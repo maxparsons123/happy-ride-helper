@@ -21,7 +21,7 @@ public enum OutputCodecMode
 /// <summary>
 /// Direct OpenAI Realtime API client with full booking flow.
 /// Connects directly to OpenAI - no edge function required.
-/// Version 3.1 - A-law passthrough, response lifecycle management, late confirmation detection.
+/// Version 5.2 - Full STT grounding, response cancellation, late confirmation detection.
 /// </summary>
 public class OpenAIRealtimeClient : IAudioAIClient
 {
@@ -79,22 +79,35 @@ public class OpenAIRealtimeClient : IAudioAIClient
             {
                 _sttCorrectionsMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
+                    // Address mishearings
                     { "52 I ain't dead bro", "52A David Road" },
                     { "52 I ain't David", "52A David Road" },
                     { "52 ain't David", "52A David Road" },
                     { "52 a David", "52A David Road" },
+                    { "baby girl", "David Road" },
+                    { "Coltree", "Coventry" },
+                    { "Coal Tree", "Coventry" },
+                    { "in Country", "in Coventry" },
+                    // Time expressions
                     { "for now", "now" },
                     { "right now", "now" },
                     { "as soon as possible", "now" },
                     { "ASAP", "now" },
+                    { "straight away", "now" },
+                    { "immediately", "now" },
+                    // Affirmatives
                     { "yeah please", "yes please" },
                     { "yep", "yes" },
                     { "yup", "yes" },
                     { "yeah", "yes" },
+                    { "yesy", "yes" },
                     { "that's right", "yes" },
                     { "correct", "yes" },
                     { "go ahead", "yes" },
                     { "book it", "yes" },
+                    { "sure", "yes" },
+                    { "okay", "yes" },
+                    { "alright", "yes" },
                 };
             }
             return _sttCorrectionsMap;
@@ -121,7 +134,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     // Audio queue for RTP transmission
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
-    private const int MAX_QUEUE_FRAMES = 500;
+    private const int MAX_QUEUE_FRAMES = 800;
 
     // Audio processor (lazy init)
     private OptimizedAudioProcessor? _audioProcessor;
@@ -141,19 +154,25 @@ public class OpenAIRealtimeClient : IAudioAIClient
     private int _greetingSent = 0;
     private bool _sessionConfigured = false;
     
-    // Response lifecycle tracking (v4.5)
+    // ===========================================
+    // RESPONSE LIFECYCLE TRACKING (v5.2)
+    // ===========================================
     private int _responseActive = 0;
     private string? _activeResponseId;
     private string? _lastCompletedResponseId;
-    private int _transcriptPending = 0;
+    private int _transcriptPending = 0;           // 1 = waiting for STT transcript
+    private int _waitingForSttTranscript = 0;     // v5.2: Block response until transcript arrives
     private long _responseCreatedAt = 0;
     private long _speechStoppedAt = 0;
+    private long _speechStartedAt = 0;
     private int _deferredResponsePending = 0;
     private int _noReplyWatchdogId = 0;
     private int _ignoreUserAudio = 0;
+    private string? _pendingUserTranscript = null; // v5.2: Store transcript that arrived during response
 
     // Echo guard
     private const int ECHO_GUARD_MS = 300;
+    private const int BARGE_IN_GRACE_MS = 500;    // v5.2: Grace period after Ada finishes before barge-in cancels response
     private long _lastAdaFinishedAt = 0;
     private bool _awaitingConfirmation = false;
 
@@ -248,10 +267,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
         Interlocked.Exchange(ref _callEnded, 0);
         Interlocked.Exchange(ref _responseActive, 0);
         Interlocked.Exchange(ref _transcriptPending, 0);
+        Interlocked.Exchange(ref _waitingForSttTranscript, 0);
         Interlocked.Exchange(ref _deferredResponsePending, 0);
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
         _activeResponseId = null;
         _lastCompletedResponseId = null;
+        _pendingUserTranscript = null;
+        Volatile.Write(ref _speechStartedAt, 0);
+        Volatile.Write(ref _speechStoppedAt, 0);
+        Volatile.Write(ref _lastUserSpeechAt, 0);
+        Volatile.Write(ref _lastAdaFinishedAt, 0);
         
         AudioProcessor.Reset();
         ClearPendingFrames();
@@ -330,7 +355,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (!IsConnected) return;
 
-        if (!_awaitingConfirmation && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < ECHO_GUARD_MS)
             return;
 
         var pcm24k = AudioProcessor.PrepareForOpenAI(pcm8kBytes, 8000, 24000);
@@ -343,7 +368,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (!IsConnected) return;
 
-        if (!_awaitingConfirmation && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < ECHO_GUARD_MS)
             return;
 
         var pcm24k = AudioProcessor.PrepareForOpenAI(pcm8kBytes, 8000, 24000);
@@ -356,7 +381,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         if (!IsConnected) return;
 
-        if (!_awaitingConfirmation && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < ECHO_GUARD_MS)
             return;
 
         byte[] pcm24k;
@@ -512,7 +537,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
     }
 
     // ===========================================
-    // PRIVATE - MESSAGE PROCESSING
+    // PRIVATE - MESSAGE PROCESSING (v5.2 Full)
     // ===========================================
     
     private async Task ProcessMessageAsync(string json)
@@ -539,236 +564,270 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     break;
 
                 case "response.created":
-                    {
-                        // OBSERVED start (OpenAI controlled) — this is the ONLY place we set _responseActive = 1
-                        var responseId = TryGetResponseId(doc.RootElement);
-                        if (responseId != null && _activeResponseId == responseId)
-                            break; // Ignore duplicate
-
-                        _activeResponseId = responseId;
-                        Interlocked.Exchange(ref _responseActive, 1);
-
-                        // CRITICAL: Record timestamp for transcript guard.
-                        Volatile.Write(ref _responseCreatedAt, NowMs());
-
-                        // v2.6: Clear audio buffer ONLY HERE on response.created
-                        _ = ClearInputAudioBufferAsync();
-
-                        Log("🤖 AI response started");
-                        OnResponseStarted?.Invoke();
-                        break;
-                    }
+                    await HandleResponseCreatedAsync(doc.RootElement).ConfigureAwait(false);
+                    break;
 
                 case "response.audio.delta":
+                    if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
                     {
-                        if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
-                        {
-                            var delta = deltaEl.GetString();
-                            if (!string.IsNullOrEmpty(delta))
-                                ProcessAudioDelta(delta);
-                        }
-                        break;
+                        var delta = deltaEl.GetString();
+                        if (!string.IsNullOrEmpty(delta))
+                            ProcessAudioDelta(delta);
                     }
+                    break;
 
                 case "response.audio_transcript.delta":
-                    {
-                        if (doc.RootElement.TryGetProperty("delta", out var d))
-                            OnAdaSpeaking?.Invoke(d.GetString() ?? "");
-                        break;
-                    }
+                    if (doc.RootElement.TryGetProperty("delta", out var d))
+                        OnAdaSpeaking?.Invoke(d.GetString() ?? "");
+                    break;
 
                 case "response.audio_transcript.done":
-                    {
-                        if (doc.RootElement.TryGetProperty("transcript", out var t) &&
-                            !string.IsNullOrWhiteSpace(t.GetString()))
-                        {
-                            var text = t.GetString()!;
-                            Log($"💬 Ada: {text}");
-                            OnTranscript?.Invoke($"Ada: {text}");
-
-                            // Track if post-booking speech has been delivered
-                            if (_booking.Confirmed && _postBookingHangupArmed)
-                                _postBookingFinalSpeechDelivered = true;
-
-                            // Goodbye detection watchdog: if Ada says goodbye, force end_call after 5s
-                            if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
-                                (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
-                                 text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
-                                 text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
-                            {
-                                Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
-                                _ = Task.Run(async () =>
-                                {
-                                    await Task.Delay(5000).ConfigureAwait(false);
-                                    if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
-                                        return;
-                                    Log("⏰ Goodbye watchdog triggered - forcing end_call");
-                                    Interlocked.Exchange(ref _ignoreUserAudio, 1);
-                                    SignalCallEnded("goodbye_watchdog");
-                                });
-                            }
-                        }
-                        break;
-                    }
+                    HandleAdaTranscriptDone(doc.RootElement);
+                    break;
 
                 case "conversation.item.input_audio_transcription.completed":
-                    {
-                        // v2.5: Transcript arrived - clear the pending flag
-                        Interlocked.Exchange(ref _transcriptPending, 0);
-
-                        if (doc.RootElement.TryGetProperty("transcript", out var u) &&
-                            !string.IsNullOrWhiteSpace(u.GetString()))
-                        {
-                            var text = ApplySttCorrections(u.GetString()!);
-
-                            // Calculate timing for logging
-                            var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
-                            var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
-
-                            // Log transcript arrival with timing context
-                            if (Volatile.Read(ref _responseActive) == 1)
-                            {
-                                Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
-                            }
-
-                            Log($"👤 User: {text}");
-                            OnTranscript?.Invoke($"You: {text}");
-
-                            // v3.6: LATE CONFIRMATION DETECTION
-                            if (Volatile.Read(ref _responseActive) == 0 && _awaitingConfirmation)
-                            {
-                                var lowerText = text.ToLowerInvariant();
-                                bool isConfirmation = lowerText.Contains("yes") ||
-                                                      lowerText.Contains("yeah") ||
-                                                      lowerText.Contains("yep") ||
-                                                      lowerText.Contains("correct") ||
-                                                      lowerText.Contains("that's right") ||
-                                                      lowerText.Contains("go ahead") ||
-                                                      lowerText.Contains("confirm") ||
-                                                      lowerText.Contains("book it") ||
-                                                      lowerText.Contains("sure") ||
-                                                      lowerText.Contains("please");
-
-                                if (isConfirmation)
-                                {
-                                    Log("✅ Late confirmation detected - injecting system prompt and triggering response");
-                                    _ = HandleLateConfirmationAsync(text);
-                                }
-                            }
-                        }
-                        break;
-                    }
+                    await HandleUserTranscriptAsync(doc.RootElement).ConfigureAwait(false);
+                    break;
 
                 case "input_audio_buffer.speech_started":
-                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
-                    // v2.5: Mark that we're expecting a transcript
-                    Interlocked.Exchange(ref _transcriptPending, 1);
+                    HandleSpeechStarted();
                     break;
 
                 case "input_audio_buffer.speech_stopped":
-                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    Volatile.Write(ref _speechStoppedAt, NowMs());  // v2.5: Track when speech ended
-                    // v2.5: Commit audio buffer - OpenAI will transcribe and respond after settle time
-                    _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
-                    Log("📝 Committed audio buffer (awaiting transcript)");
+                    HandleSpeechStopped();
                     break;
 
                 case "response.done":
-                    {
-                        // OBSERVED end (OpenAI controlled) — this is the ONLY place we set _responseActive = 0
-                        var responseId = TryGetResponseId(doc.RootElement);
-
-                        // Ignore duplicate response.done for same ID
-                        if (responseId == null || responseId == _lastCompletedResponseId)
-                            break;
-
-                        // Ignore stale response.done for different ID
-                        if (_activeResponseId != null && responseId != _activeResponseId)
-                            break;
-
-                        _lastCompletedResponseId = responseId;
-                        _activeResponseId = null;
-                        Interlocked.Exchange(ref _responseActive, 0);
-                        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
-
-                        Log("🤖 AI response completed");
-                        OnResponseCompleted?.Invoke();
-
-                        // Flush deferred response if pending
-                        if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
-                        {
-                            Log("🔄 Flushing deferred response.create");
-                            _ = Task.Run(async () =>
-                            {
-                                await Task.Delay(20).ConfigureAwait(false);
-                                if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
-                                {
-                                    await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-                                    Log("🔄 response.create sent (deferred)");
-                                }
-                            });
-                        }
-
-                        MaybeStartPostBookingSilenceHangup();
-
-                        // No-reply watchdog: give the caller enough time to respond AFTER Ada finishes.
-                        var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
-                        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
-
-                            // Abort if cancelled, call ended, or user spoke
-                            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
-                            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
-                            if (Volatile.Read(ref _responseActive) == 1) return;
-
-                            Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
-
-                            await SendJsonAsync(new
-                            {
-                                type = "conversation.item.create",
-                                item = new
-                                {
-                                    type = "message",
-                                    role = "system",
-                                    content = new[]
-                                    {
-                                        new
-                                        {
-                                            type = "input_text",
-                                            text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
-                                        }
-                                    }
-                                }
-                            }).ConfigureAwait(false);
-
-                            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
-                        });
-                        break;
-                    }
+                    await HandleResponseDoneAsync(doc.RootElement).ConfigureAwait(false);
+                    break;
 
                 case "response.function_call_arguments.done":
                     await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
                     break;
 
                 case "error":
-                    {
-                        if (doc.RootElement.TryGetProperty("error", out var e) &&
-                            e.TryGetProperty("message", out var m))
-                        {
-                            var msg = m.GetString() ?? "";
-                            if (!msg.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
-                                Log($"❌ OpenAI: {msg}");
-                        }
-                        break;
-                    }
+                    HandleError(doc.RootElement);
+                    break;
             }
         }
         catch (Exception ex)
         {
             Log($"⚠️ Parse error: {ex.Message}");
+        }
+    }
+
+    // ===========================================
+    // PRIVATE - EVENT HANDLERS (v5.2)
+    // ===========================================
+
+    private async Task HandleResponseCreatedAsync(JsonElement root)
+    {
+        var responseId = TryGetResponseId(root);
+        if (responseId != null && _activeResponseId == responseId)
+            return; // Ignore duplicate
+
+        _activeResponseId = responseId;
+        Interlocked.Exchange(ref _responseActive, 1);
+        Volatile.Write(ref _responseCreatedAt, NowMs());
+
+        // v5.2: Check if we're still waiting for a user transcript
+        // If so, cancel this response and wait for the transcript
+        if (Volatile.Read(ref _waitingForSttTranscript) == 1)
+        {
+            Log("🚫 Response created while waiting for STT - cancelling to prevent hallucination");
+            await SendJsonAsync(new { type = "response.cancel" }).ConfigureAwait(false);
+            return;
+        }
+
+        // v5.2: Only clear audio buffer if no transcript is pending
+        // This prevents losing the user's speech when response starts
+        if (Volatile.Read(ref _transcriptPending) == 0)
+        {
+            await ClearInputAudioBufferAsync().ConfigureAwait(false);
+        }
+        else
+        {
+            Log("⏳ Transcript pending - NOT clearing audio buffer");
+        }
+
+        Log("🤖 AI response started");
+        OnResponseStarted?.Invoke();
+    }
+
+    private void HandleSpeechStarted()
+    {
+        var now = NowMs();
+        Volatile.Write(ref _lastUserSpeechAt, now);
+        Volatile.Write(ref _speechStartedAt, now);
+        
+        // Cancel any pending no-reply watchdog
+        Interlocked.Increment(ref _noReplyWatchdogId);
+        
+        // Mark that we're expecting a transcript
+        Interlocked.Exchange(ref _transcriptPending, 1);
+        Interlocked.Exchange(ref _waitingForSttTranscript, 1);
+
+        Log("🎤 Speech started - awaiting transcript");
+
+        // v5.2: If AI is currently responding and user starts speaking (barge-in),
+        // cancel the response ONLY if we're past the grace period after Ada finished
+        if (Volatile.Read(ref _responseActive) == 1)
+        {
+            var timeSinceAdaFinished = now - Volatile.Read(ref _lastAdaFinishedAt);
+            
+            // Don't cancel during echo period (user might be echo of Ada's voice)
+            if (timeSinceAdaFinished > BARGE_IN_GRACE_MS)
+            {
+                Log("🛑 Barge-in detected - cancelling AI response");
+                _ = SendJsonAsync(new { type = "response.cancel" });
+            }
+            else
+            {
+                Log($"⏳ Speech during echo window ({timeSinceAdaFinished}ms) - not cancelling");
+            }
+        }
+    }
+
+    private void HandleSpeechStopped()
+    {
+        Volatile.Write(ref _lastUserSpeechAt, NowMs());
+        Volatile.Write(ref _speechStoppedAt, NowMs());
+        
+        // Commit audio buffer - OpenAI will transcribe
+        _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
+        Log("📝 Committed audio buffer (awaiting transcript)");
+    }
+
+    private async Task HandleUserTranscriptAsync(JsonElement root)
+    {
+        // Clear the waiting flags
+        Interlocked.Exchange(ref _transcriptPending, 0);
+        Interlocked.Exchange(ref _waitingForSttTranscript, 0);
+
+        if (!root.TryGetProperty("transcript", out var u) || string.IsNullOrWhiteSpace(u.GetString()))
+            return;
+
+        var text = ApplySttCorrections(u.GetString()!);
+
+        // Calculate timing for logging
+        var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
+        var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
+        var responseActive = Volatile.Read(ref _responseActive) == 1;
+
+        if (responseActive)
+        {
+            Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
+        }
+        else
+        {
+            Log($"📝 Transcript: {text}");
+        }
+
+        Log($"👤 User: {text}");
+        OnTranscript?.Invoke($"You: {text}");
+
+        // v5.2: LATE CONFIRMATION DETECTION
+        // If no response is active and we're awaiting confirmation, check for affirmative
+        if (!responseActive && _awaitingConfirmation)
+        {
+            if (IsAffirmativeResponse(text))
+            {
+                Log("✅ Late confirmation detected - injecting system prompt and triggering response");
+                await HandleLateConfirmationAsync(text).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        // v5.2: If response was cancelled or never started, trigger a new one now that we have the transcript
+        if (!responseActive)
+        {
+            Log("🔄 No active response - triggering response.create after transcript");
+            await QueueResponseCreateAsync(delayMs: 50, waitForCurrentResponse: false).ConfigureAwait(false);
+        }
+    }
+
+    private void HandleAdaTranscriptDone(JsonElement root)
+    {
+        if (!root.TryGetProperty("transcript", out var t) || string.IsNullOrWhiteSpace(t.GetString()))
+            return;
+
+        var text = t.GetString()!;
+        Log($"💬 Ada: {text}");
+        OnTranscript?.Invoke($"Ada: {text}");
+
+        // Track if post-booking speech has been delivered
+        if (_booking.Confirmed && _postBookingHangupArmed)
+            _postBookingFinalSpeechDelivered = true;
+
+        // Goodbye detection watchdog
+        if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
+            (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
+             text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
+             text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
+        {
+            Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(5000).ConfigureAwait(false);
+                if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                    return;
+                Log("⏰ Goodbye watchdog triggered - forcing end_call");
+                Interlocked.Exchange(ref _ignoreUserAudio, 1);
+                SignalCallEnded("goodbye_watchdog");
+            });
+        }
+    }
+
+    private async Task HandleResponseDoneAsync(JsonElement root)
+    {
+        var responseId = TryGetResponseId(root);
+
+        // Ignore duplicate or stale response.done
+        if (responseId == null || responseId == _lastCompletedResponseId)
+            return;
+        if (_activeResponseId != null && responseId != _activeResponseId)
+            return;
+
+        _lastCompletedResponseId = responseId;
+        _activeResponseId = null;
+        Interlocked.Exchange(ref _responseActive, 0);
+        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+
+        Log("🤖 AI response completed");
+        OnResponseCompleted?.Invoke();
+
+        // Flush deferred response if pending
+        if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+        {
+            Log("🔄 Flushing deferred response.create");
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(20).ConfigureAwait(false);
+                if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
+                {
+                    await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                    Log("🔄 response.create sent (deferred)");
+                }
+            });
+        }
+
+        MaybeStartPostBookingSilenceHangup();
+
+        // Start no-reply watchdog
+        StartNoReplyWatchdog();
+    }
+
+    private void HandleError(JsonElement root)
+    {
+        if (root.TryGetProperty("error", out var e) && e.TryGetProperty("message", out var m))
+        {
+            var msg = m.GetString() ?? "";
+            // Ignore common non-critical errors
+            if (!msg.Contains("buffer too small", StringComparison.OrdinalIgnoreCase) &&
+                !msg.Contains("already has an active response", StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"❌ OpenAI: {msg}");
+            }
         }
     }
 
@@ -789,6 +848,24 @@ public class OpenAIRealtimeClient : IAudioAIClient
     {
         await SendJsonAsync(new { type = "input_audio_buffer.clear" }).ConfigureAwait(false);
         Log("🧹 Cleared OpenAI input audio buffer");
+    }
+
+    private static bool IsAffirmativeResponse(string text)
+    {
+        var lower = text.ToLowerInvariant();
+        return lower.Contains("yes") ||
+               lower.Contains("yeah") ||
+               lower.Contains("yep") ||
+               lower.Contains("yup") ||
+               lower.Contains("correct") ||
+               lower.Contains("that's right") ||
+               lower.Contains("go ahead") ||
+               lower.Contains("confirm") ||
+               lower.Contains("book it") ||
+               lower.Contains("sure") ||
+               lower.Contains("please") ||
+               lower.Contains("okay") ||
+               lower.Contains("alright");
     }
 
     private async Task HandleLateConfirmationAsync(string text)
@@ -813,6 +890,48 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }).ConfigureAwait(false);
 
         await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+    }
+
+    private void StartNoReplyWatchdog()
+    {
+        var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
+        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+        
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
+
+            // Abort if cancelled, call ended, user spoke, or transcript pending
+            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+            if (Volatile.Read(ref _responseActive) == 1) return;
+            if (Volatile.Read(ref _transcriptPending) == 1) return;
+            
+            // v5.1: Don't interrupt if user spoke recently
+            if (NowMs() - Volatile.Read(ref _lastUserSpeechAt) < 3000) return;
+
+            Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
+
+            await SendJsonAsync(new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "input_text",
+                            text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                        }
+                    }
+                }
+            }).ConfigureAwait(false);
+
+            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
+        });
     }
 
     private async Task QueueResponseCreateAsync(int delayMs = 0, bool waitForCurrentResponse = true, int maxWaitMs = 2500)
@@ -900,7 +1019,6 @@ public class OpenAIRealtimeClient : IAudioAIClient
         }
     }
 
-
     private void ProcessOpusOutput(short[] pcm24k)
     {
         // Upsample 24kHz → 48kHz
@@ -983,9 +1101,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,
-                    prefix_padding_ms = 400,
-                    silence_duration_ms = 1000
+                    threshold = 0.35,           // v5.2: Lower threshold for better detection
+                    prefix_padding_ms = 350,    // v5.2: Slightly shorter prefix
+                    silence_duration_ms = 800   // v5.2: Faster turn detection
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -993,14 +1111,12 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         };
 
-        Log($"🎧 VAD: threshold=0.4, prefix=400ms, silence=1000ms, output={outputFormat}");
+        Log($"🎧 VAD: threshold=0.35, prefix=350ms, silence=800ms, output={outputFormat}");
         await SendJsonAsync(config);
     }
 
     private async Task SendGreetingAsync()
     {
-        // Already handled by Interlocked.CompareExchange in ProcessMessageAsync
-        // Small delay for stability
         await Task.Delay(200);
 
         var greeting = GetLocalizedGreeting();
@@ -1043,7 +1159,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                         args[prop.Name] = prop.Value.ValueKind switch
                         {
                             JsonValueKind.String => prop.Value.GetString() ?? "",
-                            JsonValueKind.Number => prop.Value.GetInt32(),
+                            JsonValueKind.Number => prop.Value.TryGetInt32(out var i) ? i : prop.Value.GetDouble(),
                             JsonValueKind.True => true,
                             JsonValueKind.False => false,
                             _ => prop.Value.ToString()
@@ -1072,89 +1188,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 break;
 
             case "book_taxi":
-                var action = args.TryGetValue("action", out var a) ? a.ToString() : "unknown";
-                
-                if (action == "request_quote")
-                {
-                    // Use Lovable AI edge function for address resolution + fare
-                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
-                        _booking.Pickup, 
-                        _booking.Destination, 
-                        _callerId);
-                    
-                    _booking.Fare = fareResult.Fare;
-                    _booking.Eta = fareResult.Eta;
-                    _booking.DistanceMiles = fareResult.DistanceMiles;
-                    
-                    // Populate geocoding data
-                    _booking.PickupLat = fareResult.PickupLat;
-                    _booking.PickupLon = fareResult.PickupLon;
-                    _booking.PickupStreet = fareResult.PickupStreet;
-                    _booking.PickupNumber = fareResult.PickupNumber;
-                    _booking.PickupCity = fareResult.PickupCity;
-                    _booking.PickupPostalCode = fareResult.PickupPostalCode;
-                    _booking.PickupFormatted = fareResult.PickupFormatted;
-                    
-                    _booking.DestLat = fareResult.DestLat;
-                    _booking.DestLon = fareResult.DestLon;
-                    _booking.DestStreet = fareResult.DestStreet;
-                    _booking.DestNumber = fareResult.DestNumber;
-                    _booking.DestCity = fareResult.DestCity;
-                    _booking.DestPostalCode = fareResult.DestPostalCode;
-                    _booking.DestFormatted = fareResult.DestFormatted;
-                    
-                    OnBookingUpdated?.Invoke(_booking);
-                    
-                    Log($"💰 Quote: {fareResult.Fare} ({fareResult.DistanceMiles:F1} miles)");
-                    
-                    await SendToolResultAsync(callId, new
-                    {
-                        success = true,
-                        fare = fareResult.Fare,
-                        eta = fareResult.Eta,
-                        distance_miles = Math.Round(fareResult.DistanceMiles, 1),
-                        message = $"Your fare is {fareResult.Fare} and your driver will arrive in {fareResult.Eta}. Would you like me to book that?"
-                    });
-
-                    _awaitingConfirmation = true;
-                    Log("🎯 Awaiting confirmation - echo guard disabled");
-                }
-                else if (action == "confirmed")
-                {
-                    _awaitingConfirmation = false;
-                    _booking.Confirmed = true;
-                    _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
-                    OnBookingUpdated?.Invoke(_booking);
-                    
-                    Log($"✅ Booking confirmed: {_booking.BookingRef}");
-                    
-                    // Send WhatsApp notification (fire and forget)
-                    _ = SendWhatsAppNotificationAsync(_callerId);
-                    
-                    await SendToolResultAsync(callId, new
-                    {
-                        success = true,
-                        booking_ref = _booking.BookingRef,
-                        message = "Your taxi is booked! Your driver will arrive shortly.",
-                        next_action = "Say thank you and goodbye, then call end_call."
-                    });
-
-                    _postBookingHangupArmed = true;
-                    
-                    // Inject instruction to end call
-                    await Task.Delay(3000);
-                    await SendJsonAsync(new
-                    {
-                        type = "conversation.item.create",
-                        item = new
-                        {
-                            type = "message",
-                            role = "system",
-                            content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } }
-                        }
-                    });
-                    await SendJsonAsync(new { type = "response.create" });
-                }
+                await HandleBookTaxiAsync(args, callId);
                 break;
 
             case "end_call":
@@ -1167,6 +1201,96 @@ public class OpenAIRealtimeClient : IAudioAIClient
             default:
                 await SendToolResultAsync(callId, new { error = $"Unknown tool: {toolName}" });
                 break;
+        }
+    }
+
+    private async Task HandleBookTaxiAsync(Dictionary<string, object> args, string? callId)
+    {
+        var action = args.TryGetValue("action", out var a) ? a.ToString() : "unknown";
+        
+        if (action == "request_quote")
+        {
+            // Use Lovable AI edge function for address resolution + fare
+            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                _booking.Pickup, 
+                _booking.Destination, 
+                _callerId);
+            
+            _booking.Fare = fareResult.Fare;
+            _booking.Eta = fareResult.Eta;
+            _booking.DistanceMiles = fareResult.DistanceMiles;
+            
+            // Populate geocoding data
+            _booking.PickupLat = fareResult.PickupLat;
+            _booking.PickupLon = fareResult.PickupLon;
+            _booking.PickupStreet = fareResult.PickupStreet;
+            _booking.PickupNumber = fareResult.PickupNumber;
+            _booking.PickupCity = fareResult.PickupCity;
+            _booking.PickupPostalCode = fareResult.PickupPostalCode;
+            _booking.PickupFormatted = fareResult.PickupFormatted;
+            
+            _booking.DestLat = fareResult.DestLat;
+            _booking.DestLon = fareResult.DestLon;
+            _booking.DestStreet = fareResult.DestStreet;
+            _booking.DestNumber = fareResult.DestNumber;
+            _booking.DestCity = fareResult.DestCity;
+            _booking.DestPostalCode = fareResult.DestPostalCode;
+            _booking.DestFormatted = fareResult.DestFormatted;
+            
+            OnBookingUpdated?.Invoke(_booking);
+            
+            Log($"💰 Quote: {fareResult.Fare} ({fareResult.DistanceMiles:F1} miles)");
+            
+            await SendToolResultAsync(callId, new
+            {
+                success = true,
+                fare = fareResult.Fare,
+                eta = fareResult.Eta,
+                distance_miles = Math.Round(fareResult.DistanceMiles, 1),
+                message = $"Your fare is {fareResult.Fare} and your driver will arrive in {fareResult.Eta}. Would you like me to book that?"
+            });
+
+            _awaitingConfirmation = true;
+            Log("🎯 Awaiting confirmation - echo guard disabled");
+        }
+        else if (action == "confirmed")
+        {
+            _awaitingConfirmation = false;
+            _booking.Confirmed = true;
+            _booking.BookingRef = $"TAXI-{DateTime.Now:yyyyMMddHHmmss}";
+            OnBookingUpdated?.Invoke(_booking);
+            
+            Log($"✅ Booking confirmed: {_booking.BookingRef}");
+            
+            // Send dispatch to BSQD webhook
+            _ = SendDispatchWebhookAsync();
+            
+            // Send WhatsApp notification (fire and forget)
+            _ = SendWhatsAppNotificationAsync(_callerId);
+            
+            await SendToolResultAsync(callId, new
+            {
+                success = true,
+                booking_ref = _booking.BookingRef,
+                message = "Your taxi is booked! Your driver will arrive shortly.",
+                next_action = "Say thank you and goodbye, then call end_call."
+            });
+
+            _postBookingHangupArmed = true;
+            
+            // Inject instruction to end call
+            await Task.Delay(3000);
+            await SendJsonAsync(new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] Say goodbye and call end_call NOW." } }
+                }
+            });
+            await SendJsonAsync(new { type = "response.create" });
         }
     }
 
@@ -1185,6 +1309,114 @@ public class OpenAIRealtimeClient : IAudioAIClient
             }
         });
         await SendJsonAsync(new { type = "response.create" });
+    }
+
+    // ===========================================
+    // PRIVATE - DISPATCH & NOTIFICATIONS
+    // ===========================================
+
+    private async Task SendDispatchWebhookAsync()
+    {
+        if (string.IsNullOrEmpty(_dispatchWebhookUrl))
+        {
+            // Use default BSQD webhook
+            var webhookUrl = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
+            
+            try
+            {
+                var payload = new
+                {
+                    event_type = "taxi_booking",
+                    call_id = _callId,
+                    caller_phone = _callerId,
+                    booking = new
+                    {
+                        pickup = _booking.Pickup,
+                        pickup_lat = _booking.PickupLat,
+                        pickup_lon = _booking.PickupLon,
+                        pickup_street = _booking.PickupStreet,
+                        pickup_number = _booking.PickupNumber,
+                        pickup_city = _booking.PickupCity,
+                        pickup_postal = _booking.PickupPostalCode,
+                        pickup_formatted = _booking.PickupFormatted,
+                        destination = _booking.Destination,
+                        dest_lat = _booking.DestLat,
+                        dest_lon = _booking.DestLon,
+                        dest_street = _booking.DestStreet,
+                        dest_number = _booking.DestNumber,
+                        dest_city = _booking.DestCity,
+                        dest_postal = _booking.DestPostalCode,
+                        dest_formatted = _booking.DestFormatted,
+                        passengers = _booking.Passengers,
+                        pickup_time = _booking.PickupTime,
+                        fare = _booking.Fare,
+                        eta = _booking.Eta,
+                        distance_miles = _booking.DistanceMiles,
+                        booking_ref = _booking.BookingRef
+                    },
+                    timestamp = DateTime.UtcNow.ToString("o")
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                content.Headers.Add("Authorization", "Bearer sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v");
+
+                Log($"📤 Sending dispatch to BSQD...");
+                var response = await HttpClient.PostAsync(webhookUrl, content);
+                
+                if (response.IsSuccessStatusCode)
+                    Log($"✅ Dispatch sent to BSQD");
+                else
+                    Log($"⚠️ Dispatch failed: HTTP {(int)response.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Dispatch error: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
+    {
+        if (string.IsNullOrEmpty(phoneNumber))
+        {
+            Log("⚠️ WhatsApp notification skipped - no phone number");
+            return;
+        }
+
+        try
+        {
+            var cli = FormatPhoneForWhatsApp(phoneNumber);
+            var webhookUrl = $"https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya?api_key=sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v&phoneNumber={cli}";
+            
+            Log($"📱 Sending WhatsApp notification to {cli}...");
+            
+            var response = await HttpClient.GetAsync(webhookUrl);
+            
+            if (response.IsSuccessStatusCode)
+                Log($"✅ WhatsApp notification sent to {cli}");
+            else
+                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ WhatsApp notification error: {ex.Message}");
+        }
+    }
+
+    private static string FormatPhoneForWhatsApp(string phone)
+    {
+        var clean = phone.Replace(" ", "").Replace("-", "");
+        
+        if (clean.StartsWith("00"))
+            clean = "+" + clean.Substring(2);
+        
+        clean = clean.TrimStart('+');
+        
+        if (clean.StartsWith("310"))
+            clean = "31" + clean.Substring(3);
+        
+        return new string(clean.Where(char.IsDigit).ToArray());
     }
 
     // ===========================================
@@ -1245,64 +1477,6 @@ public class OpenAIRealtimeClient : IAudioAIClient
         return corrected;
     }
 
-    /// <summary>
-    /// Send WhatsApp booking notification via BSQD webhook.
-    /// Fire-and-forget - errors are logged but don't affect booking.
-    /// </summary>
-    private async Task SendWhatsAppNotificationAsync(string? phoneNumber)
-    {
-        if (string.IsNullOrEmpty(phoneNumber))
-        {
-            Log("⚠️ WhatsApp notification skipped - no phone number");
-            return;
-        }
-
-        try
-        {
-            var cli = FormatPhoneForWhatsApp(phoneNumber);
-            var webhookUrl = $"https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya?api_key=sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v&phoneNumber={cli}";
-            
-            Log($"📱 Sending WhatsApp notification to {cli}...");
-            
-            var response = await HttpClient.GetAsync(webhookUrl);
-            
-            if (response.IsSuccessStatusCode)
-                Log($"✅ WhatsApp notification sent to {cli}");
-            else
-                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode}");
-        }
-        catch (Exception ex)
-        {
-            Log($"⚠️ WhatsApp notification error: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Format phone number for WhatsApp:
-    /// - Convert 00 prefix to + then strip +
-    /// - For Dutch (+31), remove leading 0 after country code (e.g., +3106 → 316)
-    /// - Strip all non-numeric characters
-    /// </summary>
-    private static string FormatPhoneForWhatsApp(string phone)
-    {
-        var clean = phone.Replace(" ", "").Replace("-", "");
-        
-        // Convert 00 prefix to + for international format
-        if (clean.StartsWith("00"))
-            clean = "+" + clean.Substring(2);
-        
-        // Remove + prefix (WhatsApp uses numbers without +)
-        clean = clean.TrimStart('+');
-        
-        // For Dutch numbers (+31), remove leading 0 after country code
-        // e.g., 3106xxxxxxxx → 316xxxxxxxx
-        if (clean.StartsWith("310"))
-            clean = "31" + clean.Substring(3);
-        
-        // Remove any remaining non-numeric characters
-        return new string(clean.Where(char.IsDigit).ToArray());
-    }
-
     private void Log(string msg)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
@@ -1358,15 +1532,17 @@ public class OpenAIRealtimeClient : IAudioAIClient
 7. On 'yes' → book_taxi(action='confirmed') → Thank user → end_call
 
 # TOOLS
-- sync_booking_data: Save each piece of info
-- book_taxi: Request quote or confirm
+- sync_booking_data: Save each piece of info as you collect it
+- book_taxi: Request quote or confirm booking
 - end_call: Hang up after goodbye
 
 # RULES
 - ONE question at a time
-- Be brief (under 20 words)
+- Be brief (under 20 words per response)
 - Currency: British pounds (£)
-- Always end call after booking confirmation";
+- Always end call after booking confirmation
+- If user says something unclear, ask for clarification
+- If user gives multiple pieces of info at once, acknowledge all and move forward";
     }
 
     private static string GetDefaultSystemPrompt() => @"You are Ada, a taxi booking assistant.
@@ -1391,16 +1567,16 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             ["type"] = "function",
             ["name"] = "sync_booking_data",
-            ["description"] = "Save booking info as you collect it",
+            ["description"] = "Save booking info as you collect it. Call this after each piece of information is provided.",
             ["parameters"] = new Dictionary<string, object>
             {
                 ["type"] = "object",
                 ["properties"] = new Dictionary<string, object>
                 {
-                    ["pickup"] = new Dictionary<string, object> { ["type"] = "string" },
-                    ["destination"] = new Dictionary<string, object> { ["type"] = "string" },
-                    ["passengers"] = new Dictionary<string, object> { ["type"] = "integer" },
-                    ["pickup_time"] = new Dictionary<string, object> { ["type"] = "string" },
+                    ["pickup"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Pickup address" },
+                    ["destination"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Destination address" },
+                    ["passengers"] = new Dictionary<string, object> { ["type"] = "integer", ["description"] = "Number of passengers" },
+                    ["pickup_time"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Pickup time (e.g., 'now', '3pm', '15:00')" },
                     ["last_question_asked"] = new Dictionary<string, object>
                     {
                         ["type"] = "string",
@@ -1413,7 +1589,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             ["type"] = "function",
             ["name"] = "book_taxi",
-            ["description"] = "Request quote or confirm booking",
+            ["description"] = "Request a fare quote or confirm the booking. Use request_quote after collecting all info, use confirmed after user says yes.",
             ["parameters"] = new Dictionary<string, object>
             {
                 ["type"] = "object",
@@ -1422,7 +1598,8 @@ public class OpenAIRealtimeClient : IAudioAIClient
                     ["action"] = new Dictionary<string, object>
                     {
                         ["type"] = "string",
-                        ["enum"] = new[] { "request_quote", "confirmed" }
+                        ["enum"] = new[] { "request_quote", "confirmed" },
+                        ["description"] = "request_quote to get fare, confirmed to finalize booking"
                     }
                 },
                 ["required"] = new[] { "action" }
@@ -1432,7 +1609,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
         {
             ["type"] = "function",
             ["name"] = "end_call",
-            ["description"] = "End the call after goodbye",
+            ["description"] = "End the call. Use this after saying goodbye.",
             ["parameters"] = new Dictionary<string, object>
             {
                 ["type"] = "object",
