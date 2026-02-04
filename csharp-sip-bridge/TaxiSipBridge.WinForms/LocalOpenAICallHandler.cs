@@ -8,7 +8,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API.
-/// Uses DirectRtpPlayout for timer-driven RTP delivery with proper G.711 encoding.
+/// Uses MultiCodecRtpPlayout for timer-driven RTP delivery with proper G.711 encoding.
 /// Thread-safe with single-execution guards for hangup handling.
 /// </summary>
 public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
@@ -28,10 +28,11 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
-    
+
+    public event Action<string>? OnAdaSpeaking;
+
     private VoIPMediaSession? _currentMediaSession;
-    private MultiCodecRtpPlayout? _playout;          // PCM path (for non-PCMA codecs)
-    private ALawRtpPlayout? _alawPlayout;            // v4.2: Direct A-law passthrough (for PCMA)
+    private MultiCodecRtpPlayout? _playout;
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
     private int _negotiatedPayloadType = 8;
     private OpenAIRealtimeClient? _aiClient;
@@ -39,8 +40,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private Action<SIPDialogue>? _currentHungupHandler;
     private SIPUserAgent? _currentUa;
     private int _hangupFired;
-    // If AI requests hangup, prefer waiting until RTP playout drains to avoid truncation.
-    private int _hangupPending;
 
     // ===========================================
     // AUDIO PROCESSING STATE
@@ -51,22 +50,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private bool _adaHasStartedSpeaking;
     private bool _needsFadeIn;
 
-    // Diagnostics: confirm ingress frames are actually forwarded to OpenAI
-    private int _ingressFramesForwarded;
-    private int _ingressBytesForwarded;
-
     // Remote SDP payload type → codec mapping
     private readonly Dictionary<int, AudioCodecsEnum> _remotePtToCodec = new();
-
-    // High-quality ingress audio processor (jitter buffer, DSP, SpeexDSP resampling)
-    private IngressAudioProcessor? _ingressProcessor;
 
     // Simli avatar integration
     private Func<byte[], Task>? _simliSendAudio;
     private int _simliAudioSendCount;
-
-    // Async logger to avoid blocking audio threads
-    private readonly AsyncLogger _asyncLog = new();
 
     // ===========================================
     // CONSTANTS
@@ -75,9 +64,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private const int FLUSH_PACKETS = 20;
     private const int EARLY_PROTECTION_MS = 500;
     private const int HANGUP_GRACE_MS = 5000;
-    // If playout never reports empty for some reason, we still need a hard stop.
-    // Keep this generous to avoid truncating long final messages.
-    private const int HANGUP_FALLBACK_MS = 20000;
 
     // ===========================================
     // EVENTS
@@ -98,16 +84,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
 
     // ===========================================
-    // v4.2 AUDIO MODE SWITCH (settable from MainForm)
-    // ===========================================
-    /// <summary>
-    /// v4.2: When true, uses A-law direct passthrough (OpenAI g711_alaw → RTP).
-    /// When false, uses PCM mode (24kHz decode/resample/encode).
-    /// Set via MainForm checkbox before starting calls.
-    /// </summary>
-    public bool UseALawDirect { get; set; } = true;  // Default to A-law passthrough
-
-    // ===========================================
     // CONSTRUCTOR
     // ===========================================
     public LocalOpenAICallHandler(
@@ -120,15 +96,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _model = model;
         _voice = voice;
         _dispatchWebhookUrl = dispatchWebhookUrl;
-
-        // Wire async logger to public event (runs on background thread)
-        _asyncLog.OnLog += msg => OnLog?.Invoke(msg);
-
-        // Initialize Supabase config for edge function address extraction
-        const string supabaseUrl = "https://oerketnvlmptpfvttysy.supabase.co";
-        const string supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
-        FareCalculator.SetSupabaseConfig(supabaseUrl, supabaseAnonKey);
-        FareCalculator.OnLog = msg => OnLog?.Invoke(msg);
     }
 
     /// <summary>
@@ -171,8 +138,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _isBotSpeaking = false;
         _botStoppedSpeakingAt = DateTime.MinValue;
         _simliAudioSendCount = 0;
-        _ingressFramesForwarded = 0;
-        _ingressBytesForwarded = 0;
 
         // Clean up stale handlers from previous call
         if (_currentHungupHandler != null && _currentUa != null)
@@ -255,110 +220,30 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // v4.2: Use direct A-law passthrough for PCMA when UseALawDirect is enabled
-            bool useDirectALaw = UseALawDirect && _negotiatedCodec == AudioCodecsEnum.PCMA;
-
-            if (useDirectALaw)
+            // Create MultiCodecRtpPlayout (supports Opus, G.722, PCMA, PCMU)
+            _playout = new MultiCodecRtpPlayout(_currentMediaSession);
+            _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
+            _playout.OnLog += msg => Log(msg);
+            _playout.OnQueueEmpty += () =>
             {
-                // Direct A-law path: OpenAI g711_alaw → raw bytes → RTP (no decoding/resampling)
-                // VoIPMediaSession inherits from RTPSession, so pass it directly
-                _alawPlayout = new ALawRtpPlayout(_currentMediaSession);
-                _alawPlayout.OnQueueEmpty += () =>
+                if (_adaHasStartedSpeaking)
                 {
-                    if (_adaHasStartedSpeaking)
-                    {
-                        _isBotSpeaking = false;
-                        _botStoppedSpeakingAt = DateTime.UtcNow;
-                        Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
-                    }
-
-                    if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
-                    {
-                        Log($"📴 [{callId}] Playout drained - ending call now");
-                        try { cts.Cancel(); } catch { }
-                    }
-                };
-                _alawPlayout.Start();
-                Log($"🎵 [{callId}] ALawRtpPlayout started (v2.6 direct passthrough)");
-            }
-            else
-            {
-                // PCM path: OpenAI pcm16 → resample → encode → RTP
-                _playout = new MultiCodecRtpPlayout(_currentMediaSession);
-                _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
-                _playout.OnLog += msg => Log(msg);
-                _playout.OnQueueEmpty += () =>
-                {
-                    if (_adaHasStartedSpeaking)
-                    {
-                        _isBotSpeaking = false;
-                        _botStoppedSpeakingAt = DateTime.UtcNow;
-                        Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
-                    }
-
-                    if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
-                    {
-                        Log($"📴 [{callId}] Playout drained - ending call now");
-                        try { cts.Cancel(); } catch { }
-                    }
-                };
-                _playout.Start();
-                Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
-            }
-
-            // Create ingress audio processor (jitter buffer + DSP + SpeexDSP 24kHz resampling)
-            _ingressProcessor?.Dispose();
-            _ingressProcessor = new IngressAudioProcessor(IngressAudioProcessor.TargetRate.Hz24000, jitterFrames: 6);
-            _ingressProcessor.SetCodecMap(_remotePtToCodec);
-            _ingressProcessor.OnLog += msg => Log(msg);
-            Log($"🎧 [{callId}] IngressAudioProcessor ready (24kHz, jitter=6)");
-
-            // Wire ingress output immediately so we can verify frames are emitted.
-            // (RTP wiring happens later via WireRtpInput, so this won't receive frames until then.)
-            _ingressProcessor.OnPcmFrameReady += async pcmBytes =>
-            {
-                if (cts.Token.IsCancellationRequested) return;
-
-                // CRITICAL: Do NOT send audio while Ada is speaking.
-                // Sending audio during Ada's speech fills OpenAI's input buffer with
-                // old audio, causing VAD to fire on stale content.
-                if (_isBotSpeaking)
-                {
-                    // Still forward to audio monitor so user can hear themselves
-                    OnCallerAudioMonitor?.Invoke(pcmBytes);
-                    return;
+                    _isBotSpeaking = false;
+                    _botStoppedSpeakingAt = DateTime.UtcNow;
+                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
                 }
-
-                // Echo guard: skip audio briefly after bot stops speaking
-                if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
-                {
-                    var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
-                    if (msSinceBotStopped < ECHO_GUARD_MS) return;
-                }
-
-                // Audio monitoring (already at 24kHz from processor)
-                OnCallerAudioMonitor?.Invoke(pcmBytes);
-
-                var ai = _aiClient;
-                if (ai == null || !ai.IsConnected) return;
-
-                try
-                {
-                    _ingressFramesForwarded++;
-                    _ingressBytesForwarded += pcmBytes.Length;
-                    if (_ingressFramesForwarded == 1 || _ingressFramesForwarded % 50 == 0)
-                    {
-                        Log($"🎙️ [{callId}] Ingress→OpenAI: frames={_ingressFramesForwarded}, bytes={_ingressBytesForwarded}");
-                    }
-
-                    await ai.SendAudioAsync(pcmBytes, 24000);
-                }
-                catch { }
             };
+            _playout.Start();
+            Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
 
-            // Create OpenAI client with output codec based on negotiated path
-            var codec = useDirectALaw ? OutputCodecMode.ALaw : (OutputCodecMode?)null;
-            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, codec, _dispatchWebhookUrl);
+            // Create OpenAI client - CRITICAL: use named parameters to avoid position mismatch
+            // outputCodec: null means PCM16 mode (OpenAI sends 24kHz PCM, we resample/encode to G.711)
+            _aiClient = new OpenAIRealtimeClient(
+                _apiKey, 
+                _model, 
+                _voice, 
+                outputCodec: null,  // PCM16 mode - MultiCodecRtpPlayout handles encoding
+                dispatchWebhookUrl: _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
@@ -366,7 +251,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
-            // Wire inbound RTP to processor
+            // Wire inbound RTP
             WireRtpInput(callId, cts);
 
             Log($"✅ [{callId}] Call fully established");
@@ -399,21 +284,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
         _aiClient.OnAdaSpeaking += _ => { };
 
-        // v4.2: Wire A-law audio directly for PCMA (no decoding/resampling)
-        _aiClient.OnALawAudio += alawBytes =>
-        {
-            if (_alawPlayout == null) return; // Only active for PCMA negotiation
-            
-            _isBotSpeaking = true;
-            _adaHasStartedSpeaking = true;
-            _alawPlayout.BufferALaw(alawBytes);
-        };
-
-        // Legacy PCM path (for non-PCMA codecs like Opus, G.722)
         _aiClient.OnPcm24Audio += async pcmBytes =>
         {
-            if (_playout == null) return; // Only active for non-PCMA codecs
-            
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
 
@@ -426,16 +298,17 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 Log($"🔊 [{callId}] Applied anti-glitch fade-in");
             }
 
-            _playout.BufferAudio(processedBytes);
+            _playout?.BufferAudio(processedBytes);
 
-            // Send to Simli avatar (still needs PCM24)
+            // Send to Simli avatar
             if (_simliSendAudio != null)
             {
-                try 
-                { 
+                try
+                {
                     await _simliSendAudio(processedBytes);
                     _simliAudioSendCount++;
-                    
+
+                    // Log first 5 sends, then every 50th to track ongoing flow
                     if (_simliAudioSendCount <= 5 || _simliAudioSendCount % 50 == 0)
                     {
                         Log($"🎭 [{callId}] Simli audio #{_simliAudioSendCount} ({processedBytes.Length} bytes)");
@@ -445,6 +318,11 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 {
                     Log($"🎭 [{callId}] Simli send error #{_simliAudioSendCount}: {ex.Message}");
                 }
+            }
+            else if (_simliAudioSendCount == 0)
+            {
+                Log($"⚠️ [{callId}] _simliSendAudio is null - avatar not wired!");
+                _simliAudioSendCount = 1; // Only log once
             }
         };
 
@@ -470,16 +348,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 _currentHungupHandler = null;
             }
 
-            Log($"📞 [{callId}] AI requested call end - waiting for playout to drain...");
-            Interlocked.Exchange(ref _hangupPending, 1);
-
-            // Fallback: if playout never reports empty (or no audio), end after a generous timeout.
-            await Task.Delay(HANGUP_FALLBACK_MS);
-            if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
-            {
-                Log($"📴 [{callId}] Hangup fallback timer fired - ending call");
-                try { cts.Cancel(); } catch { }
-            }
+            Log($"📞 [{callId}] AI requested call end, waiting {HANGUP_GRACE_MS}ms for final audio...");
+            await Task.Delay(HANGUP_GRACE_MS);
+            Log($"📴 [{callId}] Grace period complete, ending call");
+            try { cts.Cancel(); } catch { }
         };
         _aiClient.OnCallEnded += endCallHandler;
 
@@ -493,6 +365,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 _currentUa.OnCallHungup -= _currentHungupHandler;
                 _currentHungupHandler = null;
             }
+
             if (endCallHandler != null) _aiClient!.OnCallEnded -= endCallHandler;
 
             Log($"📕 [{callId}] Caller hung up");
@@ -556,13 +429,13 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     }
 
     // ===========================================
-    // RTP INPUT HANDLING (via IngressAudioProcessor)
+    // RTP INPUT HANDLING (Direct)
     // ===========================================
     private void WireRtpInput(string callId, CancellationTokenSource cts)
     {
-        if (_currentMediaSession == null || _ingressProcessor == null) return;
+        if (_currentMediaSession == null || _aiClient == null) return;
 
-        _currentMediaSession.OnRtpPacketReceived += (ep, mt, rtp) =>
+        _currentMediaSession.OnRtpPacketReceived += async (ep, mt, rtp) =>
         {
             if (mt != SDPMediaTypesEnum.audio) return;
             if (cts.Token.IsCancellationRequested) return;
@@ -587,13 +460,104 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             if (msSinceCallStart < EARLY_PROTECTION_MS)
                 return;
 
-            // Push to IngressAudioProcessor - it handles:
-            // - Jitter buffering & reordering
-            // - Codec decoding (G.711, Opus, G.722)
-            // - ASR-tuned DSP (DC blocker, pre-emphasis, noise gate, AGC)
-            // - High-quality SpeexDSP upsampling to 24kHz
-            // Output is delivered via OnPcmFrameReady event
-            _ingressProcessor.PushRtpAudio(mt, rtp);
+            // Skip while bot is speaking
+            if (_isBotSpeaking) return;
+
+            // Echo guard: only applies if Ada has actually spoken
+            if (_adaHasStartedSpeaking && _botStoppedSpeakingAt != DateTime.MinValue)
+            {
+                var msSinceBotStopped = (DateTime.UtcNow - _botStoppedSpeakingAt).TotalMilliseconds;
+                if (msSinceBotStopped < ECHO_GUARD_MS) return;
+            }
+
+            var payload = rtp.Payload;
+            if (payload == null || payload.Length == 0) return;
+
+            // Decode based on payload type
+            var pt = rtp.Header.PayloadType;
+            if (!_remotePtToCodec.TryGetValue(pt, out var codec))
+            {
+                codec = pt == 8 ? AudioCodecsEnum.PCMA : AudioCodecsEnum.PCMU;
+            }
+
+            short[] pcm16;
+            int sampleRate = 8000;
+
+            switch (codec)
+            {
+                case AudioCodecsEnum.PCMU:
+                    pcm16 = payload.Select(b => SIPSorcery.Media.MuLawDecoder.MuLawToLinearSample(b)).ToArray();
+                    break;
+
+                case AudioCodecsEnum.PCMA:
+                    pcm16 = payload.Select(b => SIPSorcery.Media.ALawDecoder.ALawToLinearSample(b)).ToArray();
+                    break;
+
+                case AudioCodecsEnum.OPUS:
+                    try
+                    {
+                        var pcm48 = AudioCodecs.OpusDecode(payload);
+                        // Downmix stereo to mono if needed
+                        short[] mono;
+                        if (AudioCodecs.OPUS_DECODE_CHANNELS == 2 && pcm48.Length % 2 == 0)
+                        {
+                            mono = new short[pcm48.Length / 2];
+                            for (int j = 0; j < mono.Length; j++)
+                                mono[j] = (short)((pcm48[j * 2] + pcm48[j * 2 + 1]) / 2);
+                        }
+                        else
+                        {
+                            mono = pcm48;
+                        }
+                        // Decimate 48kHz → 24kHz for OpenAI
+                        pcm16 = new short[mono.Length / 2];
+                        for (int j = 0; j < pcm16.Length; j++)
+                            pcm16[j] = mono[j * 2];
+                        sampleRate = 24000;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] Opus decode error: {ex.Message}");
+                        return;
+                    }
+                    break;
+
+                case AudioCodecsEnum.G722:
+                    try
+                    {
+                        pcm16 = AudioCodecs.G722Decode(payload);
+                        sampleRate = 16000;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ [{callId}] G.722 decode error: {ex.Message}");
+                        return;
+                    }
+                    break;
+
+                default:
+                    return;
+            }
+
+            // Convert to bytes for OpenAI (at original sample rate)
+            var pcmBytes = new byte[pcm16.Length * 2];
+            Buffer.BlockCopy(pcm16, 0, pcmBytes, 0, pcmBytes.Length);
+
+            // For audio monitoring, always provide PCM16 at 24kHz (MainForm expects 24kHz and upsamples to 48kHz speakers).
+            // If we feed 8k/16k here, NAudio playback sounds "digital"/fast due to sample-rate mismatch.
+            short[] monitorPcm24 = sampleRate == 24000
+                ? pcm16
+                : AudioCodecs.Resample(pcm16, sampleRate, 24000);
+            var monitorBytes24 = new byte[monitorPcm24.Length * 2];
+            Buffer.BlockCopy(monitorPcm24, 0, monitorBytes24, 0, monitorBytes24.Length);
+            OnCallerAudioMonitor?.Invoke(monitorBytes24);
+
+            // Send to OpenAI
+            try
+            {
+                await _aiClient.SendAudioAsync(pcmBytes, sampleRate);
+            }
+            catch { }
         };
     }
 
@@ -602,26 +566,18 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     // ===========================================
     private async Task CleanupAsync(string callId, SIPUserAgent ua)
     {
-        Log($"📴 [{callId}] Cleanup starting...");
-
-        // Reset call state FIRST to allow new calls
+        Log($"📴 [{callId}] Cleanup...");
         _isInCall = false;
-        _isBotSpeaking = false;
-        _adaHasStartedSpeaking = false;
-        _inboundFlushComplete = false;
-        _inboundPacketCount = 0;
 
         // Unsubscribe hangup handler
         if (_currentHungupHandler != null && _currentUa != null)
         {
-            try { _currentUa.OnCallHungup -= _currentHungupHandler; } catch { }
+            _currentUa.OnCallHungup -= _currentHungupHandler;
             _currentHungupHandler = null;
         }
 
-        // Hangup SIP call
         try { ua.Hangup(); } catch { }
 
-        // Dispose AI client
         if (_aiClient != null)
         {
             try { await _aiClient.DisconnectAsync(); } catch { }
@@ -629,46 +585,28 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _aiClient = null;
         }
 
-        // Stop playouts
         if (_playout != null)
         {
             try { _playout.Stop(); } catch { }
             try { _playout.Dispose(); } catch { }
             _playout = null;
         }
-        if (_alawPlayout != null)
-        {
-            try { _alawPlayout.Stop(); } catch { }
-            try { _alawPlayout.Dispose(); } catch { }
-            _alawPlayout = null;
-        }
 
-        // Dispose ingress processor
-        if (_ingressProcessor != null)
-        {
-            try { _ingressProcessor.Dispose(); } catch { }
-            _ingressProcessor = null;
-        }
-
-        // Close media session
         if (_currentMediaSession != null)
         {
             try { _currentMediaSession.Close("call ended"); } catch { }
             _currentMediaSession = null;
         }
 
-        // Dispose cancellation token
         try { _callCts?.Dispose(); } catch { }
         _callCts = null;
 
-        Log($"📴 [{callId}] Cleanup complete");
         OnCallEnded?.Invoke(callId);
     }
 
     // ===========================================
     // AUDIO UTILITIES
     // ===========================================
-    
     /// <summary>
     /// Apply a fade-in ramp to the first PCM24 audio delta to prevent speaker pop.
     /// Ramps from 0% to 100% over ~2ms (48 samples at 24kHz).
@@ -693,7 +631,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private void Log(string msg)
     {
         if (_disposed) return;
-        _asyncLog.Log($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
     }
 
     // ===========================================
@@ -712,10 +650,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
         try { _callCts?.Cancel(); } catch { }
         try { _playout?.Dispose(); } catch { }
-        try { _alawPlayout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
-        try { _asyncLog.Dispose(); } catch { }
 
         GC.SuppressFinalize(this);
     }
