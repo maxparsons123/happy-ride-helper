@@ -93,13 +93,16 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     public bool IsOpusAvailable => _remotePtToCodec.Values.Contains(AudioCodecsEnum.OPUS);
     public bool IsG722Available => _remotePtToCodec.Values.Contains(AudioCodecsEnum.G722);
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
-    
+
+    // ===========================================
+    // v4.2 AUDIO MODE SWITCH (toggle manually here)
+    // ===========================================
     /// <summary>
     /// v4.2: When true, uses A-law direct passthrough (OpenAI g711_alaw → RTP).
     /// When false, uses PCM mode (24kHz decode/resample/encode).
-    /// Must be set before the call starts.
+    /// ⚡ TOGGLE THIS TO TEST BOTH PATHS ⚡
     /// </summary>
-    public bool UseALawDirect { get; set; } = true;
+    private const bool USE_ALAW_DIRECT = true;  // ← Change to false for PCM mode
 
     // ===========================================
     // CONSTRUCTOR
@@ -240,9 +243,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // v4.2: Use direct A-law passthrough for PCMA when UseALawDirect is enabled
-            bool useDirectALaw = UseALawDirect && _negotiatedCodec == AudioCodecsEnum.PCMA;
-            
+            // v4.2: Use direct A-law passthrough for PCMA when USE_ALAW_DIRECT is enabled
+            bool useDirectALaw = USE_ALAW_DIRECT && _negotiatedCodec == AudioCodecsEnum.PCMA;
+
             if (useDirectALaw)
             {
                 // Direct A-law path: OpenAI g711_alaw → raw bytes → RTP (no decoding/resampling)
@@ -342,8 +345,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 catch { }
             };
 
-            // Create OpenAI client (v4.2: pass A-law mode flag based on negotiated codec and user preference)
-            bool useDirectALaw = UseALawDirect && _negotiatedCodec == AudioCodecsEnum.PCMA;
+            // Create OpenAI client (v4.2: pass A-law mode flag based on negotiated codec)
             _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, useDirectALaw, _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
 
