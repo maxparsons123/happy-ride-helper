@@ -350,8 +350,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 catch { }
             };
 
-            // Create OpenAI client (v4.2: pass A-law mode flag based on negotiated codec)
-            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, useDirectALaw, _dispatchWebhookUrl);
+            // Create OpenAI client and configure output codec
+            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
+            if (useDirectALaw)
+                _aiClient.SetOutputCodec(OutputCodecMode.ALaw);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
