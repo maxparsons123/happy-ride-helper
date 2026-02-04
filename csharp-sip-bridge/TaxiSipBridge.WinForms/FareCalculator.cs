@@ -709,7 +709,7 @@ public partial class FareCalculator
 
     private static double ToRadians(double degrees) => degrees * Math.PI / 180.0;
 
-    private static string FormatFare(decimal fare) => $"€{fare:F2}";
+    private static string FormatFare(decimal fare) => $"£{fare:F2}";
 
     public static decimal ParseFare(string fare)
     {
