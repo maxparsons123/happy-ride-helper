@@ -585,6 +585,10 @@ public class OpenAIRealtimeClient : IAudioAIClient
                             Log($"💬 Ada: {text}");
                             OnTranscript?.Invoke($"Ada: {text}");
 
+                            // Track if post-booking speech has been delivered
+                            if (_booking.Confirmed && _postBookingHangupArmed)
+                                _postBookingFinalSpeechDelivered = true;
+
                             // Goodbye detection watchdog: if Ada says goodbye, force end_call after 5s
                             if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
                                 (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
@@ -850,29 +854,13 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     private void ProcessAudioDelta(string base64)
     {
+        if (!IsConnected) return;
+        
         try
         {
             var audioBytes = Convert.FromBase64String(base64);
 
-            // v4.2: If output is A-law mode, data is raw A-law bytes from OpenAI
-            if (_outputCodec == OutputCodecMode.ALaw)
-            {
-                // Direct passthrough - no conversion needed
-                OnALawAudio?.Invoke(audioBytes);
-
-                // Also queue for RTP (split into 20ms frames)
-                for (int i = 0; i < audioBytes.Length; i += 160)
-                {
-                    int len = Math.Min(160, audioBytes.Length - i);
-                    var frame = new byte[160];
-                    Buffer.BlockCopy(audioBytes, i, frame, 0, len);
-                    if (len < 160) Array.Fill(frame, (byte)0xD5, len, 160 - len);
-                    EnqueueFrame(frame);
-                }
-                return;
-            }
-
-            // Legacy PCM16 path
+            // OpenAI always sends PCM16 @ 24kHz - we need to convert to output codec
             var pcm24k = audioBytes;
             OnPcm24Audio?.Invoke(pcm24k);
 
@@ -881,6 +869,9 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
             switch (_outputCodec)
             {
+                case OutputCodecMode.ALaw:
+                    ProcessALawOutput(samples24k);
+                    break;
                 case OutputCodecMode.Opus:
                     ProcessOpusOutput(samples24k);
                     break;
@@ -892,6 +883,28 @@ public class OpenAIRealtimeClient : IAudioAIClient
         catch (Exception ex)
         {
             Log($"⚠️ Audio delta error: {ex.Message}");
+        }
+    }
+
+    private void ProcessALawOutput(short[] pcm24k)
+    {
+        // Decimate 24kHz → 8kHz (3:1)
+        int outputLen = pcm24k.Length / 3;
+        var pcm8k = new short[outputLen];
+        for (int i = 0; i < outputLen; i++)
+            pcm8k[i] = pcm24k[i * 3];
+
+        var alaw = AudioCodecs.ALawEncode(pcm8k);
+        OnALawAudio?.Invoke(alaw);
+
+        // Split into 20ms frames (160 bytes @ 8kHz)
+        for (int i = 0; i < alaw.Length; i += 160)
+        {
+            int len = Math.Min(160, alaw.Length - i);
+            var frame = new byte[160];
+            Buffer.BlockCopy(alaw, i, frame, 0, len);
+            if (len < 160) Array.Fill(frame, (byte)0xD5, len, 160 - len);
+            EnqueueFrame(frame);
         }
     }
 
