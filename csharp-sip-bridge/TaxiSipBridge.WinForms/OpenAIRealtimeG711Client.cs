@@ -10,6 +10,7 @@ namespace TaxiSipBridge;
 
 /// <summary>
 /// OpenAI Realtime client for G.711 telephony with local DSP processing.
+/// Version 5.1: Watchdog speech guard - prevents triggering no-reply prompt while user is speaking.
 /// Version 3.4: Fixed response lifecycle - no manual state resets, transcript-gated responses.
 /// 
 /// Key improvements:
@@ -17,7 +18,7 @@ namespace TaxiSipBridge;
 /// - Keepalive loop for connection health monitoring
 /// - Deferred response handling (queue response.create if one is active)
 /// - Transcript guard (ignores stale transcripts within 400ms of response.created)
-/// - No-reply watchdog (prompts user after silence)
+/// - No-reply watchdog (prompts user after silence, with speech guard)
 /// - CanCreateResponse() gate with multiple conditions
 /// - RTP playout completion as source of truth for echo guard
 /// </summary>
@@ -548,7 +549,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                             return;
                         }
                         
-                        // v4.2: Check if there was recent local speech (within 3s) to avoid discarding user audio
+                        // v5.1: Check if there was recent local speech (within 3s) to avoid discarding user audio
                         var msSinceLastSpeech = NowMs() - Volatile.Read(ref _lastUserSpeechAt);
                         if (msSinceLastSpeech < 3000)
                         {
