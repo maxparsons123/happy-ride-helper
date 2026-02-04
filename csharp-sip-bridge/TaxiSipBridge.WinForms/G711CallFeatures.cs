@@ -349,7 +349,8 @@ public sealed class G711CallFeatures : IDisposable
                     _booking.Destination,
                     _callerPhone);
                 
-                var aiCompleted = await Task.WhenAny(aiTask, Task.Delay(3000));
+                // v4.5: Reduced timeout from 3s to 2s for faster response
+                var aiCompleted = await Task.WhenAny(aiTask, Task.Delay(2000));
                 
                 if (aiCompleted == aiTask)
                 {
@@ -376,7 +377,7 @@ public sealed class G711CallFeatures : IDisposable
                 }
                 else
                 {
-                    Log($"⏱️ [{_callId}] Lovable AI extraction timed out (3s) — using raw addresses");
+                    Log($"⏱️ [{_callId}] Lovable AI extraction timed out (2s) — using raw addresses");
                 }
                 
                 // If clarification needed, return that instead of a quote
@@ -399,13 +400,14 @@ public sealed class G711CallFeatures : IDisposable
                     resolvedDest,
                     _callerPhone);
 
-                var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(3000));
+                // v4.5: Reduced timeout from 3s to 2s for faster response
+                var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(2000));
                 var fareResult = fareCompleted == fareTask
                     ? await fareTask
                     : new FareResult { Fare = "€12.50", Eta = "6 minutes" };
 
                 if (fareCompleted != fareTask)
-                    Log($"⏱️ [{_callId}] Geocoding timed out (3s) — using fallback quote");
+                    Log($"⏱️ [{_callId}] Geocoding timed out (2s) — using fallback quote");
                 
                 // Populate geocoded address details in BookingState
                 _booking.Fare = NormalizeEuroFare(fareResult.Fare);
