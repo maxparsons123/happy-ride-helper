@@ -132,15 +132,16 @@ partial class MainForm
         };
         chkMonitorAudio.CheckedChanged += this.chkMonitorAudio_CheckedChanged;
 
-        // === G711 Mode (8kHz passthrough - experimental) ===
+        // === A-law Passthrough Mode (v4.2 direct vs PCM) ===
         chkG711Mode = new CheckBox 
         { 
-            Text = "🎵 G711", 
+            Text = "⚡ A-law Direct", 
             Location = new Point(385, 118), // Next to API Key field
-            Size = new Size(75, 23),
+            Size = new Size(95, 23),
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(102, 51, 153),
-            Visible = false // Only shown in Local OpenAI mode
+            Visible = false, // Only shown in Local OpenAI mode
+            Checked = true   // Default to v4.2 A-law passthrough
         };
         chkG711Mode.CheckedChanged += this.chkG711Mode_CheckedChanged;
 

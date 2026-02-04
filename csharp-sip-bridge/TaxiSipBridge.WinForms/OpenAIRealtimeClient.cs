@@ -45,6 +45,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private readonly string _voice;
     private readonly string? _dispatchWebhookUrl;
     private readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
+    private readonly bool _useALawOutput;  // v4.2: When true, request g711_alaw output from OpenAI
 
     // =========================
     // THREAD-SAFE STATE
@@ -124,11 +125,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
         string voice = "shimmer",
+        bool useALawOutput = true,  // v4.2: Default to A-law output passthrough
         string? dispatchWebhookUrl = null)
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
+        _useALawOutput = useALawOutput;
         _dispatchWebhookUrl = dispatchWebhookUrl;
     }
 
@@ -295,13 +298,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // AUDIO OUTPUT (A-LAW PASSTHROUGH)
+    // AUDIO OUTPUT
     // =========================
     
     /// <summary>
-    /// v4.2: Process raw A-law audio from OpenAI (g711_alaw output format).
-    /// Emits directly via OnALawAudio - no decoding/resampling needed.
-    /// The caller can send these bytes directly via SIPSorcery SendRtpRaw (payload type 8).
+    /// v4.2: Process audio from OpenAI.
+    /// When _useALawOutput=true: receives raw A-law bytes, emits via OnALawAudio.
+    /// When _useALawOutput=false: receives 24kHz PCM, emits via OnPcm24Audio.
     /// </summary>
     private void ProcessAudioDelta(string base64)
     {
@@ -309,31 +312,17 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
         try
         {
-            var alawBytes = Convert.FromBase64String(base64);
+            var audioBytes = Convert.FromBase64String(base64);
             
-            // v4.2: Emit raw A-law directly - caller handles RTP framing
-            OnALawAudio?.Invoke(alawBytes);
-            
-            // Legacy support: also emit as PCM24 if handler is attached
-            // (decode A-law → upsample 8k → 24k for backwards compatibility)
-            if (OnPcm24Audio != null)
+            if (_useALawOutput)
             {
-                var pcm8k = new short[alawBytes.Length];
-                for (int i = 0; i < alawBytes.Length; i++)
-                    pcm8k[i] = TaxiSipBridge.Audio.G711Codec.DecodeSampleALaw(alawBytes[i]);
-                
-                // Simple 3x upsample to 24kHz
-                var pcm24k = new short[pcm8k.Length * 3];
-                for (int i = 0; i < pcm8k.Length; i++)
-                {
-                    pcm24k[i * 3] = pcm8k[i];
-                    pcm24k[i * 3 + 1] = pcm8k[i];
-                    pcm24k[i * 3 + 2] = pcm8k[i];
-                }
-                
-                var pcm24Bytes = new byte[pcm24k.Length * 2];
-                Buffer.BlockCopy(pcm24k, 0, pcm24Bytes, 0, pcm24Bytes.Length);
-                OnPcm24Audio?.Invoke(pcm24Bytes);
+                // v4.2 A-law mode: emit raw A-law directly - caller handles RTP framing
+                OnALawAudio?.Invoke(audioBytes);
+            }
+            else
+            {
+                // PCM mode: emit 24kHz PCM for legacy playout engine
+                OnPcm24Audio?.Invoke(audioBytes);
             }
         }
         catch (Exception ex)
@@ -1190,7 +1179,9 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     // =========================
     private async Task ConfigureSessionAsync()
     {
-        // v4.2: Hybrid mode - PCM input (works with ingress pipeline), A-law output (direct passthrough)
+        // v4.2: Configurable output mode - A-law passthrough or PCM
+        var outputFormat = _useALawOutput ? "g711_alaw" : "pcm16";
+        
         var config = new
         {
             type = "session.update",
@@ -1199,8 +1190,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 modalities = new[] { "text", "audio" },
                 instructions = GetSystemPrompt(),
                 voice = _voice,
-                input_audio_format = "pcm16",       // v4.2: 24kHz PCM input (ingress pipeline handles decoding/resampling)
-                output_audio_format = "g711_alaw",  // v4.2: A-law output for direct SIP passthrough
+                input_audio_format = "pcm16",       // Always 24kHz PCM input (ingress pipeline handles decoding/resampling)
+                output_audio_format = outputFormat, // v4.2: A-law for direct passthrough, or pcm16 for legacy
                 input_audio_transcription = new 
                 { 
                     model = "whisper-1",
@@ -1220,7 +1211,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         };
 
         await SendJsonAsync(config).ConfigureAwait(false);
-        Log($"🎧 Session configured (lang={_detectedLanguage}, in=pcm16, out=g711_alaw)");
+        Log($"🎧 Session configured (lang={_detectedLanguage}, in=pcm16, out={outputFormat})");
     }
 
     private async Task SendGreetingAsync()

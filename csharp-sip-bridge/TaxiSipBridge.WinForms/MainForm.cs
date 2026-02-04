@@ -15,7 +15,8 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
     private bool _useManualAnswer = false;
-    private bool _useG711Mode = false;  // G711 8kHz passthrough mode
+    private bool _useG711Mode = false;  // LEGACY: G711 8kHz μ-law passthrough mode (G711CallHandler)
+    private bool _useALawDirect = true; // v4.2: A-law direct passthrough (no decoding/resampling on output)
     private ManualCallHandler? _manualCallHandler;
 
     // === Audio Monitor (local speaker playback) ===
@@ -86,18 +87,18 @@ public partial class MainForm : Form
             : "☁️ Switched to EDGE FUNCTION mode");
     }
 
-    // G711 mode checkbox handler
+    // A-law Direct mode checkbox handler (v4.2 passthrough vs PCM)
     private void chkG711Mode_CheckedChanged(object? sender, EventArgs e)
     {
-        _useG711Mode = chkG711Mode.Checked;
-        AddLog(_useG711Mode 
-            ? "🎵 G711 mode ENABLED (8kHz μ-law passthrough - experimental)" 
-            : "🎵 G711 mode DISABLED (24kHz mode)");
+        _useALawDirect = chkG711Mode.Checked;
+        AddLog(_useALawDirect 
+            ? "⚡ A-law Direct mode ENABLED (v4.2 - OpenAI g711_alaw → RTP passthrough)" 
+            : "🔊 PCM mode ENABLED (24kHz decode/resample/encode)");
         
         // Warn if already connected - requires reconnect to take effect
         if (_sipLoginManager?.IsRegistered == true)
         {
-            AddLog("⚠️ G711 mode change requires RECONNECT to take effect!");
+            AddLog("⚠️ Audio mode change requires RECONNECT to take effect!");
             AddLog("   Click Disconnect and then Connect again.");
         }
     }
@@ -425,9 +426,11 @@ public partial class MainForm : Form
                 }
                 else
                 {
-                    // Standard 24kHz mode with dispatch webhook
+                    // Standard mode with dispatch webhook
+                    // v4.2: Pass A-law direct mode flag to handler
                     const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
                     var localHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
+                    localHandler.UseALawDirect = _useALawDirect; // v4.2: Toggle A-law passthrough
                     _callHandler = localHandler;
 
                     // Configure Simli avatar if enabled
@@ -446,7 +449,11 @@ public partial class MainForm : Form
 
                     _sipLoginManager.SetCallHandler(_callHandler);
                     _sipLoginManager.Start();
-                    AddLog("🔒 SIP LOCAL AI mode started - 24kHz with resampling");
+                    
+                    if (_useALawDirect)
+                        AddLog("⚡ SIP LOCAL AI mode started - v4.2 A-law direct passthrough");
+                    else
+                        AddLog("🔊 SIP LOCAL AI mode started - PCM 24kHz with resampling");
                 }
             }
             else
