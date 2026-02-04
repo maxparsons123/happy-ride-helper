@@ -255,8 +255,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             if (useDirectALaw)
             {
                 // Direct A-law path: OpenAI g711_alaw → raw bytes → RTP (no decoding/resampling)
-                var rtpSession = _currentMediaSession.RtpSession;
-                _alawPlayout = new ALawRtpPlayout(rtpSession);
+                // VoIPMediaSession inherits from RTPSession, so pass it directly
+                _alawPlayout = new ALawRtpPlayout(_currentMediaSession);
                 _alawPlayout.OnQueueEmpty += () =>
                 {
                     if (_adaHasStartedSpeaking)
