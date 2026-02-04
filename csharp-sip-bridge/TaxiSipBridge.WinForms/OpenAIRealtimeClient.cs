@@ -1440,6 +1440,8 @@ public class BookingState
     public string? PickupNumber { get; set; }
     public string? PickupCity { get; set; }
     public string? PickupPostal { get; set; }
+    public string? PickupPostalCode { get; set; }
+    public string? PickupFormatted { get; set; }
     
     // Destination geocoding
     public double? DestLat { get; set; }
@@ -1448,6 +1450,8 @@ public class BookingState
     public string? DestNumber { get; set; }
     public string? DestCity { get; set; }
     public string? DestPostal { get; set; }
+    public string? DestPostalCode { get; set; }
+    public string? DestFormatted { get; set; }
     
     // Additional fields
     public string? CallerName { get; set; }
