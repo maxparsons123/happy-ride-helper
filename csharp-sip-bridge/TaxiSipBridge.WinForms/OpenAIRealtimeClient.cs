@@ -327,7 +327,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     public async Task SendPcm8kAsync(byte[] pcm8kBytes)
     {
-        if (!IsConnected || _disposed) return;
+        if (!IsConnected) return;
 
         if (!_awaitingConfirmation && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
             return;
@@ -340,7 +340,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     public async Task SendPcm8kNoDspAsync(byte[] pcm8kBytes)
     {
-        if (!IsConnected || _disposed) return;
+        if (!IsConnected) return;
 
         if (!_awaitingConfirmation && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
             return;
@@ -353,7 +353,7 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 24000)
     {
-        if (!IsConnected || _disposed) return;
+        if (!IsConnected) return;
 
         if (!_awaitingConfirmation && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastAdaFinishedAt < ECHO_GUARD_MS)
             return;
