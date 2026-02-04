@@ -448,6 +448,17 @@ public static class AudioCodecs
         return alaw;
     }
 
+    /// <summary>
+    /// Alias for TranscodeMuLawToALaw - converts μ-law to A-law directly.
+    /// v4.0: Used by OpenAIRealtimeClient for legacy μ-law SIP support.
+    /// </summary>
+    public static byte[] MuLawToALaw(byte[] ulaw) => TranscodeMuLawToALaw(ulaw);
+
+    /// <summary>
+    /// Alias for TranscodeALawToMuLaw - converts A-law to μ-law directly.
+    /// </summary>
+    public static byte[] ALawToMuLaw(byte[] alaw) => TranscodeALawToMuLaw(alaw);
+
     #endregion
 
     #region FIR Anti-Aliasing Filter and Decimation
