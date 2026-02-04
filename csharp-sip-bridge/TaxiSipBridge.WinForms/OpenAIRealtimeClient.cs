@@ -469,8 +469,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     }
 
     // =========================
-    // MESSAGE HANDLER
+    // MESSAGE HANDLER (v4.3 - Refactored)
     // =========================
+    
+    /// <summary>
+    /// Process incoming WebSocket message from OpenAI.
+    /// Dispatches to focused handler methods for each event type.
+    /// </summary>
     private async Task ProcessMessageAsync(string json)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
@@ -490,254 +495,316 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     break;
 
                 case "session.updated":
-                    if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
-                        await SendGreetingAsync().ConfigureAwait(false);
+                    await HandleSessionUpdatedAsync().ConfigureAwait(false);
                     break;
 
                 case "response.created":
-                    {
-                        // OBSERVED start (OpenAI controlled) — this is the ONLY place we set _responseActive = 1
-                        var responseId = TryGetResponseId(doc.RootElement);
-                        if (responseId != null && _activeResponseId == responseId)
-                            break; // Ignore duplicate
-
-                        _activeResponseId = responseId;
-                        Interlocked.Exchange(ref _responseActive, 1);
-
-                        // CRITICAL: Record timestamp for transcript guard.
-                        Volatile.Write(ref _responseCreatedAt, NowMs());
-
-                        // v2.6: Clear audio buffer ONLY HERE on response.created
-                        // This is the ONLY place buffer should be cleared - prevents Whisper from
-                        // transcribing stale audio while Ada is speaking
-                        _ = ClearInputAudioBufferAsync();
-
-                        Log("🤖 AI response started");
-                        OnResponseStarted?.Invoke();
-                        break;
-                    }
+                    HandleResponseCreated(doc.RootElement);
+                    break;
 
                 case "response.audio.delta":
-                    {
-                        if (doc.RootElement.TryGetProperty("delta", out var deltaEl))
-                        {
-                            var delta = deltaEl.GetString();
-                            if (!string.IsNullOrEmpty(delta))
-                                ProcessAudioDelta(delta);
-                        }
-                        break;
-                    }
+                    HandleAudioDelta(doc.RootElement);
+                    break;
 
                 case "response.audio_transcript.delta":
-                    {
-                        if (doc.RootElement.TryGetProperty("delta", out var d))
-                            OnAdaSpeaking?.Invoke(d.GetString() ?? "");
-                        break;
-                    }
+                    HandleTranscriptDelta(doc.RootElement);
+                    break;
 
                 case "response.audio_transcript.done":
-                    {
-                        if (doc.RootElement.TryGetProperty("transcript", out var t) &&
-                            !string.IsNullOrWhiteSpace(t.GetString()))
-                        {
-                            var text = t.GetString()!;
-                            Log($"💬 Ada: {text}");
-                            OnTranscript?.Invoke($"Ada: {text}");
-
-                            // Goodbye detection watchdog: if Ada says goodbye, force end_call after 5s
-                            if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
-                                (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
-                                 text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
-                                 text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
-                            {
-                                Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
-                                _ = Task.Run(async () =>
-                                {
-                                    await Task.Delay(5000).ConfigureAwait(false);
-
-                                    if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
-                                        return;
-
-                                    Log("⏰ Goodbye watchdog triggered - forcing end_call");
-                                    Interlocked.Exchange(ref _ignoreUserAudio, 1);
-                                    SignalCallEnded("goodbye_watchdog");
-                                });
-                            }
-                        }
-                        break;
-                    }
+                    HandleAdaTranscriptDone(doc.RootElement);
+                    break;
 
                 case "conversation.item.input_audio_transcription.completed":
-                    {
-                        // v2.5: Transcript arrived - clear the pending flag
-                        Interlocked.Exchange(ref _transcriptPending, 0);
-
-                        if (doc.RootElement.TryGetProperty("transcript", out var u) &&
-                            !string.IsNullOrWhiteSpace(u.GetString()))
-                        {
-                            var text = ApplySttCorrections(u.GetString()!);
-
-                            // Calculate timing for logging
-                            var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
-                            var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
-
-                            // Log transcript arrival with timing context
-                            if (Volatile.Read(ref _responseActive) == 1)
-                            {
-                                Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
-                            }
-
-                            Log($"👤 User: {text}");
-                            OnTranscript?.Invoke($"You: {text}");
-
-                            // v3.6: LATE CONFIRMATION DETECTION
-                            // If Ada already finished responding but the user said "yes/correct/confirm",
-                            // we need to inject a system message and trigger a new response immediately.
-                            // This handles the case where Ada says "Just a moment..." but never calls book_taxi.
-                            if (Volatile.Read(ref _responseActive) == 0 && _awaitingConfirmation)
-                            {
-                                var lowerText = text.ToLowerInvariant();
-                                bool isConfirmation = lowerText.Contains("yes") ||
-                                                      lowerText.Contains("yeah") ||
-                                                      lowerText.Contains("yep") ||
-                                                      lowerText.Contains("correct") ||
-                                                      lowerText.Contains("that's right") ||
-                                                      lowerText.Contains("go ahead") ||
-                                                      lowerText.Contains("confirm") ||
-                                                      lowerText.Contains("book it") ||
-                                                      lowerText.Contains("sure") ||
-                                                      lowerText.Contains("please");
-
-                                if (isConfirmation)
-                                {
-                                    Log("✅ Late confirmation detected - injecting system prompt and triggering response");
-                                    _ = HandleLateConfirmationAsync(text);
-                                }
-                            }
-                        }
-                        break;
-                    }
+                    await HandleUserTranscriptAsync(doc.RootElement).ConfigureAwait(false);
+                    break;
 
                 case "input_audio_buffer.speech_started":
-                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    Interlocked.Increment(ref _noReplyWatchdogId); // Cancel any pending no-reply watchdog
-                    // v2.5: Mark that we're expecting a transcript
-                    Interlocked.Exchange(ref _transcriptPending, 1);
+                    HandleSpeechStarted();
                     break;
 
                 case "input_audio_buffer.speech_stopped":
-                    Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    Volatile.Write(ref _speechStoppedAt, NowMs());  // v2.5: Track when speech ended
-                    // v2.5: Commit audio buffer - OpenAI will transcribe and respond after settle time
-                    _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
-                    Log("📝 Committed audio buffer (awaiting transcript)");
+                    HandleSpeechStopped();
                     break;
 
                 case "response.done":
-                    {
-                        // OBSERVED end (OpenAI controlled) — this is the ONLY place we set _responseActive = 0
-                        var responseId = TryGetResponseId(doc.RootElement);
-                        // Ignore duplicate response.done for same ID
-                        if (responseId == null || responseId == _lastCompletedResponseId)
-                            break;
-                        // Ignore stale response.done for different ID
-                        if (_activeResponseId != null && responseId != _activeResponseId)
-                            break;
-                        _lastCompletedResponseId = responseId;
-                        _activeResponseId = null;
-                        Interlocked.Exchange(ref _responseActive, 0);
-                        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
-
-                        // v2.6: DO NOT clear buffer here - only clear on response.created
-                        // Clearing here cuts off words mid-turn
-                        Log("🤖 AI response completed");
-                        OnResponseCompleted?.Invoke();
-
-                    // Flush deferred response if pending - MUST go through gate
-                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
-                    {
-                        Log("🔄 Flushing deferred response.create (via gate)");
-                        _ = Task.Run(async () =>
-                        {
-                            await QueueResponseCreateAsync(
-                                delayMs: 80,  // v2.7: Safe delay for SIP fade-out
-                                waitForCurrentResponse: false,
-                                maxWaitMs: 0
-                            ).ConfigureAwait(false);
-                        });
-                    }
-
-                        // No-reply watchdog: give the caller enough time to respond AFTER Ada finishes.
-                        var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
-                        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
-
-                            // Abort if cancelled, call ended, or user spoke
-                            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
-                            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
-                            if (Volatile.Read(ref _responseActive) == 1) return;
-
-                            // v2.6: Check if transcript is still pending
-                            if (Volatile.Read(ref _transcriptPending) == 1)
-                            {
-                                Log("⏰ Watchdog: transcript pending - aborting");
-                                return;
-                            }
-
-                            // v2.6: Check if there was recent speech (within 3s) to avoid discarding user audio
-                            var msSinceLastSpeech = NowMs() - Volatile.Read(ref _lastUserSpeechAt);
-                            if (msSinceLastSpeech < 3000)
-                            {
-                                Log($"⏰ Watchdog: recent speech {msSinceLastSpeech}ms ago - aborting");
-                                return;
-                            }
-
-                            Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
-                            await SendJsonAsync(new
-                            {
-                                type = "conversation.item.create",
-                                item = new
-                                {
-                                    type = "message",
-                                    role = "system",
-                                    content = new[]
-                                    {
-                    new
-                    {
-                        type = "input_text",
-                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
-                    }
-                }
-                                }
-                            }).ConfigureAwait(false);
-                            await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
-                        });
-                        break;
-                    }
+                    HandleResponseDone(doc.RootElement);
+                    break;
 
                 case "response.function_call_arguments.done":
                     await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
                     break;
 
                 case "error":
-                    {
-                        if (doc.RootElement.TryGetProperty("error", out var e) &&
-                            e.TryGetProperty("message", out var m))
-                        {
-                            var msg = m.GetString() ?? "";
-                            if (!msg.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
-                                Log($"❌ OpenAI: {msg}");
-                        }
-                        break;
-                    }
+                    HandleError(doc.RootElement);
+                    break;
             }
         }
         catch (Exception ex)
         {
             Log($"⚠️ Parse error: {ex.Message}");
         }
+    }
+
+    // =========================
+    // EVENT HANDLERS (v4.3)
+    // =========================
+
+    private async Task HandleSessionUpdatedAsync()
+    {
+        if (Interlocked.CompareExchange(ref _greetingSent, 1, 0) == 0)
+            await SendGreetingAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// OBSERVED: OpenAI starts a response. This is the ONLY place _responseActive = 1.
+    /// </summary>
+    private void HandleResponseCreated(JsonElement root)
+    {
+        var responseId = TryGetResponseId(root);
+        if (responseId != null && _activeResponseId == responseId)
+            return; // Ignore duplicate
+
+        _activeResponseId = responseId;
+        Interlocked.Exchange(ref _responseActive, 1);
+        Volatile.Write(ref _responseCreatedAt, NowMs());
+
+        // v2.6: Clear audio buffer ONLY HERE - prevents stale Whisper transcriptions
+        _ = ClearInputAudioBufferAsync();
+
+        Log("🤖 AI response started");
+        OnResponseStarted?.Invoke();
+    }
+
+    private void HandleAudioDelta(JsonElement root)
+    {
+        if (root.TryGetProperty("delta", out var deltaEl))
+        {
+            var delta = deltaEl.GetString();
+            if (!string.IsNullOrEmpty(delta))
+                ProcessAudioDelta(delta);
+        }
+    }
+
+    private void HandleTranscriptDelta(JsonElement root)
+    {
+        if (root.TryGetProperty("delta", out var d))
+            OnAdaSpeaking?.Invoke(d.GetString() ?? "");
+    }
+
+    private void HandleAdaTranscriptDone(JsonElement root)
+    {
+        if (!root.TryGetProperty("transcript", out var t) || string.IsNullOrWhiteSpace(t.GetString()))
+            return;
+
+        var text = t.GetString()!;
+        Log($"💬 Ada: {text}");
+        OnTranscript?.Invoke($"Ada: {text}");
+
+        // Goodbye detection: arm 5s hangup watchdog if Ada says goodbye
+        if (IsGoodbyePhrase(text))
+        {
+            Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
+            _ = ArmGoodbyeWatchdogAsync();
+        }
+    }
+
+    private static bool IsGoodbyePhrase(string text)
+    {
+        return text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
+               (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("for calling", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task ArmGoodbyeWatchdogAsync()
+    {
+        await Task.Delay(5000).ConfigureAwait(false);
+
+        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+            return;
+
+        Log("⏰ Goodbye watchdog triggered - forcing end_call");
+        Interlocked.Exchange(ref _ignoreUserAudio, 1);
+        SignalCallEnded("goodbye_watchdog");
+    }
+
+    private async Task HandleUserTranscriptAsync(JsonElement root)
+    {
+        // v2.5: Transcript arrived - clear the pending flag
+        Interlocked.Exchange(ref _transcriptPending, 0);
+
+        if (!root.TryGetProperty("transcript", out var u) || string.IsNullOrWhiteSpace(u.GetString()))
+            return;
+
+        var text = ApplySttCorrections(u.GetString()!);
+        LogTranscriptTiming(text);
+
+        Log($"👤 User: {text}");
+        OnTranscript?.Invoke($"You: {text}");
+
+        // v3.6: Late confirmation detection
+        if (ShouldHandleLateConfirmation(text))
+        {
+            Log("✅ Late confirmation detected - injecting system prompt");
+            _ = HandleLateConfirmationAsync(text);
+        }
+    }
+
+    private void LogTranscriptTiming(string text)
+    {
+        if (Volatile.Read(ref _responseActive) != 1) return;
+
+        var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
+        var msSinceResponseCreated = NowMs() - Volatile.Read(ref _responseCreatedAt);
+        Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
+    }
+
+    private bool ShouldHandleLateConfirmation(string text)
+    {
+        if (Volatile.Read(ref _responseActive) != 0 || !_awaitingConfirmation)
+            return false;
+
+        return IsConfirmationPhrase(text.ToLowerInvariant());
+    }
+
+    private static bool IsConfirmationPhrase(string lowerText)
+    {
+        return lowerText.Contains("yes") ||
+               lowerText.Contains("yeah") ||
+               lowerText.Contains("yep") ||
+               lowerText.Contains("correct") ||
+               lowerText.Contains("that's right") ||
+               lowerText.Contains("go ahead") ||
+               lowerText.Contains("confirm") ||
+               lowerText.Contains("book it") ||
+               lowerText.Contains("sure") ||
+               lowerText.Contains("please");
+    }
+
+    private void HandleSpeechStarted()
+    {
+        Volatile.Write(ref _lastUserSpeechAt, NowMs());
+        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel pending watchdogs
+        Interlocked.Exchange(ref _transcriptPending, 1); // v2.5: Expect transcript
+    }
+
+    private void HandleSpeechStopped()
+    {
+        var now = NowMs();
+        Volatile.Write(ref _lastUserSpeechAt, now);
+        Volatile.Write(ref _speechStoppedAt, now);
+
+        // v2.5: Commit buffer for transcription
+        _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
+        Log("📝 Committed audio buffer (awaiting transcript)");
+    }
+
+    /// <summary>
+    /// OBSERVED: OpenAI ends a response. This is the ONLY place _responseActive = 0.
+    /// </summary>
+    private void HandleResponseDone(JsonElement root)
+    {
+        var responseId = TryGetResponseId(root);
+        
+        // Ignore duplicates
+        if (responseId == null || responseId == _lastCompletedResponseId)
+            return;
+        // Ignore stale response.done for different ID
+        if (_activeResponseId != null && responseId != _activeResponseId)
+            return;
+
+        _lastCompletedResponseId = responseId;
+        _activeResponseId = null;
+        Interlocked.Exchange(ref _responseActive, 0);
+        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+
+        Log("🤖 AI response completed");
+        OnResponseCompleted?.Invoke();
+
+        // Flush deferred response through the gate
+        FlushDeferredResponseIfPending();
+
+        // Arm no-reply watchdog
+        ArmNoReplyWatchdog();
+    }
+
+    private void FlushDeferredResponseIfPending()
+    {
+        if (Interlocked.Exchange(ref _deferredResponsePending, 0) != 1)
+            return;
+
+        Log("🔄 Flushing deferred response.create (via gate)");
+        _ = Task.Run(async () =>
+        {
+            await QueueResponseCreateAsync(
+                delayMs: 80,  // v2.7: Safe delay for SIP fade-out
+                waitForCurrentResponse: false,
+                maxWaitMs: 0
+            ).ConfigureAwait(false);
+        });
+    }
+
+    private void ArmNoReplyWatchdog()
+    {
+        var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
+        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
+
+            // Abort conditions
+            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+            if (Volatile.Read(ref _responseActive) == 1) return;
+
+            // v4.3: Speech guard - don't interrupt active user speech
+            if (Volatile.Read(ref _transcriptPending) == 1)
+            {
+                Log("⏰ Watchdog: transcript pending - aborting");
+                return;
+            }
+
+            var msSinceLastSpeech = NowMs() - Volatile.Read(ref _lastUserSpeechAt);
+            if (msSinceLastSpeech < 3000)
+            {
+                Log($"⏰ Watchdog: recent speech {msSinceLastSpeech}ms ago - aborting");
+                return;
+            }
+
+            Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
+
+            await SendJsonAsync(new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "input_text",
+                            text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
+                        }
+                    }
+                }
+            }).ConfigureAwait(false);
+
+            // v2.7: Use 40ms delay for watchdog response
+            await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false).ConfigureAwait(false);
+        });
+    }
+
+    private void HandleError(JsonElement root)
+    {
+        if (!root.TryGetProperty("error", out var e) || !e.TryGetProperty("message", out var m))
+            return;
+
+        var msg = m.GetString() ?? "";
+        if (!msg.Contains("buffer too small", StringComparison.OrdinalIgnoreCase))
+            Log($"❌ OpenAI: {msg}");
     }
 
     private static string? TryGetResponseId(JsonElement root)
