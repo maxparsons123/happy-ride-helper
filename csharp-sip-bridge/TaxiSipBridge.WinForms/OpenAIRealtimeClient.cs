@@ -1104,7 +1104,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             type = "function",
             name = "sync_booking_data",
-            description = "Sync booking data after user provides information.",
+            description = "MUST call after EVERY user response containing booking info. Sync current state.",
             parameters = new
             {
                 type = "object",
@@ -1122,7 +1122,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             type = "function",
             name = "book_taxi",
-            description = "Request quote or confirm booking.",
+            description = "MANDATORY: Call with action='request_quote' IMMEDIATELY after collecting all booking info (before saying fare). Call with action='confirmed' IMMEDIATELY when user says yes/ok/confirm. DO NOT announce results before calling this tool.",
             parameters = new
             {
                 type = "object",
@@ -1154,29 +1154,32 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         - Warm, calm, confident tone
         - Clear pronunciation of names and addresses
         - Short pauses between phrases
-        - Never rush or sound robotic
 
         ## BOOKING FLOW
-        1. Greet and ask for caller's name
-        2. Ask for pickup address
+        1. Ask for caller's name
+        2. Ask for pickup address  
         3. Ask for destination
         4. Ask about passengers (default 1)
         5. Ask about pickup time (default "now")
         6. Call sync_booking_data after EVERY piece of info
-        7. Recap the booking and call book_taxi with action="request_quote"
-        8. Tell price and ask for confirmation
-        9. When confirmed, call book_taxi with action="confirmed"
-        10. Read the booking reference from the tool result
-        11. Say goodbye with the REAL reference and call end_call
+        7. Once you have all info, call book_taxi(action="request_quote") IMMEDIATELY
+        8. Wait for tool result, then tell price and ask for confirmation
+        9. When confirmed, call book_taxi(action="confirmed") IMMEDIATELY
+        10. Wait for tool result with booking_ref, then say goodbye with the reference
+        11. Call end_call
 
-        ## RULES
+        ## CRITICAL RULES - MUST FOLLOW
+        - You MUST call book_taxi(action="request_quote") BEFORE speaking the fare
+        - You MUST call book_taxi(action="confirmed") BEFORE saying "your taxi is booked"
+        - NEVER announce fares or confirmations without calling the tool FIRST
+        - The fare and booking reference come ONLY from tool results
         - Keep responses under 20 words
         - One question at a time
-        - Always use British Pounds (£) for fares
-        - Preserve addresses exactly as user says them
+        - Use British Pounds (£) for fares
 
         ## CONFIRMATION DETECTION
-        These phrases mean YES: 'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'correct', 'go ahead', 'book it', 'confirm'
+        These mean YES - call book_taxi(action="confirmed") immediately:
+        'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'correct', 'go ahead', 'book it', 'confirm', 'please'
         """;
 
     // =========================
