@@ -538,9 +538,23 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                     {
                         await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
 
+                        // Abort if cancelled, call ended, response active, or transcript pending
                         if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
                         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
                         if (Volatile.Read(ref _responseActive) == 1) return;
+                        if (Volatile.Read(ref _transcriptPending) == 1)
+                        {
+                            Log("⏰ Watchdog: transcript pending - aborting");
+                            return;
+                        }
+                        
+                        // v4.2: Check if there was recent local speech (within 3s) to avoid discarding user audio
+                        var msSinceLastSpeech = NowMs() - Volatile.Read(ref _lastUserSpeechAt);
+                        if (msSinceLastSpeech < 3000)
+                        {
+                            Log($"⏰ Watchdog: recent speech {msSinceLastSpeech}ms ago - aborting");
+                            return;
+                        }
 
                         Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
 
