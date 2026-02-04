@@ -44,7 +44,6 @@ public sealed class ALawRtpPlayout : IDisposable
     // NAT punch-through (symmetric RTP)
     private IPEndPoint? _lastRemoteEndpoint;
 
-    public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
 
     public int QueuedFrames => _frameQueue.Count;
@@ -70,12 +69,8 @@ public sealed class ALawRtpPlayout : IDisposable
             try
             {
                 _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
-                OnLog?.Invoke($"[NAT] ALawRtpPlayout locked RTP destination to: {remoteEndPoint}");
             }
-            catch (Exception ex)
-            {
-                OnLog?.Invoke($"⚠️ [NAT] Failed to lock RTP destination: {ex.Message}");
-            }
+            catch { }
         }
     }
 
@@ -140,7 +135,6 @@ public sealed class ALawRtpPlayout : IDisposable
         };
 
         _playoutThread.Start();
-        OnLog?.Invoke($"▶️ ALawRtpPlayout started (PT={PAYLOAD_TYPE_PCMA}, silence=0x{ALAW_SILENCE:X2})");
     }
 
     /// <summary>
@@ -154,10 +148,7 @@ public sealed class ALawRtpPlayout : IDisposable
         try { _playoutThread?.Join(500); } catch { }
         _playoutThread = null;
 
-        // Clear queue
         while (_frameQueue.TryDequeue(out _)) { }
-
-        OnLog?.Invoke($"⏹️ ALawRtpPlayout stopped (sent={_framesSent}, silence={_silenceFrames}, dropped={_droppedFrames})");
     }
 
     /// <summary>
@@ -165,13 +156,8 @@ public sealed class ALawRtpPlayout : IDisposable
     /// </summary>
     public void Clear()
     {
-        int count = 0;
         while (_frameQueue.TryDequeue(out _)) count++;
-        
         lock (_accLock) { _accumulator = new byte[0]; }
-        
-        if (count > 0)
-            OnLog?.Invoke($"🗑️ Cleared {count} A-law frames from queue");
     }
 
     /// <summary>
@@ -208,25 +194,18 @@ public sealed class ALawRtpPlayout : IDisposable
                 frame = queuedFrame;
                 diagnosticCounter++;
 
-                // Mark first audio time
                 if (firstAudioTimeMs < 0)
                 {
                     firstAudioTimeMs = now;
                     lastDiagnosticTime = now;
-                    OnLog?.Invoke($"🎵 First A-law frame at {now:F0}ms, queue: {_frameQueue.Count + 1}");
                 }
 
                 // Reset empty flag
                 wasEmpty = false;
 
-                // Log every 250 frames (5 seconds) for rate diagnostics
+                // Log every 250 frames (5 seconds) for rate diagnostics - silent now
                 if (diagnosticCounter % 250 == 0 && lastDiagnosticTime >= 0)
-                {
-                    double elapsed = now - lastDiagnosticTime;
-                    double framesPerSec = elapsed > 0 ? 250.0 / (elapsed / 1000.0) : 0;
-                    OnLog?.Invoke($"📊 ALaw playout rate: {framesPerSec:F1} fps (target: 50), queue: {_frameQueue.Count}");
                     lastDiagnosticTime = now;
-                }
             }
             else
             {
@@ -235,15 +214,9 @@ public sealed class ALawRtpPlayout : IDisposable
                 Array.Fill(frame, ALAW_SILENCE);
                 Interlocked.Increment(ref _silenceFrames);
 
-                // Notify once when queue empties
                 if (!wasEmpty)
                 {
                     wasEmpty = true;
-                    if (firstAudioTimeMs >= 0)
-                    {
-                        double totalPlayMs = now - firstAudioTimeMs;
-                        OnLog?.Invoke($"📊 A-law audio finished: {diagnosticCounter} frames in {totalPlayMs:F0}ms ({diagnosticCounter * 20}ms expected)");
-                    }
                     OnQueueEmpty?.Invoke();
                 }
             }
@@ -262,20 +235,14 @@ public sealed class ALawRtpPlayout : IDisposable
                 _timestamp += SAMPLES_PER_FRAME;
                 Interlocked.Increment(ref _framesSent);
             }
-            catch (Exception ex)
-            {
-                OnLog?.Invoke($"⚠️ RTP send error: {ex.Message}");
-            }
+            catch { }
 
             // Schedule next frame
             nextFrameTimeMs += FRAME_MS;
 
             // Drift correction: reset if >40ms behind
             if (now - nextFrameTimeMs > 40)
-            {
-                OnLog?.Invoke($"⏱️ Drift correction: {now - nextFrameTimeMs:F1}ms behind, resetting timer");
                 nextFrameTimeMs = now + FRAME_MS;
-            }
         }
     }
 
