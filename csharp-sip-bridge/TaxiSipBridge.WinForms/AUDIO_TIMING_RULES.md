@@ -1,6 +1,6 @@
 # Audio Timing Rules (CRITICAL - DO NOT VIOLATE)
 
-## Version 3.4 - Audio Lifecycle Contract
+## Version 3.5 - Audio Lifecycle Contract (v2.7)
 
 These rules are **mandatory** for clean, professional audio quality. Violations cause clipped consonants, "crispy" starts, and overlapping speech.
 
@@ -69,6 +69,55 @@ The gate in Rule 2 ensures `response.created` only fires after transcription com
 
 ---
 
+## RULE 4: ALL response.create MUST go through QueueResponseCreateAsync (v2.7)
+
+```csharp
+// ❌ FORBIDDEN - bypasses all audio guards
+await SendJsonAsync(new { type = "response.create" });
+
+// ✅ CORRECT - routes through gate
+await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0);
+```
+
+**Why:** Raw `SendJsonAsync` bypasses:
+- `_responseQueued` lock
+- `_transcriptPending` check
+- Echo guard window
+- User speech settle timing
+
+**Allowed exceptions:**
+- `SendGreetingAsync` (first response, session just created - use 180ms delay before sending)
+
+---
+
+## RULE 5: Use SIP-safe delays (v2.7)
+
+| Context                     | Delay   |
+|-----------------------------|---------|
+| sync_booking_data           | 40 ms   |
+| request_quote               | 60 ms   |
+| confirmed / goodbye         | 150 ms  |
+| deferred flush              | 80 ms   |
+| late confirmation           | 80 ms   |
+| silence watchdog            | 40 ms   |
+| greeting                    | 180 ms  |
+
+**Why:** 10ms is not enough for SIP + PCMA. RTP jitter buffers need time to drain.
+
+---
+
+## RULE 6: Echo guard must be 500ms (v2.7)
+
+```csharp
+// ✅ CORRECT - 500ms echo guard
+if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 500)
+    return;
+```
+
+**Why:** 300ms is barely one RTP jitter buffer. User speech bleeds into Ada's final phonemes.
+
+---
+
 ## Mental Model
 
 > **Bad timing sounds like bad audio**
@@ -77,6 +126,7 @@ The gate in Rule 2 ensures `response.created` only fires after transcription com
 - Lifecycle violations
 - Premature buffer clears
 - Turn overlap
+- Bypassed response gates
 
 If audio sounds clipped or crispy, check timing before checking DSP/codec.
 
@@ -86,6 +136,7 @@ If audio sounds clipped or crispy, check timing before checking DSP/codec.
 
 | Version | Changes |
 |---------|---------|
+| 3.5 | v2.7: All response.create routed through gate, 500ms echo guard, SIP-safe delays |
 | 3.4 | Fixed response lifecycle - no manual state resets, transcript-gated responses |
 | 3.3 | Added implicit correction detection, STT corrections for Coventry |
 | 3.2 | Turn finalization protocol, buffer clear timing |
