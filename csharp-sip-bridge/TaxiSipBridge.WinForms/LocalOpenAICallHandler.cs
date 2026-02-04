@@ -356,10 +356,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 catch { }
             };
 
-            // Create OpenAI client and configure output codec
-            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, null, _dispatchWebhookUrl);
-            if (useDirectALaw)
-                _aiClient.SetOutputCodec(OutputCodecMode.ALaw);
+            // Create OpenAI client with output codec based on negotiated path
+            var codec = useDirectALaw ? OutputCodecMode.ALaw : (OutputCodecMode?)null;
+            _aiClient = new OpenAIRealtimeClient(_apiKey, _model, _voice, codec, _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
