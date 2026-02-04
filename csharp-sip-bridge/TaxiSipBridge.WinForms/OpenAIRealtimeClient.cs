@@ -793,6 +793,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         {
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
             {
+                Log($"⚠️ Quote requested but pickup/destination missing");
                 await SendToolResultAsync(callId, new
                 {
                     success = false,
@@ -803,13 +804,54 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 return;
             }
 
-            // Simple fare calculation
-            _booking.Fare = "£12.50";
-            _booking.Eta = "6 minutes";
+            // Calculate fare with geocoding (with timeout guard)
+            FareResult fareResult;
+            try
+            {
+                Log("💰 Calculating fare...");
+                var fareTask = FareCalculator.CalculateFareWithCoordsAsync(
+                    _booking.Pickup!,
+                    _booking.Destination!,
+                    _callerId);
+
+                var completed = await Task.WhenAny(fareTask, Task.Delay(3000)).ConfigureAwait(false);
+                if (completed != fareTask)
+                {
+                    Log("⏱️ Fare calculation timed out - using fallback");
+                    fareResult = new FareResult { Fare = "£12.50", Eta = "6 minutes" };
+                }
+                else
+                {
+                    fareResult = await fareTask.ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Fare calculation failed: {ex.Message}");
+                fareResult = new FareResult { Fare = "£12.50", Eta = "6 minutes" };
+            }
+
+            _booking.Fare = fareResult.Fare;
+            _booking.Eta = fareResult.Eta;
+            _booking.PickupLat = fareResult.PickupLat;
+            _booking.PickupLon = fareResult.PickupLon;
+            _booking.PickupStreet = fareResult.PickupStreet;
+            _booking.PickupNumber = fareResult.PickupNumber;
+            _booking.PickupPostalCode = fareResult.PickupPostalCode;
+            _booking.PickupCity = fareResult.PickupCity;
+            _booking.PickupFormatted = fareResult.PickupFormatted;
+            _booking.DestLat = fareResult.DestLat;
+            _booking.DestLon = fareResult.DestLon;
+            _booking.DestStreet = fareResult.DestStreet;
+            _booking.DestNumber = fareResult.DestNumber;
+            _booking.DestPostalCode = fareResult.DestPostalCode;
+            _booking.DestCity = fareResult.DestCity;
+            _booking.DestFormatted = fareResult.DestFormatted;
+
             _awaitingConfirmation = true;
             OnBookingUpdated?.Invoke(_booking);
 
-            Log($"💰 Quote: {_booking.Fare}");
+            Log($"💰 Quote: {_booking.Fare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
 
             await SendToolResultAsync(callId, new
             {
@@ -839,7 +881,28 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             _awaitingConfirmation = false;
 
             OnBookingUpdated?.Invoke(_booking);
-            Log($"✅ Booked: {_booking.BookingRef}");
+            Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
+
+            // Dispatch to BSQD
+            if (!string.IsNullOrEmpty(_callerId))
+            {
+                BsqdDispatcher.OnLog += msg => Log(msg);
+                BsqdDispatcher.Dispatch(_booking, _callerId);
+            }
+
+            // WhatsApp notification (fire-and-forget)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var (success, message) = await WhatsAppNotifier.SendAsync(_callerId);
+                    Log(success ? $"📱 WhatsApp: {message}" : $"📱 WhatsApp failed: {message}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"📱 WhatsApp error: {ex.Message}");
+                }
+            });
 
             await SendToolResultAsync(callId, new
             {
