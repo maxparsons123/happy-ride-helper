@@ -21,6 +21,7 @@ public enum OutputCodecMode
 /// <summary>
 /// Direct OpenAI Realtime API client with full booking flow.
 /// Connects directly to OpenAI - no edge function required.
+/// Version 3.1 - A-law passthrough, response lifecycle management, late confirmation detection.
 /// </summary>
 public class OpenAIRealtimeClient : IAudioAIClient
 {
