@@ -244,7 +244,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 _voice, 
                 outputCodec: OutputCodecMode.MuLaw,  // Forces pcm16 output from OpenAI
                 dispatchWebhookUrl: _dispatchWebhookUrl);
-                dispatchWebhookUrl: _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
 
             // Connect to OpenAI
