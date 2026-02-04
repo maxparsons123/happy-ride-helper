@@ -30,7 +30,8 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
     
     private VoIPMediaSession? _currentMediaSession;
-    private MultiCodecRtpPlayout? _playout;
+    private MultiCodecRtpPlayout? _playout;          // PCM path (for non-PCMA codecs)
+    private ALawRtpPlayout? _alawPlayout;            // v4.2: Direct A-law passthrough (for PCMA)
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
     private int _negotiatedPayloadType = 8;
     private OpenAIRealtimeClient? _aiClient;
@@ -232,28 +233,55 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // Create MultiCodecRtpPlayout (supports Opus, G.722, PCMA, PCMU)
-            _playout = new MultiCodecRtpPlayout(_currentMediaSession);
-            _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
-            _playout.OnLog += msg => Log(msg);
-            _playout.OnQueueEmpty += () =>
+            // v4.2: Use direct A-law passthrough for PCMA, otherwise use MultiCodecRtpPlayout
+            if (_negotiatedCodec == AudioCodecsEnum.PCMA)
             {
-                if (_adaHasStartedSpeaking)
+                // Direct A-law path: OpenAI g711_alaw → raw bytes → RTP (no decoding/resampling)
+                var rtpSession = _currentMediaSession.RtpSession;
+                _alawPlayout = new ALawRtpPlayout(rtpSession);
+                _alawPlayout.OnLog += msg => Log(msg);
+                _alawPlayout.OnQueueEmpty += () =>
                 {
-                    _isBotSpeaking = false;
-                    _botStoppedSpeakingAt = DateTime.UtcNow;
-                    Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
-                }
+                    if (_adaHasStartedSpeaking)
+                    {
+                        _isBotSpeaking = false;
+                        _botStoppedSpeakingAt = DateTime.UtcNow;
+                        Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
+                    }
 
-                // If AI asked to end the call, end as soon as the outbound audio buffer is drained.
-                if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
+                    if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
+                    {
+                        Log($"📴 [{callId}] Playout drained - ending call now");
+                        try { cts.Cancel(); } catch { }
+                    }
+                };
+                _alawPlayout.Start();
+                Log($"🎵 [{callId}] ALawRtpPlayout started (v4.2 direct passthrough)");
+            }
+            else
+            {
+                // PCM path: OpenAI pcm16 → resample → encode → RTP
+                _playout = new MultiCodecRtpPlayout(_currentMediaSession);
+                _playout.SetCodec(_negotiatedCodec, _negotiatedPayloadType);
+                _playout.OnLog += msg => Log(msg);
+                _playout.OnQueueEmpty += () =>
                 {
-                    Log($"📴 [{callId}] Playout drained - ending call now");
-                    try { cts.Cancel(); } catch { }
-                }
-            };
-            _playout.Start();
-            Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
+                    if (_adaHasStartedSpeaking)
+                    {
+                        _isBotSpeaking = false;
+                        _botStoppedSpeakingAt = DateTime.UtcNow;
+                        Log($"🔇 [{callId}] Ada finished speaking (echo guard {ECHO_GUARD_MS}ms)");
+                    }
+
+                    if (Interlocked.Exchange(ref _hangupPending, 0) == 1)
+                    {
+                        Log($"📴 [{callId}] Playout drained - ending call now");
+                        try { cts.Cancel(); } catch { }
+                    }
+                };
+                _playout.Start();
+                Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
+            }
 
             // Create ingress audio processor (jitter buffer + DSP + SpeexDSP 24kHz resampling)
             _ingressProcessor?.Dispose();
@@ -347,8 +375,21 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
         _aiClient.OnAdaSpeaking += _ => { };
 
+        // v4.2: Wire A-law audio directly for PCMA (no decoding/resampling)
+        _aiClient.OnALawAudio += alawBytes =>
+        {
+            if (_alawPlayout == null) return; // Only active for PCMA negotiation
+            
+            _isBotSpeaking = true;
+            _adaHasStartedSpeaking = true;
+            _alawPlayout.BufferALaw(alawBytes);
+        };
+
+        // Legacy PCM path (for non-PCMA codecs like Opus, G.722)
         _aiClient.OnPcm24Audio += async pcmBytes =>
         {
+            if (_playout == null) return; // Only active for non-PCMA codecs
+            
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
 
@@ -361,9 +402,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 Log($"🔊 [{callId}] Applied anti-glitch fade-in");
             }
 
-            _playout?.BufferAudio(processedBytes);
+            _playout.BufferAudio(processedBytes);
 
-            // Send to Simli avatar
+            // Send to Simli avatar (still needs PCM24)
             if (_simliSendAudio != null)
             {
                 try 
@@ -371,7 +412,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     await _simliSendAudio(processedBytes);
                     _simliAudioSendCount++;
                     
-                    // Log first 5 sends, then every 50th to track ongoing flow
                     if (_simliAudioSendCount <= 5 || _simliAudioSendCount % 50 == 0)
                     {
                         Log($"🎭 [{callId}] Simli audio #{_simliAudioSendCount} ({processedBytes.Length} bytes)");
@@ -381,11 +421,6 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                 {
                     Log($"🎭 [{callId}] Simli send error #{_simliAudioSendCount}: {ex.Message}");
                 }
-            }
-            else if (_simliAudioSendCount == 0)
-            {
-                Log($"⚠️ [{callId}] _simliSendAudio is null - avatar not wired!");
-                _simliAudioSendCount = 1; // Only log once
             }
         };
 
@@ -570,12 +605,18 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _aiClient = null;
         }
 
-        // Stop playout
+        // Stop playouts
         if (_playout != null)
         {
             try { _playout.Stop(); } catch { }
             try { _playout.Dispose(); } catch { }
             _playout = null;
+        }
+        if (_alawPlayout != null)
+        {
+            try { _alawPlayout.Stop(); } catch { }
+            try { _alawPlayout.Dispose(); } catch { }
+            _alawPlayout = null;
         }
 
         // Dispose ingress processor
