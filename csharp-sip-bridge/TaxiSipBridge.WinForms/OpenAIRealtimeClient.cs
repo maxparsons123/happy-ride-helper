@@ -13,22 +13,24 @@ namespace TaxiSipBridge;
 /// <summary>
 /// OpenAI Realtime API client with A-law output passthrough.
 /// 
-/// v5.1: Watchdog speech guard - prevents triggering no-reply prompt while user is speaking.
-/// v4.2: Hybrid mode - PCM input (works with existing ingress), A-law output (direct SIP passthrough).
+/// v2.6: Watchdog speech guard - prevents triggering no-reply prompt while user is speaking.
+///       Checks _transcriptPending and _lastUserSpeechAt (3s window) before firing.
+/// v2.5: Hybrid mode - PCM input (ingress pipeline), A-law output (direct SIP passthrough).
 /// Audio path:
 ///   INPUT:  SIP (PCMA 8kHz) → decode → resample 24kHz → OpenAI (pcm16)
 ///   OUTPUT: OpenAI (g711_alaw) → raw A-law bytes → SIPSorcery SendRtpRaw → SIP
 /// 
 /// This eliminates resampling/encoding on the output path for lower latency.
 /// 
-/// v3.6 features retained:
+/// Retained features:
 /// - Late confirmation detection for booking flow
-/// - Transcript guard timing
-/// - No-reply watchdog
+/// - Transcript guard timing (400ms window)
+/// - Deferred response handling
+/// - No-reply watchdog with speech guard
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "4.2";
+    public const string VERSION = "2.6";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -686,7 +688,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             return;
                         }
                         
-                        // v5.1: Check if there was recent local speech (within 3s) to avoid discarding user audio
+                        // v2.6: Check if there was recent local speech (within 3s) to avoid discarding user audio
                         var msSinceLastSpeech = NowMs() - Volatile.Read(ref _lastUserSpeechAt);
                         if (msSinceLastSpeech < 3000)
                         {

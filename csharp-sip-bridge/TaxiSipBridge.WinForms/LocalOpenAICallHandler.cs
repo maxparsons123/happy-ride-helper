@@ -98,10 +98,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     public IReadOnlyDictionary<int, AudioCodecsEnum> NegotiatedCodecs => _remotePtToCodec;
 
     // ===========================================
-    // v4.2 AUDIO MODE SWITCH (toggle manually here)
+    // v2.6 AUDIO MODE SWITCH (toggle manually here)
     // ===========================================
     /// <summary>
-    /// v4.2: When true, uses A-law direct passthrough (OpenAI g711_alaw → RTP).
+    /// v2.6: When true, uses A-law direct passthrough (OpenAI g711_alaw → RTP).
     /// When false, uses PCM mode (24kHz decode/resample/encode).
     /// ⚡ TOGGLE THIS TO TEST BOTH PATHS ⚡
     /// </summary>
@@ -249,7 +249,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // v5.1: Use direct A-law passthrough for PCMA when USE_ALAW_DIRECT is enabled
+            // v2.6: Use direct A-law passthrough for PCMA when USE_ALAW_DIRECT is enabled
             bool useDirectALaw = USE_ALAW_DIRECT && _negotiatedCodec == AudioCodecsEnum.PCMA;
 
             if (useDirectALaw)
@@ -273,7 +273,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
                     }
                 };
                 _alawPlayout.Start();
-                Log($"🎵 [{callId}] ALawRtpPlayout started (v5.1 direct passthrough)");
+                Log($"🎵 [{callId}] ALawRtpPlayout started (v2.6 direct passthrough)");
             }
             else
             {
