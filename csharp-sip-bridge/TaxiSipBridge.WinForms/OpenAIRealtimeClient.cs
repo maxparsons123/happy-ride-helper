@@ -23,11 +23,11 @@ public enum OutputCodecMode
 
 /// <summary>
 /// OpenAI Realtime API client with STT-gated response logic.
-/// Version 7.0 - Fire-and-forget webhooks, full prompt
+/// Version 7.1 - Fixed duplicate geocoding (proper task cancellation)
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "7.0";
+    public const string VERSION = "7.1";
 
     // =========================
     // CONFIG
@@ -804,25 +804,26 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 return;
             }
 
-            // Calculate fare with geocoding (with timeout guard)
+            // Calculate fare with geocoding (with timeout + cancellation)
             FareResult fareResult;
             try
             {
                 Log("💰 Calculating fare...");
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
                 var fareTask = FareCalculator.CalculateFareWithCoordsAsync(
                     _booking.Pickup!,
                     _booking.Destination!,
-                    _callerId);
+                    _callerId,
+                    cts.Token);
 
-                var completed = await Task.WhenAny(fareTask, Task.Delay(3000)).ConfigureAwait(false);
-                if (completed != fareTask)
+                try
+                {
+                    fareResult = await fareTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
                 {
                     Log("⏱️ Fare calculation timed out - using fallback");
                     fareResult = new FareResult { Fare = "£12.50", Eta = "6 minutes" };
-                }
-                else
-                {
-                    fareResult = await fareTask.ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
