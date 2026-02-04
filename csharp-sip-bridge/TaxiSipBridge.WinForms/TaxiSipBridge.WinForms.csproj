@@ -40,6 +40,7 @@
 
     <!-- Audio utilities -->
     <Compile Include="AudioCodecs.cs" />
+    <Compile Include="UnifiedAudioEncoder.cs" />
     <Compile Include="Audio\OptimizedAudioProcessor.cs" />
 
     <Compile Include="SipAutoAnswer.cs" />
