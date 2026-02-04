@@ -193,6 +193,151 @@ public partial class FareCalculator
     }
 
     /// <summary>
+    /// Extract addresses using Lovable AI edge function and calculate fare.
+    /// Uses the address-dispatch edge function for AI-powered address resolution.
+    /// </summary>
+    public async Task<FareResult> ExtractAddressesWithLovableAiAsync(
+        string? pickup,
+        string? destination,
+        string? phoneNumber = null)
+    {
+        const string EDGE_FUNCTION_URL = "https://oerketnvlmptpfvttysy.supabase.co/functions/v1/address-dispatch";
+        
+        var result = new FareResult
+        {
+            Fare = FormatFare(MIN_FARE),
+            Eta = "5 minutes",
+            DistanceMiles = 0
+        };
+
+        if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
+            return result;
+
+        try
+        {
+            Log($"🤖 Calling Lovable AI address-dispatch: pickup='{pickup}', dest='{destination}'");
+
+            var requestBody = JsonSerializer.Serialize(new
+            {
+                pickup = pickup ?? "",
+                destination = destination ?? "",
+                phone = phoneNumber ?? ""
+            });
+
+            var request = new HttpRequestMessage(HttpMethod.Post, EDGE_FUNCTION_URL)
+            {
+                Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
+            };
+            request.Headers.Add("apikey", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU");
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var response = await _httpClient.SendAsync(request, cts.Token);
+            var responseJson = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Log($"⚠️ Edge function error: {response.StatusCode} - {responseJson}");
+                return await CalculateAsync(pickup, destination, phoneNumber);
+            }
+
+            using var doc = JsonDocument.Parse(responseJson);
+            var root = doc.RootElement;
+
+            // Check for errors
+            if (root.TryGetProperty("error", out _))
+            {
+                Log($"⚠️ Edge function returned error, falling back to geocoding");
+                return await CalculateAsync(pickup, destination, phoneNumber);
+            }
+
+            // Extract detected area
+            string? detectedArea = null;
+            if (root.TryGetProperty("detected_area", out var areaEl))
+                detectedArea = areaEl.GetString();
+            Log($"🌍 Detected area: {detectedArea ?? "unknown"}");
+
+            // Get resolved addresses
+            string resolvedPickup = pickup ?? "";
+            string resolvedDest = destination ?? "";
+
+            if (root.TryGetProperty("pickup", out var pickupEl) && 
+                pickupEl.TryGetProperty("address", out var pickupAddr))
+            {
+                resolvedPickup = pickupAddr.GetString() ?? pickup ?? "";
+                
+                if (pickupEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
+                {
+                    result.NeedsClarification = true;
+                    if (pickupEl.TryGetProperty("alternatives", out var alts))
+                    {
+                        result.PickupAlternatives = alts.EnumerateArray()
+                            .Select(a => a.GetString() ?? "")
+                            .Where(s => !string.IsNullOrEmpty(s))
+                            .ToArray();
+                    }
+                }
+            }
+
+            if (root.TryGetProperty("dropoff", out var dropoffEl) && 
+                dropoffEl.TryGetProperty("address", out var dropoffAddr))
+            {
+                resolvedDest = dropoffAddr.GetString() ?? destination ?? "";
+                
+                if (dropoffEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
+                {
+                    result.NeedsClarification = true;
+                    if (dropoffEl.TryGetProperty("alternatives", out var alts))
+                    {
+                        result.DestAlternatives = alts.EnumerateArray()
+                            .Select(a => a.GetString() ?? "")
+                            .Where(s => !string.IsNullOrEmpty(s))
+                            .ToArray();
+                    }
+                }
+            }
+
+            // Check status
+            if (root.TryGetProperty("status", out var statusEl) && 
+                statusEl.GetString() == "clarification_needed")
+            {
+                result.NeedsClarification = true;
+                Log($"⚠️ Clarification needed for addresses");
+            }
+
+            Log($"📍 Resolved: pickup='{resolvedPickup}', dest='{resolvedDest}'");
+
+            // Now geocode the resolved addresses
+            var fareResult = await CalculateAsync(resolvedPickup, resolvedDest, phoneNumber);
+            
+            // Merge clarification info
+            fareResult.NeedsClarification = result.NeedsClarification;
+            fareResult.PickupAlternatives = result.PickupAlternatives;
+            fareResult.DestAlternatives = result.DestAlternatives;
+
+            // Override city with detected area if available
+            if (!string.IsNullOrEmpty(detectedArea))
+            {
+                if (string.IsNullOrEmpty(fareResult.PickupCity))
+                    fareResult.PickupCity = detectedArea;
+                if (string.IsNullOrEmpty(fareResult.DestCity))
+                    fareResult.DestCity = detectedArea;
+            }
+
+            return fareResult;
+        }
+        catch (OperationCanceledException)
+        {
+            Log($"⏱️ Edge function timeout, falling back to direct geocoding");
+            return await CalculateAsync(pickup, destination, phoneNumber);
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Edge function error: {ex.Message}, falling back to geocoding");
+            return await CalculateAsync(pickup, destination, phoneNumber);
+        }
+    }
+
+    /// <summary>
     /// Verify and geocode an address.
     /// </summary>
     public async Task<GeocodedAddress?> GeocodeAsync(string address, string? phoneNumber = null)
