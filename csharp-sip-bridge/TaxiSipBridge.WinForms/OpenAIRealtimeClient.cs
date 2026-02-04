@@ -2,10 +2,6 @@ using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
-using System.using System;
-using System.Buffers;
-using System.Collections.Concurrent;
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -32,7 +28,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "4.3";
+    public const string VERSION = "4.4";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -81,6 +77,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private string _detectedLanguage = "en";
     private readonly BookingState _booking = new();
     private bool _awaitingConfirmation;
+    private int _confirmationCommitTimerId;  // v4.4: Forced audio commit timer ID
 
     // =========================
     // WS + LIFECYCLE
@@ -797,6 +794,43 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         });
     }
 
+    /// <summary>
+    /// v4.4: Forced Audio Commit Timer - periodically commits audio buffer when awaiting confirmation.
+    /// This ensures short affirmatives ("yes", "yes please") get transcribed even if VAD fails.
+    /// </summary>
+    private void StartConfirmationCommitTimer()
+    {
+        var timerId = Interlocked.Increment(ref _confirmationCommitTimerId);
+        Log("⏱️ Started confirmation commit timer (3s interval)");
+
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                await Task.Delay(3000).ConfigureAwait(false);
+
+                // Stop conditions
+                if (Volatile.Read(ref _confirmationCommitTimerId) != timerId) return;
+                if (!_awaitingConfirmation) return;
+                if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                if (Volatile.Read(ref _responseActive) == 1) return;  // Don't commit while Ada is speaking
+
+                // Check if there's pending audio (user might have spoken but VAD didn't trigger)
+                var msSinceAdaFinished = NowMs() - Volatile.Read(ref _lastAdaFinishedAt);
+                if (msSinceAdaFinished < 1000) continue;  // Wait at least 1s after Ada finishes
+
+                // Force commit to trigger transcription
+                Log("🔄 Forced audio commit (confirmation mode)");
+                await SendJsonAsync(new { type = "input_audio_buffer.commit" }).ConfigureAwait(false);
+            }
+        });
+    }
+
+    private void StopConfirmationCommitTimer()
+    {
+        Interlocked.Increment(ref _confirmationCommitTimerId);
+    }
+
     private void HandleError(JsonElement root)
     {
         if (!root.TryGetProperty("error", out var e) || !e.TryGetProperty("message", out var m))
@@ -987,6 +1021,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         _booking.DestFormatted = fareResult.DestFormatted;
 
                         _awaitingConfirmation = true;
+                        StartConfirmationCommitTimer();  // v4.4: Start forced commit timer
 
                         OnBookingUpdated?.Invoke(_booking);
                         Log($"💰 Quote: {normalizedFare} (pickup: {fareResult.PickupCity}, dest: {fareResult.DestCity})");
@@ -1023,6 +1058,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         _booking.Confirmed = true;
                         _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                         _awaitingConfirmation = false;
+                        StopConfirmationCommitTimer();  // v4.4: Stop forced commit timer
 
                         // Ensure we have geocoded components before dispatch (e.g., if quote step was skipped/failed)
                         if ((string.IsNullOrWhiteSpace(_booking.PickupStreet) || string.IsNullOrWhiteSpace(_booking.DestStreet)) &&
