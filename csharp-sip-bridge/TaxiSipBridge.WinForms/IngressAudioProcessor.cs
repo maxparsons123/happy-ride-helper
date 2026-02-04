@@ -13,7 +13,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class IngressAudioProcessor : IDisposable
 {
-    public const string VERSION = "1.2"; // v3.3 sync - added STT corrections for Coventry mishearings
+    public const string VERSION = "1.3"; // v4.0 sync - A-law passthrough support
     // ===========================================
     // CONFIGURATION
     // ===========================================
