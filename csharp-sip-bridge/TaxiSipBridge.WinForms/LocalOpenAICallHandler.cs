@@ -65,6 +65,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private Func<byte[], Task>? _simliSendAudio;
     private int _simliAudioSendCount;
 
+    // Async logger to avoid blocking audio threads
+    private readonly AsyncLogger _asyncLog = new();
+
     // ===========================================
     // CONSTANTS
     // ===========================================
@@ -117,6 +120,9 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
         _model = model;
         _voice = voice;
         _dispatchWebhookUrl = dispatchWebhookUrl;
+
+        // Wire async logger to public event (runs on background thread)
+        _asyncLog.OnLog += msg => OnLog?.Invoke(msg);
     }
 
     /// <summary>
@@ -680,7 +686,7 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
     private void Log(string msg)
     {
         if (_disposed) return;
-        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+        _asyncLog.Log($"{DateTime.Now:HH:mm:ss.fff} {msg}");
     }
 
     // ===========================================
@@ -699,8 +705,10 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
         try { _callCts?.Cancel(); } catch { }
         try { _playout?.Dispose(); } catch { }
+        try { _alawPlayout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
+        try { _asyncLog.Dispose(); } catch { }
 
         GC.SuppressFinalize(this);
     }
