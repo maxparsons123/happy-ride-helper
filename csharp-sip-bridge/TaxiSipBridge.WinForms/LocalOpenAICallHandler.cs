@@ -236,13 +236,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
             _playout.Start();
             Log($"🎵 [{callId}] MultiCodecRtpPlayout started ({_negotiatedCodec})");
 
-            // Create OpenAI client - EXPLICIT MuLaw = pcm16 output from OpenAI
-            // This ensures we get 24kHz PCM which MultiCodecRtpPlayout can resample/encode
+            // Create OpenAI client with A-law output (g711_alaw direct from OpenAI)
             _aiClient = new OpenAIRealtimeClient(
                 _apiKey, 
                 _model, 
                 _voice, 
-                outputCodec: OutputCodecMode.MuLaw,  // Forces pcm16 output from OpenAI
+                outputCodec: OutputCodecMode.ALaw,
                 dispatchWebhookUrl: _dispatchWebhookUrl);
             WireAiClientEvents(callId, cts);
 
