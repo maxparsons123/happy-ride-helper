@@ -10,6 +10,10 @@ namespace AdaMain.Ai;
 /// <summary>
 /// OpenAI Realtime API client with proper response lifecycle handling.
 /// 
+/// v4.4: Added Forced Audio Commit Timer for confirmation mode.
+///       - When awaiting confirmation, periodically commits audio buffer (every 3s)
+///       - Ensures short affirmatives ("yes", "yes please") get transcribed even if VAD fails
+/// 
 /// v4.3: All response.create routed through QueueResponseCreateAsync with SIP-safe delays.
 ///       - Echo guard increased to 500ms
 ///       - Deferred response flush uses gated queue
@@ -20,7 +24,7 @@ namespace AdaMain.Ai;
 /// </summary>
 public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "4.3";
+    public const string VERSION = "4.4";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -63,6 +67,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     private string _callerId = "";
     private string _detectedLanguage = "en";
     private bool _awaitingConfirmation;
+    private int _confirmationCommitTimerId;  // v4.4: Forced audio commit timer ID
     
     public bool IsConnected => 
         Volatile.Read(ref _disposed) == 0 && 
@@ -497,6 +502,43 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         return null;
     }
 
+    /// <summary>
+    /// v4.4: Forced Audio Commit Timer - periodically commits audio buffer when awaiting confirmation.
+    /// This ensures short affirmatives ("yes", "yes please") get transcribed even if VAD fails.
+    /// </summary>
+    private void StartConfirmationCommitTimer()
+    {
+        var timerId = Interlocked.Increment(ref _confirmationCommitTimerId);
+        _logger.LogDebug("Started confirmation commit timer (3s interval)");
+
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                await Task.Delay(3000).ConfigureAwait(false);
+
+                // Stop conditions
+                if (Volatile.Read(ref _confirmationCommitTimerId) != timerId) return;
+                if (!_awaitingConfirmation) return;
+                if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                if (Volatile.Read(ref _responseActive) == 1) return;  // Don't commit while Ada is speaking
+
+                // Check if there's pending audio (user might have spoken but VAD didn't trigger)
+                var msSinceAdaFinished = NowMs() - Volatile.Read(ref _lastAdaFinishedAt);
+                if (msSinceAdaFinished < 1000) continue;  // Wait at least 1s after Ada finishes
+
+                // Force commit to trigger transcription
+                _logger.LogDebug("Forced audio commit (confirmation mode)");
+                await SendJsonAsync(new { type = "input_audio_buffer.commit" }).ConfigureAwait(false);
+            }
+        });
+    }
+
+    private void StopConfirmationCommitTimer()
+    {
+        Interlocked.Increment(ref _confirmationCommitTimerId);
+    }
+
     private async Task HandleLateConfirmationAsync(string userText)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
@@ -579,7 +621,14 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         if (name == "book_taxi")
         {
             var action = args.TryGetValue("action", out var a2) ? a2?.ToString() : null;
+            var wasAwaiting = _awaitingConfirmation;
             _awaitingConfirmation = action == "request_quote";
+            
+            // v4.4: Manage confirmation commit timer
+            if (_awaitingConfirmation && !wasAwaiting)
+                StartConfirmationCommitTimer();
+            else if (!_awaitingConfirmation && wasAwaiting)
+                StopConfirmationCommitTimer();
         }
         
         await QueueResponseCreateAsync(delayMs: delayMs, waitForCurrentResponse: false, maxWaitMs: 0);
