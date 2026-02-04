@@ -115,29 +115,40 @@ public partial class FareCalculator
     public static async Task<FareResult> CalculateFareWithCoordsAsync(
         string? pickup,
         string? destination,
-        string? phoneNumber = null)
+        string? phoneNumber = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            
             if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
                 return new FareResult { Fare = "£12.50", Eta = "6 minutes" };
 
             var calc = GetDefaultCalculator();
 
-            // Try Edge AI extraction first (with 5s timeout) to get city-biased addresses
+            // Try Edge AI extraction first (with 4s timeout) to get city-biased addresses
             var extractor = GetEdgeExtractor();
             if (extractor != null)
             {
                 try
                 {
                     Log("💰 Starting Lovable AI address extraction...");
-                    var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    linkedCts.CancelAfter(TimeSpan.FromSeconds(4));
+                    
                     var extractionTask = extractor.ExtractAsync(pickup, destination, phoneNumber);
-                    var completed = await Task.WhenAny(extractionTask, Task.Delay(5000, cts.Token)).ConfigureAwait(false);
+                    
+                    // Wait for extraction or cancellation
+                    var completedTask = await Task.WhenAny(
+                        extractionTask, 
+                        Task.Delay(Timeout.Infinite, linkedCts.Token)
+                    ).ConfigureAwait(false);
 
-                    if (completed == extractionTask && extractionTask.Result != null)
+                    linkedCts.Token.ThrowIfCancellationRequested();
+                    
+                    if (completedTask == extractionTask && extractionTask.Result != null)
                     {
-                        cts.Cancel();
                         var extraction = extractionTask.Result;
 
                         // Use edge-extracted addresses with city appended for better geocoding
@@ -147,6 +158,7 @@ public partial class FareCalculator
                         Log($"💰 Using Edge addresses: pickup='{resolvedPickup}', dest='{resolvedDest}'");
 
                         // Calculate fare with the better addresses
+                        cancellationToken.ThrowIfCancellationRequested();
                         var result = await calc.CalculateAsync(resolvedPickup, resolvedDest, phoneNumber).ConfigureAwait(false);
 
                         // Enrich with Edge-extracted city info (may be more accurate than geocoding)
@@ -163,12 +175,13 @@ public partial class FareCalculator
                     }
                     else
                     {
-                        Log("⏱️ Lovable AI extraction timed out (5s) — using raw addresses");
+                        Log("⏱️ Lovable AI extraction timed out — using raw addresses");
                     }
                 }
                 catch (OperationCanceledException)
                 {
-                    Log("⏱️ Lovable AI extraction cancelled — using raw addresses");
+                    Log("⏱️ Address extraction cancelled");
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -177,7 +190,12 @@ public partial class FareCalculator
             }
 
             // Fallback: geocode raw addresses
+            cancellationToken.ThrowIfCancellationRequested();
             return await calc.CalculateAsync(pickup, destination, phoneNumber).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // Re-throw cancellation to caller
         }
         catch (Exception ex)
         {
