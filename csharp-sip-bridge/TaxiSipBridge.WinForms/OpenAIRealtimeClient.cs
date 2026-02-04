@@ -219,7 +219,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
         // Echo guard: skip audio right after AI speaks (but bypass if awaiting confirmation)
-        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
+        // v2.7: Increased from 300ms to 500ms for SIP jitter buffer safety
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 500)
             return;
 
         await SendJsonAsync(new
@@ -255,7 +256,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
         // Echo guard: skip audio right after AI speaks (but bypass if awaiting confirmation)
-        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 300)
+        // v2.7: Increased from 300ms to 500ms for SIP jitter buffer safety
+        if (!_awaitingConfirmation && NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 500)
             return;
 
         // Resample to 24kHz if needed (OpenAI expects 24kHz PCM16)
@@ -651,20 +653,19 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         Log("🤖 AI response completed");
                         OnResponseCompleted?.Invoke();
 
-                        // Flush deferred response if pending
-                        if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+                    // Flush deferred response if pending - MUST go through gate
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+                    {
+                        Log("🔄 Flushing deferred response.create (via gate)");
+                        _ = Task.Run(async () =>
                         {
-                            Log("🔄 Flushing deferred response.create");
-                            _ = Task.Run(async () =>
-                            {
-                                await Task.Delay(20).ConfigureAwait(false);
-                                if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
-                                {
-                                    await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-                                    Log("🔄 response.create sent (deferred)");
-                                }
-                            });
-                        }
+                            await QueueResponseCreateAsync(
+                                delayMs: 80,  // v2.7: Safe delay for SIP fade-out
+                                waitForCurrentResponse: false,
+                                maxWaitMs: 0
+                            ).ConfigureAwait(false);
+                        });
+                    }
 
                         // No-reply watchdog: give the caller enough time to respond AFTER Ada finishes.
                         var watchdogDelayMs = _awaitingConfirmation ? 20000 : 15000;
@@ -781,9 +782,9 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     // Verify addresses with Google Maps (region-biased) to enrich with geocoded details
                     await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
 
-                    OnBookingUpdated?.Invoke(_booking);
-                    await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
-                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                OnBookingUpdated?.Invoke(_booking);
+                await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms for sync
                     break;
                 }
 
@@ -799,13 +800,13 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
                         {
                             Log($"⚠️ Quote requested but pickup/destination missing (pickup='{_booking.Pickup}', dest='{_booking.Destination}')");
-                            await SendToolResultAsync(callId, new
-                            {
-                                success = false,
-                                error = "Missing pickup or destination",
-                                message = "Missing pickup or destination. Ask the caller to repeat it."
-                            }).ConfigureAwait(false);
-                            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = false,
+                            error = "Missing pickup or destination",
+                            message = "Missing pickup or destination. Ask the caller to repeat it."
+                        }).ConfigureAwait(false);
+                        await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
                             break;
                         }
 
@@ -869,7 +870,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                     destination_options = destAlternatives ?? Array.Empty<string>(),
                                     message = "I found multiple locations with that name. Ask which one they meant."
                                 }).ConfigureAwait(false);
-                                await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
                                 break;
                             }
 
@@ -935,7 +936,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             message = $"The fare is {spokenFare}, and the driver will arrive in {fareResult.Eta}. Ask if they want to confirm."
                         }).ConfigureAwait(false);
 
-                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                        await QueueResponseCreateAsync(delayMs: 60, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 60ms for quote
                     }
                     else if (action == "confirmed")
                     {
@@ -948,7 +949,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                 error = "Missing pickup or destination",
                                 message = "Missing pickup or destination. Ask the caller to repeat it before booking."
                             }).ConfigureAwait(false);
-                            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                            await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
                             break;
                         }
 
@@ -1034,16 +1035,16 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             }
                         });
 
-                        await SendToolResultAsync(callId, new
-                        {
-                            success = true,
-                            booking_ref = _booking.BookingRef,
-                            message = string.IsNullOrWhiteSpace(_booking.Name)
-                                ? "Your taxi is booked!"
-                                : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
-                        }).ConfigureAwait(false);
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        booking_ref = _booking.BookingRef,
+                        message = string.IsNullOrWhiteSpace(_booking.Name)
+                            ? "Your taxi is booked!"
+                            : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
+                    }).ConfigureAwait(false);
 
-                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                    await QueueResponseCreateAsync(delayMs: 150, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 150ms for goodbye
 
                         // Extended grace period (15s) for "anything else?" flow, then force end
                         _ = Task.Run(async () =>
@@ -1124,14 +1125,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
                 };
 
-                    await SendToolResultAsync(callId, new
-                    {
-                        success = true,
-                        events = mockEvents,
-                        message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
-                    }).ConfigureAwait(false);
+                await SendToolResultAsync(callId, new
+                {
+                    success = true,
+                    events = mockEvents,
+                    message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+                }).ConfigureAwait(false);
 
-                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);  // v2.7: 40ms
                     break;
                 }
 
@@ -1226,8 +1227,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
     private async Task SendGreetingAsync()
     {
-        // Short delay to let session stabilize
-        await Task.Delay(100).ConfigureAwait(false);
+        // v2.7: Increased from 100ms to 180ms to let session + SIP fully stabilize
+        await Task.Delay(180).ConfigureAwait(false);
 
         var greeting = GetLocalizedGreeting(_detectedLanguage);
 
@@ -1439,10 +1440,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
-
+        
         // Cancel the no-reply watchdog since user DID respond
         Interlocked.Increment(ref _noReplyWatchdogId);
-
+        
         // Inject a system message that forces Ada to call book_taxi(request_quote)
         await SendJsonAsync(new
         {
@@ -1461,15 +1462,15 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 }
             }
         }).ConfigureAwait(false);
-
-        // Trigger an immediate response from the AI
-        await Task.Delay(20).ConfigureAwait(false);
-
-        if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
-        {
-            await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-            Log("🔄 response.create sent (late confirmation)");
-        }
+        
+        // v2.7: Route through gate - prevents bypass of audio guards
+        await QueueResponseCreateAsync(
+            delayMs: 80,
+            waitForCurrentResponse: false,
+            maxWaitMs: 0
+        ).ConfigureAwait(false);
+        
+        Log("🔄 response.create queued (late confirmation)");
     }
 
     // ===========================================
@@ -2045,7 +2046,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.6";
+    public const string VERSION = "2.7";
 
     // =========================
     // PERF: Cached JSON serializer options

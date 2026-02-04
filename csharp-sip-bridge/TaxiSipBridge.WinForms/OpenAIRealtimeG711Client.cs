@@ -11,7 +11,7 @@ namespace TaxiSipBridge;
 /// <summary>
 /// OpenAI Realtime client for G.711 telephony with local DSP processing.
 /// 
-/// v2.6: Watchdog speech guard - prevents triggering no-reply prompt while user is speaking.
+/// v2.7: All response.create calls routed through QueueResponseCreateAsync with SIP-safe delays.
 ///       Checks _transcriptPending and _lastUserSpeechAt (3s window) before firing.
 /// 
 /// Key features:
@@ -25,7 +25,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.6";
+    public const string VERSION = "2.7";
 
     // =========================
     // G.711 CONFIG
