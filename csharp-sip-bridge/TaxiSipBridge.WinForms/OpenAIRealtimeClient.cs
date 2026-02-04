@@ -23,11 +23,11 @@ public enum OutputCodecMode
 
 /// <summary>
 /// OpenAI Realtime API client with STT-gated response logic.
-/// Version 6.9 - Full system prompt with strict tool execution
+/// Version 7.0 - Fire-and-forget webhooks, full prompt
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "6.9";
+    public const string VERSION = "7.0";
 
     // =========================
     // CONFIG
