@@ -1076,20 +1076,44 @@ public class OpenAIRealtimeClient : IAudioAIClient
                 
                 if (action == "request_quote")
                 {
-                    var (fare, eta, dist) = await FareCalculator.CalculateFareAsync(_booking.Pickup, _booking.Destination);
-                    _booking.Fare = fare;
-                    _booking.Eta = eta;
+                    // Use Lovable AI edge function for address resolution + fare
+                    var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                        _booking.Pickup, 
+                        _booking.Destination, 
+                        _callerId);
+                    
+                    _booking.Fare = fareResult.Fare;
+                    _booking.Eta = fareResult.Eta;
+                    _booking.DistanceMiles = fareResult.DistanceMiles;
+                    
+                    // Populate geocoding data
+                    _booking.PickupLat = fareResult.PickupLat;
+                    _booking.PickupLon = fareResult.PickupLon;
+                    _booking.PickupStreet = fareResult.PickupStreet;
+                    _booking.PickupNumber = fareResult.PickupNumber;
+                    _booking.PickupCity = fareResult.PickupCity;
+                    _booking.PickupPostalCode = fareResult.PickupPostalCode;
+                    _booking.PickupFormatted = fareResult.PickupFormatted;
+                    
+                    _booking.DestLat = fareResult.DestLat;
+                    _booking.DestLon = fareResult.DestLon;
+                    _booking.DestStreet = fareResult.DestStreet;
+                    _booking.DestNumber = fareResult.DestNumber;
+                    _booking.DestCity = fareResult.DestCity;
+                    _booking.DestPostalCode = fareResult.DestPostalCode;
+                    _booking.DestFormatted = fareResult.DestFormatted;
+                    
                     OnBookingUpdated?.Invoke(_booking);
                     
-                    Log($"💰 Quote: {fare} ({dist:F1} miles)");
+                    Log($"💰 Quote: {fareResult.Fare} ({fareResult.DistanceMiles:F1} miles)");
                     
                     await SendToolResultAsync(callId, new
                     {
                         success = true,
-                        fare,
-                        eta,
-                        distance_miles = Math.Round(dist, 1),
-                        message = $"Your fare is {fare} and your driver will arrive in {eta}. Would you like me to book that?"
+                        fare = fareResult.Fare,
+                        eta = fareResult.Eta,
+                        distance_miles = Math.Round(fareResult.DistanceMiles, 1),
+                        message = $"Your fare is {fareResult.Fare} and your driver will arrive in {fareResult.Eta}. Would you like me to book that?"
                     });
 
                     _awaitingConfirmation = true;
