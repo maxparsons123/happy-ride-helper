@@ -128,12 +128,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         string apiKey,
         string model = "gpt-4o-mini-realtime-preview-2024-12-17",
         string voice = "shimmer",
+        OutputCodecMode? outputCodec = null,
         string? dispatchWebhookUrl = null)
     {
         _apiKey = apiKey ?? throw new ArgumentNullException(nameof(apiKey));
         _model = model;
         _voice = voice;
         _dispatchWebhookUrl = dispatchWebhookUrl;
+        if (outputCodec.HasValue) _outputCodec = outputCodec.Value;
     }
 
     // =========================
