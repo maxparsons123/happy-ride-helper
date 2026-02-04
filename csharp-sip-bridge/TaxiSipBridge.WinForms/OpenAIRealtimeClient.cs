@@ -883,26 +883,36 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             OnBookingUpdated?.Invoke(_booking);
             Log($"✅ Booked: {_booking.BookingRef} (caller={_callerId})");
 
-            // Dispatch to BSQD
+            // Fire-and-forget: Dispatch to BSQD + WhatsApp notification
             if (!string.IsNullOrEmpty(_callerId))
             {
-                BsqdDispatcher.OnLog += msg => Log(msg);
-                BsqdDispatcher.Dispatch(_booking, _callerId);
-            }
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        BsqdDispatcher.OnLog += msg => Log(msg);
+                        BsqdDispatcher.Dispatch(_booking, _callerId);
+                        Log("🚀 BSQD dispatch sent (fire-and-forget)");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"🚀 BSQD dispatch error: {ex.Message}");
+                    }
+                });
 
-            // WhatsApp notification (fire-and-forget)
-            _ = Task.Run(async () =>
-            {
-                try
+                _ = Task.Run(async () =>
                 {
-                    var (success, message) = await WhatsAppNotifier.SendAsync(_callerId);
-                    Log(success ? $"📱 WhatsApp: {message}" : $"📱 WhatsApp failed: {message}");
-                }
-                catch (Exception ex)
-                {
-                    Log($"📱 WhatsApp error: {ex.Message}");
-                }
-            });
+                    try
+                    {
+                        var (success, message) = await WhatsAppNotifier.SendAsync(_callerId);
+                        Log(success ? $"📱 WhatsApp: {message}" : $"📱 WhatsApp failed: {message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"📱 WhatsApp error: {ex.Message}");
+                    }
+                });
+            }
 
             await SendToolResultAsync(callId, new
             {
