@@ -1317,62 +1317,65 @@ public class OpenAIRealtimeClient : IAudioAIClient
 
     private async Task SendDispatchWebhookAsync()
     {
-        if (string.IsNullOrEmpty(_dispatchWebhookUrl))
+        // BSQD dispatch webhook - same as BsqdDispatcher.cs
+        const string BSQD_WEBHOOK_URL = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
+        const string BSQD_API_KEY = "sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v";
+        
+        var webhookUrl = !string.IsNullOrEmpty(_dispatchWebhookUrl) ? _dispatchWebhookUrl : BSQD_WEBHOOK_URL;
+        
+        try
         {
-            // Use default BSQD webhook
-            var webhookUrl = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
+            // Full TaxiBotRequest payload matching BsqdDispatcher format
+            var payload = new
+            {
+                phoneNumber = FormatPhoneForWhatsApp(_callerId),
+                name = _booking.CallerName,
+                pickup = _booking.PickupFormatted ?? _booking.Pickup,
+                pickupStraat = _booking.PickupStreet,
+                pickupHuisnr = ParseIntFromString(_booking.PickupNumber),
+                pickupPlaats = _booking.PickupCity,
+                pickupLat = _booking.PickupLat,
+                pickupLon = _booking.PickupLon,
+                destination = _booking.DestFormatted ?? _booking.Destination,
+                destStraat = _booking.DestStreet,
+                destHuisnr = ParseIntFromString(_booking.DestNumber),
+                destPlaats = _booking.DestCity,
+                destLat = _booking.DestLat,
+                destLon = _booking.DestLon,
+                passengers = _booking.Passengers ?? 1,
+                pickupTime = _booking.PickupTime,
+                fare = _booking.Fare,
+                eta = _booking.Eta,
+                bookingRef = _booking.BookingRef,
+                callId = _callId,
+                timestamp = DateTime.UtcNow.ToString("o")
+            };
+
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions 
+            { 
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
             
-            try
-            {
-                var payload = new
-                {
-                    event_type = "taxi_booking",
-                    call_id = _callId,
-                    caller_phone = _callerId,
-                    booking = new
-                    {
-                        pickup = _booking.Pickup,
-                        pickup_lat = _booking.PickupLat,
-                        pickup_lon = _booking.PickupLon,
-                        pickup_street = _booking.PickupStreet,
-                        pickup_number = _booking.PickupNumber,
-                        pickup_city = _booking.PickupCity,
-                        pickup_postal = _booking.PickupPostalCode,
-                        pickup_formatted = _booking.PickupFormatted,
-                        destination = _booking.Destination,
-                        dest_lat = _booking.DestLat,
-                        dest_lon = _booking.DestLon,
-                        dest_street = _booking.DestStreet,
-                        dest_number = _booking.DestNumber,
-                        dest_city = _booking.DestCity,
-                        dest_postal = _booking.DestPostalCode,
-                        dest_formatted = _booking.DestFormatted,
-                        passengers = _booking.Passengers,
-                        pickup_time = _booking.PickupTime,
-                        fare = _booking.Fare,
-                        eta = _booking.Eta,
-                        distance_miles = _booking.DistanceMiles,
-                        booking_ref = _booking.BookingRef
-                    },
-                    timestamp = DateTime.UtcNow.ToString("o")
-                };
+            Log($"📤 Dispatch payload: {json}");
+            
+            var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", BSQD_API_KEY);
+            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-                content.Headers.Add("Authorization", "Bearer sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v");
-
-                Log($"📤 Sending dispatch to BSQD...");
-                var response = await HttpClient.PostAsync(webhookUrl, content);
-                
-                if (response.IsSuccessStatusCode)
-                    Log($"✅ Dispatch sent to BSQD");
-                else
-                    Log($"⚠️ Dispatch failed: HTTP {(int)response.StatusCode}");
-            }
-            catch (Exception ex)
+            var response = await HttpClient.SendAsync(request);
+            
+            if (response.IsSuccessStatusCode)
+                Log($"✅ Dispatch sent to BSQD: {_booking.BookingRef}");
+            else
             {
-                Log($"⚠️ Dispatch error: {ex.Message}");
+                var error = await response.Content.ReadAsStringAsync();
+                Log($"⚠️ Dispatch failed: HTTP {(int)response.StatusCode} - {error}");
             }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Dispatch error: {ex.Message}");
         }
     }
 
@@ -1384,24 +1387,46 @@ public class OpenAIRealtimeClient : IAudioAIClient
             return;
         }
 
+        // WhatsApp notification webhook - same as WhatsAppNotifier.cs
+        const string WHATSAPP_WEBHOOK_URL = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya";
+        const string BSQD_API_KEY = "sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v";
+
         try
         {
-            var cli = FormatPhoneForWhatsApp(phoneNumber);
-            var webhookUrl = $"https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya?api_key=sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v&phoneNumber={cli}";
+            var formattedPhone = FormatPhoneForWhatsApp(phoneNumber);
             
-            Log($"📱 Sending WhatsApp notification to {cli}...");
+            var request = new HttpRequestMessage(HttpMethod.Post, WHATSAPP_WEBHOOK_URL);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", BSQD_API_KEY);
             
-            var response = await HttpClient.GetAsync(webhookUrl);
+            var payload = new { phoneNumber = formattedPhone };
+            request.Content = new StringContent(
+                JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                "application/json");
+            
+            Log($"📱 Sending WhatsApp notification to {formattedPhone}...");
+            
+            var response = await HttpClient.SendAsync(request);
             
             if (response.IsSuccessStatusCode)
-                Log($"✅ WhatsApp notification sent to {cli}");
+                Log($"✅ WhatsApp notification sent to {formattedPhone}");
             else
-                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode}");
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                Log($"⚠️ WhatsApp notification failed: HTTP {(int)response.StatusCode} - {error}");
+            }
         }
         catch (Exception ex)
         {
             Log($"⚠️ WhatsApp notification error: {ex.Message}");
         }
+    }
+
+    private static int? ParseIntFromString(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var digits = new string(value.Where(char.IsDigit).ToArray());
+        return int.TryParse(digits, out var n) ? n : null;
     }
 
     private static string FormatPhoneForWhatsApp(string phone)
