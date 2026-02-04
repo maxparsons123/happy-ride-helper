@@ -123,6 +123,12 @@ public class LocalOpenAICallHandler : ISipCallHandler, IDisposable
 
         // Wire async logger to public event (runs on background thread)
         _asyncLog.OnLog += msg => OnLog?.Invoke(msg);
+
+        // Initialize Supabase config for edge function address extraction
+        const string supabaseUrl = "https://oerketnvlmptpfvttysy.supabase.co";
+        const string supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
+        FareCalculator.SetSupabaseConfig(supabaseUrl, supabaseAnonKey);
+        FareCalculator.OnLog = msg => OnLog?.Invoke(msg);
     }
 
     /// <summary>
