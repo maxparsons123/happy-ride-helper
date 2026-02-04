@@ -22,7 +22,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "3.5";
+    public const string VERSION = "3.6";
 
     // =========================
     // PERF: Cached JSON serializer options
@@ -607,6 +607,31 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         
                         Log($"👤 User: {text}");
                         OnTranscript?.Invoke($"You: {text}");
+                        
+                        // v3.6: LATE CONFIRMATION DETECTION
+                        // If Ada already finished responding but the user said "yes/correct/confirm",
+                        // we need to inject a system message and trigger a new response immediately.
+                        // This handles the case where Ada says "Just a moment..." but never calls book_taxi.
+                        if (Volatile.Read(ref _responseActive) == 0 && _awaitingConfirmation)
+                        {
+                            var lowerText = text.ToLowerInvariant();
+                            bool isConfirmation = lowerText.Contains("yes") || 
+                                                  lowerText.Contains("yeah") ||
+                                                  lowerText.Contains("yep") ||
+                                                  lowerText.Contains("correct") ||
+                                                  lowerText.Contains("that's right") ||
+                                                  lowerText.Contains("go ahead") ||
+                                                  lowerText.Contains("confirm") ||
+                                                  lowerText.Contains("book it") ||
+                                                  lowerText.Contains("sure") ||
+                                                  lowerText.Contains("please");
+                            
+                            if (isConfirmation)
+                            {
+                                Log("✅ Late confirmation detected - injecting system prompt and triggering response");
+                                _ = HandleLateConfirmationAsync(text);
+                            }
+                        }
                     }
                     break;
                 }
@@ -1413,6 +1438,51 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         ("Coal Tree", "Coventry"),
         ("in Country", "in Coventry"),
     };
+
+    // ===========================================
+    // LATE CONFIRMATION HANDLING (v3.6)
+    // ===========================================
+    /// <summary>
+    /// Handles confirmations that arrive after Ada's response has already completed.
+    /// This occurs when the user says "yes" but Ada already responded with "just a moment"
+    /// without calling the book_taxi tool. We inject a system message to force the tool call.
+    /// </summary>
+    private async Task HandleLateConfirmationAsync(string userText)
+    {
+        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+            return;
+        
+        // Cancel the no-reply watchdog since user DID respond
+        Interlocked.Increment(ref _noReplyWatchdogId);
+        
+        // Inject a system message that forces Ada to call book_taxi(request_quote)
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "system",
+                content = new[]
+                {
+                    new
+                    {
+                        type = "input_text",
+                        text = $"[USER CONFIRMED BOOKING] The user said \"{userText}\". This is a confirmation. You MUST now call the book_taxi tool with action='request_quote' to get the fare quote. Do NOT speak first - call the tool immediately."
+                    }
+                }
+            }
+        }).ConfigureAwait(false);
+        
+        // Trigger an immediate response from the AI
+        await Task.Delay(20).ConfigureAwait(false);
+        
+        if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _disposed) == 0)
+        {
+            await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+            Log("🔄 response.create sent (late confirmation)");
+        }
+    }
 
     // ===========================================
     // UTILITIES
