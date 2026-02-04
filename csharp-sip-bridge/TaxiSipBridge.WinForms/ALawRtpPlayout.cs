@@ -1,0 +1,293 @@
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net;
+using System.Threading;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
+
+namespace TaxiSipBridge;
+
+/// <summary>
+/// Direct A-law RTP playout for OpenAI g711_alaw output.
+/// 
+/// v4.2: Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
+/// and sends directly via SIPSorcery's SendRtpRaw (payload type 8 = PCMA).
+/// 
+/// No decoding. No resampling. Just raw RTP passthrough.
+/// </summary>
+public sealed class ALawRtpPlayout : IDisposable
+{
+    private const int SAMPLE_RATE = 8000;
+    private const int FRAME_MS = 20;
+    private const int SAMPLES_PER_FRAME = 160; // 20ms @ 8kHz = 160 bytes for A-law
+    private const byte ALAW_SILENCE = 0xD5;    // A-law silence byte
+    private const byte PAYLOAD_TYPE_PCMA = 8;  // RTP payload type for G.711 A-law
+    private const int MAX_QUEUE_FRAMES = 1000; // ~20 seconds buffer
+
+    private readonly RTPSession _rtpSession;
+    private readonly ConcurrentQueue<byte[]> _frameQueue = new();
+    
+    // Accumulator for incoming A-law bytes (may arrive in odd sizes)
+    private byte[] _accumulator = new byte[0];
+    private readonly object _accLock = new();
+
+    private Thread? _playoutThread;
+    private volatile bool _running;
+    private volatile bool _disposed;
+
+    private uint _timestamp;
+    private int _framesSent;
+    private int _silenceFrames;
+    private int _droppedFrames;
+
+    // NAT punch-through (symmetric RTP)
+    private IPEndPoint? _lastRemoteEndpoint;
+
+    public event Action<string>? OnLog;
+    public event Action? OnQueueEmpty;
+
+    public int QueuedFrames => _frameQueue.Count;
+    public int FramesSent => _framesSent;
+    public int SilenceFrames => _silenceFrames;
+
+    public ALawRtpPlayout(RTPSession rtpSession)
+    {
+        _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
+        
+        // Symmetric RTP: lock destination to where we receive RTP from (NAT traversal)
+        _rtpSession.AcceptRtpFromAny = true;
+        _rtpSession.OnRtpPacketReceived += HandleSymmetricRtp;
+    }
+
+    private void HandleSymmetricRtp(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    {
+        if (mediaType != SDPMediaTypesEnum.audio) return;
+
+        if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(remoteEndPoint))
+        {
+            _lastRemoteEndpoint = remoteEndPoint;
+            try
+            {
+                _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
+                OnLog?.Invoke($"[NAT] ALawRtpPlayout locked RTP destination to: {remoteEndPoint}");
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"⚠️ [NAT] Failed to lock RTP destination: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Buffer raw A-law bytes from OpenAI for playout.
+    /// Frames into 160-byte (20ms) chunks automatically.
+    /// </summary>
+    public void BufferALaw(byte[] alawData)
+    {
+        if (!_running || _disposed || alawData == null || alawData.Length == 0)
+            return;
+
+        lock (_accLock)
+        {
+            // Append to accumulator
+            var newAcc = new byte[_accumulator.Length + alawData.Length];
+            Buffer.BlockCopy(_accumulator, 0, newAcc, 0, _accumulator.Length);
+            Buffer.BlockCopy(alawData, 0, newAcc, _accumulator.Length, alawData.Length);
+            _accumulator = newAcc;
+
+            // Extract complete 160-byte frames
+            while (_accumulator.Length >= SAMPLES_PER_FRAME)
+            {
+                var frame = new byte[SAMPLES_PER_FRAME];
+                Buffer.BlockCopy(_accumulator, 0, frame, 0, SAMPLES_PER_FRAME);
+
+                // Overflow protection: drop oldest frame if queue is full
+                if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
+                {
+                    _frameQueue.TryDequeue(out _);
+                    Interlocked.Increment(ref _droppedFrames);
+                }
+
+                _frameQueue.Enqueue(frame);
+
+                // Remove consumed bytes from accumulator
+                var remaining = new byte[_accumulator.Length - SAMPLES_PER_FRAME];
+                Buffer.BlockCopy(_accumulator, SAMPLES_PER_FRAME, remaining, 0, remaining.Length);
+                _accumulator = remaining;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Start the playout thread.
+    /// </summary>
+    public void Start()
+    {
+        if (_running || _disposed) return;
+        _running = true;
+
+        _timestamp = (uint)new Random().Next(0, 65535); // Random starting timestamp per RFC 3550
+        _framesSent = 0;
+        _silenceFrames = 0;
+        _droppedFrames = 0;
+
+        _playoutThread = new Thread(PlayoutLoop)
+        {
+            IsBackground = true,
+            Priority = ThreadPriority.AboveNormal,
+            Name = "ALawRtpPlayoutThread"
+        };
+
+        _playoutThread.Start();
+        OnLog?.Invoke($"▶️ ALawRtpPlayout started (PT={PAYLOAD_TYPE_PCMA}, silence=0x{ALAW_SILENCE:X2})");
+    }
+
+    /// <summary>
+    /// Stop the playout thread and clear queue.
+    /// </summary>
+    public void Stop()
+    {
+        if (!_running) return;
+        _running = false;
+
+        try { _playoutThread?.Join(500); } catch { }
+        _playoutThread = null;
+
+        // Clear queue
+        while (_frameQueue.TryDequeue(out _)) { }
+
+        OnLog?.Invoke($"⏹️ ALawRtpPlayout stopped (sent={_framesSent}, silence={_silenceFrames}, dropped={_droppedFrames})");
+    }
+
+    /// <summary>
+    /// Clear all queued frames (e.g., on barge-in).
+    /// </summary>
+    public void Clear()
+    {
+        int count = 0;
+        while (_frameQueue.TryDequeue(out _)) count++;
+        
+        lock (_accLock) { _accumulator = new byte[0]; }
+        
+        if (count > 0)
+            OnLog?.Invoke($"🗑️ Cleared {count} A-law frames from queue");
+    }
+
+    /// <summary>
+    /// High-precision 20ms playout loop.
+    /// </summary>
+    private void PlayoutLoop()
+    {
+        var sw = Stopwatch.StartNew();
+        double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
+        bool wasEmpty = true;
+        int diagnosticCounter = 0;
+        double firstAudioTimeMs = -1;
+        double lastDiagnosticTime = -1;
+
+        while (_running)
+        {
+            double now = sw.Elapsed.TotalMilliseconds;
+
+            // Wait for next frame time
+            if (now < nextFrameTimeMs)
+            {
+                double waitMs = nextFrameTimeMs - now;
+                if (waitMs > 2.0)
+                    Thread.Sleep((int)(waitMs - 1));
+                else if (waitMs > 0.5)
+                    Thread.SpinWait(500);
+                continue;
+            }
+
+            // Get next frame or generate silence on underrun
+            byte[] frame;
+            if (_frameQueue.TryDequeue(out var queuedFrame))
+            {
+                frame = queuedFrame;
+                diagnosticCounter++;
+
+                // Mark first audio time
+                if (firstAudioTimeMs < 0)
+                {
+                    firstAudioTimeMs = now;
+                    lastDiagnosticTime = now;
+                    OnLog?.Invoke($"🎵 First A-law frame at {now:F0}ms, queue: {_frameQueue.Count + 1}");
+                }
+
+                // Reset empty flag
+                wasEmpty = false;
+
+                // Log every 250 frames (5 seconds) for rate diagnostics
+                if (diagnosticCounter % 250 == 0 && lastDiagnosticTime >= 0)
+                {
+                    double elapsed = now - lastDiagnosticTime;
+                    double framesPerSec = elapsed > 0 ? 250.0 / (elapsed / 1000.0) : 0;
+                    OnLog?.Invoke($"📊 ALaw playout rate: {framesPerSec:F1} fps (target: 50), queue: {_frameQueue.Count}");
+                    lastDiagnosticTime = now;
+                }
+            }
+            else
+            {
+                // Generate silence frame
+                frame = new byte[SAMPLES_PER_FRAME];
+                Array.Fill(frame, ALAW_SILENCE);
+                Interlocked.Increment(ref _silenceFrames);
+
+                // Notify once when queue empties
+                if (!wasEmpty)
+                {
+                    wasEmpty = true;
+                    if (firstAudioTimeMs >= 0)
+                    {
+                        double totalPlayMs = now - firstAudioTimeMs;
+                        OnLog?.Invoke($"📊 A-law audio finished: {diagnosticCounter} frames in {totalPlayMs:F0}ms ({diagnosticCounter * 20}ms expected)");
+                    }
+                    OnQueueEmpty?.Invoke();
+                }
+            }
+
+            // Send raw A-law frame via RTP (payload type 8 = PCMA)
+            try
+            {
+                _rtpSession.SendRtpRaw(
+                    SDPMediaTypesEnum.audio,
+                    frame,
+                    _timestamp,
+                    0,  // marker bit
+                    PAYLOAD_TYPE_PCMA
+                );
+
+                _timestamp += SAMPLES_PER_FRAME;
+                Interlocked.Increment(ref _framesSent);
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"⚠️ RTP send error: {ex.Message}");
+            }
+
+            // Schedule next frame
+            nextFrameTimeMs += FRAME_MS;
+
+            // Drift correction: reset if >40ms behind
+            if (now - nextFrameTimeMs > 40)
+            {
+                OnLog?.Invoke($"⏱️ Drift correction: {now - nextFrameTimeMs:F1}ms behind, resetting timer");
+                nextFrameTimeMs = now + FRAME_MS;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        Stop();
+
+        try { _rtpSession.OnRtpPacketReceived -= HandleSymmetricRtp; } catch { }
+
+        GC.SuppressFinalize(this);
+    }
+}
