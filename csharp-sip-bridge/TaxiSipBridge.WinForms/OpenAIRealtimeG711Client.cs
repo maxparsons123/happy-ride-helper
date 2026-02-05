@@ -538,14 +538,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
                     Interlocked.Exchange(ref _responseActive, 0);
                     
-                    // v2.6: DO NOT clear buffer here - only clear on response.created
-                    // Clearing here cuts off words mid-turn
+                    // v2.8: Check if this response actually addressed the user's input
+                    // If transcript is no longer pending, the AI already processed it
+                    var transcriptStillPending = Volatile.Read(ref _transcriptPending) == 1;
                     
                     Log("🤖 AI response completed");
                     OnResponseCompleted?.Invoke();
 
-                    // Flush deferred response if pending (fast - 20ms delay)
-                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+                    // Flush deferred response ONLY if transcript is still pending
+                    // (meaning the completed response didn't consume the user input)
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1 && transcriptStillPending)
                     {
                         Log("🔄 Flushing deferred response.create");
                         _ = Task.Run(async () =>
