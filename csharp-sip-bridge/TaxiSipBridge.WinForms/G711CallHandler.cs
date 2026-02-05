@@ -226,7 +226,7 @@ Be concise, warm, and professional.
                 _features.HandleToolCallAsync(toolName, toolCallId, args);
             
             // v6.1: Use ALawRtpPlayout for direct A-law passthrough (better audio quality)
-            _alawPlayout = new ALawRtpPlayout(_currentMediaSession.RtpSession);
+            _alawPlayout = new ALawRtpPlayout(_currentMediaSession);
             _alawPlayout.OnQueueEmpty += () =>
             {
                 if (_adaHasStartedSpeaking && _isBotSpeaking)
