@@ -1,4 +1,4 @@
-// Version: 123
+// Version: 124 - Added marker bit support for talk spurts
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -59,6 +59,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private uint _timestamp;
     private byte _lastByte; // For fade-out
     private DateTime _lastRtpSendTime = DateTime.UtcNow;
+    private volatile bool _isNewTalkSpurt; // Marker bit for first frame of new audio burst
     
     // NAT state
     private IPEndPoint? _lastRemoteEndpoint;
@@ -145,6 +146,9 @@ public sealed class DirectG711RtpPlayout : IDisposable
     {
         if (Volatile.Read(ref _disposed) != 0 || g711 == null || g711.Length == 0)
             return;
+
+        // New audio burst from AI - set marker bit for first frame
+        _isNewTalkSpurt = true;
 
         for (int i = 0; i < g711.Length; i += FRAME_SIZE)
         {
@@ -274,14 +278,21 @@ public sealed class DirectG711RtpPlayout : IDisposable
         if (_queue.TryDequeue(out var audioFrame))
         {
             Interlocked.Decrement(ref _queueCount);
-            frameToSend = audioFrame;
             _framesSent++;
             _wasPlaying = true;
             _consecutiveUnderruns = 0; // Reset on successful dequeue
             _lastByte = audioFrame[FRAME_SIZE - 1];
 
+            // Send with marker bit if this is the first frame of a new talk spurt
+            bool marker = _isNewTalkSpurt;
+            _isNewTalkSpurt = false;
+            
+            SendRtpFrame(audioFrame, marker);
+
             if (_framesSent % 500 == 0)
                 OnLog?.Invoke($"[DirectG711RtpPlayout] Sent {_framesSent} frames (queue: {Volatile.Read(ref _queueCount)})");
+            
+            return;
         }
         else
         {
@@ -303,15 +314,16 @@ public sealed class DirectG711RtpPlayout : IDisposable
             {
                 _wasPlaying = false;
                 _isBuffering = true;
+                _isNewTalkSpurt = false; // Reset for next audio burst
                 OnLog?.Invoke($"[DirectG711RtpPlayout] Queue empty after {_framesSent} frames");
                 OnQueueEmpty?.Invoke();
             }
         }
 
-        SendRtpFrame(frameToSend);
+        SendRtpFrame(frameToSend, false);
     }
 
-    private void SendRtpFrame(byte[] frame)
+    private void SendRtpFrame(byte[] frame, bool marker)
     {
         try
         {
@@ -319,7 +331,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
-                0,  // marker bit
+                marker ? 1 : 0,  // Marker bit for jitter buffer sync at talk spurt start
                 (int)_payloadType
             );
             _timestamp += FRAME_SIZE;
@@ -344,6 +356,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _consecutiveUnderruns = 0;
         _currentJitterBuffer = JITTER_BUFFER_MIN; // Reset adaptive buffer
         _lastByte = _silence;
+        _isNewTalkSpurt = false;
         OnLog?.Invoke("[DirectG711RtpPlayout] Queue cleared (barge-in)");
     }
 
@@ -359,7 +372,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp;
         
         // Final silence frame for graceful close
-        try { SendRtpFrame(_silenceFrame); } catch { }
+        try { SendRtpFrame(_silenceFrame, false); } catch { }
         
         Clear();
         GC.SuppressFinalize(this);
