@@ -9,14 +9,12 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Call handler that routes audio directly to OpenAI Realtime API using G.711 μ-law @ 8kHz.
 /// 
-/// Key Benefits:
-/// - No resampling overhead (8kHz throughout)
-/// - Direct passthrough: SIP (μ-law) → OpenAI (μ-law) → SIP (μ-law)
-/// - For A-law carriers: Direct transcode A-law ↔ μ-law at 8kHz (no PCM intermediate)
-/// - Lower latency and CPU usage
-/// - Simplified audio pipeline
+/// Audio Architecture (Hybrid Mode):
+/// - INPUT:  SIP G.711 (8kHz) → OpenAI native G.711 (no resampling)
+/// - OUTPUT: OpenAI 24kHz PCM → G711AiSipPlayout (DSP + resample + encode) → SIP G.711
 /// 
-/// Uses MultiCodecRtpPlayout for RTP output (encodes μ-law frames for transmission).
+/// This hybrid approach gives OpenAI's best quality output (24kHz) while minimizing
+/// input latency with native G.711 passthrough.
 /// </summary>
 public class G711CallHandler : ISipCallHandler, IDisposable
 {
@@ -38,7 +36,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private DirectG711RtpPlayout? _playout;   // Clean push-based RTP playout for native G.711
+    private G711AiSipPlayout? _playout;   // 24kHz PCM → G.711 playout with local DSP
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA; // Default to A-law for G711 mode
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
@@ -211,8 +209,8 @@ Be concise, warm, and professional.
             _aiClient.OnToolCall += (toolName, toolCallId, args) =>
                 _features.HandleToolCallAsync(toolName, toolCallId, args);
             
-            // Create DirectG711RtpPlayout - uses SIP-negotiated codec for correct payload type
-            _playout = new DirectG711RtpPlayout(_currentMediaSession, sipCodec);
+            // Create G711AiSipPlayout - accepts 24kHz PCM, does DSP + resample + G.711 encode
+            _playout = new G711AiSipPlayout(_currentMediaSession, ua);
             _playout.OnLog += msg => Log(msg);
             _playout.OnQueueEmpty += () =>
             {
@@ -228,12 +226,12 @@ Be concise, warm, and professional.
                 }
             };
             _playout.Start();
-            Log($"🎵 [{callId}] DirectG711RtpPlayout started (push-based, 20ms timer)");
+            Log($"🎵 [{callId}] G711AiSipPlayout started (24kHz PCM → G.711)");
 
-            // Wire AI client events (using native G.711 audio path)
+            // Wire AI client events (using 24kHz PCM output path)
             WireAiClientEvents(callId, cts);
 
-            // Connect to OpenAI - using 24kHz PCM with local DSP for richer audio
+            // Connect to OpenAI - request 24kHz PCM output for local DSP processing
             var codecName = sipCodec == OpenAIRealtimeG711Client.G711Codec.ALaw ? "A-law" : "μ-law";
             Log($"🔌 [{callId}] Connecting to OpenAI Realtime (PCM24 → DSP → {codecName})...");
             await _aiClient.ConnectAsync(caller, cts.Token);
@@ -279,13 +277,13 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        // NATIVE G.711 PATH: Push raw G.711 audio directly to playout (zero DSP)
-        // 🔥 THIS IS THE IMPORTANT LINE - push-based, not polling
-        _aiClient.OnG711Audio += g711Bytes =>
+        // 24kHz PCM PATH: Push PCM to playout which does DSP + resample + G.711 encode
+        // This gives OpenAI's best quality output while the playout handles conversion
+        _aiClient.OnPcm24Audio += pcm24kBytes =>
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
-            _playout?.PushAudio(g711Bytes);
+            _playout?.BufferAiAudio(pcm24kBytes);
         };
 
         _aiClient.OnResponseStarted += () =>
@@ -305,7 +303,7 @@ Be concise, warm, and professional.
         Action bargeInHandler = () =>
         {
             // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn
-            if (!_isBotSpeaking && (_playout == null || _playout.PendingFrameCount == 0))
+            if (!_isBotSpeaking && (_playout == null || _playout.QueuedFrames == 0))
                 return;
             
             _playout?.Clear();  // Immediately stop Ada speaking
@@ -322,11 +320,11 @@ Be concise, warm, and professional.
             {
                 var del = Delegate.CreateDelegate(evt.EventHandlerType, bargeInHandler.Target!, bargeInHandler.Method);
                 evt.AddEventHandler(_aiClient, del);
-                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio, OnResponseStarted, OnResponseCompleted, OnBargeIn");
+                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio→G711AiSipPlayout, OnResponseStarted, OnResponseCompleted, OnBargeIn");
             }
             else
             {
-                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio, OnResponseStarted, OnResponseCompleted");
+                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio→G711AiSipPlayout, OnResponseStarted, OnResponseCompleted");
             }
         }
         catch (Exception ex)
