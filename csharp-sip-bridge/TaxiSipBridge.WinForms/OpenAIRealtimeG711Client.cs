@@ -671,7 +671,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var text = transcriptEl.GetString();
                         if (!string.IsNullOrEmpty(text))
                         {
-                            Log($"💬 Ada: {text}");
+                            // v5.1: Only fire event, don't Log() to avoid duplicate output
                             OnTranscript?.Invoke($"Ada: {text}");
 
                             // Goodbye detection watchdog
@@ -715,7 +715,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                                 Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped, {msSinceResponseCreated}ms after response.created: {text}");
                             }
 
-                            Log($"👤 User: {text}");
+                            // v5.1: Only fire event, don't Log() to avoid duplicate output  
                             OnTranscript?.Invoke($"You: {text}");
                         }
                     }

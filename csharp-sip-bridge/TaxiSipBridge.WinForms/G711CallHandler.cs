@@ -231,9 +231,9 @@ Be concise, warm, and professional.
             // Wire AI client events (using 24kHz PCM output path)
             WireAiClientEvents(callId, cts);
 
-            // Connect to OpenAI - request 24kHz PCM output for local DSP processing
+            // v5.1: Direct A-law passthrough (no PCM conversion, no DSP)
             var codecName = sipCodec == OpenAIRealtimeG711Client.G711Codec.ALaw ? "A-law" : "μ-law";
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (PCM24 → DSP → {codecName})...");
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime ({codecName} passthrough 8kHz)...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
@@ -245,7 +245,7 @@ Be concise, warm, and professional.
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI (PCM24→DSP→{codecName})");
+            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI ({codecName} passthrough)");
             
             // Start keepalive loop
             _features?.StartKeepalive();
