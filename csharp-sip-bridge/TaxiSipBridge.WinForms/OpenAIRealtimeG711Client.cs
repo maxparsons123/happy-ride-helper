@@ -575,21 +575,18 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var b64 = deltaEl.GetString();
                         if (!string.IsNullOrEmpty(b64))
                         {
-                            var pcm24Bytes = Convert.FromBase64String(b64);
-
-                            OnPcm24Audio?.Invoke(pcm24Bytes);
-
-                            var g711Bytes = ProcessPcm24ToG711(pcm24Bytes);
+                            // Native G.711 mode: bytes are already 8kHz A-law/μ-law - zero transcoding!
+                            var g711Bytes = Convert.FromBase64String(b64);
                             if (g711Bytes.Length > 0)
                             {
                                 OnG711Audio?.Invoke(g711Bytes);
-                            }
 
-                            var count = Interlocked.Increment(ref _audioChunksReceived);
-                            if (count % 10 == 0)
-                            {
-                                var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-                                Log($"📢 Received {count} audio chunks (PCM24→DSP→{codecName}), in={pcm24Bytes.Length}B out={g711Bytes.Length}B");
+                                var count = Interlocked.Increment(ref _audioChunksReceived);
+                                if (count % 10 == 0)
+                                {
+                                    var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
+                                    Log($"📢 Received {count} native G.711 {codecName} chunks ({g711Bytes.Length}B)");
+                                }
                             }
                         }
                     }
@@ -800,9 +797,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private async Task ConfigureSessionAsync()
     {
         var inputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        var outputCodec = "pcm16"; // 24kHz PCM - we apply DSP locally
+        var outputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw"; // Native 8kHz G.711 - zero transcoding!
 
-        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output={outputCodec}@24kHz (DSP→G.711), voice={_voice}");
+        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output={outputCodec}@8kHz (NATIVE G.711), voice={_voice}");
 
         await SendJsonAsync(new
         {
