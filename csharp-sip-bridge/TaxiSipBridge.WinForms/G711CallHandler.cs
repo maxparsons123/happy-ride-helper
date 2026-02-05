@@ -423,33 +423,51 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // v5.1: Native A-law passthrough (8kHz A-law → OpenAI)
+                // v5.2: TRUE A-law passthrough - no decode/DSP/re-encode (eliminates quantization noise)
                 if (_negotiatedCodec == AudioCodecsEnum.PCMA || _negotiatedCodec == AudioCodecsEnum.PCMU)
                 {
-                    // Decode G.711 → Apply ingress DSP → Re-encode G.711 for OpenAI
-                    short[] pcm8k;
-                    if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                        pcm8k = AudioCodecs.ALawDecode(payload);
-                    else
-                        pcm8k = AudioCodecs.MuLawDecode(payload);
-                    
-                    // Apply ingress DSP (DC removal, normalization, soft gate if needed)
-                    bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, isBotSpeaking: applySoftGate);
-                    
-                    if (applySoftGate && isBargeIn)
+                    // Transcode μ-law to A-law if needed (OpenAI expects A-law)
+                    byte[] g711ToSend;
+                    if (_negotiatedCodec == AudioCodecsEnum.PCMU)
                     {
-                        _features?.CancelWatchdog();
-                        Log($"✂️ [{callId}] Barge-in detected (VAD during bot speaking)");
+                        // Direct μ-law → A-law transcode (no PCM intermediate)
+                        g711ToSend = AudioCodecs.MuLawToALaw(payload);
                     }
-
-                    // Re-encode to A-law for OpenAI (v5.1: always A-law)
-                    byte[] g711 = AudioCodecs.ALawEncode(pcm8k);
+                    else
+                    {
+                        // Pure A-law passthrough - zero processing
+                        g711ToSend = payload;
+                    }
                     
-                    await ai.SendALawAsync(g711);
+                    // Soft gate: during bot speaking, send silence instead of echo
+                    if (applySoftGate)
+                    {
+                        // Check RMS of decoded audio for barge-in detection
+                        var pcmCheck = AudioCodecs.ALawDecode(g711ToSend);
+                        double sumSq = 0;
+                        for (int i = 0; i < pcmCheck.Length; i++)
+                            sumSq += (double)pcmCheck[i] * pcmCheck[i];
+                        float rms = (float)Math.Sqrt(sumSq / pcmCheck.Length);
+                        
+                        bool isBargeIn = rms >= 1500; // Barge-in threshold
+                        
+                        if (isBargeIn)
+                        {
+                            _features?.CancelWatchdog();
+                            Log($"✂️ [{callId}] Barge-in detected (RMS={rms:F0})");
+                        }
+                        else
+                        {
+                            // Not a barge-in - send silence to prevent echo
+                            Array.Fill(g711ToSend, (byte)0xD5); // A-law silence
+                        }
+                    }
+                    
+                    await ai.SendALawAsync(g711ToSend);
 
                     _framesForwarded++;
                     if (_framesForwarded % 50 == 0)
-                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (A-law 8kHz → OpenAI){(applySoftGate ? " [soft-gated]" : "")}");
+                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (passthrough 8kHz){(applySoftGate ? " [gated]" : "")}");
                 }
 
                 // Audio monitor (decode for monitoring if needed)
