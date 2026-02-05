@@ -15,8 +15,8 @@ public partial class MainForm : Form
     private volatile bool _isMicMode = false;
     private bool _useLocalOpenAI = false;
     private bool _useManualAnswer = false;
-    private bool _useG711Mode = false;  // LEGACY: G711 8kHz μ-law passthrough mode (G711CallHandler)
-    private bool _useALawDirect = true; // v4.2: A-law direct passthrough (no decoding/resampling on output)
+    private bool _useG711Mode = false;  // v5.1: A-law passthrough mode (G711CallHandler)
+    private bool _useALawDirect = true; // v5.1: A-law direct passthrough (no decoding/resampling on output)
     private ManualCallHandler? _manualCallHandler;
 
     // === Audio Monitor (local speaker playback) ===
@@ -87,12 +87,12 @@ public partial class MainForm : Form
             : "☁️ Switched to EDGE FUNCTION mode");
     }
 
-    // A-law Direct mode checkbox handler (v4.2 passthrough vs PCM)
+    // A-law Direct mode checkbox handler (v5.1 passthrough)
     private void chkG711Mode_CheckedChanged(object? sender, EventArgs e)
     {
         _useALawDirect = chkG711Mode.Checked;
         AddLog(_useALawDirect 
-            ? "⚡ A-law Direct mode ENABLED (v4.2 - OpenAI g711_alaw → RTP passthrough)" 
+            ? "🎵 A-law Direct mode ENABLED (v5.1 - OpenAI g711_alaw → RTP passthrough)" 
             : "🔊 PCM mode ENABLED (24kHz decode/resample/encode)");
         
         // Warn if already connected - requires reconnect to take effect
