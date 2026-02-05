@@ -7,14 +7,13 @@ using SIPSorceryMedia.Abstractions;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Call handler that routes audio directly to OpenAI Realtime API using G.711 μ-law @ 8kHz.
+/// Call handler for pure A-law end-to-end passthrough @ 8kHz.
 /// 
-/// Audio Architecture (Hybrid Mode):
-/// - INPUT:  SIP G.711 (8kHz) → OpenAI native G.711 (no resampling)
-/// - OUTPUT: OpenAI 24kHz PCM → G711AiSipPlayout (DSP + resample + encode) → SIP G.711
+/// Audio Architecture (v5.1 - Pure Passthrough):
+/// - INPUT:  SIP PCMA (A-law 8kHz) → OpenAI g711_alaw (8kHz)
+/// - OUTPUT: OpenAI g711_alaw (8kHz) → DirectG711RtpPlayout → SIP PCMA
 /// 
-/// This hybrid approach gives OpenAI's best quality output (24kHz) while minimizing
-/// input latency with native G.711 passthrough.
+/// No PCM conversion, no resampling, no DSP—direct A-law bytes passthrough.
 /// </summary>
 public class G711CallHandler : ISipCallHandler, IDisposable
 {
@@ -36,8 +35,8 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private G711AiSipPlayout? _playout;   // 24kHz PCM → G.711 playout with local DSP
-    private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA; // Default to A-law for G711 mode
+    private DirectG711RtpPlayout? _directPlayout;  // v5.1: Native A-law 8kHz direct RTP output
+    private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
     private G711CallFeatures? _features;
@@ -61,11 +60,11 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     // ===========================================
     // CONSTANTS
     // ===========================================
-    private const int ECHO_GUARD_MS = 120; // Reduced from 200ms for faster turn-taking
+    private const int ECHO_GUARD_MS = 120; // 120ms reduced echo guard for A-law passthrough
     private const int FLUSH_PACKETS = 20;
     private const int EARLY_PROTECTION_MS = 500;
     private const int HANGUP_GRACE_MS = 5000;
-    private const int FRAME_SIZE_ULAW = 160; // 20ms @ 8kHz = 160 bytes μ-law
+    private const int FRAME_SIZE_ALAW = 160; // 20ms @ 8kHz = 160 bytes A-law
 
     // ===========================================
     // EVENTS
@@ -131,14 +130,14 @@ Be concise, warm, and professional.
 
         try
         {
-            // Setup media session (G.711 μ-law preferred)
+            // Setup media session (A-law preferred)
             var audioEncoder = new UnifiedAudioEncoder();
             AudioCodecs.ResetAllCodecs();
 
-            // Prefer PCMU (μ-law) for G711 mode
+            // Prefer PCMA (A-law) for v5.1 pure passthrough mode
             var preferredFormats = audioEncoder.SupportedFormats
-                .OrderByDescending(f => f.Codec == AudioCodecsEnum.PCMU)
-                .ThenByDescending(f => f.Codec == AudioCodecsEnum.PCMA)
+                .OrderByDescending(f => f.Codec == AudioCodecsEnum.PCMA)
+                .ThenByDescending(f => f.Codec == AudioCodecsEnum.PCMU)
                 .ToList();
 
             var audioSource = new AudioExtrasSource(
@@ -188,11 +187,10 @@ Be concise, warm, and professional.
             await _currentMediaSession.Start();
             Log($"📗 [{callId}] Call answered and RTP started");
 
-            // FORCE A-LAW: Hardcoded to eliminate codec mismatch debugging
-            // TODO: Restore dynamic codec selection once audio verified working
+            // v5.1: Force A-law for pure passthrough consistency
             var sipCodec = OpenAIRealtimeG711Client.G711Codec.ALaw;
             
-            Log($"🎵 [{callId}] FORCED A-law (ignoring SIP negotiated {_negotiatedCodec})");
+            Log($"🎵 [{callId}] FORCED A-law (v5.1 pure passthrough)");
             _aiClient = new OpenAIRealtimeG711Client(_apiKey, _model, _voice, sipCodec);
 
             // Feature add-ons: tool handling + booking state + dispatch
@@ -209,10 +207,10 @@ Be concise, warm, and professional.
             _aiClient.OnToolCall += (toolName, toolCallId, args) =>
                 _features.HandleToolCallAsync(toolName, toolCallId, args);
             
-            // Create G711AiSipPlayout - accepts 24kHz PCM, does DSP + resample + G.711 encode
-            _playout = new G711AiSipPlayout(_currentMediaSession, ua);
-            _playout.OnLog += msg => Log(msg);
-            _playout.OnQueueEmpty += () =>
+            // v5.1: Create DirectG711RtpPlayout for pure A-law passthrough
+            _directPlayout = new DirectG711RtpPlayout(_currentMediaSession, ua);
+            _directPlayout.OnLog += msg => Log(msg);
+            _directPlayout.OnQueueEmpty += () =>
             {
                 if (_adaHasStartedSpeaking && _isBotSpeaking)
                 {
@@ -225,10 +223,10 @@ Be concise, warm, and professional.
                     else _aiClient?.NotifyPlayoutComplete();
                 }
             };
-            _playout.Start();
-            Log($"🎵 [{callId}] G711AiSipPlayout started (24kHz PCM → G.711)");
+            _directPlayout.Start();
+            Log($"🎵 [{callId}] DirectG711RtpPlayout started (native A-law 8kHz)");
 
-            // Wire AI client events (using 24kHz PCM output path)
+            // Wire AI client events (using v5.1 pure A-law output path)
             WireAiClientEvents(callId, cts);
 
             // v5.1: Direct A-law passthrough (no PCM conversion, no DSP)
@@ -265,8 +263,6 @@ Be concise, warm, and professional.
         }
     }
 
-    // NOTE: PlayoutLoopAsync removed - SipAudioPlayout handles timer-driven RTP transmission
-
     // ===========================================
     // AI CLIENT EVENT WIRING
     // ===========================================
@@ -277,13 +273,12 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        // 24kHz PCM PATH: Push PCM to playout which does DSP + resample + G.711 encode
-        // This gives OpenAI's best quality output while the playout handles conversion
-        _aiClient.OnPcm24Audio += pcm24kBytes =>
+        // v5.1: Native A-law audio PATH - push A-law bytes directly to RTP playout
+        _aiClient.OnG711Audio += g711Bytes =>
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
-            _playout?.BufferAiAudio(pcm24kBytes);
+            _directPlayout?.SendRtpFrame(g711Bytes);
         };
 
         _aiClient.OnResponseStarted += () =>
@@ -303,10 +298,10 @@ Be concise, warm, and professional.
         Action bargeInHandler = () =>
         {
             // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn
-            if (!_isBotSpeaking && (_playout == null || _playout.QueuedFrames == 0))
+            if (!_isBotSpeaking && (_directPlayout == null || _directPlayout.PendingFrames == 0))
                 return;
             
-            _playout?.Clear();  // Immediately stop Ada speaking
+            _directPlayout?.Clear();  // Immediately stop Ada speaking
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
             _features?.CancelWatchdog();
@@ -320,11 +315,11 @@ Be concise, warm, and professional.
             {
                 var del = Delegate.CreateDelegate(evt.EventHandlerType, bargeInHandler.Target!, bargeInHandler.Method);
                 evt.AddEventHandler(_aiClient, del);
-                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio→G711AiSipPlayout, OnResponseStarted, OnResponseCompleted, OnBargeIn");
+                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→DirectG711RtpPlayout, OnResponseStarted, OnResponseCompleted, OnBargeIn");
             }
             else
             {
-                Log($"📌 [{callId}] Event handlers wired: OnPcm24Audio→G711AiSipPlayout, OnResponseStarted, OnResponseCompleted");
+                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→DirectG711RtpPlayout, OnResponseStarted, OnResponseCompleted");
             }
         }
         catch (Exception ex)
@@ -427,13 +422,10 @@ Be concise, warm, and professional.
                 var payload = rtp.Payload;
                 if (payload == null || payload.Length == 0) return;
 
-                // NATIVE G.711 MODE with DSP enhancement
-                // Decode G.711 → Apply ingress DSP → Re-encode G.711 for OpenAI
-                // This preserves audio quality while adding DC removal + normalization for better STT
-                
+                // v5.1: Native A-law passthrough (8kHz A-law → OpenAI)
                 if (_negotiatedCodec == AudioCodecsEnum.PCMA || _negotiatedCodec == AudioCodecsEnum.PCMU)
                 {
-                    // Always decode → apply DSP → re-encode for consistent quality
+                    // Decode G.711 → Apply ingress DSP → Re-encode G.711 for OpenAI
                     short[] pcm8k;
                     if (_negotiatedCodec == AudioCodecsEnum.PCMA)
                         pcm8k = AudioCodecs.ALawDecode(payload);
@@ -445,66 +437,18 @@ Be concise, warm, and professional.
                     
                     if (applySoftGate && isBargeIn)
                     {
-                        Log($"🎤 [{callId}] Barge-in detected via soft gate");
-                    }
-                    
-                    // Re-encode to match the OpenAI session's configured codec.
-                    // SendMuLawAsync is a generic G.711 sender that works for both A-law and μ-law
-                    // (the codec format is configured at session level, not per-frame).
-                    byte[] processedG711 = ai.NegotiatedCodec == OpenAIRealtimeG711Client.G711Codec.ALaw
-                        ? AudioCodecs.ALawEncode(pcm8k)
-                        : AudioCodecs.MuLawEncode(pcm8k);
-                    
-                    await ai.SendMuLawAsync(processedG711);
-                    
-                    _framesForwarded++;
-                    if (_framesForwarded % 50 == 0)
-                    {
-                        var codecName = _negotiatedCodec == AudioCodecsEnum.PCMA ? "PCMA" : "PCMU";
-                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames ({codecName} → DSP → G711 alaw → OpenAI){(applySoftGate ? " [gated]" : "")}");
-                    }
-                }
-                else
-                {
-                    // Wideband codecs: Decode → Resample → Send as PCM
-                    short[] pcm8k;
-                    if (_negotiatedCodec == AudioCodecsEnum.OPUS)
-                    {
-                        var stereo = AudioCodecs.OpusDecode(payload);
-                        pcm8k = new short[stereo.Length / 2];
-                        for (int i = 0; i < pcm8k.Length; i++)
-                            pcm8k[i] = (short)((stereo[i * 2] + stereo[i * 2 + 1]) / 2);
-                        pcm8k = AudioCodecs.Resample(pcm8k, 48000, 8000);
-                    }
-                    else if (_negotiatedCodec == AudioCodecsEnum.G722)
-                    {
-                        pcm8k = AudioCodecs.G722Decode(payload);
-                        pcm8k = AudioCodecs.Resample(pcm8k, 16000, 8000);
-                    }
-                    else
-                    {
-                        return; // Unknown codec
+                        _features?.CancelWatchdog();
+                        Log($"✂️ [{callId}] Barge-in detected (VAD during bot speaking)");
                     }
 
-                    // Apply soft gate for wideband
-                    bool isBargeIn = IngressDsp.ApplyForStt(pcm8k, isBotSpeaking: applySoftGate);
-                    if (applySoftGate && isBargeIn)
-                    {
-                        Log($"🎤 [{callId}] Barge-in detected via soft gate (loud speech during bot talking)");
-                    }
-
-                    // For wideband: encode to G.711 matching OpenAI config
-                    byte[] g711;
-                    if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                        g711 = AudioCodecs.ALawEncode(pcm8k);
-                    else
-                        g711 = AudioCodecs.MuLawEncode(pcm8k);
+                    // Re-encode to A-law for OpenAI (v5.1: always A-law)
+                    byte[] g711 = AudioCodecs.ALawEncode(pcm8k);
                     
-                    await ai.SendMuLawAsync(g711);
+                    await ai.SendALawAsync(g711);
 
                     _framesForwarded++;
                     if (_framesForwarded % 50 == 0)
-                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames ({_negotiatedCodec} → G.711 8kHz) → OpenAI{(applySoftGate ? " [soft-gated]" : "")}");
+                        Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (A-law 8kHz → OpenAI){(applySoftGate ? " [soft-gated]" : "")}");
                 }
 
                 // Audio monitor (decode for monitoring if needed)
@@ -579,11 +523,11 @@ Be concise, warm, and professional.
             _features = null;
         }
 
-        if (_playout != null)
+        if (_directPlayout != null)
         {
-            try { _playout.Stop(); } catch { }
-            try { _playout.Dispose(); } catch { }
-            _playout = null;
+            try { _directPlayout.Stop(); } catch { }
+            try { _directPlayout.Dispose(); } catch { }
+            _directPlayout = null;
         }
 
         if (_currentMediaSession != null)
@@ -620,7 +564,7 @@ Be concise, warm, and professional.
         }
 
         try { _callCts?.Cancel(); } catch { }
-        try { _playout?.Dispose(); } catch { }
+        try { _directPlayout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _features?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
