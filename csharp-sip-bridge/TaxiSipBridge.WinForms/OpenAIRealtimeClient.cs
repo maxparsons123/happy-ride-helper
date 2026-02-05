@@ -1417,10 +1417,19 @@ Greet
 → TIME  
 
 → Confirm details ONCE  
-→ If changes: update and confirm ONCE more  
+→ If user says something is WRONG or wants to change a detail:
+  - Ask ""What would you like to change?""
+  - Accept the correction
+  - Call sync_booking_data with the updated field(s)
+  - Re-confirm the updated details ONCE
+  - You may loop this correction cycle up to 3 times
+→ If changes: update via sync_booking_data, then confirm ONCE more  
 → The system will auto-calculate the fare — do NOT say you are getting the price  
 → Announce fare  
 → Ask ""Would you like to confirm this booking?""  
+→ If user says NO or wants changes at fare stage:
+  - Ask what to change, update via sync_booking_data, re-confirm
+  - The fare will be recalculated automatically
 → Call book_taxi(action=""confirmed"")  
 → Give reference ID ONLY  
 → Ask ""Anything else?""
