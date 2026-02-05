@@ -1,4 +1,4 @@
-// Version: 125 - Fixed jitter buffer for native G.711 mode (100ms→200ms)
+ // Version: 126 - Increased jitter buffer for native G.711 mode (160ms→240ms)
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -32,8 +32,8 @@ public sealed class DirectG711RtpPlayout : IDisposable
     
     // Adaptive jitter buffer: starts at 100ms (5 frames), grows to 200ms on underruns
     // OpenAI sends audio in bursts, so we need a larger buffer to absorb jitter
-    private const int JITTER_BUFFER_MIN = 5;   // 100ms initial (handles OpenAI bursts)
-    private const int JITTER_BUFFER_MAX = 10;  // 200ms after underruns
+    private const int JITTER_BUFFER_MIN = 8;   // 160ms initial (handles OpenAI G.711 bursts)
+    private const int JITTER_BUFFER_MAX = 12;  // 240ms after underruns (smoother for native G.711)
     private const int UNDERRUN_THRESHOLD = 1;  // Grow buffer after first underrun
 
     private readonly VoIPMediaSession _mediaSession;
