@@ -834,11 +834,36 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     break;
                 }
 
+            case "find_local_events":
+                {
+                    var category = args.TryGetValue("category", out var cat) ? cat?.ToString() ?? "all" : "all";
+                    var near = args.TryGetValue("near", out var loc) ? loc?.ToString() ?? "" : "";
+                    var date = args.TryGetValue("date", out var dt) ? dt?.ToString() ?? "tonight" : "tonight";
+                    Log($"🎭 Event search: category={category}, near={near}, date={date}");
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        events = new[]
+                        {
+                            new { name = "Live Music Night", venue = $"The Grand, {near}", time = "8:00 PM", category = "concert" },
+                            new { name = "Comedy Club", venue = $"Laugh Factory, {near}", time = "9:00 PM", category = "comedy" }
+                        },
+                        message = $"I found some events {date} near {near}. Would you like a taxi to any of these?"
+                    }).ConfigureAwait(false);
+                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false).ConfigureAwait(false);
+                    break;
+                }
+
             case "end_call":
                 Log("📞 End call requested");
                 Interlocked.Exchange(ref _ignoreUserAudio, 1);
                 await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
                 SignalCallEnded("end_call");
+                break;
+
+            default:
+                Log($"⚠️ Unknown tool: {name}");
+                await SendToolResultAsync(callId, new { error = $"Unknown tool: {name}" }).ConfigureAwait(false);
                 break;
         }
     }
@@ -3557,23 +3582,7 @@ RESPONSE STYLE
     }
 }
 
-// BookingState moved to BookingState.cs for centralized accessg;
-using System.Threading.Tasks;
-using taxibridgemain;
-
-namespace TaxiSipBridge;
-
-/// <summary>
-/// Output codec mode for AI audio output.
-/// </summary>
-public enum OutputCodecMode
-{
-    /// <summary>PCM16 @ 24kHz - requires local resampling/encoding to G.711</summary>
-    MuLaw,
-    
-    /// <summary>G.711 A-law @ 8kHz - direct passthrough to RTP</summary>
-    ALaw,
-}
+// BookingState moved to BookingState.cs for centralized access
 
 /// <summary>
 /// OpenAI Realtime API client with STT-gated response logic.
