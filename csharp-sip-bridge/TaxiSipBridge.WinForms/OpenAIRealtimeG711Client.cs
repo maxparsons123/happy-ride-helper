@@ -812,7 +812,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             
             // v7.5: GROUNDING FIX - After sync_booking_data, inject state snapshot into conversation
             // This ensures the AI KNOWS what was synced and doesn't ask redundant questions
-            if (toolName == "sync_booking_data" && result is JsonElement jResult)
+            // Guard: only inject if still connected (prevents disposed SemaphoreSlim errors)
+            if (toolName == "sync_booking_data" && IsConnected)
             {
                 var stateUpdate = new
                 {
@@ -829,7 +830,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
             
             // Trigger new response immediately - BYPASS transcript guard since we have tool result
-            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);
+            if (IsConnected)
+                await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
