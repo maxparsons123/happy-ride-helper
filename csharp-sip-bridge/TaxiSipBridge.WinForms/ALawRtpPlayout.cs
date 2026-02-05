@@ -11,8 +11,8 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Direct A-law RTP playout for OpenAI g711_alaw output.
 /// 
-/// v6.2: High-precision timing with Windows multimedia timer (1ms granularity)
-/// and non-blocking AsyncLogger for zero-jitter playout.
+/// v6.3: High-precision timing with Windows multimedia timer (1ms granularity),
+/// non-blocking AsyncLogger, and 100ms jitter buffer for smooth playout.
 /// 
 /// Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
 /// and sends directly via VoIPMediaSession's SendRtpRaw (payload type 8 = PCMA).
