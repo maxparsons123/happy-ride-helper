@@ -132,11 +132,13 @@ public partial class FareCalculator
     /// Legacy: geocode pickup & destination and compute fare/ETA.
     /// Uses Edge AI extraction first to get city-biased addresses, then geocodes with that city context.
     /// </summary>
+    /// <param name="skipEdgeExtraction">If true, skip Edge AI extraction (already done by caller).</param>
     public static async Task<FareResult> CalculateFareWithCoordsAsync(
         string? pickup,
         string? destination,
         string? phoneNumber = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool skipEdgeExtraction = false)
     {
         try
         {
@@ -147,9 +149,11 @@ public partial class FareCalculator
 
             var calc = GetDefaultCalculator();
 
-            // Skip Edge AI extraction if addresses already contain a city (v6.2 optimization)
-            // e.g., "52A David Road, Coventry" is already complete - no need to extract
-            bool addressesAlreadyComplete = ContainsCityHint(pickup) && ContainsCityHint(destination);
+            // Skip Edge AI extraction if:
+            // 1. Caller already did extraction (skipEdgeExtraction = true)
+            // 2. Addresses already contain a city (v6.2 optimization)
+            bool addressesAlreadyComplete = skipEdgeExtraction || 
+                (ContainsCityHint(pickup) && ContainsCityHint(destination));
             
             if (!addressesAlreadyComplete)
             {
