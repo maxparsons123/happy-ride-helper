@@ -51,6 +51,9 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private volatile bool _disposed;
     private volatile bool _isBotSpeaking;
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
+    
+    // v6.3: Non-blocking async logger to prevent UI thread from causing audio jitter
+    private readonly AsyncLogger _asyncLog = new();
 
     private VoIPMediaSession? _currentMediaSession;
     private ALawRtpPlayout? _alawPlayout;  // v6.1: Direct A-law RTP playout (better audio than NAudio pipeline)
@@ -581,7 +584,8 @@ Be concise, warm, and professional.
     private void Log(string msg)
     {
         if (_disposed) return;
-        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+        // v6.3: Use async logger to prevent blocking audio threads
+        _asyncLog.Log($"{DateTime.Now:HH:mm:ss.fff} {msg}", s => OnLog?.Invoke(s));
     }
 
     // ===========================================
@@ -603,6 +607,7 @@ Be concise, warm, and professional.
         try { _aiClient?.Dispose(); } catch { }
         try { _features?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
+        try { _asyncLog.Dispose(); } catch { }  // v6.3: Dispose async logger
 
         GC.SuppressFinalize(this);
     }
