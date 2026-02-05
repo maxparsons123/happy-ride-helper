@@ -1,4 +1,4 @@
-// Version: 124 - Added marker bit support for talk spurts
+// Version: 125 - Fixed jitter buffer for native G.711 mode (100ms→200ms)
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -18,7 +18,7 @@ namespace TaxiSipBridge;
 /// 
 /// Features:
 /// ✅ High-precision Stopwatch-based timing (sub-ms accuracy)
-/// ✅ Adaptive jitter buffer (60ms → 120ms on underruns)
+/// ✅ Adaptive jitter buffer (100ms → 200ms on underruns)
 /// ✅ NAT keepalives for strict NATs (25s interval)
 /// ✅ Symmetric RTP locking (dynamic endpoint detection)
 /// ✅ Smooth fade-out on underruns (click-free transitions)
@@ -30,11 +30,11 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
     private const int MAX_QUEUE_FRAMES = 1500; // ~30s max buffer (safety cap)
     
-    // Adaptive jitter buffer: starts at 40ms, grows to 80ms on underruns
-    // Lower latency for LAN/VoIP while still handling network jitter
-    private const int JITTER_BUFFER_MIN = 2;  // 40ms initial (low latency)
-    private const int JITTER_BUFFER_MAX = 4;  // 80ms after underruns
-    private const int UNDERRUN_THRESHOLD = 2; // Grow buffer after 2 consecutive underruns
+    // Adaptive jitter buffer: starts at 100ms (5 frames), grows to 200ms on underruns
+    // OpenAI sends audio in bursts, so we need a larger buffer to absorb jitter
+    private const int JITTER_BUFFER_MIN = 5;   // 100ms initial (handles OpenAI bursts)
+    private const int JITTER_BUFFER_MAX = 10;  // 200ms after underruns
+    private const int UNDERRUN_THRESHOLD = 1;  // Grow buffer after first underrun
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
@@ -198,7 +198,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         };
         _playoutThread.Start();
         
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (adaptive {_currentJitterBuffer * 20}ms buffer, ts={_timestamp})");
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (Native G.711, {_currentJitterBuffer * 20}ms buffer)");
     }
 
     public void Stop()
@@ -341,6 +341,11 @@ public sealed class DirectG711RtpPlayout : IDisposable
         {
             OnLog?.Invoke($"[DirectG711RtpPlayout] SendRtpRaw error: {ex.Message}");
         }
+    }
+
+    private void SendRtpFrame(byte[] frame)
+    {
+        SendRtpFrame(frame, false);
     }
 
     /// <summary>
