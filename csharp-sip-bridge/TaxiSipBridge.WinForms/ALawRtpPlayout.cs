@@ -34,6 +34,9 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte PAYLOAD_TYPE_PCMA = 8;  // RTP payload type for G.711 A-law
     private const int MAX_QUEUE_FRAMES = 1000; // ~20 seconds buffer
 
+    private const int JITTER_BUFFER_MS = 100;  // v6.2: Buffer before starting playout
+    private const int JITTER_BUFFER_FRAMES = JITTER_BUFFER_MS / FRAME_MS;  // 5 frames
+
     private readonly VoIPMediaSession _mediaSession;
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly AsyncLogger _asyncLog = new();  // v6.2: Non-blocking logging
@@ -45,6 +48,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private Thread? _playoutThread;
     private volatile bool _running;
     private volatile bool _disposed;
+    private volatile bool _isBuffering = true;  // v6.2: Start in buffering mode
     private bool _mmTimerActive;
 
     private uint _timestamp;
@@ -166,18 +170,23 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         while (_frameQueue.TryDequeue(out _)) { }
         lock (_accLock) { _accumulator = Array.Empty<byte>(); }
+        _isBuffering = true;  // v6.2: Re-enter buffering mode after clear
     }
 
     /// <summary>
-    /// High-precision 20ms playout loop with drift correction.
+    /// High-precision 20ms playout loop with jitter buffer and drift correction.
     /// Uses Stopwatch for sub-millisecond timing accuracy.
     /// </summary>
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
         double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
-        bool wasEmpty = true;
+        bool wasPlaying = false;
         int frameCounter = 0;
+        
+        // Pre-allocate silence frame for efficiency
+        var silenceFrame = new byte[SAMPLES_PER_FRAME];
+        Array.Fill(silenceFrame, ALAW_SILENCE);
 
         while (_running)
         {
@@ -194,13 +203,35 @@ public sealed class ALawRtpPlayout : IDisposable
                 continue;
             }
 
-            // Get next frame or generate silence on underrun
-            byte[] frame;
-            if (_frameQueue.TryDequeue(out var queuedFrame))
+            int queueCount = _frameQueue.Count;
+
+            // v6.2: Jitter buffer - wait until we have enough frames before starting
+            if (_isBuffering)
             {
-                frame = queuedFrame;
+                if (queueCount >= JITTER_BUFFER_FRAMES)
+                {
+                    _isBuffering = false;
+                    _asyncLog.Log($"[ALawRtpPlayout] Buffer ready ({queueCount} frames)");
+                }
+                else
+                {
+                    // Send silence while buffering
+                    SendFrame(silenceFrame, false);
+                    nextFrameTimeMs += FRAME_MS;
+                    continue;
+                }
+            }
+
+            // Get next frame or generate silence on underrun
+            if (_frameQueue.TryDequeue(out var frame))
+            {
                 frameCounter++;
-                wasEmpty = false;
+                
+                // Marker bit on first frame after silence (talk spurt start)
+                bool marker = !wasPlaying;
+                wasPlaying = true;
+                
+                SendFrame(frame, marker);
 
                 // Non-blocking diagnostic log every 500 frames (~10 seconds)
                 if (frameCounter % 500 == 0)
@@ -208,33 +239,18 @@ public sealed class ALawRtpPlayout : IDisposable
             }
             else
             {
-                // Generate silence frame
-                frame = new byte[SAMPLES_PER_FRAME];
-                Array.Fill(frame, ALAW_SILENCE);
-                Interlocked.Increment(ref _silenceFrames);
-
-                if (!wasEmpty)
+                // Queue empty - send silence and re-enter buffering mode
+                if (wasPlaying)
                 {
-                    wasEmpty = true;
+                    wasPlaying = false;
+                    _isBuffering = true;
+                    _asyncLog.Log($"[ALawRtpPlayout] Queue empty after {frameCounter} frames");
                     OnQueueEmpty?.Invoke();
                 }
+                
+                SendFrame(silenceFrame, false);
+                Interlocked.Increment(ref _silenceFrames);
             }
-
-            // Send raw A-law frame via RTP (payload type 8 = PCMA)
-            try
-            {
-                _mediaSession.SendRtpRaw(
-                    SDPMediaTypesEnum.audio,
-                    frame,
-                    _timestamp,
-                    0,  // marker bit
-                    PAYLOAD_TYPE_PCMA
-                );
-
-                _timestamp += SAMPLES_PER_FRAME;
-                Interlocked.Increment(ref _framesSent);
-            }
-            catch { }
 
             // Schedule next frame
             nextFrameTimeMs += FRAME_MS;
@@ -244,6 +260,24 @@ public sealed class ALawRtpPlayout : IDisposable
             if (now - nextFrameTimeMs > 40)
                 nextFrameTimeMs = now + FRAME_MS;
         }
+    }
+
+    private void SendFrame(byte[] frame, bool marker)
+    {
+        try
+        {
+            _mediaSession.SendRtpRaw(
+                SDPMediaTypesEnum.audio,
+                frame,
+                _timestamp,
+                marker ? 1 : 0,  // v6.2: Marker bit for talk spurt start
+                PAYLOAD_TYPE_PCMA
+            );
+
+            _timestamp += SAMPLES_PER_FRAME;
+            Interlocked.Increment(ref _framesSent);
+        }
+        catch { }
     }
 
     public void Dispose()
