@@ -1,8 +1,9 @@
- // Version: 126 - Increased jitter buffer for native G.711 mode (160ms→240ms)
+ // Version: 127 - Fixed jitter with multimedia timer + larger persistent buffer
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Threading;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
@@ -11,14 +12,27 @@ using SIPSorceryMedia.Abstractions;
 namespace TaxiSipBridge;
 
 /// <summary>
+/// Windows multimedia timer for precise 20ms scheduling.
+/// Thread.Sleep has 15.6ms granularity which causes jitter.
+/// </summary>
+internal static class WinMmTimer
+{
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    public static extern uint TimeBeginPeriod(uint uPeriod);
+    
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    public static extern uint TimeEndPeriod(uint uPeriod);
+}
+
+/// <summary>
 /// Production-grade RTP playout for native G.711 mode.
 /// 
 /// ZERO DSP: No resampling, no filtering, no volume processing.
 /// Raw G.711 bytes from OpenAI → jitter buffer → RTP at 20ms intervals.
 /// 
 /// Features:
-/// ✅ High-precision Stopwatch-based timing (sub-ms accuracy)
-/// ✅ Adaptive jitter buffer (100ms → 200ms on underruns)
+/// ✅ Windows multimedia timer for 1ms precision (vs 15.6ms default)
+/// ✅ Large persistent jitter buffer (300ms - survives barge-ins)
 /// ✅ NAT keepalives for strict NATs (25s interval)
 /// ✅ Symmetric RTP locking (dynamic endpoint detection)
 /// ✅ Smooth fade-out on underruns (click-free transitions)
@@ -30,11 +44,9 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
     private const int MAX_QUEUE_FRAMES = 1500; // ~30s max buffer (safety cap)
     
-    // Adaptive jitter buffer: starts at 100ms (5 frames), grows to 200ms on underruns
-    // OpenAI sends audio in bursts, so we need a larger buffer to absorb jitter
-    private const int JITTER_BUFFER_MIN = 8;   // 160ms initial (handles OpenAI G.711 bursts)
-    private const int JITTER_BUFFER_MAX = 12;  // 240ms after underruns (smoother for native G.711)
-    private const int UNDERRUN_THRESHOLD = 1;  // Grow buffer after first underrun
+    // Fixed large jitter buffer - OpenAI bursts need consistent buffering
+    // 300ms is large enough to absorb any timing variations
+    private const int JITTER_BUFFER_FRAMES = 15;  // 300ms buffer (rock-solid)
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
@@ -54,7 +66,6 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private int _queueCount;
     private int _framesSent;
     private int _consecutiveUnderruns;
-    private int _currentJitterBuffer;
     private bool _wasPlaying;
     private uint _timestamp;
     private byte _lastByte; // For fade-out
@@ -64,6 +75,9 @@ public sealed class DirectG711RtpPlayout : IDisposable
     // NAT state
     private IPEndPoint? _lastRemoteEndpoint;
     private volatile bool _natBindingEstablished;
+
+    // Multimedia timer state
+    private bool _mmTimerActive;
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -79,7 +93,6 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _silence = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)0xD5 : (byte)0xFF;
         _payloadType = codec == OpenAIRealtimeG711Client.G711Codec.ALaw ? (byte)8 : (byte)0;
         _lastByte = _silence;
-        _currentJitterBuffer = JITTER_BUFFER_MIN;
         
         // Pre-allocate frames
         _silenceFrame = new byte[FRAME_SIZE];
@@ -183,11 +196,18 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _wasPlaying = false;
         _isBuffering = true;
         _consecutiveUnderruns = 0;
-        _currentJitterBuffer = JITTER_BUFFER_MIN;
         _running = true;
         
         // Random start timestamp (RFC 3550 compliant)
         _timestamp = (uint)Random.Shared.Next();
+
+        // Enable Windows multimedia timer for 1ms precision
+        try
+        {
+            WinMmTimer.TimeBeginPeriod(1);
+            _mmTimerActive = true;
+        }
+        catch { /* Non-Windows or no permission */ }
 
         // High-precision playout thread
         _playoutThread = new Thread(PlayoutLoop)
@@ -198,7 +218,7 @@ public sealed class DirectG711RtpPlayout : IDisposable
         };
         _playoutThread.Start();
         
-        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (Native G.711, {_currentJitterBuffer * 20}ms buffer)");
+        OnLog?.Invoke($"[DirectG711RtpPlayout] Started (Native G.711, {JITTER_BUFFER_FRAMES * 20}ms buffer, mmTimer={_mmTimerActive})");
     }
 
     public void Stop()
@@ -206,6 +226,14 @@ public sealed class DirectG711RtpPlayout : IDisposable
         _running = false;
         _playoutThread?.Join(500);
         _playoutThread = null;
+        
+        // Release multimedia timer
+        if (_mmTimerActive)
+        {
+            try { WinMmTimer.TimeEndPeriod(1); } catch { }
+            _mmTimerActive = false;
+        }
+        
         OnLog?.Invoke($"[DirectG711RtpPlayout] Stopped ({_framesSent} frames sent)");
     }
 
@@ -249,18 +277,10 @@ public sealed class DirectG711RtpPlayout : IDisposable
     {
         int currentCount = Volatile.Read(ref _queueCount);
 
-        // Adaptive buffer: grow after consecutive underruns
-        if (_consecutiveUnderruns >= UNDERRUN_THRESHOLD && _currentJitterBuffer < JITTER_BUFFER_MAX)
-        {
-            _currentJitterBuffer = JITTER_BUFFER_MAX;
-            _consecutiveUnderruns = 0;
-            OnLog?.Invoke($"[DirectG711RtpPlayout] ⚠️ Underruns detected - buffer increased to {_currentJitterBuffer * 20}ms");
-        }
-
         // Jitter buffer: wait until we have enough frames before starting playout
         if (_isBuffering)
         {
-            if (currentCount >= _currentJitterBuffer)
+            if (currentCount >= JITTER_BUFFER_FRAMES)
             {
                 _isBuffering = false;
                 OnLog?.Invoke($"[DirectG711RtpPlayout] Buffer ready ({currentCount} frames), starting playout");
@@ -357,9 +377,8 @@ public sealed class DirectG711RtpPlayout : IDisposable
             Interlocked.Decrement(ref _queueCount);
 
         _wasPlaying = false;
-        _isBuffering = true;
+        _isBuffering = true;  // Will rebuffer to 300ms before resuming
         _consecutiveUnderruns = 0;
-        _currentJitterBuffer = JITTER_BUFFER_MIN; // Reset adaptive buffer
         _lastByte = _silence;
         _isNewTalkSpurt = false;
         OnLog?.Invoke("[DirectG711RtpPlayout] Queue cleared (barge-in)");
