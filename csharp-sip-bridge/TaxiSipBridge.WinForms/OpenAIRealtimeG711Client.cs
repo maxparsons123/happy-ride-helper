@@ -137,15 +137,15 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     /// Check if we can create a new response. Used by QueueResponseCreateAsync.
     /// NOTE: Does NOT check _responseQueued because we're already inside that gate when called.
     /// </summary>
-    private bool CanCreateResponse(bool skipQueueCheck = false)
+    private bool CanCreateResponse(bool skipQueueCheck = false, bool bypassTranscriptGuard = false)
     {
         return Volatile.Read(ref _responseActive) == 0 &&
                (skipQueueCheck || Volatile.Read(ref _responseQueued) == 0) &&
-               Volatile.Read(ref _transcriptPending) == 0 &&  // v2.6: Wait for transcript before responding
+               (bypassTranscriptGuard || Volatile.Read(ref _transcriptPending) == 0) &&  // v2.6: Wait for transcript (unless tool-driven)
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300;
+               (bypassTranscriptGuard || NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300);  // v7.1: Tool responses bypass speech check
     }
     
     /// <summary>
@@ -163,7 +163,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     /// Waits for any active response to complete first, then sends response.create.
     /// OpenAI's response.created event will set _responseActive = 1.
     /// </summary>
-    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000)
+    private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000, bool bypassTranscriptGuard = false)
     {
         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
             return;
@@ -197,7 +197,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
 
             // Skip the _responseQueued check since we're already inside this method
-            if (!CanCreateResponse(skipQueueCheck: true))
+            if (!CanCreateResponse(skipQueueCheck: true, bypassTranscriptGuard: bypassTranscriptGuard))
             {
                 // Log which condition blocked
                 var reason = Volatile.Read(ref _responseActive) == 1 ? "responseActive" :
@@ -212,7 +212,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             }
 
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-            Log(waitForCurrentResponse ? "🔄 response.create sent" : "🔄 response.create sent (forced after tool)");
+            Log(bypassTranscriptGuard ? "🔄 response.create sent (tool bypass)" : "🔄 response.create sent");
         }
         finally
         {
@@ -743,8 +743,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             // The old response won't send response.done, a NEW response will be created
             Interlocked.Exchange(ref _responseActive, 0);
             
-            // Trigger new response immediately with NO wait (old response is already done)
-            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+            // Trigger new response immediately - BYPASS transcript guard since we have tool result
+            await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
