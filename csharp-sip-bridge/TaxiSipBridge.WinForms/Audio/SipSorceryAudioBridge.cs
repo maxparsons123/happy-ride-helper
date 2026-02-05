@@ -1,12 +1,26 @@
-// Version: 6.0 - SIPSorcery-native audio bridge
+// Version: 6.1 - SIPSorcery-native audio bridge with high-precision timing
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge.Audio;
+
+/// <summary>
+/// Windows multimedia timer for precise 20ms scheduling (1ms granularity vs 15.6ms default).
+/// </summary>
+internal static class WinMmTimer
+{
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    public static extern uint TimeBeginPeriod(uint uPeriod);
+    
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    public static extern uint TimeEndPeriod(uint uPeriod);
+}
 
 /// <summary>
 /// Clean audio bridge using SIPSorcery's native audio handling.
@@ -50,6 +64,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
     private int _disposed;
     private uint _rtpTimestamp;
     private int _framesSent;
+    private bool _mmTimerActive;  // v6.1: multimedia timer flag
     
     // ===========================================
     // EVENTS
@@ -179,6 +194,14 @@ public sealed class SipSorceryAudioBridge : IDisposable
         _isBuffering = true;
         _running = true;
         
+        // Enable Windows multimedia timer for 1ms precision (v6.1)
+        try
+        {
+            WinMmTimer.TimeBeginPeriod(1);
+            _mmTimerActive = true;
+        }
+        catch { /* Non-Windows or no permission */ }
+        
         _playoutThread = new Thread(PlayoutLoop)
         {
             IsBackground = true,
@@ -187,7 +210,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
         };
         _playoutThread.Start();
         
-        OnLog?.Invoke($"[SipSorceryAudioBridge] Started ({JITTER_BUFFER_MS}ms buffer)");
+        OnLog?.Invoke($"[SipSorceryAudioBridge] Started ({JITTER_BUFFER_MS}ms buffer, mmTimer={_mmTimerActive})");
     }
     
     public void Stop()
@@ -196,25 +219,34 @@ public sealed class SipSorceryAudioBridge : IDisposable
         _playoutThread?.Join(500);
         _playoutThread = null;
         
+        // Release multimedia timer (v6.1)
+        if (_mmTimerActive)
+        {
+            try { WinMmTimer.TimeEndPeriod(1); } catch { }
+            _mmTimerActive = false;
+        }
+        
         OnLog?.Invoke($"[SipSorceryAudioBridge] Stopped ({_framesSent} frames sent)");
     }
     
     private void PlayoutLoop()
     {
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        double nextFrameTimeMs = stopwatch.Elapsed.TotalMilliseconds;
+        var sw = Stopwatch.StartNew();
+        double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
         bool wasPlaying = false;
         
         while (_running && Volatile.Read(ref _disposed) == 0)
         {
-            double now = stopwatch.Elapsed.TotalMilliseconds;
+            double now = sw.Elapsed.TotalMilliseconds;
             
-            // Wait for next frame time
+            // Wait for next frame time with high precision (v6.1)
             if (now < nextFrameTimeMs)
             {
                 double waitMs = nextFrameTimeMs - now;
-                if (waitMs > 2)
+                if (waitMs > 2.0)
                     Thread.Sleep((int)(waitMs - 1));
+                else if (waitMs > 0.1)
+                    Thread.SpinWait(100);
                 continue;
             }
             
@@ -266,8 +298,8 @@ public sealed class SipSorceryAudioBridge : IDisposable
             // Schedule next frame
             nextFrameTimeMs += FRAME_MS;
             
-            // Drift correction
-            now = stopwatch.Elapsed.TotalMilliseconds;
+            // Drift correction: if way behind, catch up (v6.1)
+            now = sw.Elapsed.TotalMilliseconds;
             if (now - nextFrameTimeMs > 40)
                 nextFrameTimeMs = now + FRAME_MS;
         }
