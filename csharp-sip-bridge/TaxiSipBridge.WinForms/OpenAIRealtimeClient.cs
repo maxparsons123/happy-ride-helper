@@ -729,13 +729,98 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     var (newPickup, newDest) = ApplyBookingSnapshotFromArgsWithTracking(args);
                     await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
                     OnBookingUpdated?.Invoke(_booking);
-                    await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+
+                    // v10.1: AUTO-QUOTE — if all 5 fields are filled, auto-calculate fare
+                    // This prevents the AI from "forgetting" to call book_taxi(action="request_quote")
+                    bool allFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Name)
+                        && !string.IsNullOrWhiteSpace(_booking.Pickup)
+                        && !string.IsNullOrWhiteSpace(_booking.Destination)
+                        && _booking.Passengers > 0
+                        && !string.IsNullOrWhiteSpace(_booking.PickupTime)
+                        && string.IsNullOrWhiteSpace(_booking.Fare); // Only auto-quote once
+
+                    if (allFieldsFilled)
+                    {
+                        Log("💰 AUTO-QUOTE: All fields collected, auto-calculating fare...");
+                        try
+                        {
+                            var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(_booking.Pickup, _booking.Destination, _callerId).ConfigureAwait(false);
+
+                            if (aiResult?.status == "clarification_needed")
+                            {
+                                Log("⚠️ AUTO-QUOTE: Ambiguous addresses - letting AI ask for clarification");
+                                await SendToolResultAsync(callId, new
+                                {
+                                    success = true,
+                                    auto_quote = false,
+                                    needs_clarification = true,
+                                    pickup_options = aiResult.pickup?.alternatives ?? Array.Empty<string>(),
+                                    destination_options = aiResult.dropoff?.alternatives ?? Array.Empty<string>(),
+                                    message = "Multiple locations found. Ask the caller which city or area."
+                                }).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                string resolvedP = aiResult?.pickup?.address ?? _booking.Pickup;
+                                string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
+                                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, cancellationToken: default, skipEdgeExtraction: true).ConfigureAwait(false);
+
+                                _booking.Fare = NormalizeEuroFare(fareResult.Fare);
+                                _booking.Eta = fareResult.Eta;
+                                _booking.PickupFormatted = fareResult.PickupFormatted;
+                                _booking.DestFormatted = fareResult.DestFormatted;
+                                _booking.PickupLat = fareResult.PickupLat;
+                                _booking.PickupLon = fareResult.PickupLon;
+                                _booking.DestLat = fareResult.DestLat;
+                                _booking.DestLon = fareResult.DestLon;
+                                _booking.PickupStreet ??= fareResult.PickupStreet;
+                                _booking.PickupNumber ??= fareResult.PickupNumber ?? FareCalculator.ExtractHouseNumber(_booking.Pickup);
+                                _booking.PickupPostalCode ??= fareResult.PickupPostalCode;
+                                _booking.PickupCity ??= fareResult.PickupCity;
+                                _booking.DestStreet ??= fareResult.DestStreet;
+                                _booking.DestNumber ??= fareResult.DestNumber ?? FareCalculator.ExtractHouseNumber(_booking.Destination);
+                                _booking.DestPostalCode ??= fareResult.DestPostalCode;
+                                _booking.DestCity ??= fareResult.DestCity;
+
+                                OnBookingUpdated?.Invoke(_booking);
+                                Log($"💰 AUTO-QUOTE: Fare={_booking.Fare}, ETA={_booking.Eta}");
+
+                                var fareSpoken = FormatFareForSpeech(_booking.Fare);
+                                await SendToolResultAsync(callId, new
+                                {
+                                    success = true,
+                                    auto_quote = true,
+                                    fare = _booking.Fare,
+                                    fare_spoken = fareSpoken,
+                                    eta = _booking.Eta,
+                                    pickup_verified = _booking.PickupFormatted ?? _booking.Pickup,
+                                    destination_verified = _booking.DestFormatted ?? _booking.Destination,
+                                    message = $"The fare is {fareSpoken} with an ETA of {_booking.Eta}. Ask: Would you like to confirm this booking?"
+                                }).ConfigureAwait(false);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"⚠️ AUTO-QUOTE failed: {ex.Message}");
+                            await SendToolResultAsync(callId, new
+                            {
+                                success = true,
+                                auto_quote = false,
+                                message = "Quote calculation failed. Ask the user to confirm and use book_taxi(action='request_quote')."
+                            }).ConfigureAwait(false);
+                        }
+                    }
+                    else
+                    {
+                        await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+                    }
 
                     // v7.6: State grounding — inject current state into conversation context
-                    // so OpenAI knows what's already collected and doesn't repeat questions
                     if (IsConnected)
                     {
-                        var stateText = $"[BRIDGE STATE] Name={_booking.Name ?? "?"}, Pickup={_booking.Pickup ?? "?"}, Destination={_booking.Destination ?? "?"}, Passengers={_booking.Passengers?.ToString() ?? "?"}, Time={_booking.PickupTime ?? "?"}";
+                        var stateText = allFieldsFilled && !string.IsNullOrWhiteSpace(_booking.Fare)
+                            ? $"[BRIDGE STATE] Name={_booking.Name}, Pickup={_booking.Pickup}, Destination={_booking.Destination}, Passengers={_booking.Passengers}, Time={_booking.PickupTime}, Fare={_booking.Fare}, ETA={_booking.Eta}. ANNOUNCE THE FARE AND ASK FOR CONFIRMATION."
+                            : $"[BRIDGE STATE] Name={_booking.Name ?? "?"}, Pickup={_booking.Pickup ?? "?"}, Destination={_booking.Destination ?? "?"}, Passengers={_booking.Passengers?.ToString() ?? "?"}, Time={_booking.PickupTime ?? "?"}";
                         await SendJsonAsync(new
                         {
                             type = "conversation.item.create",
@@ -749,7 +834,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         Log($"📋 State grounding injected: {stateText}");
                     }
 
-                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                    await QueueResponseCreateAsync(delayMs: allFieldsFilled ? 60 : 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                     break;
                 }
 
