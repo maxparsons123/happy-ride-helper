@@ -73,7 +73,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private bool _inboundFlushComplete;
     private DateTime _callStartedAt;
     private bool _adaHasStartedSpeaking;
-
+    private volatile bool _watchdogPending;  // v7.4: Track if watchdog should fire on queue empty
     // Stats
     private int _framesForwarded;
     private int _framesSent;
@@ -232,6 +232,7 @@ Be concise, warm, and professional.
             _alawPlayout = new ALawRtpPlayout(_currentMediaSession);
             _alawPlayout.OnQueueEmpty += () =>
             {
+                // v7.4: Track when playout genuinely empties after speech
                 if (_adaHasStartedSpeaking && _isBotSpeaking)
                 {
                     _isBotSpeaking = false;
@@ -239,6 +240,14 @@ Be concise, warm, and professional.
                     Log($"🔇 [{callId}] Playout queue empty - echo guard started");
                     
                     // Notify AI client + start watchdog from playout completion
+                    if (_features != null) _features.OnPlayoutComplete();
+                    else _aiClient?.NotifyPlayoutComplete();
+                }
+                // v7.4: Also trigger watchdog if response completed but queue was still draining
+                else if (_watchdogPending)
+                {
+                    _watchdogPending = false;
+                    Log($"🔇 [{callId}] Playout drained post-response - starting watchdog");
                     if (_features != null) _features.OnPlayoutComplete();
                     else _aiClient?.NotifyPlayoutComplete();
                 }
@@ -312,6 +321,19 @@ Be concise, warm, and professional.
             _isBotSpeaking = false;
             _botStoppedSpeakingAt = DateTime.UtcNow;
             Log($"✅ [{callId}] AI response done - UNBLOCKING user audio (echo guard {ECHO_GUARD_MS}ms)");
+            
+            // v7.4: If queue is already empty, start watchdog immediately
+            // Otherwise, set pending flag for OnQueueEmpty to pick up
+            if (_alawPlayout == null || _alawPlayout.QueuedFrames == 0)
+            {
+                Log($"🔔 [{callId}] Queue already empty - starting watchdog now");
+                if (_features != null) _features.OnPlayoutComplete();
+                else _aiClient?.NotifyPlayoutComplete();
+            }
+            else
+            {
+                _watchdogPending = true;
+            }
         };
 
         // Barge-in handler - only act if Ada is actually speaking or queue has audio
