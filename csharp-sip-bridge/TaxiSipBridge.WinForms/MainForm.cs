@@ -409,7 +409,7 @@ public partial class MainForm : Form
                 // Create call handler based on mode
                 if (_useG711Mode)
                 {
-                    // G711 mode: 8kHz μ-law passthrough (experimental)
+                    // G711 mode: 8kHz A-law passthrough (v5.1)
                     var g711Handler = new G711CallHandler(apiKey);
                     _callHandler = g711Handler;
 
@@ -422,7 +422,7 @@ public partial class MainForm : Form
 
                     _sipLoginManager.SetCallHandler(_callHandler);
                     _sipLoginManager.Start();
-                    AddLog("🎵 SIP G711 mode started - 8kHz μ-law passthrough (experimental)");
+                    AddLog("🎵 SIP G711 mode started - 8kHz A-law passthrough (v5.1)");
                 }
                 else
                 {
