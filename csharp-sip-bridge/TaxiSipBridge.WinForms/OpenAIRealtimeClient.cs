@@ -604,6 +604,15 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         if (responseId != null && _activeResponseId == responseId)
             return;
 
+       // STT-GROUNDING GUARD: Cancel response if transcript is still pending
+       // This prevents Ada from responding before we know what the user said
+       if (Volatile.Read(ref _transcriptPending) == 1)
+       {
+           Log("🛑 Cancelling response - transcript still pending (STT grounding)");
+           _ = SendJsonAsync(new { type = "response.cancel" });
+           return;
+       }
+
         _activeResponseId = responseId;
         Interlocked.Exchange(ref _responseActive, 1);
         Volatile.Write(ref _responseCreatedAt, NowMs());
