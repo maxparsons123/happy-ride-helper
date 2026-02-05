@@ -143,6 +143,16 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                IsConnected &&
                NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300;
     }
+    
+    /// <summary>
+    /// Cancel any pending deferred response to prevent double-responses
+    /// when G711CallFeatures watchdog sends its own response.create.
+    /// </summary>
+    public void CancelDeferredResponse()
+    {
+        if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+            Log("🔄 Deferred response.create cancelled");
+    }
 
     /// <summary>
     /// Queue a response.create. Does NOT set _responseActive manually.
@@ -533,53 +543,8 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         });
                     }
 
-                    // No-reply watchdog: prompt user after silence
-                    var watchdogDelayMs = 15000;
-                    var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(watchdogDelayMs).ConfigureAwait(false);
-
-                        // Abort if cancelled, call ended, response active, or transcript pending
-                        if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
-                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
-                        if (Volatile.Read(ref _responseActive) == 1) return;
-                        if (Volatile.Read(ref _transcriptPending) == 1)
-                        {
-                            Log("⏰ Watchdog: transcript pending - aborting");
-                            return;
-                        }
-                        
-                        // v2.6: Check if there was recent local speech (within 3s) to avoid discarding user audio
-                        var msSinceLastSpeech = NowMs() - Volatile.Read(ref _lastUserSpeechAt);
-                        if (msSinceLastSpeech < 3000)
-                        {
-                            Log($"⏰ Watchdog: recent speech {msSinceLastSpeech}ms ago - aborting");
-                            return;
-                        }
-
-                        Log($"⏰ No-reply watchdog triggered ({watchdogDelayMs}ms) - prompting user");
-
-                        await SendJsonAsync(new
-                        {
-                            type = "conversation.item.create",
-                            item = new
-                            {
-                                type = "message",
-                                role = "system",
-                                content = new[]
-                                {
-                                    new
-                                    {
-                                        type = "input_text",
-                                        text = "[SILENCE DETECTED] The user has not responded. Gently ask if they're still there or repeat your last question briefly."
-                                    }
-                                }
-                            }
-                        }).ConfigureAwait(false);
-
-                        await QueueResponseCreateAsync(delayMs: 20, waitForCurrentResponse: false).ConfigureAwait(false);
-                    });
+                    // NOTE: No-reply watchdog is handled by G711CallFeatures.OnPlayoutComplete()
+                    // to avoid duplicate watchdogs causing double-responses
 
                     break;
                 }
