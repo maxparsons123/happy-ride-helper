@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Threading;
+using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
@@ -11,8 +12,8 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Direct A-law RTP playout for OpenAI g711_alaw output.
 /// 
-/// v4.2: Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
-/// and sends directly via SIPSorcery's SendRtpRaw (payload type 8 = PCMA).
+/// v6.1: Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
+/// and sends directly via VoIPMediaSession's SendRtpRaw (payload type 8 = PCMA).
 /// 
 /// No decoding. No resampling. Just raw RTP passthrough.
 /// </summary>
@@ -25,7 +26,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte PAYLOAD_TYPE_PCMA = 8;  // RTP payload type for G.711 A-law
     private const int MAX_QUEUE_FRAMES = 1000; // ~20 seconds buffer
 
-    private readonly RTPSession _rtpSession;
+    private readonly VoIPMediaSession _mediaSession;  // v6.1: Use VoIPMediaSession directly
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     
     // Accumulator for incoming A-law bytes (may arrive in odd sizes)
@@ -41,39 +42,16 @@ public sealed class ALawRtpPlayout : IDisposable
     private int _silenceFrames;
     private int _droppedFrames;
 
-    // NAT punch-through (symmetric RTP)
-    private IPEndPoint? _lastRemoteEndpoint;
-
     public event Action? OnQueueEmpty;
 
     public int QueuedFrames => _frameQueue.Count;
     public int FramesSent => _framesSent;
     public int SilenceFrames => _silenceFrames;
 
-    public ALawRtpPlayout(RTPSession rtpSession)
+    public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
-        _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
-        
-        // Symmetric RTP: lock destination to where we receive RTP from (NAT traversal)
-        _rtpSession.AcceptRtpFromAny = true;
-        _rtpSession.OnRtpPacketReceived += HandleSymmetricRtp;
+        _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
     }
-
-    private void HandleSymmetricRtp(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
-    {
-        if (mediaType != SDPMediaTypesEnum.audio) return;
-
-        if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(remoteEndPoint))
-        {
-            _lastRemoteEndpoint = remoteEndPoint;
-            try
-            {
-                _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteEndPoint, remoteEndPoint);
-            }
-            catch { }
-        }
-    }
-
     /// <summary>
     /// Buffer raw A-law bytes from OpenAI for playout.
     /// Frames into 160-byte (20ms) chunks automatically.
@@ -224,7 +202,7 @@ public sealed class ALawRtpPlayout : IDisposable
             // Send raw A-law frame via RTP (payload type 8 = PCMA)
             try
             {
-                _rtpSession.SendRtpRaw(
+                _mediaSession.SendRtpRaw(
                     SDPMediaTypesEnum.audio,
                     frame,
                     _timestamp,
@@ -252,8 +230,6 @@ public sealed class ALawRtpPlayout : IDisposable
         _disposed = true;
 
         Stop();
-
-        try { _rtpSession.OnRtpPacketReceived -= HandleSymmetricRtp; } catch { }
 
         GC.SuppressFinalize(this);
     }
