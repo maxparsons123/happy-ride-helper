@@ -38,9 +38,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5; // ITU-T G.711 A-law silence
     private const byte PAYLOAD_TYPE_PCMA = 8; // RTP payload type for A-law
 
-    // FIXED 80ms buffer (4 frames) - optimal smoothness for telephony
-    // Larger buffers cause latency wobble; smaller cause underruns
-    private const int JITTER_BUFFER_FRAMES = 4;
+    // FIXED 100ms buffer (5 frames) - absorbs OpenAI burst delivery
+    // Prevents "fast then slow" pacing artifacts from bursty TTS
+    private const int JITTER_BUFFER_FRAMES = 5;
+    private const int REBUFFER_THRESHOLD = 2; // Re-buffer if queue drops below this
     private const int MAX_QUEUE_FRAMES = 1500; // ~30s safety cap
 
     private readonly VoIPMediaSession _mediaSession;
@@ -226,8 +227,16 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private void SendNextFrame()
     {
+        int queueCount = Volatile.Read(ref _queueCount);
+        
+        // Re-buffer if queue gets too low (prevents burst→slow pacing)
+        if (!_isBuffering && queueCount < REBUFFER_THRESHOLD && queueCount > 0)
+        {
+            _isBuffering = true;
+        }
+        
         // Fixed jitter buffer: wait until we have enough frames
-        if (_isBuffering && Volatile.Read(ref _queueCount) < JITTER_BUFFER_FRAMES)
+        if (_isBuffering && queueCount < JITTER_BUFFER_FRAMES)
         {
             SendRtpFrame(_silenceFrame, false);
             return;
