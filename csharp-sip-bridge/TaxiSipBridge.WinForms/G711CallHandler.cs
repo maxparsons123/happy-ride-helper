@@ -8,7 +8,7 @@ using TaxiSipBridge.Audio;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// G711CallHandler v6.0 - True A-law end-to-end passthrough @ 8kHz.
+/// G711CallHandler v6.3 - True A-law end-to-end passthrough @ 8kHz with non-blocking logging.
 /// 
 /// ═══════════════════════════════════════════════════════════════════════════════
 /// AUDIO ARCHITECTURE (v6.0 - Zero-Processing Passthrough)
