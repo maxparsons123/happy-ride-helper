@@ -695,7 +695,19 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             }
         }
 
-        Interlocked.Exchange(ref _transcriptPending, 0);
+        // STT-grounding: delay 120ms to let Whisper fully settle, then trigger response
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(120).ConfigureAwait(false);
+            Interlocked.Exchange(ref _transcriptPending, 0);
+
+            // Only trigger response if conditions are met
+            if (CanCreateResponse())
+            {
+                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false).ConfigureAwait(false);
+                Log("🎯 STT-grounded response.create triggered");
+            }
+        });
     }
 
     private void HandleError(JsonElement root)
@@ -1025,7 +1037,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     type = "server_vad",
                     threshold = 0.35,
                     prefix_padding_ms = 350,
-                    silence_duration_ms = 800
+                    silence_duration_ms = 800,
+                    create_response = false  // STT-grounding: manual trigger after transcript
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
