@@ -1,4 +1,4 @@
-// ALawRtpPlayout.cs - Version 7.2 SMOOTH TUNED
+// ALawRtpPlayout.cs - Version 7.4 REBUFFER SMOOTH
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -14,8 +14,9 @@ namespace TaxiSipBridge;
 /// <summary>
 /// PURE A-LAW PASSTHROUGH with buttery-smooth timing.
 /// 
-/// Optimized for smoothness over "smart" features:
-/// ✅ Fixed 80ms jitter buffer (consistent latency = smoother playout)
+/// ✅ Fixed 100ms jitter buffer (absorbs OpenAI burst delivery)
+/// ✅ Re-buffering on underrun (prevents fast→slow pacing artifacts)
+/// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
 /// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
 /// ✅ Pre-allocated lock-free accumulator (no GC hiccups)
 /// ✅ Instant silence transitions (NO fade-out = no G.711 warbling)
