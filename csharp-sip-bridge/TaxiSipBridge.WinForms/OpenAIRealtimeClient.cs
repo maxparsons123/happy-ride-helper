@@ -791,8 +791,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             string resolvedP = aiResult?.pickup?.address ?? _booking.Pickup;
                             string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
 
-                            // Geocode and Calculate
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId).ConfigureAwait(false);
+                            // Geocode and Calculate (skip Edge extraction since we already did it)
+                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
 
                             // Map all geocoded data to state
                             _booking.Fare = NormalizeEuroFare(fareResult.Fare);
@@ -803,6 +803,14 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             _booking.PickupLon = fareResult.PickupLon;
                             _booking.DestLat = fareResult.DestLat;
                             _booking.DestLon = fareResult.DestLon;
+                            _booking.PickupStreet ??= fareResult.PickupStreet;
+                            _booking.PickupNumber ??= fareResult.PickupNumber ?? FareCalculator.ExtractHouseNumber(_booking.Pickup);
+                            _booking.PickupPostalCode ??= fareResult.PickupPostalCode;
+                            _booking.PickupCity ??= fareResult.PickupCity;
+                            _booking.DestStreet ??= fareResult.DestStreet;
+                            _booking.DestNumber ??= fareResult.DestNumber ?? FareCalculator.ExtractHouseNumber(_booking.Destination);
+                            _booking.DestPostalCode ??= fareResult.DestPostalCode;
+                            _booking.DestCity ??= fareResult.DestCity;
 
                             _awaitingConfirmation = true;
                             OnBookingUpdated?.Invoke(_booking);
@@ -834,8 +842,25 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         if (string.IsNullOrWhiteSpace(_booking.PickupStreet))
                         {
                             var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(_booking.Pickup, _booking.Destination, _callerId).ConfigureAwait(false);
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId).ConfigureAwait(false);
-                            // (Mapping logic for dispatch...)
+                            // Skip Edge extraction in fare calc since we just did it
+                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            
+                            // Map geocoded data to booking state for BSQD dispatch
+                            _booking.PickupLat ??= fareResult.PickupLat;
+                            _booking.PickupLon ??= fareResult.PickupLon;
+                            _booking.PickupStreet ??= fareResult.PickupStreet;
+                            _booking.PickupNumber ??= fareResult.PickupNumber ?? FareCalculator.ExtractHouseNumber(_booking.Pickup);
+                            _booking.PickupPostalCode ??= fareResult.PickupPostalCode;
+                            _booking.PickupCity ??= fareResult.PickupCity;
+                            _booking.PickupFormatted ??= fareResult.PickupFormatted;
+                            
+                            _booking.DestLat ??= fareResult.DestLat;
+                            _booking.DestLon ??= fareResult.DestLon;
+                            _booking.DestStreet ??= fareResult.DestStreet;
+                            _booking.DestNumber ??= fareResult.DestNumber ?? FareCalculator.ExtractHouseNumber(_booking.Destination);
+                            _booking.DestPostalCode ??= fareResult.DestPostalCode;
+                            _booking.DestCity ??= fareResult.DestCity;
+                            _booking.DestFormatted ??= fareResult.DestFormatted;
                         }
 
                         OnBookingUpdated?.Invoke(_booking);
