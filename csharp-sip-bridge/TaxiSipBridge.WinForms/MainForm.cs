@@ -519,7 +519,7 @@ public partial class MainForm : Form
 
                 _localAiClient = new OpenAIRealtimeClient(
                     apiKey: apiKey,
-                    model: "gpt-4o-realtime-preview-2024-12-17",
+                    model: "gpt-4o-mini-realtime-preview-2024-12-17",
                     voice: "alloy",
                     systemPrompt: "You are Ada, a friendly UK taxi dispatcher."
                 );

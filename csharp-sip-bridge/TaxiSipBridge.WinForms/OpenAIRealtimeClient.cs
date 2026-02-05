@@ -103,7 +103,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     // =========================
     public OpenAIRealtimeClient(
         string apiKey,
-        string model = "gpt-4o-realtime-preview-2024-12-17",
+        string model = "gpt-4o-mini-realtime-preview-2024-12-17",
         string voice = "shimmer",
         string? dispatchWebhookUrl = null)
     {
@@ -1856,7 +1856,7 @@ RESPONSE STYLE
         {
             type = "function",
             name = "sync_booking_data",
-            description = "MANDATORY: You MUST call this function after EVERY user turn that provides a name, pickup address, destination, passenger count, or pickup time. If you do NOT call this, the booking data will be LOST and the system will fail. Call it even if only one field changed — always include ALL known fields.",
+            description = "Save the current booking state. Call after every user turn that provides or corrects booking info.",
             parameters = new
             {
                 type = "object",
@@ -1874,13 +1874,13 @@ RESPONSE STYLE
         {
             type = "function",
             name = "book_taxi",
-            description = "MANDATORY: You MUST call this with action='confirmed' BEFORE telling the user their booking is confirmed. NEVER announce a booking reference or success without calling this first. The reference number comes from the tool result — NEVER invent one.",
+            description = "Request a fare quote or confirm and dispatch the booking.",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
-                    ["action"] = new { type = "string", description = "Must be 'confirmed' to finalize booking", @enum = new[] { "request_quote", "confirmed" } },
+                    ["action"] = new { type = "string", description = "Use 'request_quote' for fare estimate or 'confirmed' to finalize", @enum = new[] { "request_quote", "confirmed" } },
                     ["caller_name"] = new { type = "string" },
                     ["pickup"] = new { type = "string" },
                     ["destination"] = new { type = "string" },
@@ -1910,7 +1910,7 @@ RESPONSE STYLE
         {
             type = "function",
             name = "end_call",
-            description = "End the call. ONLY call this AFTER speaking the mandatory closing script.",
+            description = "End the call after speaking the closing script.",
             parameters = new
             {
                 type = "object",
