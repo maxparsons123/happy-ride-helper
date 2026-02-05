@@ -104,7 +104,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     public G711CallHandler(
         string apiKey,
         string model = "gpt-4o-realtime-preview-2025-06-03",
-        string voice = "shimmer",
+        string voice = "coral",  // v6.0: Changed from shimmer to coral for more energetic voice
         string? instructions = null,
         string? greeting = null)
     {
@@ -112,7 +112,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
         _model = model;
         _voice = voice;
         _instructions = instructions ?? GetDefaultInstructions();
-        _greeting = greeting ?? "Hello! How can I help you today?";
+        _greeting = greeting ?? "Hi there! Welcome to Voice Taxibot!";  // v6.0: More energetic greeting
     }
 
     private static string GetDefaultInstructions() => @"
