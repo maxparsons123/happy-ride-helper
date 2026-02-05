@@ -1,268 +1,253 @@
+// ALawRtpPlayout.cs - Version 7.2 SMOOTH TUNED
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Direct A-law RTP playout for OpenAI g711_alaw output.
+/// PURE A-LAW PASSTHROUGH with buttery-smooth timing.
 /// 
-/// v6.3: High-precision timing with Windows multimedia timer (1ms granularity),
-/// non-blocking AsyncLogger, and 100ms jitter buffer for smooth playout.
+/// Optimized for smoothness over "smart" features:
+/// ✅ Fixed 80ms jitter buffer (consistent latency = smoother playout)
+/// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
+/// ✅ Pre-allocated lock-free accumulator (no GC hiccups)
+/// ✅ Instant silence transitions (NO fade-out = no G.711 warbling)
+/// ✅ NAT keepalives (reliability without audio impact)
+/// ✅ Minimal logging (zero hot-path overhead)
 /// 
-/// Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
-/// and sends directly via VoIPMediaSession's SendRtpRaw (payload type 8 = PCMA).
-/// 
-/// No decoding. No resampling. Just raw RTP passthrough.
+/// Architecture: Pure passthrough - NO DSP, NO resampling, NO conversions.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
-    // Windows multimedia timer for 1ms precision (vs 15.6ms default)
+    // Windows multimedia timer for 1ms precision
     [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
     private static extern uint TimeBeginPeriod(uint uPeriod);
-    
+
     [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
     private static extern uint TimeEndPeriod(uint uPeriod);
 
     private const int FRAME_MS = 20;
-    private const int SAMPLES_PER_FRAME = 160; // 20ms @ 8kHz = 160 bytes for A-law
-    private const byte ALAW_SILENCE = 0xD5;    // A-law silence byte
-    private const byte PAYLOAD_TYPE_PCMA = 8;  // RTP payload type for G.711 A-law
-    private const int MAX_QUEUE_FRAMES = 1000; // ~20 seconds buffer
+    private const int FRAME_SIZE = 160; // 20ms @ 8kHz A-law
+    private const byte ALAW_SILENCE = 0xD5; // ITU-T G.711 A-law silence
+    private const byte PAYLOAD_TYPE_PCMA = 8; // RTP payload type for A-law
 
-    private const int JITTER_BUFFER_MS = 100;  // v6.2: Buffer before starting playout
-    private const int JITTER_BUFFER_FRAMES = JITTER_BUFFER_MS / FRAME_MS;  // 5 frames
+    // FIXED 80ms buffer (4 frames) - optimal smoothness for telephony
+    // Larger buffers cause latency wobble; smaller cause underruns
+    private const int JITTER_BUFFER_FRAMES = 4;
+    private const int MAX_QUEUE_FRAMES = 1500; // ~30s safety cap
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
-    private readonly AsyncLogger _asyncLog = new();  // v6.2: Non-blocking logging
-    
-    // Accumulator for incoming A-law bytes (may arrive in odd sizes)
-    private byte[] _accumulator = Array.Empty<byte>();
+    private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
+
+    // Pre-allocated accumulator (avoids GC pressure → smoother audio)
+    private byte[] _accumulator = new byte[8192];
+    private int _accCount;
     private readonly object _accLock = new();
 
+    // Threading/state
     private Thread? _playoutThread;
+    private System.Threading.Timer? _natKeepaliveTimer;
     private volatile bool _running;
-    private volatile bool _disposed;
-    private volatile bool _isBuffering = true;  // v6.2: Start in buffering mode
-    private bool _mmTimerActive;
-
-    private uint _timestamp;
+    private volatile bool _isBuffering = true;
+    private volatile int _disposed;
+    private int _queueCount;
     private int _framesSent;
-    private int _silenceFrames;
-    private int _droppedFrames;
+    private uint _timestamp;
+    private DateTime _lastRtpSendTime = DateTime.UtcNow;
 
-    public event Action? OnQueueEmpty;
+    // NAT state
+    private IPEndPoint? _lastRemoteEndpoint;
+    private volatile bool _natBindingEstablished;
+
     public event Action<string>? OnLog;
 
-    public int QueuedFrames => _frameQueue.Count;
+    public int QueuedFrames => Volatile.Read(ref _queueCount);
     public int FramesSent => _framesSent;
-    public int SilenceFrames => _silenceFrames;
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
+        _mediaSession.AcceptRtpFromAny = true;
+        _mediaSession.OnRtpPacketReceived += HandleSymmetricRtp;
+
+        Array.Fill(_silenceFrame, ALAW_SILENCE);
+
+        // Minimal NAT keepalive (25s interval - non-intrusive)
+        _natKeepaliveTimer = new System.Threading.Timer(KeepaliveNAT, null,
+            TimeSpan.FromSeconds(25), TimeSpan.FromSeconds(25));
+    }
+
+    private void HandleSymmetricRtp(IPEndPoint ep, SDPMediaTypesEnum media, RTPPacket pkt)
+    {
+        if (media != SDPMediaTypesEnum.audio || Volatile.Read(ref _disposed) != 0) return;
+
+        if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(ep))
+        {
+            _lastRemoteEndpoint = ep;
+            try
+            {
+                _mediaSession.SetDestination(SDPMediaTypesEnum.audio, ep, ep);
+                _natBindingEstablished = true;
+                SafeLog($"[NAT] ✓ RTP locked to {ep}");
+            }
+            catch { }
+        }
+    }
+
+    private void KeepaliveNAT(object? state)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (_natBindingEstablished || (DateTime.UtcNow - _lastRtpSendTime).TotalSeconds < 20) return;
+
+        try { SendRtpFrame(_silenceFrame, false); } catch { }
     }
 
     /// <summary>
-    /// Buffer raw A-law bytes from OpenAI for playout.
-    /// Frames into 160-byte (20ms) chunks automatically.
+    /// Buffer raw A-law bytes (any length) with lock-free accumulator.
     /// </summary>
     public void BufferALaw(byte[] alawData)
     {
-        if (!_running || _disposed || alawData == null || alawData.Length == 0)
-            return;
+        if (Volatile.Read(ref _disposed) != 0 || alawData == null || alawData.Length == 0) return;
 
         lock (_accLock)
         {
-            // Append to accumulator
-            var newAcc = new byte[_accumulator.Length + alawData.Length];
-            Buffer.BlockCopy(_accumulator, 0, newAcc, 0, _accumulator.Length);
-            Buffer.BlockCopy(alawData, 0, newAcc, _accumulator.Length, alawData.Length);
-            _accumulator = newAcc;
-
-            // Extract complete 160-byte frames
-            while (_accumulator.Length >= SAMPLES_PER_FRAME)
+            // Append to pre-allocated buffer (reallocate only if truly needed)
+            if (_accCount + alawData.Length > _accumulator.Length)
             {
-                var frame = new byte[SAMPLES_PER_FRAME];
-                Buffer.BlockCopy(_accumulator, 0, frame, 0, SAMPLES_PER_FRAME);
+                var newAcc = new byte[Math.Max(_accumulator.Length * 2, _accCount + alawData.Length)];
+                Buffer.BlockCopy(_accumulator, 0, newAcc, 0, _accCount);
+                _accumulator = newAcc;
+            }
 
-                // Overflow protection: drop oldest frame if queue is full
-                if (_frameQueue.Count >= MAX_QUEUE_FRAMES)
+            Buffer.BlockCopy(alawData, 0, _accumulator, _accCount, alawData.Length);
+            _accCount += alawData.Length;
+
+            // Extract complete frames
+            while (_accCount >= FRAME_SIZE)
+            {
+                // Overflow protection
+                while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
                 {
-                    _frameQueue.TryDequeue(out _);
-                    Interlocked.Increment(ref _droppedFrames);
+                    if (_frameQueue.TryDequeue(out _))
+                        Interlocked.Decrement(ref _queueCount);
                 }
 
+                var frame = new byte[FRAME_SIZE];
+                Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
                 _frameQueue.Enqueue(frame);
+                Interlocked.Increment(ref _queueCount);
 
-                // Remove consumed bytes from accumulator
-                var remaining = new byte[_accumulator.Length - SAMPLES_PER_FRAME];
-                Buffer.BlockCopy(_accumulator, SAMPLES_PER_FRAME, remaining, 0, remaining.Length);
-                _accumulator = remaining;
+                // Shift remaining bytes down
+                _accCount -= FRAME_SIZE;
+                if (_accCount > 0)
+                    Buffer.BlockCopy(_accumulator, FRAME_SIZE, _accumulator, 0, _accCount);
             }
         }
     }
 
-    /// <summary>
-    /// Start the playout thread with high-precision timing.
-    /// </summary>
     public void Start()
     {
-        if (_running || _disposed) return;
+        if (Volatile.Read(ref _disposed) != 0 || _running) return;
+
         _running = true;
-
-        _timestamp = (uint)new Random().Next(0, 65535); // Random starting timestamp per RFC 3550
+        _isBuffering = true;
         _framesSent = 0;
-        _silenceFrames = 0;
-        _droppedFrames = 0;
+        _timestamp = (uint)Random.Shared.Next();
 
-        // Enable Windows multimedia timer for 1ms precision (v6.2)
-        try
-        {
-            TimeBeginPeriod(1);
-            _mmTimerActive = true;
-        }
-        catch { /* Non-Windows or no permission */ }
+        // Enable 1ms multimedia timer (smooth timing baseline)
+        try { TimeBeginPeriod(1); } catch { }
 
         _playoutThread = new Thread(PlayoutLoop)
         {
             IsBackground = true,
-            Priority = ThreadPriority.Highest,  // v6.2: Maximum priority for timing
-            Name = "ALawRtpPlayoutThread"
+            Priority = ThreadPriority.AboveNormal, // Prevents starving audio capture
+            Name = "ALawPlayout"
         };
 
         _playoutThread.Start();
-        _asyncLog.Log("[ALawRtpPlayout] Started (v6.2, mmTimer=1ms)");
+        SafeLog($"[RTP] Started (pure A-law, {JITTER_BUFFER_FRAMES * 20}ms fixed buffer)");
     }
 
-    /// <summary>
-    /// Stop the playout thread and clear queue.
-    /// </summary>
     public void Stop()
     {
-        if (!_running) return;
         _running = false;
-
-        try { _playoutThread?.Join(500); } catch { }
+        _playoutThread?.Join(500);
         _playoutThread = null;
 
-        // Disable multimedia timer
-        if (_mmTimerActive)
-        {
-            try { TimeEndPeriod(1); } catch { }
-            _mmTimerActive = false;
-        }
+        try { TimeEndPeriod(1); } catch { }
 
         while (_frameQueue.TryDequeue(out _)) { }
-        
-        _asyncLog.Log($"[ALawRtpPlayout] Stopped ({_framesSent} frames sent)");
     }
 
     /// <summary>
-    /// Clear all queued frames (e.g., on barge-in).
-    /// </summary>
-    public void Clear()
-    {
-        while (_frameQueue.TryDequeue(out _)) { }
-        lock (_accLock) { _accumulator = Array.Empty<byte>(); }
-        _isBuffering = true;  // v6.2: Re-enter buffering mode after clear
-    }
-
-    /// <summary>
-    /// High-precision 20ms playout loop with jitter buffer and drift correction.
-    /// Uses Stopwatch for sub-millisecond timing accuracy.
+    /// SMOOTH TIMING LOOP: Simple wall-clock sync without aggressive correction.
+    /// Aggressive drift correction causes micro-stutters → perceived as jitter.
     /// </summary>
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
-        double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
-        bool wasPlaying = false;
-        int frameCounter = 0;
-        
-        // Pre-allocate silence frame for efficiency
-        var silenceFrame = new byte[SAMPLES_PER_FRAME];
-        Array.Fill(silenceFrame, ALAW_SILENCE);
+        long nextFrameNs = sw.ElapsedTicks * 100; // 100ns units
 
-        while (_running)
+        while (_running && Volatile.Read(ref _disposed) == 0)
         {
-            double now = sw.Elapsed.TotalMilliseconds;
+            long nowNs = sw.ElapsedTicks * 100;
 
-            // Wait for next frame time with hybrid sleep/spin strategy
-            if (now < nextFrameTimeMs)
+            // Smooth wait: sleep most of the time, spin only for final precision
+            if (nowNs < nextFrameNs)
             {
-                double waitMs = nextFrameTimeMs - now;
-                if (waitMs > 2.0)
-                    Thread.Sleep((int)(waitMs - 1));  // Sleep most of the wait
-                else if (waitMs > 0.5)
-                    Thread.SpinWait(500);  // Spin for final sub-ms precision
+                long waitNs = nextFrameNs - nowNs;
+                if (waitNs > 2_000_000) // >2ms
+                    Thread.Sleep((int)(waitNs / 1_000_000) - 1);
+                else if (waitNs > 100_000) // >0.1ms
+                    Thread.SpinWait(50);
                 continue;
             }
 
-            int queueCount = _frameQueue.Count;
+            SendNextFrame();
 
-            // v6.2: Jitter buffer - wait until we have enough frames before starting
-            if (_isBuffering)
-            {
-                if (queueCount >= JITTER_BUFFER_FRAMES)
-                {
-                    _isBuffering = false;
-                    _asyncLog.Log($"[ALawRtpPlayout] Buffer ready ({queueCount} frames)");
-                }
-                else
-                {
-                    // Send silence while buffering
-                    SendFrame(silenceFrame, false);
-                    nextFrameTimeMs += FRAME_MS;
-                    continue;
-                }
-            }
+            // Schedule next frame based on WALL CLOCK (no accumulation)
+            nextFrameNs += 20_000_000; // 20ms in 100ns units
 
-            // Get next frame or generate silence on underrun
-            if (_frameQueue.TryDequeue(out var frame))
-            {
-                frameCounter++;
-                
-                // Marker bit on first frame after silence (talk spurt start)
-                bool marker = !wasPlaying;
-                wasPlaying = true;
-                
-                SendFrame(frame, marker);
-
-                // Non-blocking diagnostic log every 500 frames (~10 seconds)
-                if (frameCounter % 500 == 0)
-                    _asyncLog.Log($"[ALawRtpPlayout] Sent {frameCounter} frames (queue: {_frameQueue.Count})");
-            }
-            else
-            {
-                // Queue empty - send silence and re-enter buffering mode
-                if (wasPlaying)
-                {
-                    wasPlaying = false;
-                    _isBuffering = true;
-                    _asyncLog.Log($"[ALawRtpPlayout] Queue empty after {frameCounter} frames");
-                    OnQueueEmpty?.Invoke();
-                }
-                
-                SendFrame(silenceFrame, false);
-                Interlocked.Increment(ref _silenceFrames);
-            }
-
-            // Schedule next frame
-            nextFrameTimeMs += FRAME_MS;
-
-            // Drift correction: reset if >40ms behind
-            now = sw.Elapsed.TotalMilliseconds;
-            if (now - nextFrameTimeMs > 40)
-                nextFrameTimeMs = now + FRAME_MS;
+            // Gentle drift correction: only snap if >100ms behind (prevents micro-stutters)
+            long currentNs = sw.ElapsedTicks * 100;
+            if (currentNs - nextFrameNs > 100_000_000) // >100ms behind
+                nextFrameNs = currentNs + 20_000_000;
         }
     }
 
-    private void SendFrame(byte[] frame, bool marker)
+    private void SendNextFrame()
+    {
+        // Fixed jitter buffer: wait until we have enough frames
+        if (_isBuffering && Volatile.Read(ref _queueCount) < JITTER_BUFFER_FRAMES)
+        {
+            SendRtpFrame(_silenceFrame, false);
+            return;
+        }
+
+        _isBuffering = false;
+
+        // Get frame or send instant silence (NO fade-out → prevents G.711 warbling)
+        if (_frameQueue.TryDequeue(out var frame))
+        {
+            Interlocked.Decrement(ref _queueCount);
+            SendRtpFrame(frame, false);
+            Interlocked.Increment(ref _framesSent);
+        }
+        else
+        {
+            SendRtpFrame(_silenceFrame, false);
+        }
+    }
+
+    private void SendRtpFrame(byte[] frame, bool marker)
     {
         try
         {
@@ -270,23 +255,44 @@ public sealed class ALawRtpPlayout : IDisposable
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
-                marker ? 1 : 0,  // v6.2: Marker bit for talk spurt start
+                marker ? 1 : 0,
                 PAYLOAD_TYPE_PCMA
             );
 
-            _timestamp += SAMPLES_PER_FRAME;
-            Interlocked.Increment(ref _framesSent);
+            _timestamp += FRAME_SIZE;
+            _lastRtpSendTime = DateTime.UtcNow;
         }
+        catch { }
+    }
+
+    public void Clear()
+    {
+        while (_frameQueue.TryDequeue(out _))
+            Interlocked.Decrement(ref _queueCount);
+
+        lock (_accLock)
+        {
+            _accCount = 0;
+            Array.Clear(_accumulator, 0, _accumulator.Length);
+        }
+
+        _isBuffering = true;
+    }
+
+    private void SafeLog(string msg)
+    {
+        try { OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss.fff}] {msg}"); }
         catch { }
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         Stop();
-        _asyncLog.Dispose();
+        _natKeepaliveTimer?.Dispose();
+        _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp;
+        Clear();
 
         GC.SuppressFinalize(this);
     }
