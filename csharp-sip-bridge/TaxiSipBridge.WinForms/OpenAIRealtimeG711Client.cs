@@ -128,7 +128,46 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     public int PendingFrameCount => Math.Max(0, Volatile.Read(ref _outboundQueueCount));
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-    private void Log(string msg) => OnLog?.Invoke(msg);
+    
+    // Non-blocking async logger - enqueues to background thread to avoid audio jitter
+    private readonly ConcurrentQueue<string> _logQueue = new();
+    private readonly AutoResetEvent _logSignal = new(false);
+    private Thread? _logThread;
+    
+    private void InitializeLogger()
+    {
+        if (_logThread != null) return;
+        _logThread = new Thread(LogFlushLoop)
+        {
+            IsBackground = true,
+            Priority = ThreadPriority.BelowNormal,
+            Name = "G711ClientLogThread"
+        };
+        _logThread.Start();
+    }
+    
+    private void LogFlushLoop()
+    {
+        while (!(_disposed != 0))
+        {
+            _logSignal.WaitOne(100);
+            while (_logQueue.TryDequeue(out var msg))
+            {
+                try { OnLog?.Invoke(msg); } catch { }
+            }
+        }
+        // Final drain
+        while (_logQueue.TryDequeue(out var msg))
+        {
+            try { OnLog?.Invoke(msg); } catch { }
+        }
+    }
+    
+    private void Log(string msg)
+    {
+        _logQueue.Enqueue(msg);
+        _logSignal.Set();
+    }
 
     // =========================
     // RESPONSE GATE
@@ -284,6 +323,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     {
         ThrowIfDisposed();
         ResetCallState(callerPhone);
+        InitializeLogger();  // Start non-blocking logger
 
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
@@ -293,7 +333,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
         var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-        Log($"📞 Connecting (caller: {callerPhone ?? "unknown"}, codec: {codecName} passthrough 8kHz)");→DSP→{codecName})");
+        Log($"📞 Connecting (caller: {callerPhone ?? "unknown"}, codec: {codecName} passthrough 8kHz)");
 
         await _ws.ConnectAsync(
             new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
@@ -363,7 +403,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             throw new TimeoutException("session.updated not received");
 
         var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-        Log($"✅ Session configured (call={_callerId}, input={codecName}@8kHz, output={codecName}@8kHz, voice={_voice})"); → TtsPreConditioner → {codecName}, voice={_voice})");
+        Log($"✅ Session configured (call={_callerId}, input={codecName}@8kHz, output={codecName}@8kHz, voice={_voice})");
     }
 
     // =========================
