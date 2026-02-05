@@ -16,7 +16,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "10.4";
+    public const string VERSION = "10.5";
 
     // =========================
     // CONFIG
@@ -580,10 +580,35 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 case "input_audio_buffer.speech_stopped":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
-                    Volatile.Write(ref _speechStoppedAt, NowMs());  // v2.5: Track when speech ended
-                    // v2.5: Commit audio buffer - OpenAI will transcribe and respond after settle time
+                    Volatile.Write(ref _speechStoppedAt, NowMs());
                     _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     Log("📝 Committed audio buffer (awaiting transcript)");
+                    // v10.4: Since create_response=false, we manually trigger response after commit
+                    // Inject tool-forcing instruction before creating response
+                    _ = Task.Run(async () =>
+                    {
+                        // Wait for transcript to settle
+                        await Task.Delay(200).ConfigureAwait(false);
+                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+                        if (Volatile.Read(ref _responseActive) == 1) return;
+
+                        // Inject tool reminder as system message
+                        if (IsConnected)
+                        {
+                            await SendJsonAsync(new
+                            {
+                                type = "conversation.item.create",
+                                item = new
+                                {
+                                    type = "message",
+                                    role = "system",
+                                    content = new[] { new { type = "input_text", text = "[SYSTEM REMINDER] If the user provided any booking info (name, pickup, destination, passengers, or time), you MUST call sync_booking_data NOW before speaking. If confirming a booking, you MUST call book_taxi(action=\"confirmed\") before announcing success. NEVER invent fares or reference numbers." } }
+                                }
+                            }).ConfigureAwait(false);
+                        }
+
+                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                    });
                     break;
 
                 case "response.done":
@@ -1037,8 +1062,9 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 {
                     type = "server_vad",
                     threshold = 0.4,
-                    prefix_padding_ms = 450,      // v2.1: Slightly longer for natural pace
-                    silence_duration_ms = 1200     // v2.1: Calmer, less racy (was 700)
+                    prefix_padding_ms = 450,
+                    silence_duration_ms = 1200,
+                    create_response = false  // v10.4: Disable auto-response so we can inject tool reminders
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
