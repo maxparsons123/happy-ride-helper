@@ -403,10 +403,12 @@ public sealed class G711CallFeatures : IDisposable
                 }
                 
                 // Step 2: Geocode the resolved addresses and calculate fare
+                // Skip Edge extraction since we already did it above
                 var fareTask = FareCalculator.CalculateFareWithCoordsAsync(
                     resolvedPickup,
                     resolvedDest,
-                    _callerPhone);
+                    _callerPhone,
+                    skipEdgeExtraction: true);
 
                 // v4.5: Reduced timeout from 3s to 2s for faster response
                 var fareCompleted = await Task.WhenAny(fareTask, Task.Delay(2000));
