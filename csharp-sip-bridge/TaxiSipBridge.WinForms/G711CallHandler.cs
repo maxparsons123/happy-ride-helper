@@ -8,13 +8,30 @@ using TaxiSipBridge.Audio;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// Call handler for pure A-law end-to-end passthrough @ 8kHz.
+/// G711CallHandler v6.0 - True A-law end-to-end passthrough @ 8kHz.
 /// 
-/// Audio Architecture (v5.1 - Pure Passthrough):
-/// - INPUT:  SIP PCMA (A-law 8kHz) → OpenAI g711_alaw (8kHz)
-/// - OUTPUT: OpenAI g711_alaw (8kHz) → DirectG711RtpPlayout → SIP PCMA
+/// ═══════════════════════════════════════════════════════════════════════════════
+/// AUDIO ARCHITECTURE (v6.0 - Zero-Processing Passthrough)
+/// ═══════════════════════════════════════════════════════════════════════════════
 /// 
-/// No PCM conversion, no resampling, no DSP—direct A-law bytes passthrough.
+/// INGRESS (SIP → OpenAI):
+///   SIP PCMA (A-law 8kHz) → [NO DECODE] → [NO DSP] → OpenAI g711_alaw (8kHz)
+///   - Raw A-law bytes forwarded directly (or μ-law→A-law transcoded if SIP uses PCMU)
+///   - NO decode/encode cycle = NO quantization noise = NO crispy audio
+///   - Barge-in detection: decode only for RMS check, then discard
+/// 
+/// EGRESS (OpenAI → SIP):
+///   OpenAI g711_alaw (8kHz) → SipSorceryAudioBridge → SIP PCMA (A-law 8kHz)
+///   - Direct A-law passthrough via OnG711Audio event
+///   - NAudio pipeline handles jitter buffering (400ms)
+///   - High-precision 20ms timing via Windows multimedia timer (1ms granularity)
+/// 
+/// CRITICAL CHANGES FROM v5.1:
+///   - Removed IngressDsp.ApplyForStt() which caused decode→DSP→re-encode cycle
+///   - Eliminated quantization noise from double G.711 encoding
+///   - Soft gate now sends silence bytes instead of processed audio
+/// 
+/// ═══════════════════════════════════════════════════════════════════════════════
 /// </summary>
 public class G711CallHandler : ISipCallHandler, IDisposable
 {
@@ -36,7 +53,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private SipSorceryAudioBridge? _audioBridge;  // v6.0: NAudio + SIPSorcery native pipeline
+    private SipSorceryAudioBridge? _audioBridge;  // v6.0: NAudio + SIPSorcery native pipeline (true passthrough)
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
