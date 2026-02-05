@@ -53,6 +53,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
     private readonly VoIPMediaSession _mediaSession;
     private readonly NAudioPipeline _pipeline;
     private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
+    private readonly AsyncLogger _asyncLog = new();  // v6.1: Non-blocking logging
     private readonly byte _silenceByte;
     private readonly byte _payloadType;
     private readonly byte[] _silenceFrame;
@@ -64,7 +65,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
     private int _disposed;
     private uint _rtpTimestamp;
     private int _framesSent;
-    private bool _mmTimerActive;  // v6.1: multimedia timer flag
+    private bool _mmTimerActive;
     
     // ===========================================
     // EVENTS
@@ -94,6 +95,9 @@ public sealed class SipSorceryAudioBridge : IDisposable
         
         // Random start timestamp (RFC 3550)
         _rtpTimestamp = (uint)Random.Shared.Next();
+        
+        // Wire async logger to public event
+        _asyncLog.OnLog += msg => OnLog?.Invoke(msg);
     }
     
     // ===========================================
@@ -155,7 +159,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
             Interlocked.Decrement(ref _queueCount);
         
         _isBuffering = true;
-        OnLog?.Invoke("[SipSorceryAudioBridge] Queue cleared");
+        _asyncLog.Log("[SipSorceryAudioBridge] Queue cleared");
     }
     
     // ===========================================
@@ -210,7 +214,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
         };
         _playoutThread.Start();
         
-        OnLog?.Invoke($"[SipSorceryAudioBridge] Started ({JITTER_BUFFER_MS}ms buffer, mmTimer={_mmTimerActive})");
+        _asyncLog.Log($"[SipSorceryAudioBridge] Started ({JITTER_BUFFER_MS}ms buffer, mmTimer={_mmTimerActive})");
     }
     
     public void Stop()
@@ -226,7 +230,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
             _mmTimerActive = false;
         }
         
-        OnLog?.Invoke($"[SipSorceryAudioBridge] Stopped ({_framesSent} frames sent)");
+        _asyncLog.Log($"[SipSorceryAudioBridge] Stopped ({_framesSent} frames sent)");
     }
     
     private void PlayoutLoop()
@@ -259,7 +263,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
                 if (currentCount >= JITTER_BUFFER_FRAMES)
                 {
                     _isBuffering = false;
-                    OnLog?.Invoke($"[SipSorceryAudioBridge] Buffer ready ({currentCount} frames)");
+                    _asyncLog.Log($"[SipSorceryAudioBridge] Buffer ready ({currentCount} frames)");
                 }
                 else
                 {
@@ -280,7 +284,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
                 SendFrame(frame, marker);
                 
                 if (_framesSent % 500 == 0)
-                    OnLog?.Invoke($"[SipSorceryAudioBridge] Sent {_framesSent} frames (queue: {Volatile.Read(ref _queueCount)})");
+                    _asyncLog.Log($"[SipSorceryAudioBridge] Sent {_framesSent} frames (queue: {Volatile.Read(ref _queueCount)})");
             }
             else
             {
@@ -289,7 +293,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
                 {
                     wasPlaying = false;
                     _isBuffering = true;
-                    OnLog?.Invoke($"[SipSorceryAudioBridge] Queue empty after {_framesSent} frames");
+                    _asyncLog.Log($"[SipSorceryAudioBridge] Queue empty after {_framesSent} frames");
                     OnQueueEmpty?.Invoke();
                 }
                 SendFrame(_silenceFrame, false);
@@ -320,7 +324,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
         }
         catch (Exception ex)
         {
-            OnLog?.Invoke($"[SipSorceryAudioBridge] SendRtpRaw error: {ex.Message}");
+            _asyncLog.Log($"[SipSorceryAudioBridge] SendRtpRaw error: {ex.Message}");
         }
     }
     
@@ -336,6 +340,7 @@ public sealed class SipSorceryAudioBridge : IDisposable
         Stop();
         Clear();
         _pipeline.Dispose();
+        _asyncLog.Dispose();  // v6.1: Dispose async logger
         
         GC.SuppressFinalize(this);
     }
