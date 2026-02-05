@@ -833,7 +833,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
 
     // =========================
-    // SESSION CONFIG
+    // SESSION CONFIG (v5.1 - Straight-through approach)
     // =========================
     private async Task ConfigureSessionAsync()
     {
@@ -852,69 +852,44 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 instructions = GetDefaultInstructions(),
                 input_audio_format = inputCodec,
                 output_audio_format = outputCodec,
-                input_audio_transcription = new { model = "whisper-1", language = _detectedLanguage },  // v2.4: Language hint
+                input_audio_transcription = new { model = "whisper-1", language = _detectedLanguage },
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,          // Slightly higher threshold to reduce false triggers
-                    prefix_padding_ms = 450,  // More padding for natural speech
-                    silence_duration_ms = 900 // Longer pause before Ada responds (less racy)
+                    threshold = 0.5,
+                    prefix_padding_ms = 300,
+                    silence_duration_ms = 500  // v5.1: Faster response
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
-                temperature = 0.5  // Lower for more predictable/strict behavior
+                temperature = 0.5
             }
         });
     }
 
     private static string GetDefaultInstructions() => @"
-You are Ada, a friendly taxi booking assistant for Voice Taxibot.
-
-CURRENCY: Always use Euros (€) for fares.
+You are Ada, a professional taxi dispatcher. Keep responses brief for telephony. Output ONLY G.711 A-law audio.
 
 ## VOICE STYLE
-
-Speak naturally, like a friendly professional taxi dispatcher.
 - Warm, calm, confident tone
 - Clear pronunciation of names and addresses
-- Short pauses between phrases
-- Never rush or sound robotic
-- Patient and relaxed pace
+- Short, concise responses (1-2 sentences max)
 
-## ABSOLUTE RULES - VIOLATION FORBIDDEN
+## BOOKING FLOW
 
-### RULE 1: NEVER ANNOUNCE A BOOKING WITHOUT CALLING book_taxi FIRST
-- You are FORBIDDEN from saying 'booked', 'confirmed', 'your taxi is on the way', or giving a booking reference UNLESS you have FIRST called book_taxi(action=confirmed) and received a booking_ref in the tool response.
-- If you say a booking is complete without calling the tool, THE BOOKING DOES NOT EXIST.
-- The ONLY valid booking reference format is 'TAXI-YYYYMMDDHHMMSS' - if you invent ANY other format (e.g., TX1234), you have FAILED.
+1. Greet: 'Hello, Voice Taxibot. I'm Ada. What's your name?'
+2. Get name → sync_booking_data → 'Hi [name]! Where from?'
+3. Get pickup → sync_booking_data → 'And where to?'
+4. Get destination → sync_booking_data → 'How many passengers?'
+5. Get passengers → Call create_booking IMMEDIATELY
+6. Announce: 'Booked! [eta] minutes, [fare]. Anything else?'
+7. If no → 'Thank you, goodbye!' → call end_call
 
-### RULE 2: CALL sync_booking_data AFTER EVERY USER INPUT
-- After the user provides name, pickup, destination, passengers, or time → call sync_booking_data IMMEDIATELY
-- Include ALL the booking fields you know in the call (not just the new one)
-
-### RULE 3: COMPLETE THE ENTIRE FLOW
-- NEVER abandon a call mid-conversation
-- ALWAYS end with end_call after goodbye
-
-## MANDATORY BOOKING FLOW
-
-1. Greet: 'Hello, welcome to the Voice Taxibot demo. I'm Ada, your taxi booking assistant. What's your name?'
-2. Get name → sync_booking_data(caller_name) → 'Hi [name]! Where would you like to be picked up from?'
-3. Get pickup → sync_booking_data(pickup, caller_name) → 'And where would you like to go?'
-4. Get destination → sync_booking_data(pickup, destination, caller_name) → 'How many passengers?'
-5. Get passengers → sync_booking_data(all fields) → 'And what time would you like to be picked up?'
-6. Get time → sync_booking_data(all fields) → Recap: 'So that's [passengers] passengers from [pickup] to [destination], [time]. Is that correct?'
-7. User confirms → 'Shall I get you a price?'
-8. User says yes → call book_taxi(action=request_quote, pickup=X, destination=Y, passengers=N, pickup_time=T)
-9. Tool returns fare/eta → 'The fare is [fare], and the driver will arrive in [eta]. Shall I confirm this booking?'
-10. User confirms → call book_taxi(action=confirmed, pickup=X, destination=Y, passengers=N, pickup_time=T) IMMEDIATELY
-11. Tool returns booking_ref → 'Your taxi is booked, reference [booking_ref]. You'll receive a WhatsApp confirmation. Is there anything else I can help with?'
-12. User says no/thanks → 'Thank you for using Voice Taxibot. Goodbye!' → call end_call(reason='booking_complete')
-
-## CONFIRMATION DETECTION
-
-These phrases mean YES - proceed immediately:
-'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'correct', 'that's right', 'go ahead', 'book it', 'please do', 'confirm', 'that's fine'
+## CRITICAL RULES
+- Call sync_booking_data after EACH piece of info
+- Call create_booking as soon as you have pickup, destination, passengers
+- NEVER ask for confirmation - just book it
+- Keep responses SHORT for telephony
 ";
 
     private static object[] GetTools() => new object[]
@@ -923,54 +898,49 @@ These phrases mean YES - proceed immediately:
         {
             type = "function",
             name = "sync_booking_data",
-            description = "Save booking data as collected",
+            description = "Save booking data as collected. Call after EACH user input.",
             parameters = new
             {
                 type = "object",
                 properties = new System.Collections.Generic.Dictionary<string, object>
                 {
-                    ["caller_name"] = new { type = "string" },
-                    ["pickup"] = new { type = "string" },
-                    ["destination"] = new { type = "string" },
-                    ["passengers"] = new { type = "integer" },
-                    ["pickup_time"] = new { type = "string" }
+                    ["caller_name"] = new { type = "string", description = "Customer name" },
+                    ["pickup"] = new { type = "string", description = "Pickup address" },
+                    ["destination"] = new { type = "string", description = "Destination address" },
+                    ["passengers"] = new { type = "integer", description = "Number of passengers" },
+                    ["pickup_time"] = new { type = "string", description = "Pickup time" }
                 }
             }
         },
         new
         {
             type = "function",
-            name = "book_taxi",
-            description = "Request quote or confirm booking",
+            name = "create_booking",
+            description = "Books a taxi for the user. Call as soon as you have pickup and destination.",
             parameters = new
             {
                 type = "object",
                 properties = new System.Collections.Generic.Dictionary<string, object>
                 {
-                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
-                    // Booking snapshot (optional but strongly recommended)
-                    ["caller_name"] = new { type = "string" },
-                    ["pickup"] = new { type = "string" },
-                    ["destination"] = new { type = "string" },
-                    ["passengers"] = new { type = "integer" },
-                    ["pickup_time"] = new { type = "string" }
+                    ["pickup_address"] = new { type = "string", description = "Pickup address" },
+                    ["dropoff_address"] = new { type = "string", description = "Dropoff/destination address" },
+                    ["passenger_count"] = new { type = "integer", description = "Number of passengers (default 1)" }
                 },
-                required = new[] { "action" }
+                required = new[] { "pickup_address" }
             }
         },
         new
         {
             type = "function",
             name = "end_call",
-            description = "End call after goodbye",
+            description = "End the call after goodbye",
             parameters = new
             {
                 type = "object",
                 properties = new System.Collections.Generic.Dictionary<string, object>
                 {
-                    ["reason"] = new { type = "string" }
-                },
-                required = new[] { "reason" }
+                    ["reason"] = new { type = "string", description = "Reason for ending call" }
+                }
             }
         }
     };
