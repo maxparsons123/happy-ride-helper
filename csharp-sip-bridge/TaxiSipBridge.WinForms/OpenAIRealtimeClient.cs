@@ -16,7 +16,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "10.3";
+    public const string VERSION = "10.4";
 
     // =========================
     // CONFIG
@@ -1856,17 +1856,17 @@ RESPONSE STYLE
         {
             type = "function",
             name = "sync_booking_data",
-            description = "Save booking data as collected",
+            description = "MANDATORY: You MUST call this function after EVERY user turn that provides a name, pickup address, destination, passenger count, or pickup time. If you do NOT call this, the booking data will be LOST and the system will fail. Call it even if only one field changed — always include ALL known fields.",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
-                    ["caller_name"] = new { type = "string" },
-                    ["pickup"] = new { type = "string" },
-                    ["destination"] = new { type = "string" },
-                    ["passengers"] = new { type = "integer" },
-                    ["pickup_time"] = new { type = "string" }
+                    ["caller_name"] = new { type = "string", description = "Caller's name" },
+                    ["pickup"] = new { type = "string", description = "Pickup address exactly as spoken" },
+                    ["destination"] = new { type = "string", description = "Destination address exactly as spoken" },
+                    ["passengers"] = new { type = "integer", description = "Number of passengers (1-8)" },
+                    ["pickup_time"] = new { type = "string", description = "Pickup time or 'now'" }
                 }
             }
         },
@@ -1874,14 +1874,13 @@ RESPONSE STYLE
         {
             type = "function",
             name = "book_taxi",
-            description = "Request quote or confirm booking",
+            description = "MANDATORY: You MUST call this with action='confirmed' BEFORE telling the user their booking is confirmed. NEVER announce a booking reference or success without calling this first. The reference number comes from the tool result — NEVER invent one.",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
-                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
-                    // Booking snapshot (optional but strongly recommended)
+                    ["action"] = new { type = "string", description = "Must be 'confirmed' to finalize booking", @enum = new[] { "request_quote", "confirmed" } },
                     ["caller_name"] = new { type = "string" },
                     ["pickup"] = new { type = "string" },
                     ["destination"] = new { type = "string" },
@@ -1911,7 +1910,7 @@ RESPONSE STYLE
         {
             type = "function",
             name = "end_call",
-            description = "End call after goodbye",
+            description = "End the call. ONLY call this AFTER speaking the mandatory closing script.",
             parameters = new
             {
                 type = "object",
