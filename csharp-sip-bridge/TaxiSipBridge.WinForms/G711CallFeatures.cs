@@ -150,6 +150,9 @@ public sealed class G711CallFeatures : IDisposable
     
     private async Task SendNoReplyPromptAsync()
     {
+        // Cancel any deferred response to prevent double-responses
+        _client.CancelDeferredResponse();
+        
         // Inject a system message to prompt the user
         await SendToOpenAIAsync(new
         {
@@ -558,6 +561,9 @@ public sealed class G711CallFeatures : IDisposable
             
             Log($"⏰ [{_callId}] Post-booking timeout - requesting farewell");
             
+            // Cancel any deferred response to prevent double-responses
+            _client.CancelDeferredResponse();
+            
             await SendToOpenAIAsync(new
             {
                 type = "conversation.item.create",
@@ -713,6 +719,9 @@ public sealed class G711CallFeatures : IDisposable
     
     private async Task RequestEndCallAsync(string reason)
     {
+        // Cancel any deferred response to prevent double-responses
+        _client.CancelDeferredResponse();
+        
         await SendToOpenAIAsync(new
         {
             type = "conversation.item.create",
