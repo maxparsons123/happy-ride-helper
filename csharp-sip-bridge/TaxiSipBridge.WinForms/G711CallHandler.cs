@@ -3,6 +3,7 @@ using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
+using TaxiSipBridge.Audio;
 
 namespace TaxiSipBridge;
 
@@ -35,7 +36,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private DirectG711RtpPlayout? _directPlayout;  // v5.1: Native A-law 8kHz direct RTP output
+    private SipSorceryAudioBridge? _audioBridge;  // v6.0: NAudio + SIPSorcery native pipeline
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
@@ -207,10 +208,10 @@ Be concise, warm, and professional.
             _aiClient.OnToolCall += (toolName, toolCallId, args) =>
                 _features.HandleToolCallAsync(toolName, toolCallId, args);
             
-            // v5.1: Create DirectG711RtpPlayout for pure A-law passthrough
-            _directPlayout = new DirectG711RtpPlayout(_currentMediaSession, sipCodec);
-            _directPlayout.OnLog += msg => Log(msg);
-            _directPlayout.OnQueueEmpty += () =>
+            // v6.0: Create SipSorceryAudioBridge using NAudio pipeline
+            _audioBridge = new SipSorceryAudioBridge(_currentMediaSession, useALaw: true);
+            _audioBridge.OnLog += msg => Log(msg);
+            _audioBridge.OnQueueEmpty += () =>
             {
                 if (_adaHasStartedSpeaking && _isBotSpeaking)
                 {
@@ -223,8 +224,8 @@ Be concise, warm, and professional.
                     else _aiClient?.NotifyPlayoutComplete();
                 }
             };
-            _directPlayout.Start();
-            Log($"🎵 [{callId}] DirectG711RtpPlayout started (native A-law 8kHz)");
+            _audioBridge.Start();
+            Log($"🎵 [{callId}] SipSorceryAudioBridge started (NAudio pipeline)");
 
             // Wire AI client events (using v5.1 pure A-law output path)
             WireAiClientEvents(callId, cts);
@@ -273,12 +274,12 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        // v5.1: Native A-law audio PATH - push A-law bytes directly to RTP playout
+        // v6.0: Native G.711 audio PATH - push to SipSorceryAudioBridge
         _aiClient.OnG711Audio += g711Bytes =>
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
-            _directPlayout?.PushAudio(g711Bytes);
+            _audioBridge?.PushG711(g711Bytes);
         };
 
         _aiClient.OnResponseStarted += () =>
@@ -298,10 +299,10 @@ Be concise, warm, and professional.
         Action bargeInHandler = () =>
         {
             // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn
-            if (!_isBotSpeaking && (_directPlayout == null || _directPlayout.PendingFrameCount == 0))
+            if (!_isBotSpeaking && (_audioBridge == null || _audioBridge.PendingFrameCount == 0))
                 return;
             
-            _directPlayout?.Clear();  // Immediately stop Ada speaking
+            _audioBridge?.Clear();  // Immediately stop Ada speaking
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
             _features?.CancelWatchdog();
@@ -523,11 +524,11 @@ Be concise, warm, and professional.
             _features = null;
         }
 
-        if (_directPlayout != null)
+        if (_audioBridge != null)
         {
-            try { _directPlayout.Stop(); } catch { }
-            try { _directPlayout.Dispose(); } catch { }
-            _directPlayout = null;
+            try { _audioBridge.Stop(); } catch { }
+            try { _audioBridge.Dispose(); } catch { }
+            _audioBridge = null;
         }
 
         if (_currentMediaSession != null)
@@ -564,7 +565,7 @@ Be concise, warm, and professional.
         }
 
         try { _callCts?.Cancel(); } catch { }
-        try { _directPlayout?.Dispose(); } catch { }
+        try { _audioBridge?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _features?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
