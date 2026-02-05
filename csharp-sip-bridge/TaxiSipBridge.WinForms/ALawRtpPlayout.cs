@@ -1,10 +1,9 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
+using System.Runtime.InteropServices;
 using System.Threading;
 using SIPSorcery.Media;
-using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace TaxiSipBridge;
@@ -12,30 +11,41 @@ namespace TaxiSipBridge;
 /// <summary>
 /// Direct A-law RTP playout for OpenAI g711_alaw output.
 /// 
-/// v6.1: Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
+/// v6.2: High-precision timing with Windows multimedia timer (1ms granularity)
+/// and non-blocking AsyncLogger for zero-jitter playout.
+/// 
+/// Receives raw A-law bytes from OpenAI, frames into 20ms chunks (160 bytes),
 /// and sends directly via VoIPMediaSession's SendRtpRaw (payload type 8 = PCMA).
 /// 
 /// No decoding. No resampling. Just raw RTP passthrough.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
-    private const int SAMPLE_RATE = 8000;
+    // Windows multimedia timer for 1ms precision (vs 15.6ms default)
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    private static extern uint TimeBeginPeriod(uint uPeriod);
+    
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    private static extern uint TimeEndPeriod(uint uPeriod);
+
     private const int FRAME_MS = 20;
     private const int SAMPLES_PER_FRAME = 160; // 20ms @ 8kHz = 160 bytes for A-law
     private const byte ALAW_SILENCE = 0xD5;    // A-law silence byte
     private const byte PAYLOAD_TYPE_PCMA = 8;  // RTP payload type for G.711 A-law
     private const int MAX_QUEUE_FRAMES = 1000; // ~20 seconds buffer
 
-    private readonly VoIPMediaSession _mediaSession;  // v6.1: Use VoIPMediaSession directly
+    private readonly VoIPMediaSession _mediaSession;
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
+    private readonly AsyncLogger _asyncLog = new();  // v6.2: Non-blocking logging
     
     // Accumulator for incoming A-law bytes (may arrive in odd sizes)
-    private byte[] _accumulator = new byte[0];
+    private byte[] _accumulator = Array.Empty<byte>();
     private readonly object _accLock = new();
 
     private Thread? _playoutThread;
     private volatile bool _running;
     private volatile bool _disposed;
+    private bool _mmTimerActive;
 
     private uint _timestamp;
     private int _framesSent;
@@ -43,6 +53,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private int _droppedFrames;
 
     public event Action? OnQueueEmpty;
+    public event Action<string>? OnLog;
 
     public int QueuedFrames => _frameQueue.Count;
     public int FramesSent => _framesSent;
@@ -52,6 +63,7 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
     }
+
     /// <summary>
     /// Buffer raw A-law bytes from OpenAI for playout.
     /// Frames into 160-byte (20ms) chunks automatically.
@@ -93,7 +105,7 @@ public sealed class ALawRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// Start the playout thread.
+    /// Start the playout thread with high-precision timing.
     /// </summary>
     public void Start()
     {
@@ -105,14 +117,23 @@ public sealed class ALawRtpPlayout : IDisposable
         _silenceFrames = 0;
         _droppedFrames = 0;
 
+        // Enable Windows multimedia timer for 1ms precision (v6.2)
+        try
+        {
+            TimeBeginPeriod(1);
+            _mmTimerActive = true;
+        }
+        catch { /* Non-Windows or no permission */ }
+
         _playoutThread = new Thread(PlayoutLoop)
         {
             IsBackground = true,
-            Priority = ThreadPriority.AboveNormal,
+            Priority = ThreadPriority.Highest,  // v6.2: Maximum priority for timing
             Name = "ALawRtpPlayoutThread"
         };
 
         _playoutThread.Start();
+        _asyncLog.Log("[ALawRtpPlayout] Started (v6.2, mmTimer=1ms)");
     }
 
     /// <summary>
@@ -126,7 +147,16 @@ public sealed class ALawRtpPlayout : IDisposable
         try { _playoutThread?.Join(500); } catch { }
         _playoutThread = null;
 
+        // Disable multimedia timer
+        if (_mmTimerActive)
+        {
+            try { TimeEndPeriod(1); } catch { }
+            _mmTimerActive = false;
+        }
+
         while (_frameQueue.TryDequeue(out _)) { }
+        
+        _asyncLog.Log($"[ALawRtpPlayout] Stopped ({_framesSent} frames sent)");
     }
 
     /// <summary>
@@ -135,33 +165,32 @@ public sealed class ALawRtpPlayout : IDisposable
     public void Clear()
     {
         while (_frameQueue.TryDequeue(out _)) { }
-        lock (_accLock) { _accumulator = new byte[0]; }
+        lock (_accLock) { _accumulator = Array.Empty<byte>(); }
     }
 
     /// <summary>
-    /// High-precision 20ms playout loop.
+    /// High-precision 20ms playout loop with drift correction.
+    /// Uses Stopwatch for sub-millisecond timing accuracy.
     /// </summary>
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
         double nextFrameTimeMs = sw.Elapsed.TotalMilliseconds;
         bool wasEmpty = true;
-        int diagnosticCounter = 0;
-        double firstAudioTimeMs = -1;
-        double lastDiagnosticTime = -1;
+        int frameCounter = 0;
 
         while (_running)
         {
             double now = sw.Elapsed.TotalMilliseconds;
 
-            // Wait for next frame time
+            // Wait for next frame time with hybrid sleep/spin strategy
             if (now < nextFrameTimeMs)
             {
                 double waitMs = nextFrameTimeMs - now;
                 if (waitMs > 2.0)
-                    Thread.Sleep((int)(waitMs - 1));
+                    Thread.Sleep((int)(waitMs - 1));  // Sleep most of the wait
                 else if (waitMs > 0.5)
-                    Thread.SpinWait(500);
+                    Thread.SpinWait(500);  // Spin for final sub-ms precision
                 continue;
             }
 
@@ -170,20 +199,12 @@ public sealed class ALawRtpPlayout : IDisposable
             if (_frameQueue.TryDequeue(out var queuedFrame))
             {
                 frame = queuedFrame;
-                diagnosticCounter++;
-
-                if (firstAudioTimeMs < 0)
-                {
-                    firstAudioTimeMs = now;
-                    lastDiagnosticTime = now;
-                }
-
-                // Reset empty flag
+                frameCounter++;
                 wasEmpty = false;
 
-                // Log every 250 frames (5 seconds) for rate diagnostics - silent now
-                if (diagnosticCounter % 250 == 0 && lastDiagnosticTime >= 0)
-                    lastDiagnosticTime = now;
+                // Non-blocking diagnostic log every 500 frames (~10 seconds)
+                if (frameCounter % 500 == 0)
+                    _asyncLog.Log($"[ALawRtpPlayout] Sent {frameCounter} frames (queue: {_frameQueue.Count})");
             }
             else
             {
@@ -219,6 +240,7 @@ public sealed class ALawRtpPlayout : IDisposable
             nextFrameTimeMs += FRAME_MS;
 
             // Drift correction: reset if >40ms behind
+            now = sw.Elapsed.TotalMilliseconds;
             if (now - nextFrameTimeMs > 40)
                 nextFrameTimeMs = now + FRAME_MS;
         }
@@ -230,6 +252,7 @@ public sealed class ALawRtpPlayout : IDisposable
         _disposed = true;
 
         Stop();
+        _asyncLog.Dispose();
 
         GC.SuppressFinalize(this);
     }
