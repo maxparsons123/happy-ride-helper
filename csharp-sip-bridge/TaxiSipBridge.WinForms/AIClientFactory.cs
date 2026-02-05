@@ -39,7 +39,7 @@ public static class AIClientFactory
             
             AIMode.DirectOpenAI => CreateOpenAIClient(
                 openAiApiKey ?? throw new ArgumentException("OpenAI API key required for direct mode"),
-                openAiModel ?? "gpt-4o-mini-realtime-preview-2024-12-17",
+                openAiModel ?? "gpt-4o-realtime-preview-2024-12-17",
                 openAiVoice ?? "shimmer",
                 systemPrompt),
             
