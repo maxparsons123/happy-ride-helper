@@ -132,7 +132,7 @@ partial class MainForm
         };
         chkMonitorAudio.CheckedChanged += this.chkMonitorAudio_CheckedChanged;
 
-        // === A-law Passthrough Mode (v4.2 direct vs PCM) ===
+        // === A-law Passthrough Mode (v5.1 pure passthrough) ===
         chkG711Mode = new CheckBox 
         { 
             Text = "⚡ A-law Direct", 
@@ -141,7 +141,7 @@ partial class MainForm
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(102, 51, 153),
             Visible = false, // Only shown in Local OpenAI mode
-            Checked = true   // Default to v4.2 A-law passthrough
+            Checked = true   // Default to v5.1 A-law passthrough
         };
         chkG711Mode.CheckedChanged += this.chkG711Mode_CheckedChanged;
 
