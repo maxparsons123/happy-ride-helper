@@ -54,6 +54,26 @@ public partial class FareCalculator
             return _staticEdgeExtractor;
         }
     }
+    
+    /// <summary>
+    /// Quick check if an address likely already contains a city hint.
+    /// Avoids unnecessary Edge AI calls for complete addresses like "52A David Road, Coventry".
+    /// </summary>
+    private static bool ContainsCityHint(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return false;
+        
+        var knownCities = new[] 
+        { 
+            "London", "Birmingham", "Manchester", "Leeds", "Glasgow", "Liverpool", "Bristol", 
+            "Sheffield", "Edinburgh", "Leicester", "Coventry", "Bradford", "Cardiff", "Belfast",
+            "Nottingham", "Newcastle", "Southampton", "Derby", "Portsmouth", "Brighton", "Plymouth",
+            "York", "Bath", "Chester", "Exeter", "Norwich", "Giffnock", "Westminster"
+        };
+        
+        var lower = address.ToLowerInvariant();
+        return knownCities.Any(city => lower.Contains(city.ToLowerInvariant()));
+    }
 
     /// <summary>
     /// Legacy: address extraction via backend function.
@@ -127,65 +147,71 @@ public partial class FareCalculator
 
             var calc = GetDefaultCalculator();
 
-            // Try Edge AI extraction first (with 4s timeout) to get city-biased addresses
-            var extractor = GetEdgeExtractor();
-            if (extractor != null)
+            // Skip Edge AI extraction if addresses already contain a city (v6.2 optimization)
+            // e.g., "52A David Road, Coventry" is already complete - no need to extract
+            bool addressesAlreadyComplete = ContainsCityHint(pickup) && ContainsCityHint(destination);
+            
+            if (!addressesAlreadyComplete)
             {
-                try
+                var extractor = GetEdgeExtractor();
+                if (extractor != null)
                 {
-                    Log("💰 Starting Lovable AI address extraction...");
-                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    linkedCts.CancelAfter(TimeSpan.FromSeconds(4));
-                    
-                    var extractionTask = extractor.ExtractAsync(pickup, destination, phoneNumber);
-                    
-                    // Wait for extraction or cancellation
-                    var completedTask = await Task.WhenAny(
-                        extractionTask, 
-                        Task.Delay(Timeout.Infinite, linkedCts.Token)
-                    ).ConfigureAwait(false);
-
-                    linkedCts.Token.ThrowIfCancellationRequested();
-                    
-                    if (completedTask == extractionTask && extractionTask.Result != null)
+                    try
                     {
-                        var extraction = extractionTask.Result;
+                        Log("💰 Starting Lovable AI address extraction...");
+                        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                        linkedCts.CancelAfter(TimeSpan.FromSeconds(2));
+                        
+                        var extractionTask = extractor.ExtractAsync(pickup, destination, phoneNumber);
+                        
+                        // Wait for extraction or cancellation
+                        var completedTask = await Task.WhenAny(
+                            extractionTask, 
+                            Task.Delay(Timeout.Infinite, linkedCts.Token)
+                        ).ConfigureAwait(false);
 
-                        // Use edge-extracted addresses with city appended for better geocoding
-                        var resolvedPickup = extraction.PickupAddress ?? pickup;
-                        var resolvedDest = extraction.DestinationAddress ?? destination;
-
-                        Log($"💰 Using Edge addresses: pickup='{resolvedPickup}', dest='{resolvedDest}'");
-
-                        // Calculate fare with the better addresses
-                        cancellationToken.ThrowIfCancellationRequested();
-                        var result = await calc.CalculateAsync(resolvedPickup, resolvedDest, phoneNumber).ConfigureAwait(false);
-
-                        // Enrich with Edge-extracted city info (may be more accurate than geocoding)
-                        if (!string.IsNullOrEmpty(extraction.DetectedArea))
+                        linkedCts.Token.ThrowIfCancellationRequested();
+                        
+                        if (completedTask == extractionTask && extractionTask.Result != null)
                         {
-                            if (string.IsNullOrEmpty(result.PickupCity))
-                                result.PickupCity = extraction.DetectedArea;
-                            if (string.IsNullOrEmpty(result.DestCity))
-                                result.DestCity = extraction.DetectedArea;
-                        }
+                            var extraction = extractionTask.Result;
 
-                        Log($"💰 Quote: {result.Fare} (pickup: {result.PickupCity}, dest: {result.DestCity})");
-                        return result;
+                            // Use edge-extracted addresses with city appended for better geocoding
+                            var resolvedPickup = extraction.PickupAddress ?? pickup;
+                            var resolvedDest = extraction.DestinationAddress ?? destination;
+
+                            Log($"💰 Using Edge addresses: pickup='{resolvedPickup}', dest='{resolvedDest}'");
+
+                            // Calculate fare with the better addresses
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var result = await calc.CalculateAsync(resolvedPickup, resolvedDest, phoneNumber).ConfigureAwait(false);
+
+                            // Enrich with Edge-extracted city info (may be more accurate than geocoding)
+                            if (!string.IsNullOrEmpty(extraction.DetectedArea))
+                            {
+                                if (string.IsNullOrEmpty(result.PickupCity))
+                                    result.PickupCity = extraction.DetectedArea;
+                                if (string.IsNullOrEmpty(result.DestCity))
+                                    result.DestCity = extraction.DetectedArea;
+                            }
+
+                            Log($"💰 Quote: {result.Fare} (pickup: {result.PickupCity}, dest: {result.DestCity})");
+                            return result;
+                        }
+                        else
+                        {
+                            Log("⏱️ Lovable AI extraction timed out — using raw addresses");
+                        }
                     }
-                    else
+                    catch (OperationCanceledException)
                     {
-                        Log("⏱️ Lovable AI extraction timed out — using raw addresses");
+                        Log("⏱️ Address extraction cancelled");
+                        throw;
                     }
-                }
-                catch (OperationCanceledException)
-                {
-                    Log("⏱️ Address extraction cancelled");
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Log($"⚠️ Edge extraction error: {ex.Message} — using raw addresses");
+                    catch (Exception ex)
+                    {
+                        Log($"⚠️ Edge extraction error: {ex.Message} — using raw addresses");
+                    }
                 }
             }
 
