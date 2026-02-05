@@ -235,7 +235,7 @@ Be concise, warm, and professional.
 
             // Connect to OpenAI - using 24kHz PCM with local DSP for richer audio
             var codecName = sipCodec == OpenAIRealtimeG711Client.G711Codec.ALaw ? "A-law" : "μ-law";
-            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (Native {codecName} passthrough)...");
+            Log($"🔌 [{callId}] Connecting to OpenAI Realtime (PCM24 → DSP → {codecName})...");
             await _aiClient.ConnectAsync(caller, cts.Token);
             Log($"🟢 [{callId}] OpenAI connected");
 
@@ -247,7 +247,7 @@ Be concise, warm, and professional.
             // Wire inbound RTP
             WireRtpInput(callId, cts);
 
-            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI (Native {codecName} 8kHz)");
+            Log($"✅ [{callId}] Call established: SIP ({_negotiatedCodec}) ↔ OpenAI (PCM24→DSP→{codecName})");
             
             // Start keepalive loop
             _features?.StartKeepalive();

@@ -575,8 +575,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var b64 = deltaEl.GetString();
                         if (!string.IsNullOrEmpty(b64))
                         {
-                            // Native G.711 mode: bytes are already 8kHz A-law/μ-law - zero transcoding!
-                            var g711Bytes = Convert.FromBase64String(b64);
+                            // PCM16 @ 24kHz from OpenAI → transcode to G.711 @ 8kHz locally
+                            var pcm24Bytes = Convert.FromBase64String(b64);
+                            
+                            // Fire PCM event for any listeners (monitoring, etc.)
+                            OnPcm24Audio?.Invoke(pcm24Bytes);
+                            
+                            // Transcode: PCM16@24kHz → G.711@8kHz using TtsPreConditioner
+                            var g711Bytes = ProcessPcm24ToG711(pcm24Bytes);
                             if (g711Bytes.Length > 0)
                             {
                                 OnG711Audio?.Invoke(g711Bytes);
@@ -585,7 +591,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                                 if (count % 10 == 0)
                                 {
                                     var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-                                    Log($"📢 Received {count} native G.711 {codecName} chunks ({g711Bytes.Length}B)");
+                                    Log($"📢 Received {count} audio chunks (PCM24→DSP→{codecName}), in={pcm24Bytes.Length}B out={g711Bytes.Length}B");
                                 }
                             }
                         }
@@ -797,9 +803,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private async Task ConfigureSessionAsync()
     {
         var inputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        var outputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw"; // Native 8kHz G.711 - zero transcoding!
+        var outputCodec = "pcm16"; // OpenAI only supports G.711 for INPUT - must use PCM16@24kHz for output
 
-        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output={outputCodec}@8kHz (NATIVE G.711), voice={_voice}");
+        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output=pcm16@24kHz (local DSP→G.711), voice={_voice}");
 
         await SendJsonAsync(new
         {
