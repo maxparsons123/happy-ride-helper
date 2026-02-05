@@ -640,7 +640,7 @@ public class SipOpenAIBridge : IDisposable
             // Connect to OpenAI Realtime API
             _aiClient = new OpenAIRealtimeClient(
                 _apiKey,
-                model: "gpt-4o-mini-realtime-preview-2024-12-17"
+                model: "gpt-4o-realtime-preview-2024-12-17"
             );
             _aiClient.SetOutputCodec(outputCodecMode);  // Set codec mode before connecting
             _aiClient.OnLog += msg => Log(msg);
