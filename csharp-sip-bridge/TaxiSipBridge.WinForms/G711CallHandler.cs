@@ -208,7 +208,7 @@ Be concise, warm, and professional.
                 _features.HandleToolCallAsync(toolName, toolCallId, args);
             
             // v5.1: Create DirectG711RtpPlayout for pure A-law passthrough
-            _directPlayout = new DirectG711RtpPlayout(_currentMediaSession, ua);
+            _directPlayout = new DirectG711RtpPlayout(_currentMediaSession, sipCodec);
             _directPlayout.OnLog += msg => Log(msg);
             _directPlayout.OnQueueEmpty += () =>
             {
@@ -278,7 +278,7 @@ Be concise, warm, and professional.
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
-            _directPlayout?.SendRtpFrame(g711Bytes);
+            _directPlayout?.PushAudio(g711Bytes);
         };
 
         _aiClient.OnResponseStarted += () =>
@@ -298,7 +298,7 @@ Be concise, warm, and professional.
         Action bargeInHandler = () =>
         {
             // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn
-            if (!_isBotSpeaking && (_directPlayout == null || _directPlayout.PendingFrames == 0))
+            if (!_isBotSpeaking && (_directPlayout == null || _directPlayout.PendingFrameCount == 0))
                 return;
             
             _directPlayout?.Clear();  // Immediately stop Ada speaking
