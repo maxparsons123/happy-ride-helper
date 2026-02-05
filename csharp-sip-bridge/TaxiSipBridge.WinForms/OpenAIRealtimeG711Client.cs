@@ -25,7 +25,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "2.7";
+    public const string VERSION = "4.0";
 
     // =========================
     // G.711 CONFIG
@@ -293,7 +293,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
 
         var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-        Log($"📞 Connecting (caller: {callerPhone ?? "unknown"}, codec: PCM24→DSP→{codecName})");
+        Log($"📞 Connecting (caller: {callerPhone ?? "unknown"}, codec: {codecName} passthrough 8kHz)");→DSP→{codecName})");
 
         await _ws.ConnectAsync(
             new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
@@ -363,17 +363,21 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             throw new TimeoutException("session.updated not received");
 
         var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-        Log($"✅ Session configured (PCM16@24kHz → TtsPreConditioner → {codecName}, voice={_voice})");
+        Log($"✅ Session configured (call={_callerId}, input={codecName}@8kHz, output={codecName}@8kHz, voice={_voice})"); → TtsPreConditioner → {codecName}, voice={_voice})");
     }
 
     // =========================
     // AUDIO INPUT (SIP → OPENAI)
     // =========================
-    public async Task SendMuLawAsync(byte[] frame)
+    /// <summary>
+    /// v4.0: Send A-law audio directly to OpenAI (no decoding, no resampling).
+    /// SIP PCMA (8kHz A-law) → OpenAI g711_alaw passthrough.
+    /// </summary>
+    public async Task SendALawAsync(byte[] alawFrame)
     {
         if (!IsConnected) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
-        if (frame.Length != FRAME_BYTES) return;
+        if (alawFrame == null || alawFrame.Length == 0) return;
 
         // Echo guard: Only check RTP playout completion time
         if (NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 200)
@@ -382,7 +386,7 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         var msg = JsonSerializer.SerializeToUtf8Bytes(new
         {
             type = "input_audio_buffer.append",
-            audio = Convert.ToBase64String(frame)
+            audio = Convert.ToBase64String(alawFrame)
         });
 
         await SendBytesAsync(msg);
@@ -390,14 +394,26 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 
         var count = Interlocked.Increment(ref _audioFramesSent);
         if (count % 50 == 0)
-        {
-            var codecName = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-            Log($"📤 Sent {count} audio frames ({codecName} native 8kHz)");
-        }
+            Log($"📤 Sent {count} audio frames (g711_alaw native 8kHz)");
     }
 
     /// <summary>
-    /// Send PCM audio. Encodes to G.711 for native passthrough.
+    /// Legacy μ-law support - converts to A-law before sending.
+    /// Use SendALawAsync directly if your SIP uses PCMA (payload type 8).
+    /// </summary>
+    public async Task SendMuLawAsync(byte[] ulawFrame)
+    {
+        if (!IsConnected || ulawFrame == null || ulawFrame.Length == 0) return;
+        if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
+
+        // Convert μ-law to A-law (both are 8kHz, 8-bit)
+        var alawFrame = ConvertMuLawToALaw(ulawFrame);
+        await SendALawAsync(alawFrame).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Send PCM audio. Encodes to A-law before sending.
+    /// For best quality, use SendALawAsync with native PCMA.
     /// </summary>
     public async Task SendAudioAsync(byte[] pcmData, int sampleRate = 8000)
     {
@@ -408,11 +424,22 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         if (sampleRate != SAMPLE_RATE)
             samples = Audio.AudioCodecs.Resample(samples, sampleRate, SAMPLE_RATE);
 
-        byte[] encoded = _codec == G711Codec.ALaw
-            ? Audio.AudioCodecs.ALawEncode(samples)
-            : Audio.AudioCodecs.MuLawEncode(samples);
+        byte[] encoded = Audio.AudioCodecs.ALawEncode(samples);
+        await SendALawAsync(encoded).ConfigureAwait(false);
+    }
 
-        await SendMuLawAsync(encoded).ConfigureAwait(false);
+    /// <summary>
+    /// Convert μ-law byte to A-law byte (both are 8-bit, 8kHz).
+    /// </summary>
+    private static byte[] ConvertMuLawToALaw(byte[] ulawData)
+    {
+        var alawData = new byte[ulawData.Length];
+        for (int i = 0; i < ulawData.Length; i++)
+        {
+            short pcm = Audio.AudioCodecs.MuLawDecode(new[] { ulawData[i] })[0];
+            alawData[i] = Audio.AudioCodecs.ALawEncode(new[] { pcm })[0];
+        }
+        return alawData;
     }
 
     /// <summary>
@@ -577,24 +604,17 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                         var b64 = deltaEl.GetString();
                         if (!string.IsNullOrEmpty(b64))
                         {
-                            // OpenAI sends PCM16@24kHz - transcode locally to G.711@8kHz
-                            var pcm24Bytes = Convert.FromBase64String(b64);
+                            // v4.0: OpenAI sends g711_alaw directly - no PCM conversion, no resampling
+                            var alawBytes = Convert.FromBase64String(b64);
                             
-                            // Fire PCM event for monitoring
-                            OnPcm24Audio?.Invoke(pcm24Bytes);
-                            
-                            // Transcode: PCM16@24kHz → downsample → G.711@8kHz
-                            var g711Bytes = ProcessPcm24ToG711(pcm24Bytes);
-                            if (g711Bytes.Length > 0)
+                            if (alawBytes.Length > 0)
                             {
-                                OnG711Audio?.Invoke(g711Bytes);
+                                // Fire raw A-law for SIP
+                                OnG711Audio?.Invoke(alawBytes);
 
                                 var count = Interlocked.Increment(ref _audioChunksReceived);
                                 if (count % 10 == 0)
-                                {
-                                    var codecName = _codec == G711Codec.ALaw ? "A-law" : "μ-law";
-                                    Log($"📢 Transcoded {count} PCM24→{codecName} chunks ({pcm24Bytes.Length}B→{g711Bytes.Length}B)");
-                                }
+                                    Log($"📢 Received {count} native A-law chunks ({alawBytes.Length}B)");
                             }
                         }
                     }
@@ -771,33 +791,6 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
         }).ConfigureAwait(false);
     }
 
-    // =========================
-    // PCM24 → G.711 PROCESSING (STREAMING)
-    // =========================
-    /// <summary>
-    /// Process variable-length 24kHz PCM from OpenAI → G.711 for SIP.
-    /// Uses streaming DSP that handles any chunk size (not fixed 20ms frames).
-    /// </summary>
-    private byte[] ProcessPcm24ToG711(byte[] pcm24Bytes)
-    {
-        if (pcm24Bytes == null || pcm24Bytes.Length == 0)
-            return Array.Empty<byte>();
-
-        // Use STREAMING processor for variable-length audio from OpenAI
-        short[] samples24k = TtsPreConditioner.BytesToPcm(pcm24Bytes);
-        short[] samples8k = TtsPreConditioner.ProcessStreaming(samples24k);
-
-        if (samples8k.Length == 0)
-            return Array.Empty<byte>();
-
-        byte[] g711;
-        if (_codec == G711Codec.ALaw)
-            g711 = AudioCodecs.ALawEncode(samples8k);
-        else
-            g711 = AudioCodecs.MuLawEncode(samples8k);
-
-        return g711;
-    }
 
     // =========================
     // SESSION CONFIG
@@ -805,11 +798,9 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     private async Task ConfigureSessionAsync()
     {
         var inputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
-        // CRITICAL: OpenAI does NOT support G.711 output - it sends 24kHz PCM mislabeled as G.711
-        // We MUST request pcm16 output and transcode locally to avoid 3x slow "tired" audio
-        var outputCodec = "pcm16";
+        var outputCodec = _codec == G711Codec.ALaw ? "g711_alaw" : "g711_ulaw";
 
-        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output=pcm16@24kHz→local DSP→G.711, voice={_voice}");
+        Log($"🎧 Configuring session: input={inputCodec}@8kHz, output={outputCodec}@8kHz (NATIVE G.711), voice={_voice}");
 
         await SendJsonAsync(new
         {
