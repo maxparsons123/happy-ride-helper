@@ -1,4 +1,4 @@
- // Version: 127 - Fixed jitter with multimedia timer + larger persistent buffer
+ // Version: 5.1 - Pure A-law end-to-end passthrough (no PCM conversion, no DSP)
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
