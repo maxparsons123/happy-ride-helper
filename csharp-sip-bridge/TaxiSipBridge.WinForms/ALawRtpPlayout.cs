@@ -72,7 +72,6 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public int QueuedFrames => Volatile.Read(ref _queueCount);
     public int FramesSent => _framesSent;
-    public int FramesSent => _framesSent;
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
