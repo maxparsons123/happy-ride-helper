@@ -9,14 +9,16 @@ using System.Threading.Tasks;
 namespace TaxiSipBridge;
 
 /// <summary>
-/// OpenAI Realtime client for G.711 telephony with local DSP processing.
+/// v7.5 - OpenAI Realtime client for G.711 telephony with state grounding.
 /// 
-/// v2.7: All response.create calls routed through QueueResponseCreateAsync with SIP-safe delays.
-///       Checks _transcriptPending and _lastUserSpeechAt (3s window) before firing.
+/// STATE GROUNDING FIX (v7.5):
+/// After sync_booking_data completes, injects a state snapshot message into the conversation.
+/// This ensures the AI KNOWS what booking fields were just synced and prevents redundant questions.
 /// 
 /// Key features:
 /// - Proper ResetCallState() for clean per-call state
 /// - Keepalive loop for connection health monitoring
+/// - State injection after tool success (prevents "ask passenger count twice" bug)
 /// - Deferred response handling (queue response.create if one is active)
 /// - Transcript guard (ignores stale transcripts within 400ms of response.created)
 /// - No-reply watchdog with speech guard
@@ -25,7 +27,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "6.0";
+    public const string VERSION = "v7.5";
 
     // =========================
     // G.711 CONFIG
@@ -807,6 +809,24 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
             // CRITICAL: After tool result, the old response is done - clear state immediately
             // The old response won't send response.done, a NEW response will be created
             Interlocked.Exchange(ref _responseActive, 0);
+            
+            // v7.5: GROUNDING FIX - After sync_booking_data, inject state snapshot into conversation
+            // This ensures the AI KNOWS what was synced and doesn't ask redundant questions
+            if (toolName == "sync_booking_data" && result is JsonElement jResult)
+            {
+                var stateUpdate = new
+                {
+                    type = "conversation.item.create",
+                    item = new
+                    {
+                        type = "message",
+                        role = "user",
+                        content = $"[BOOKING STATE UPDATE] Name: {_booking.Name ?? "?"}, Pickup: {_booking.Pickup ?? "?"}, Destination: {_booking.Destination ?? "?"}, Passengers: {_booking.Passengers ?? 0}, Time: {_booking.PickupTime ?? "?"}"
+                    }
+                };
+                await SendJsonAsync(stateUpdate).ConfigureAwait(false);
+                Log($"💬 [{_callId}] Injected state snapshot: {_booking.Name}, {_booking.Passengers} pax");
+            }
             
             // Trigger new response immediately - BYPASS transcript guard since we have tool result
             await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);
