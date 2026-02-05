@@ -1,17 +1,18 @@
- using System;
- using System.Collections.Concurrent;
- using System.Runtime.InteropServices;
- 
- namespace AdaMain.Audio;
- 
- /// <summary>
- /// Converts PCM16 @ 24kHz (OpenAI pcm16 output)
- /// → G.711 (A-law or μ-law) @ 8kHz
- /// → 20ms RTP-ready frames (160 bytes)
- ///
- /// Designed for SIP / SIPSorcery pipelines.
- /// Drop-in replacement for jittery audio paths.
- /// </summary>
+// Version: 5.1 - Pure A-law end-to-end passthrough architecture
+using System;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+
+namespace AdaMain.Audio;
+
+/// <summary>
+/// Converts PCM16 @ 24kHz (OpenAI pcm16 output)
+/// → G.711 (A-law or μ-law) @ 8kHz
+/// → 20ms RTP-ready frames (160 bytes)
+///
+/// Designed for SIP / SIPSorcery pipelines.
+/// Drop-in replacement for jittery audio paths.
+/// </summary>
  public sealed class PcmToSipG711Encoder : IDisposable
  {
      private const int INPUT_RATE = 24000;
