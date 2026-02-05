@@ -316,18 +316,12 @@ public sealed class DirectG711RtpPlayout : IDisposable
         }
         else
         {
-            // Queue empty - create smooth fade-out frame
+            // Queue empty - send silence immediately (no fade on G.711)
+            // IMPORTANT: G.711 is logarithmic encoding, linear fade produces distorted audio!
+            // Fading between G.711 values causes warbly/distorted sound.
             _consecutiveUnderruns++;
-            
-            // Exponential fade toward silence (click-free transition)
-            for (int i = 0; i < FRAME_SIZE; i++)
-            {
-                // Blend from last byte toward silence
-                float blend = (float)i / FRAME_SIZE;
-                _fadeFrame[i] = (byte)((_lastByte * (1 - blend)) + (_silence * blend));
-            }
             _lastByte = _silence;
-            frameToSend = _fadeFrame;
+            frameToSend = _silenceFrame;
             
             // Fire OnQueueEmpty once when transitioning from playing to empty
             if (_wasPlaying)
