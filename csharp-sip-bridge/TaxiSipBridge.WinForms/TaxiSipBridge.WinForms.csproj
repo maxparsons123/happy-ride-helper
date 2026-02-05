@@ -74,6 +74,8 @@
     <Compile Include="G711CallFeatures.cs" />
     <Compile Include="Audio\AudioDsp.cs" />
     <Compile Include="Audio\AudioResampler.cs" />
+    <Compile Include="Audio\NAudioPipeline.cs" />
+    <Compile Include="Audio\SipSorceryAudioBridge.cs" />
   </ItemGroup>
 
 </Project>
