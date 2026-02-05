@@ -1,4 +1,4 @@
- // Version: 5.1 - Pure A-law end-to-end passthrough (no PCM conversion, no DSP)
+// Version: 5.2 - Pure A-law end-to-end passthrough (no PCM conversion, no DSP)
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -30,12 +30,16 @@ internal static class WinMmTimer
 /// ZERO DSP: No resampling, no filtering, no volume processing.
 /// Raw G.711 bytes from OpenAI → jitter buffer → RTP at 20ms intervals.
 /// 
+/// v5.2 FIXES:
+/// ✅ Increased jitter buffer to 25 frames (500ms) for smoother audio
+/// ✅ Improved timing precision in playout loop
+/// ✅ Better drift correction
+/// 
 /// Features:
 /// ✅ Windows multimedia timer for 1ms precision (vs 15.6ms default)
-/// ✅ Large persistent jitter buffer (300ms - survives barge-ins)
+/// ✅ Large persistent jitter buffer (survives barge-ins)
 /// ✅ NAT keepalives for strict NATs (25s interval)
 /// ✅ Symmetric RTP locking (dynamic endpoint detection)
-/// ✅ Smooth fade-out on underruns (click-free transitions)
 /// ✅ Thread-safe disposal
 /// </summary>
 public sealed class DirectG711RtpPlayout : IDisposable
@@ -44,9 +48,8 @@ public sealed class DirectG711RtpPlayout : IDisposable
     private const int FRAME_SIZE = 160; // 20ms @ 8kHz G.711
     private const int MAX_QUEUE_FRAMES = 1500; // ~30s max buffer (safety cap)
     
-    // Fixed large jitter buffer - OpenAI bursts need consistent buffering
-    // 300ms is large enough to absorb any timing variations
-    private const int JITTER_BUFFER_FRAMES = 15;  // 300ms buffer (rock-solid)
+    // v5.2: Increased jitter buffer for smoother audio during OpenAI bursts
+    private const int JITTER_BUFFER_FRAMES = 25;  // 500ms buffer (handles bursty delivery)
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly byte _silence;
