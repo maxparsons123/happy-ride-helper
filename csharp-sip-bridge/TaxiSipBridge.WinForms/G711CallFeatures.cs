@@ -208,6 +208,11 @@ public sealed class G711CallFeatures : IDisposable
                 result = await HandleBookTaxiAsync(arguments);
                 break;
                 
+            case "create_booking":
+                // v5.2: Handle simplified create_booking tool (straight-through approach)
+                result = await HandleCreateBookingAsync(arguments);
+                break;
+                
             case "find_local_events":
                 result = HandleFindLocalEvents(arguments);
                 break;
@@ -593,6 +598,110 @@ public sealed class G711CallFeatures : IDisposable
             message = string.IsNullOrWhiteSpace(_booking.Name)
                 ? "Your taxi is booked!"
                 : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
+        };
+    }
+    
+    /// <summary>
+    /// v5.2: Simplified create_booking for straight-through approach.
+    /// Books immediately without separate quote/confirm steps.
+    /// </summary>
+    private async Task<object> HandleCreateBookingAsync(JsonElement args)
+    {
+        // Extract booking details from args
+        var pickup = args.TryGetProperty("pickup_address", out var p) ? p.GetString() : null;
+        var dropoff = args.TryGetProperty("dropoff_address", out var d) ? d.GetString() : null;
+        var passengers = 1;
+        
+        if (args.TryGetProperty("passenger_count", out var pax))
+        {
+            passengers = pax.ValueKind switch
+            {
+                JsonValueKind.Number => pax.GetInt32(),
+                JsonValueKind.String => int.TryParse(pax.GetString(), out var v) ? v : 1,
+                _ => 1
+            };
+        }
+        
+        // Update booking state
+        if (!string.IsNullOrWhiteSpace(pickup)) _booking.Pickup = pickup;
+        if (!string.IsNullOrWhiteSpace(dropoff)) _booking.Destination = dropoff;
+        _booking.Passengers = passengers;
+        
+        if (string.IsNullOrWhiteSpace(_booking.Pickup))
+        {
+            Log($"⚠️ [{_callId}] create_booking missing pickup address");
+            return new { success = false, error = "Pickup address is required" };
+        }
+        
+        Log($"🚕 [{_callId}] create_booking: {_booking.Pickup} → {_booking.Destination ?? "TBD"}, {passengers} pax");
+        
+        // Quick fare calculation (2s timeout)
+        try
+        {
+            var fareTask = FareCalculator.CalculateFareWithCoordsAsync(
+                _booking.Pickup!,
+                _booking.Destination ?? _booking.Pickup!,
+                _callerPhone);
+            
+            var completed = await Task.WhenAny(fareTask, Task.Delay(2000));
+            
+            if (completed == fareTask)
+            {
+                var result = await fareTask;
+                _booking.Fare = NormalizeEuroFare(result.Fare);
+                _booking.Eta = result.Eta;
+                _booking.PickupLat = result.PickupLat;
+                _booking.PickupLon = result.PickupLon;
+                _booking.PickupCity = result.PickupCity;
+                _booking.DestLat = result.DestLat;
+                _booking.DestLon = result.DestLon;
+                _booking.DestCity = result.DestCity;
+            }
+            else
+            {
+                _booking.Fare = "€12.50";
+                _booking.Eta = "5 minutes";
+                Log($"⏱️ [{_callId}] Fare timeout - using default");
+            }
+        }
+        catch (Exception ex)
+        {
+            _booking.Fare = "€12.50";
+            _booking.Eta = "5 minutes";
+            Log($"⚠️ [{_callId}] Fare error: {ex.Message}");
+        }
+        
+        // Generate booking ref
+        _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+        _booking.Confirmed = true;
+        
+        Log($"✅ [{_callId}] Booking created: {_booking.BookingRef}");
+        OnBookingUpdated?.Invoke(_booking);
+        
+        // Dispatch (fire-and-forget)
+        if (!string.IsNullOrEmpty(_callerPhone))
+        {
+            BsqdDispatcher.OnLog += msg => Log(msg);
+            BsqdDispatcher.Dispatch(_booking, _callerPhone);
+        }
+        
+        // WhatsApp notification (fire-and-forget)
+        _ = Task.Run(async () =>
+        {
+            try { await SendWhatsAppNotificationAsync(); }
+            catch (Exception ex) { Log($"❌ [{_callId}] WhatsApp error: {ex.Message}"); }
+        });
+        
+        var spokenFare = FormatFareForSpeech(_booking.Fare);
+        
+        return new
+        {
+            success = true,
+            booking_ref = _booking.BookingRef,
+            eta = _booking.Eta,
+            fare = _booking.Fare,
+            fare_spoken = spokenFare,
+            message = $"Booked! Driver in {_booking.Eta}, fare is {spokenFare}."
         };
     }
 
