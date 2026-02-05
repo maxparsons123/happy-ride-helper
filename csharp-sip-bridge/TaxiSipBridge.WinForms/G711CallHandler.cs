@@ -53,7 +53,7 @@ public class G711CallHandler : ISipCallHandler, IDisposable
     private DateTime _botStoppedSpeakingAt = DateTime.MinValue;
 
     private VoIPMediaSession? _currentMediaSession;
-    private SipSorceryAudioBridge? _audioBridge;  // v6.0: NAudio + SIPSorcery native pipeline (true passthrough)
+    private ALawRtpPlayout? _alawPlayout;  // v6.1: Direct A-law RTP playout (better audio than NAudio pipeline)
     private AudioCodecsEnum _negotiatedCodec = AudioCodecsEnum.PCMA;
     private int _negotiatedPayloadType = 0;
     private OpenAIRealtimeG711Client? _aiClient;
@@ -225,10 +225,9 @@ Be concise, warm, and professional.
             _aiClient.OnToolCall += (toolName, toolCallId, args) =>
                 _features.HandleToolCallAsync(toolName, toolCallId, args);
             
-            // v6.0: Create SipSorceryAudioBridge using NAudio pipeline
-            _audioBridge = new SipSorceryAudioBridge(_currentMediaSession, useALaw: true);
-            _audioBridge.OnLog += msg => Log(msg);
-            _audioBridge.OnQueueEmpty += () =>
+            // v6.1: Use ALawRtpPlayout for direct A-law passthrough (better audio quality)
+            _alawPlayout = new ALawRtpPlayout(_currentMediaSession.RtpSession);
+            _alawPlayout.OnQueueEmpty += () =>
             {
                 if (_adaHasStartedSpeaking && _isBotSpeaking)
                 {
@@ -241,8 +240,8 @@ Be concise, warm, and professional.
                     else _aiClient?.NotifyPlayoutComplete();
                 }
             };
-            _audioBridge.Start();
-            Log($"🎵 [{callId}] SipSorceryAudioBridge started (NAudio pipeline)");
+            _alawPlayout.Start();
+            Log($"🎵 [{callId}] ALawRtpPlayout started (direct A-law passthrough)");
 
             // Wire AI client events (using v5.1 pure A-law output path)
             WireAiClientEvents(callId, cts);
@@ -291,12 +290,12 @@ Be concise, warm, and professional.
         _aiClient.OnLog += msg => Log(msg);
         _aiClient.OnTranscript += t => OnTranscript?.Invoke(t);
 
-        // v6.0: Native G.711 audio PATH - push to SipSorceryAudioBridge
+        // v6.1: Native G.711 audio PATH - push to ALawRtpPlayout
         _aiClient.OnG711Audio += g711Bytes =>
         {
             _isBotSpeaking = true;
             _adaHasStartedSpeaking = true;
-            _audioBridge?.PushG711(g711Bytes);
+            _alawPlayout?.BufferALaw(g711Bytes);
         };
 
         _aiClient.OnResponseStarted += () =>
@@ -316,10 +315,10 @@ Be concise, warm, and professional.
         Action bargeInHandler = () =>
         {
             // If Ada isn't speaking and queue is empty, this is just normal speech starting a new turn
-            if (!_isBotSpeaking && (_audioBridge == null || _audioBridge.PendingFrameCount == 0))
+            if (!_isBotSpeaking && (_alawPlayout == null || _alawPlayout.QueuedFrames == 0))
                 return;
             
-            _audioBridge?.Clear();  // Immediately stop Ada speaking
+            _alawPlayout?.Clear();  // Immediately stop Ada speaking
             _isBotSpeaking = false;
             _adaHasStartedSpeaking = true;
             _features?.CancelWatchdog();
@@ -333,11 +332,11 @@ Be concise, warm, and professional.
             {
                 var del = Delegate.CreateDelegate(evt.EventHandlerType, bargeInHandler.Target!, bargeInHandler.Method);
                 evt.AddEventHandler(_aiClient, del);
-                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→SipSorceryAudioBridge, OnResponseStarted, OnResponseCompleted, OnBargeIn");
+                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→ALawRtpPlayout, OnResponseStarted, OnResponseCompleted, OnBargeIn");
             }
             else
             {
-                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→SipSorceryAudioBridge, OnResponseStarted, OnResponseCompleted");
+                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→ALawRtpPlayout, OnResponseStarted, OnResponseCompleted");
             }
         }
         catch (Exception ex)
@@ -559,11 +558,11 @@ Be concise, warm, and professional.
             _features = null;
         }
 
-        if (_audioBridge != null)
+        if (_alawPlayout != null)
         {
-            try { _audioBridge.Stop(); } catch { }
-            try { _audioBridge.Dispose(); } catch { }
-            _audioBridge = null;
+            try { _alawPlayout.Stop(); } catch { }
+            try { _alawPlayout.Dispose(); } catch { }
+            _alawPlayout = null;
         }
 
         if (_currentMediaSession != null)
@@ -600,7 +599,7 @@ Be concise, warm, and professional.
         }
 
         try { _callCts?.Cancel(); } catch { }
-        try { _audioBridge?.Dispose(); } catch { }
+        try { _alawPlayout?.Dispose(); } catch { }
         try { _aiClient?.Dispose(); } catch { }
         try { _features?.Dispose(); } catch { }
         try { _currentMediaSession?.Close("disposed"); } catch { }
