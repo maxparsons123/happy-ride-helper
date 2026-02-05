@@ -792,7 +792,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
 
                             // Geocode and Calculate (skip Edge extraction since we already did it)
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, cancellationToken: default, skipEdgeExtraction: true).ConfigureAwait(false);
 
                             // Map all geocoded data to state
                             _booking.Fare = NormalizeEuroFare(fareResult.Fare);
@@ -843,7 +843,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         {
                             var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(_booking.Pickup, _booking.Destination, _callerId).ConfigureAwait(false);
                             // Skip Edge extraction in fare calc since we just did it
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId, cancellationToken: default, skipEdgeExtraction: true).ConfigureAwait(false);
                             
                             // Map geocoded data to booking state for BSQD dispatch
                             _booking.PickupLat ??= fareResult.PickupLat;
