@@ -18,7 +18,7 @@ public class AddressDto
     public double lat { get; set; }
     public double lon { get; set; }
     public string street_name { get; set; } = "";
-    public int street_number { get; set; }
+    public string street_number { get; set; } = "";
     public string postal_code { get; set; } = "";
     public string city { get; set; } = "";
     public string? formatted_depa_address { get; set; }   // for departure
@@ -102,7 +102,7 @@ public static class BsqdDispatcher
                 lat = booking.PickupLat ?? 0,
                 lon = booking.PickupLon ?? 0,
                 street_name = booking.PickupStreet ?? ParseStreetName(booking.Pickup),
-                street_number = ParseInt(booking.PickupNumber) ?? ParseStreetNumber(booking.Pickup),
+                street_number = ResolveHouseNumber(booking.PickupNumber, booking.Pickup),
                 postal_code = booking.PickupPostalCode ?? ParsePostalCode(booking.Pickup),
                 city = booking.PickupCity ?? ParseCity(booking.Pickup),
                 formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "Unknown"
@@ -112,7 +112,7 @@ public static class BsqdDispatcher
                 lat = booking.DestLat ?? 0,
                 lon = booking.DestLon ?? 0,
                 street_name = booking.DestStreet ?? ParseStreetName(booking.Destination),
-                street_number = ParseInt(booking.DestNumber) ?? ParseStreetNumber(booking.Destination),
+                street_number = ResolveHouseNumber(booking.DestNumber, booking.Destination),
                 postal_code = booking.DestPostalCode ?? ParsePostalCode(booking.Destination),
                 city = booking.DestCity ?? ParseCity(booking.Destination),
                 formatted_dest_address = booking.DestFormatted ?? booking.Destination ?? "Unknown"
@@ -126,14 +126,36 @@ public static class BsqdDispatcher
     }
     
     /// <summary>
-    /// Parse string to int (handles string-based house numbers from BookingState).
+    /// Resolve house number as string, preserving alphanumeric values like "52A", "7", "100-8".
+    /// Priority: BookingState field → regex extraction from raw address → empty string.
     /// </summary>
-    private static int? ParseInt(string? value)
+    private static string ResolveHouseNumber(string? stateValue, string? rawAddress)
     {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        // Extract leading digits (handles "52A", "100-8", etc.)
-        var digits = new string(value.TakeWhile(char.IsDigit).ToArray());
-        return int.TryParse(digits, out var num) ? num : null;
+        // 1. Use BookingState value if set (from geocoder or AI extraction)
+        if (!string.IsNullOrWhiteSpace(stateValue))
+            return stateValue;
+
+        // 2. Try to extract from raw address using FareCalculator's regex helper
+        var extracted = FareCalculator.ExtractHouseNumber(rawAddress);
+        if (!string.IsNullOrEmpty(extracted))
+            return extracted;
+
+        // 3. Fallback: try legacy regex on first comma-separated part
+        if (!string.IsNullOrWhiteSpace(rawAddress))
+        {
+            var parts = rawAddress.Split(',');
+            if (parts.Length > 0)
+            {
+                // Match number with optional alphanumeric suffix at START or END of street part
+                var match = Regex.Match(parts[0].Trim(), @"^(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)\s");
+                if (match.Success) return match.Groups[1].Value;
+                
+                match = Regex.Match(parts[0].Trim(), @"\s(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)$");
+                if (match.Success) return match.Groups[1].Value;
+            }
+        }
+
+        return "";
     }
 
     /// <summary>
@@ -264,21 +286,19 @@ public static class BsqdDispatcher
     }
 
     /// <summary>
-    /// Extract street number from address (handles 52-8 format)
+    /// Extract street number from address as string (legacy fallback, kept for ParseCity/ParseStreetName).
     /// </summary>
-    public static int ParseStreetNumber(string? address)
+    public static string ParseStreetNumberString(string? address)
     {
-        if (string.IsNullOrWhiteSpace(address)) return 0;
+        if (string.IsNullOrWhiteSpace(address)) return "";
 
         var parts = address.Split(',');
         if (parts.Length > 0)
         {
-            // Match number with optional suffix like "4", "52-8", "100A"
-            var match = Regex.Match(parts[0], @"\s+(\d+)[\-A-Za-z0-9]*$");
-            if (match.Success && int.TryParse(match.Groups[1].Value, out var num))
-                return num;
+            var match = Regex.Match(parts[0], @"\s+(\d+[A-Za-z]?[\-A-Za-z0-9]*)$");
+            if (match.Success) return match.Groups[1].Value;
         }
-        return 0;
+        return "";
     }
 
     /// <summary>
