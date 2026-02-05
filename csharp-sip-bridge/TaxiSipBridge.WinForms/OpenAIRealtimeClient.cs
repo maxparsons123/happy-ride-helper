@@ -569,10 +569,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 
                 case "input_audio_buffer.speech_started":
                     Interlocked.Exchange(ref _transcriptPending, 1);
+                    Log("🎤 Speech started - transcriptPending=1");
                     break;
 
                 case "input_audio_buffer.speech_stopped":
                     Volatile.Write(ref _speechStoppedAt, NowMs());
+                    Log("🔇 Speech stopped");
                     break;
 
                 case "input_audio_buffer.committed":
@@ -611,6 +613,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
            Log("🛑 Cancelling response - transcript still pending (STT grounding)");
            _ = SendJsonAsync(new { type = "response.cancel" });
            return;
+       }
+       else
+       {
+           Log($"✓ STT guard passed (transcriptPending=0)");
        }
 
         _activeResponseId = responseId;
