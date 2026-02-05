@@ -133,10 +133,14 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
     // =========================
     // RESPONSE GATE
     // =========================
-    private bool CanCreateResponse()
+    /// <summary>
+    /// Check if we can create a new response. Used by QueueResponseCreateAsync.
+    /// NOTE: Does NOT check _responseQueued because we're already inside that gate when called.
+    /// </summary>
+    private bool CanCreateResponse(bool skipQueueCheck = false)
     {
         return Volatile.Read(ref _responseActive) == 0 &&
-               Volatile.Read(ref _responseQueued) == 0 &&
+               (skipQueueCheck || Volatile.Read(ref _responseQueued) == 0) &&
                Volatile.Read(ref _transcriptPending) == 0 &&  // v2.6: Wait for transcript before responding
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
@@ -192,8 +196,20 @@ public sealed class OpenAIRealtimeG711Client : IAudioAIClient, IDisposable
                 return;
             }
 
-            if (!CanCreateResponse())
+            // Skip the _responseQueued check since we're already inside this method
+            if (!CanCreateResponse(skipQueueCheck: true))
+            {
+                // Log which condition blocked
+                var reason = Volatile.Read(ref _responseActive) == 1 ? "responseActive" :
+                             Volatile.Read(ref _transcriptPending) == 1 ? "transcriptPending" :
+                             Volatile.Read(ref _callEnded) != 0 ? "callEnded" :
+                             Volatile.Read(ref _disposed) != 0 ? "disposed" :
+                             !IsConnected ? "disconnected" :
+                             (NowMs() - Volatile.Read(ref _lastUserSpeechAt)) <= 300 ? $"recentSpeech ({NowMs() - Volatile.Read(ref _lastUserSpeechAt)}ms)" :
+                             "unknown";
+                Log($"⚠️ CanCreateResponse blocked ({reason}) - skipping response.create");
                 return;
+            }
 
             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
             Log(waitForCurrentResponse ? "🔄 response.create sent" : "🔄 response.create sent (forced after tool)");
