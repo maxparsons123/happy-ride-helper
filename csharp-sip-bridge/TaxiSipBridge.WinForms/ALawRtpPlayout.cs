@@ -68,8 +68,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private volatile bool _natBindingEstablished;
 
     public event Action<string>? OnLog;
+    public event Action? OnQueueEmpty;
 
     public int QueuedFrames => Volatile.Read(ref _queueCount);
+    public int FramesSent => _framesSent;
     public int FramesSent => _framesSent;
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
@@ -244,6 +246,7 @@ public sealed class ALawRtpPlayout : IDisposable
         else
         {
             SendRtpFrame(_silenceFrame, false);
+            try { OnQueueEmpty?.Invoke(); } catch { }
         }
     }
 
