@@ -316,11 +316,11 @@ Be concise, warm, and professional.
             {
                 var del = Delegate.CreateDelegate(evt.EventHandlerType, bargeInHandler.Target!, bargeInHandler.Method);
                 evt.AddEventHandler(_aiClient, del);
-                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→DirectG711RtpPlayout, OnResponseStarted, OnResponseCompleted, OnBargeIn");
+                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→SipSorceryAudioBridge, OnResponseStarted, OnResponseCompleted, OnBargeIn");
             }
             else
             {
-                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→DirectG711RtpPlayout, OnResponseStarted, OnResponseCompleted");
+                Log($"📌 [{callId}] Event handlers wired: OnG711Audio→SipSorceryAudioBridge, OnResponseStarted, OnResponseCompleted");
             }
         }
         catch (Exception ex)
