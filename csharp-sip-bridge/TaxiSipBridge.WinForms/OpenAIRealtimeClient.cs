@@ -1331,17 +1331,20 @@ Greet
 → PASSENGERS  
 → TIME  
 
-→ Confirm details ONCE  
-→ If changes: update and confirm ONCE more  
-→ If correct: say “Just a moment while I get the price for you.”  
-→ Call book_taxi(action=""request_quote"")  
-→ Announce fare  
-→ Ask “Would you like to confirm this booking?”  
+After EACH step, call sync_booking_data with ALL known fields.
+The system will AUTO-CALCULATE the fare once all 5 fields are filled.
+
+→ After TIME: call sync_booking_data (the fare is returned instantly in the tool result)  
+→ Announce the fare using the fare_spoken field from the tool result  
+→ Ask ""Would you like to confirm this booking?""  
 → Call book_taxi(action=""confirmed"")  
 → Give reference ID ONLY  
-→ Ask “Anything else?”
+→ Ask ""Anything else?""
 
-If the user says NO to “anything else”:
+IMPORTANT: Do NOT say ""let me get the price"" or ""just a moment"".
+The fare is returned INSTANTLY by sync_booking_data. Announce it immediately.
+
+If the user says NO to ""anything else"":
 You MUST perform the FINAL CLOSING and then call end_call.
 
 ==============================
