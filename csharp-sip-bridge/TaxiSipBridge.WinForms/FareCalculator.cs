@@ -33,6 +33,53 @@ public partial class FareCalculator
         "Almere", "Breda", "Nijmegen", "Apeldoorn", "Haarlem", "Arnhem", "Maastricht", "Leiden", "Delft"
     };
 
+    // City center coordinates for OSM viewbox biasing (~15km radius)
+    private static readonly Dictionary<string, (double Lat, double Lon)> _cityCoords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // UK
+        ["London"] = (51.5074, -0.1278),
+        ["Birmingham"] = (52.4862, -1.8904),
+        ["Manchester"] = (53.4808, -2.2426),
+        ["Leeds"] = (53.8008, -1.5491),
+        ["Glasgow"] = (55.8642, -4.2518),
+        ["Liverpool"] = (53.4084, -2.9916),
+        ["Bristol"] = (51.4545, -2.5879),
+        ["Sheffield"] = (53.3811, -1.4701),
+        ["Edinburgh"] = (55.9533, -3.1883),
+        ["Leicester"] = (52.6369, -1.1398),
+        ["Coventry"] = (52.4068, -1.5197),
+        ["Bradford"] = (53.7960, -1.7594),
+        ["Cardiff"] = (51.4816, -3.1791),
+        ["Belfast"] = (54.5973, -5.9301),
+        ["Nottingham"] = (52.9548, -1.1581),
+        ["Newcastle"] = (54.9783, -1.6178),
+        ["Southampton"] = (50.9097, -1.4044),
+        ["Derby"] = (52.9225, -1.4746),
+        ["Portsmouth"] = (50.8198, -1.0880),
+        ["Brighton"] = (50.8225, -0.1372),
+        ["Plymouth"] = (50.3755, -4.1427),
+        ["Wolverhampton"] = (52.5870, -2.1288),
+        ["Reading"] = (51.4543, -0.9781),
+        ["Northampton"] = (52.2405, -0.9027),
+        ["Milton Keynes"] = (52.0406, -0.7594),
+        ["Oxford"] = (51.7520, -1.2577),
+        ["Cambridge"] = (52.2053, 0.1218),
+        ["York"] = (53.9591, -1.0815),
+        ["Bath"] = (51.3811, -2.3590),
+        ["Chester"] = (53.1930, -2.8931),
+        ["Exeter"] = (50.7184, -3.5339),
+        ["Norwich"] = (52.6309, 1.2974),
+        // NL
+        ["Amsterdam"] = (52.3676, 4.9041),
+        ["Rotterdam"] = (51.9244, 4.4777),
+        ["Den Haag"] = (52.0705, 4.3007),
+        ["The Hague"] = (52.0705, 4.3007),
+        ["Utrecht"] = (52.0907, 5.1214),
+        ["Eindhoven"] = (51.4416, 5.4697),
+        ["Tilburg"] = (51.5555, 5.0913),
+        ["Groningen"] = (53.2194, 6.5665),
+    };
+
     public static Action<string>? OnLog;
     private static void Log(string msg) => OnLog?.Invoke(msg);
 
@@ -562,6 +609,16 @@ public partial class FareCalculator
                       $"&format=json&limit=1&addressdetails=1" +
                       $"&countrycodes={region.CountryCode.ToLower()}";
 
+            // Add viewbox biasing when a city is detected in the address
+            var detectedCity = DetectCityFromAddress(address, region);
+            if (detectedCity != null && _cityCoords.TryGetValue(detectedCity, out var coords))
+            {
+                const double BIAS_RADIUS = 0.15; // ~15km in degrees
+                url += $"&viewbox={coords.Lon - BIAS_RADIUS},{coords.Lat + BIAS_RADIUS},{coords.Lon + BIAS_RADIUS},{coords.Lat - BIAS_RADIUS}";
+                url += "&bounded=1";
+                Log($"📍 OSM viewbox bias: {detectedCity} ({coords.Lat:F2}, {coords.Lon:F2})");
+            }
+
             var response = await _httpClient.GetStringAsync(url);
             var results = JsonSerializer.Deserialize<JsonElement[]>(response);
 
@@ -592,6 +649,48 @@ public partial class FareCalculator
 
                 Log($"✓ OSM: {address} → {result.City}");
                 return result;
+            }
+            
+            // If bounded search returned nothing, retry without viewbox
+            if (detectedCity != null && _cityCoords.ContainsKey(detectedCity))
+            {
+                Log($"🔄 OSM bounded search empty, retrying without viewbox...");
+                var fallbackUrl = $"https://nominatim.openstreetmap.org/search" +
+                                  $"?q={Uri.EscapeDataString(searchAddress)}" +
+                                  $"&format=json&limit=1&addressdetails=1" +
+                                  $"&countrycodes={region.CountryCode.ToLower()}";
+                
+                var fbResponse = await _httpClient.GetStringAsync(fallbackUrl);
+                var fbResults = JsonSerializer.Deserialize<JsonElement[]>(fbResponse);
+                
+                if (fbResults != null && fbResults.Length > 0)
+                {
+                    var first = fbResults[0];
+                    var result = new GeocodedAddress
+                    {
+                        Lat = double.Parse(first.GetProperty("lat").GetString()!),
+                        Lon = double.Parse(first.GetProperty("lon").GetString()!),
+                        FormattedAddress = first.TryGetProperty("display_name", out var dn)
+                            ? dn.GetString() ?? address : address
+                    };
+
+                    if (first.TryGetProperty("address", out var addr))
+                    {
+                        if (addr.TryGetProperty("road", out var road))
+                            result.StreetName = road.GetString() ?? "";
+                        if (addr.TryGetProperty("house_number", out var houseNum))
+                            result.StreetNumber = houseNum.GetString() ?? "";
+                        if (addr.TryGetProperty("postcode", out var pc))
+                            result.PostalCode = pc.GetString() ?? "";
+                        if (addr.TryGetProperty("city", out var city))
+                            result.City = city.GetString() ?? "";
+                        else if (addr.TryGetProperty("town", out var town))
+                            result.City = town.GetString() ?? "";
+                    }
+
+                    Log($"✓ OSM (unbounded): {address} → {result.City}");
+                    return result;
+                }
             }
         }
         catch (Exception ex)
