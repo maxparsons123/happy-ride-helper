@@ -303,15 +303,31 @@ public partial class FareCalculator
                 detectedArea = areaEl.GetString();
             Log($"🌍 Detected area: {detectedArea ?? "unknown"}");
 
-            // Get resolved addresses
+            // Get resolved addresses with coordinates
             string resolvedPickup = pickup ?? "";
             string resolvedDest = destination ?? "";
+            double? pickupLat = null, pickupLon = null;
+            double? destLat = null, destLon = null;
+            string? pickupStreet = null, pickupNumber = null, pickupPostal = null, pickupCity = null;
+            string? destStreet = null, destNumber = null, destPostal = null, destCity = null;
 
-            if (root.TryGetProperty("pickup", out var pickupEl) && 
-                pickupEl.TryGetProperty("address", out var pickupAddr))
+            if (root.TryGetProperty("pickup", out var pickupEl))
             {
-                resolvedPickup = pickupAddr.GetString() ?? pickup ?? "";
-                
+                if (pickupEl.TryGetProperty("address", out var pickupAddr))
+                    resolvedPickup = pickupAddr.GetString() ?? pickup ?? "";
+                if (pickupEl.TryGetProperty("lat", out var pLat) && pLat.ValueKind == JsonValueKind.Number)
+                    pickupLat = pLat.GetDouble();
+                if (pickupEl.TryGetProperty("lon", out var pLon) && pLon.ValueKind == JsonValueKind.Number)
+                    pickupLon = pLon.GetDouble();
+                if (pickupEl.TryGetProperty("street_name", out var pSt))
+                    pickupStreet = pSt.GetString();
+                if (pickupEl.TryGetProperty("street_number", out var pNum))
+                    pickupNumber = pNum.GetString();
+                if (pickupEl.TryGetProperty("postal_code", out var pPc))
+                    pickupPostal = pPc.GetString();
+                if (pickupEl.TryGetProperty("city", out var pCity))
+                    pickupCity = pCity.GetString();
+                    
                 if (pickupEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
                 {
                     result.NeedsClarification = true;
@@ -325,11 +341,23 @@ public partial class FareCalculator
                 }
             }
 
-            if (root.TryGetProperty("dropoff", out var dropoffEl) && 
-                dropoffEl.TryGetProperty("address", out var dropoffAddr))
+            if (root.TryGetProperty("dropoff", out var dropoffEl))
             {
-                resolvedDest = dropoffAddr.GetString() ?? destination ?? "";
-                
+                if (dropoffEl.TryGetProperty("address", out var dropoffAddr))
+                    resolvedDest = dropoffAddr.GetString() ?? destination ?? "";
+                if (dropoffEl.TryGetProperty("lat", out var dLat) && dLat.ValueKind == JsonValueKind.Number)
+                    destLat = dLat.GetDouble();
+                if (dropoffEl.TryGetProperty("lon", out var dLon) && dLon.ValueKind == JsonValueKind.Number)
+                    destLon = dLon.GetDouble();
+                if (dropoffEl.TryGetProperty("street_name", out var dSt))
+                    destStreet = dSt.GetString();
+                if (dropoffEl.TryGetProperty("street_number", out var dNum))
+                    destNumber = dNum.GetString();
+                if (dropoffEl.TryGetProperty("postal_code", out var dPc))
+                    destPostal = dPc.GetString();
+                if (dropoffEl.TryGetProperty("city", out var dCity))
+                    destCity = dCity.GetString();
+                    
                 if (dropoffEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
                 {
                     result.NeedsClarification = true;
@@ -351,9 +379,39 @@ public partial class FareCalculator
                 Log($"⚠️ Clarification needed for addresses");
             }
 
-            Log($"📍 Resolved: pickup='{resolvedPickup}', dest='{resolvedDest}'");
+            Log($"📍 Resolved: pickup='{resolvedPickup}' ({pickupLat},{pickupLon}), dest='{resolvedDest}' ({destLat},{destLon})");
 
-            // Now geocode the resolved addresses
+            // If we have coordinates from Gemini, use them directly (skip geocoding!)
+            if (pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
+                pickupLat.Value != 0 && destLat.Value != 0)
+            {
+                var distanceMiles = HaversineDistanceMiles(pickupLat.Value, pickupLon.Value, destLat.Value, destLon.Value);
+                var fare = CalculateFareFromDistance(distanceMiles);
+
+                result.Fare = FormatFare(fare);
+                result.Eta = EstimateEta(distanceMiles);
+                result.DistanceMiles = distanceMiles;
+                result.PickupLat = pickupLat.Value;
+                result.PickupLon = pickupLon.Value;
+                result.PickupStreet = pickupStreet;
+                result.PickupNumber = pickupNumber;
+                result.PickupPostalCode = pickupPostal;
+                result.PickupCity = pickupCity ?? detectedArea;
+                result.PickupFormatted = resolvedPickup;
+                result.DestLat = destLat.Value;
+                result.DestLon = destLon.Value;
+                result.DestStreet = destStreet;
+                result.DestNumber = destNumber;
+                result.DestPostalCode = destPostal;
+                result.DestCity = destCity ?? detectedArea;
+                result.DestFormatted = resolvedDest;
+
+                Log($"✅ Using Gemini coordinates directly — {distanceMiles:F2} miles → {result.Fare}");
+                return result;
+            }
+
+            // Fallback: geocode the resolved addresses if Gemini didn't return coords
+            Log($"⚠️ Gemini returned no coordinates, falling back to geocoding");
             var fareResult = await CalculateAsync(resolvedPickup, resolvedDest, phoneNumber);
             
             // Merge clarification info
