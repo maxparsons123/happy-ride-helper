@@ -816,7 +816,7 @@ public partial class FareCalculator
                Regex.IsMatch(address, @"[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}"); // UK postcode
     }
 
-    private static decimal CalculateFareFromDistance(double distanceMiles)
+    public static decimal CalculateFareFromDistance(double distanceMiles)
     {
         var fare = BASE_FARE + (RATE_PER_MILE * (decimal)distanceMiles);
         fare = Math.Max(fare, MIN_FARE);
@@ -866,7 +866,7 @@ public partial class FareCalculator
 
     private static double ToRadians(double degrees) => degrees * Math.PI / 180.0;
 
-    private static string FormatFare(decimal fare) => $"£{fare:F2}";
+    public static string FormatFare(decimal fare) => $"£{fare:F2}";
 
     public static decimal ParseFare(string fare)
     {

@@ -2573,7 +2573,45 @@ RESPONSE STYLE
                             {
                                 string resolvedP = aiResult?.pickup?.address ?? _booking.Pickup;
                                 string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
-                                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, cancellationToken: default, skipEdgeExtraction: true).ConfigureAwait(false);
+
+                                // Use Gemini lat/lon directly if available, skip OSM geocoding
+                                double? pLat = aiResult?.pickup?.lat;
+                                double? pLon = aiResult?.pickup?.lon;
+                                double? dLat = aiResult?.dropoff?.lat;
+                                double? dLon = aiResult?.dropoff?.lon;
+
+                                FareResult fareResult;
+                                if (pLat.HasValue && pLon.HasValue && dLat.HasValue && dLon.HasValue
+                                    && pLat.Value != 0 && dLat.Value != 0)
+                                {
+                                    Log($"📌 AUTO-QUOTE: Using Gemini coordinates directly (P:{pLat:F4},{pLon:F4} D:{dLat:F4},{dLon:F4})");
+                                    var distanceMiles = FareCalculator.HaversineDistanceMiles(pLat.Value, pLon.Value, dLat.Value, dLon.Value);
+                                    fareResult = new FareResult
+                                    {
+                                        Fare = FareCalculator.FormatFare(FareCalculator.CalculateFareFromDistance(distanceMiles)),
+                                        Eta = FareCalculator.EstimateEta(distanceMiles),
+                                        DistanceMiles = distanceMiles,
+                                        PickupLat = pLat.Value,
+                                        PickupLon = pLon.Value,
+                                        DestLat = dLat.Value,
+                                        DestLon = dLon.Value,
+                                        PickupFormatted = resolvedP,
+                                        DestFormatted = resolvedD,
+                                        PickupStreet = aiResult?.pickup?.street_name,
+                                        PickupNumber = aiResult?.pickup?.street_number,
+                                        PickupPostalCode = aiResult?.pickup?.postal_code,
+                                        PickupCity = aiResult?.pickup?.city,
+                                        DestStreet = aiResult?.dropoff?.street_name,
+                                        DestNumber = aiResult?.dropoff?.street_number,
+                                        DestPostalCode = aiResult?.dropoff?.postal_code,
+                                        DestCity = aiResult?.dropoff?.city
+                                    };
+                                }
+                                else
+                                {
+                                    Log("📌 AUTO-QUOTE: No Gemini coords, falling back to geocoding");
+                                    fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, cancellationToken: default, skipEdgeExtraction: true).ConfigureAwait(false);
+                                }
 
                                 _booking.Fare = NormalizeEuroFare(fareResult.Fare);
                                 _booking.Eta = fareResult.Eta;

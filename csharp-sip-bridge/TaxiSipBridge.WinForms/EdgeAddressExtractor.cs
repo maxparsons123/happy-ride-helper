@@ -80,9 +80,15 @@ public class EdgeAddressExtractor
             {
                 result.PickupAddress = pickupEl.TryGetProperty("address", out var a) ? a.GetString() : null;
                 result.PickupAmbiguous = pickupEl.TryGetProperty("is_ambiguous", out var amb) && amb.GetBoolean();
-                if (pickupEl.TryGetProperty("alternatives", out var alts))
+                result.PickupLat = pickupEl.TryGetProperty("lat", out var plat) && plat.ValueKind == JsonValueKind.Number ? plat.GetDouble() : (double?)null;
+                result.PickupLon = pickupEl.TryGetProperty("lon", out var plon) && plon.ValueKind == JsonValueKind.Number ? plon.GetDouble() : (double?)null;
+                result.PickupStreet = pickupEl.TryGetProperty("street_name", out var psn) ? psn.GetString() : null;
+                result.PickupHouseNumber = pickupEl.TryGetProperty("street_number", out var pnum) ? pnum.GetString() : null;
+                result.PickupPostalCode = pickupEl.TryGetProperty("postal_code", out var ppc) ? ppc.GetString() : null;
+                result.PickupCity = pickupEl.TryGetProperty("city", out var pcity) ? pcity.GetString() : null;
+                if (pickupEl.TryGetProperty("alternatives", out var palts))
                 {
-                    result.PickupAlternatives = alts.EnumerateArray()
+                    result.PickupAlternatives = palts.EnumerateArray()
                         .Select(x => x.GetString() ?? "")
                         .Where(x => !string.IsNullOrEmpty(x))
                         .ToArray();
@@ -94,9 +100,15 @@ public class EdgeAddressExtractor
             {
                 result.DestinationAddress = dropoffEl.TryGetProperty("address", out var a) ? a.GetString() : null;
                 result.DestinationAmbiguous = dropoffEl.TryGetProperty("is_ambiguous", out var amb) && amb.GetBoolean();
-                if (dropoffEl.TryGetProperty("alternatives", out var alts))
+                result.DestinationLat = dropoffEl.TryGetProperty("lat", out var dlat) && dlat.ValueKind == JsonValueKind.Number ? dlat.GetDouble() : (double?)null;
+                result.DestinationLon = dropoffEl.TryGetProperty("lon", out var dlon) && dlon.ValueKind == JsonValueKind.Number ? dlon.GetDouble() : (double?)null;
+                result.DestinationStreet = dropoffEl.TryGetProperty("street_name", out var dsn) ? dsn.GetString() : null;
+                result.DestinationHouseNumber = dropoffEl.TryGetProperty("street_number", out var dnum) ? dnum.GetString() : null;
+                result.DestinationPostalCode = dropoffEl.TryGetProperty("postal_code", out var dpc) ? dpc.GetString() : null;
+                result.DestinationCity = dropoffEl.TryGetProperty("city", out var dcity) ? dcity.GetString() : null;
+                if (dropoffEl.TryGetProperty("alternatives", out var dalts))
                 {
-                    result.DestinationAlternatives = alts.EnumerateArray()
+                    result.DestinationAlternatives = dalts.EnumerateArray()
                         .Select(x => x.GetString() ?? "")
                         .Where(x => !string.IsNullOrEmpty(x))
                         .ToArray();
@@ -121,7 +133,11 @@ public class EdgeAddressExtractor
         Log($"📱 Phone: {result.PhoneCountry ?? "?"}, Mobile: {result.IsMobile}, City: {result.LandlineCity ?? "(none)"}");
         Log($"🌍 Detected Area: {result.DetectedArea}");
         Log($"📍 Pickup: {result.PickupAddress ?? "(empty)"} {(result.PickupAmbiguous ? "⚠️ AMBIGUOUS" : "")}");
+        if (result.PickupLat.HasValue && result.PickupLon.HasValue)
+            Log($"   📌 Coords: {result.PickupLat:F6}, {result.PickupLon:F6} | {result.PickupStreet} {result.PickupHouseNumber}, {result.PickupCity} {result.PickupPostalCode}");
         Log($"🏁 Dropoff: {result.DestinationAddress ?? "(empty)"} {(result.DestinationAmbiguous ? "⚠️ AMBIGUOUS" : "")}");
+        if (result.DestinationLat.HasValue && result.DestinationLon.HasValue)
+            Log($"   📌 Coords: {result.DestinationLat:F6}, {result.DestinationLon:F6} | {result.DestinationStreet} {result.DestinationHouseNumber}, {result.DestinationCity} {result.DestinationPostalCode}");
         Log($"📋 Status: {result.Status}");
         Log($"════════════════════════════════════════════════════");
     }
@@ -146,6 +162,9 @@ public class AddressExtractionResult
     public string? PickupHouseNumber { get; set; }
     public string? PickupStreet { get; set; }
     public string? PickupCity { get; set; }
+    public string? PickupPostalCode { get; set; }
+    public double? PickupLat { get; set; }
+    public double? PickupLon { get; set; }
     public bool PickupAmbiguous { get; set; }
     public string[]? PickupAlternatives { get; set; }
     public double PickupConfidence { get; set; }
@@ -155,6 +174,9 @@ public class AddressExtractionResult
     public string? DestinationHouseNumber { get; set; }
     public string? DestinationStreet { get; set; }
     public string? DestinationCity { get; set; }
+    public string? DestinationPostalCode { get; set; }
+    public double? DestinationLat { get; set; }
+    public double? DestinationLon { get; set; }
     public bool DestinationAmbiguous { get; set; }
     public string[]? DestinationAlternatives { get; set; }
     public double DestinationConfidence { get; set; }
