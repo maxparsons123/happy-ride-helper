@@ -22,11 +22,14 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - 0117 or +44 117 → Bristol
    - 0118 or +44 118 → Reading
 
-2. UK Mobile (+44 7 or 07) → NO geographic clue. Use ONLY:
-   - Destination landmarks (airports, stations, hospitals)
-   - Neighborhood names mentioned
-   - City names in the text
-   - If truly ambiguous, return top 3 options by population density
+2. UK Mobile (+44 7 or 07) → NO geographic clue. You MUST:
+   - Check if a city name is explicitly mentioned in the address text
+   - Check if a unique landmark is mentioned (e.g., "Heathrow Airport" → London)
+   - If the street name exists in MULTIPLE UK cities and NO city/landmark/area is mentioned:
+     → Set is_ambiguous=true, status="clarification_needed", and provide top 3 city alternatives
+   - Common streets like "High Street", "Church Road", "Station Road", "Russell Street", "Park Road" 
+     are ALWAYS ambiguous without a city name
+   - NEVER default to London just because a street exists there
 
 3. Netherlands:
    - +31 or 0031 → Netherlands
