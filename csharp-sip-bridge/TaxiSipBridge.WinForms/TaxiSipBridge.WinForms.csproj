@@ -76,6 +76,7 @@
     <Compile Include="Audio\AudioResampler.cs" />
     <Compile Include="Audio\NAudioPipeline.cs" />
     <Compile Include="Audio\SipSorceryAudioBridge.cs" />
+    <Compile Include="Audio\WarmAudioBridge.cs" />
   </ItemGroup>
 
 </Project>
