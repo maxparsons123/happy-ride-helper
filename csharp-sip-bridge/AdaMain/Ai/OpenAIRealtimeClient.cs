@@ -4,7 +4,6 @@ using System.Text.Json;
 using AdaMain.Config;
 using AdaMain.Audio;
 using Microsoft.Extensions.Logging;
-using TaxiSipBridge.Audio;
 
 namespace AdaMain.Ai;
 
@@ -25,7 +24,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     private Task? _receiveTask;
     
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
-    private readonly WarmAudioBridge _audioBridge = new();
+    private readonly PcmToSipG711Encoder _egressEncoder = new("alaw", 5);
     private readonly AlawToOpenAiPcm24k _ingressResampler = new();
     
     private int _disposed;
@@ -59,7 +58,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         _detectedLanguage = DetectLanguage(callerId);
         
         // Reset DSP filter state for fresh call
-        _audioBridge.Reset();
+        _egressEncoder.Reset();
         
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_settings.ApiKey}");
@@ -122,8 +121,8 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     {
         if (!IsConnected) return;
         
-        // Clear any queued warm audio frames on barge-in
-        _audioBridge.Reset();
+        // Clear any queued audio frames on barge-in
+        _egressEncoder.Clear();
         
         await SendJsonAsync(new { type = "response.cancel" });
     }
@@ -202,9 +201,10 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                         var b64 = delta.GetString() ?? "";
                         if (b64.Length > 0)
                         {
-                            // WarmAudioBridge: Butterworth LPF + 800Hz warmth EQ → 8kHz A-law frames
-                            _audioBridge.ProcessAudioDelta(b64);
-                            while (_audioBridge.OutboundQueue.TryDequeue(out var frame))
+                            // SpeexDSP: 24kHz PCM16 → 8kHz A-law 20ms frames
+                            var pcmBytes = Convert.FromBase64String(b64);
+                            _egressEncoder.PushPcm16(pcmBytes);
+                            while (_egressEncoder.TryGetFrame(out var frame))
                                 OnAudio?.Invoke(frame);
                         }
                     }
@@ -494,5 +494,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     {
         await DisconnectAsync();
         _sendMutex.Dispose();
+        _ingressResampler.Dispose();
+        _egressEncoder.Dispose();
     }
 }
