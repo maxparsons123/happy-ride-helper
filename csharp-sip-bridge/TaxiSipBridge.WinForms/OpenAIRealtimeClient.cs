@@ -770,31 +770,24 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 {
                     var (newPickup, newDest) = ApplyBookingSnapshotFromArgsWithTracking(args);
 
-                    // v10.5: Fast-path for non-address syncs — no geocoding needed
-                    bool noAddressChange = newPickup == null && newDest == null;
+                    // v10.5: Skip per-field address verification entirely.
+                    // Address resolution only happens once at auto-quote time (when all 4 travel fields are filled).
+                    // This eliminates 2 redundant edge/OSM calls during collection.
+                    OnBookingUpdated?.Invoke(_booking);
 
-                    if (noAddressChange)
+                    // Check if all travel fields are now complete → trigger auto-quote with full resolution
+                    bool travelFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Pickup)
+                        && !string.IsNullOrWhiteSpace(_booking.Destination)
+                        && _booking.Passengers > 0
+                        && !string.IsNullOrWhiteSpace(_booking.PickupTime)
+                        && string.IsNullOrWhiteSpace(_booking.Fare);
+
+                    if (!travelFieldsFilled)
                     {
-                        Log($"⚡ Non-address sync (fast path): Name={_booking.Name}, Pax={_booking.Passengers}, Time={_booking.PickupTime}");
-                        OnBookingUpdated?.Invoke(_booking);
-
-                        // Check if this passengers/time sync completes all travel fields → auto-quote
-                        bool travelReady = !string.IsNullOrWhiteSpace(_booking.Pickup)
-                            && !string.IsNullOrWhiteSpace(_booking.Destination)
-                            && _booking.Passengers > 0
-                            && !string.IsNullOrWhiteSpace(_booking.PickupTime)
-                            && string.IsNullOrWhiteSpace(_booking.Fare);
-
-                        if (travelReady)
-                        {
-                            Log("💰 Fast-path auto-quote: travel fields now complete");
-                            // Fall through to full sync path for fare calculation
-                            goto fullSync;
-                        }
-
+                        // Fast path: just store data and move on
+                        Log($"⚡ Fast sync: Name={_booking.Name}, Pickup={_booking.Pickup ?? "?"}, Dest={_booking.Destination ?? "?"}, Pax={_booking.Passengers}, Time={_booking.PickupTime ?? "?"}");
                         await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
 
-                        // Inject state grounding
                         if (IsConnected)
                         {
                             var stateText = $"[BRIDGE STATE] Name={_booking.Name ?? "?"}, Pickup={_booking.Pickup ?? "?"}, Destination={_booking.Destination ?? "?"}, Passengers={_booking.Passengers?.ToString() ?? "?"}, Time={_booking.PickupTime ?? "?"}";
@@ -815,19 +808,10 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         break;
                     }
 
-                    fullSync:
-                    await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
-                    OnBookingUpdated?.Invoke(_booking);
-
-                    // v10.3: Auto-quote — trigger fare calculation when travel fields are filled
-                    // Name is NOT required for fare calculation
-                    bool travelFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Pickup)
-                        && !string.IsNullOrWhiteSpace(_booking.Destination)
-                        && _booking.Passengers > 0
-                        && !string.IsNullOrWhiteSpace(_booking.PickupTime);
+                    // Full path: all travel fields complete — resolve addresses + calculate fare
+                    Log("💰 All travel fields filled — resolving addresses and calculating fare...");
 
                     object toolResult;
-                    if (travelFieldsFilled && string.IsNullOrWhiteSpace(_booking.Fare))
                     {
                         try
                         {
@@ -916,10 +900,6 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             Log($"⚠️ Auto-quote failed: {ex.Message}");
                             toolResult = new { success = true, fare = "€12.50", fare_spoken = "12 euros 50", eta = "5 mins", message = "ANNOUNCE THE FARE AND ASK FOR CONFIRMATION." };
                         }
-                    }
-                    else
-                    {
-                        toolResult = new { success = true };
                     }
 
                     await SendToolResultAsync(callId, toolResult).ConfigureAwait(false);
