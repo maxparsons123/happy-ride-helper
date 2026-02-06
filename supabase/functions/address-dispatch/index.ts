@@ -41,6 +41,18 @@ ADDRESS EXTRACTION RULES:
 3. Append detected city to addresses for clarity
 4. For landmarks, resolve to actual street addresses if known
 
+INTRA-CITY DISTRICT DISAMBIGUATION (CRITICAL):
+Even when the CITY is known (e.g., Birmingham from landline 0121), many street names exist in MULTIPLE districts within that city.
+- Example: "School Road" exists in Hall Green, Moseley, Yardley, Kings Heath, and other Birmingham districts.
+- Example: "Church Road" exists in Erdington, Aston, Yardley, Sheldon, and others within Birmingham.
+- Example: "Park Road" exists in Moseley, Hockley, Aston, Sparkbrook within Birmingham.
+- If a street name exists in 3+ districts within the detected city AND no district/area/postcode is mentioned:
+  → Set is_ambiguous=true, status="clarification_needed"
+  → Provide alternatives as "Street Name, District" (e.g., "School Road, Hall Green", "School Road, Moseley")
+  → Ask the user which area/district they mean
+- District-unique streets (only one in the city) can be resolved directly.
+- A house number can help: if "School Road, Hall Green" is short (numbers up to ~80) but "School Road, Yardley" is long (numbers up to 200+), a high house number narrows it down.
+
 HOUSE NUMBER DISAMBIGUATION (CRITICAL):
 When a user provides a house number with a street name, USE the house number to disambiguate which street it is:
 - Example: "1214A Warwick Road" — many cities have a Warwick Road, but very few have numbers as high as 1214. 
