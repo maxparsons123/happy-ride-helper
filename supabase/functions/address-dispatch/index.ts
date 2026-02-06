@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,6 +9,17 @@ const corsHeaders = {
 const SYSTEM_PROMPT = `Role: Professional Taxi Dispatch Logic System for UK & Netherlands.
 
 Objective: Extract, validate, and GEOCODE pickup and drop-off addresses from user messages, using phone number patterns to determine geographic bias.
+
+CALLER HISTORY MATCHING (HIGHEST PRIORITY):
+When CALLER_HISTORY is provided, it contains addresses this specific caller has used before.
+- ALWAYS fuzzy-match the user's current input against their history FIRST before any other disambiguation.
+- If the user says "School Road" and their history contains "School Road, Hall Green, Birmingham" → resolve directly to that address. No clarification needed.
+- If the user says "the pub" and their history contains "The Royal Oak, Botts Lane" → resolve to that address.
+- Partial matches count: "Russell" matching "7 Russell Street, Coventry" is a valid fuzzy match.
+- Name variations count: "Robics" matching "The Robics Club, Botts Lane" is valid.
+- If the user's input matches a history entry with >70% confidence, use it directly and set is_ambiguous=false.
+- If multiple history entries match equally well, prefer the most recently used one.
+- When a history match is used, set region_source to "caller_history" in the output.
 
 PHONE NUMBER BIASING LOGIC (CRITICAL):
 1. UK Landline Area Codes - STRONG bias to specific city:
@@ -23,12 +35,13 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - 0118 or +44 118 → Reading
 
 2. UK Mobile (+44 7 or 07) → NO geographic clue. You MUST:
-   - Check if a city name is explicitly mentioned in the address text
+   - First check CALLER_HISTORY for fuzzy matches (this resolves most mobile ambiguity)
+   - Then check if a city name is explicitly mentioned in the address text
    - Check if a unique landmark is mentioned (e.g., "Heathrow Airport" → London)
-   - If the street name exists in MULTIPLE UK cities and NO city/landmark/area is mentioned:
+   - If the street name exists in MULTIPLE UK cities and NO city/landmark/area is mentioned AND no history match:
      → Set is_ambiguous=true, status="clarification_needed", and provide top 3 city alternatives
    - Common streets like "High Street", "Church Road", "Station Road", "Russell Street", "Park Road" 
-     are ALWAYS ambiguous without a city name
+     are ALWAYS ambiguous without a city name OR a caller history match
    - NEVER default to London just because a street exists there
 
 3. Netherlands:
@@ -46,7 +59,8 @@ Even when the CITY is known (e.g., Birmingham from landline 0121), many street n
 - Example: "School Road" exists in Hall Green, Moseley, Yardley, Kings Heath, and other Birmingham districts.
 - Example: "Church Road" exists in Erdington, Aston, Yardley, Sheldon, and others within Birmingham.
 - Example: "Park Road" exists in Moseley, Hockley, Aston, Sparkbrook within Birmingham.
-- If a street name exists in 3+ districts within the detected city AND no district/area/postcode is mentioned:
+- FIRST check CALLER_HISTORY — if the caller has been to "School Road, Hall Green" before and says "School Road", resolve to Hall Green directly.
+- If NO history match and a street name exists in 3+ districts within the detected city AND no district/area/postcode is mentioned:
   → Set is_ambiguous=true, status="clarification_needed"
   → Provide alternatives as "Street Name, District" (e.g., "School Road, Hall Green", "School Road, Moseley")
   → Ask the user which area/district they mean
@@ -75,6 +89,7 @@ GEOCODING RULES (CRITICAL):
 OUTPUT FORMAT (STRICT JSON):
 {
   "detected_area": "city name or region",
+  "region_source": "caller_history|landline_area_code|text_mention|landmark|unknown",
   "phone_analysis": {
     "detected_country": "UK" | "NL" | "unknown",
     "is_mobile": boolean,
@@ -89,7 +104,8 @@ OUTPUT FORMAT (STRICT JSON):
     "postal_code": "postal code if known or empty string",
     "city": "city name",
     "is_ambiguous": boolean,
-    "alternatives": ["option1", "option2"]
+    "alternatives": ["option1", "option2"],
+    "matched_from_history": boolean
   },
   "dropoff": {
     "address": "full resolved address with city",
@@ -100,7 +116,8 @@ OUTPUT FORMAT (STRICT JSON):
     "postal_code": "postal code if known or empty string",
     "city": "city name",
     "is_ambiguous": boolean,
-    "alternatives": []
+    "alternatives": [],
+    "matched_from_history": boolean
   },
   "status": "ready" | "clarification_needed"
 }`;
@@ -118,11 +135,51 @@ serve(async (req) => {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}"`);
+
+    // Look up caller history from database
+    let callerHistory = "";
+    if (phone) {
+      try {
+        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+        const supabase = createClient(supabaseUrl, supabaseKey);
+
+        // Normalize phone for lookup (strip + prefix)
+        const normalizedPhone = phone.replace(/^\+/, "");
+        const phoneVariants = [phone, normalizedPhone, `+${normalizedPhone}`];
+
+        const { data: caller } = await supabase
+          .from("callers")
+          .select("pickup_addresses, dropoff_addresses, trusted_addresses, last_pickup, last_destination, name")
+          .or(phoneVariants.map(p => `phone_number.eq.${p}`).join(","))
+          .maybeSingle();
+
+        if (caller) {
+          const allAddresses = new Set<string>();
+          if (caller.last_pickup) allAddresses.add(caller.last_pickup);
+          if (caller.last_destination) allAddresses.add(caller.last_destination);
+          (caller.pickup_addresses || []).forEach((a: string) => allAddresses.add(a));
+          (caller.dropoff_addresses || []).forEach((a: string) => allAddresses.add(a));
+          (caller.trusted_addresses || []).forEach((a: string) => allAddresses.add(a));
+
+          if (allAddresses.size > 0) {
+            callerHistory = `\n\nCALLER_HISTORY (addresses this caller has used before):\n${[...allAddresses].map((a, i) => `${i + 1}. ${a}`).join("\n")}`;
+            console.log(`📋 Found ${allAddresses.size} historical addresses for caller`);
+          } else {
+            console.log(`📋 Caller found but no address history`);
+          }
+        } else {
+          console.log(`📋 No caller record found for ${phone}`);
+        }
+      } catch (dbErr) {
+        console.warn(`⚠️ Caller history lookup failed (non-fatal):`, dbErr);
+      }
+    }
+
     // Build the user message
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}`;
-
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}"`);
+User Phone: ${phone || 'not provided'}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
