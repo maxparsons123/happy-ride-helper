@@ -770,14 +770,28 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                 {
                     var (newPickup, newDest) = ApplyBookingSnapshotFromArgsWithTracking(args);
 
-                    // v10.5: Fast-path for name-only syncs — no geocoding or fare calc needed
-                    bool nameOnlySync = newPickup == null && newDest == null
-                        && !args.ContainsKey("passengers") && !args.ContainsKey("pickup_time");
+                    // v10.5: Fast-path for non-address syncs — no geocoding needed
+                    bool noAddressChange = newPickup == null && newDest == null;
 
-                    if (nameOnlySync)
+                    if (noAddressChange)
                     {
-                        Log($"⚡ Name-only sync (fast path): {_booking.Name}");
+                        Log($"⚡ Non-address sync (fast path): Name={_booking.Name}, Pax={_booking.Passengers}, Time={_booking.PickupTime}");
                         OnBookingUpdated?.Invoke(_booking);
+
+                        // Check if this passengers/time sync completes all travel fields → auto-quote
+                        bool travelReady = !string.IsNullOrWhiteSpace(_booking.Pickup)
+                            && !string.IsNullOrWhiteSpace(_booking.Destination)
+                            && _booking.Passengers > 0
+                            && !string.IsNullOrWhiteSpace(_booking.PickupTime)
+                            && string.IsNullOrWhiteSpace(_booking.Fare);
+
+                        if (travelReady)
+                        {
+                            Log("💰 Fast-path auto-quote: travel fields now complete");
+                            // Fall through to full sync path for fare calculation
+                            goto fullSync;
+                        }
+
                         await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
 
                         // Inject state grounding
@@ -801,6 +815,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         break;
                     }
 
+                    fullSync:
                     await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
                     OnBookingUpdated?.Invoke(_booking);
 
