@@ -121,8 +121,7 @@ User Phone: ${phone || 'not provided'}`;
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userMessage },
         ],
-        temperature: 0.1, // Low temp for consistent structured output
-        response_format: { type: "json_object" },
+        temperature: 0.1,
       }),
     });
 
@@ -143,7 +142,15 @@ User Phone: ${phone || 'not provided'}`;
       throw new Error(`AI gateway error: ${response.status}`);
     }
 
-    const aiResponse = await response.json();
+    let aiResponse;
+    try {
+      const responseText = await response.text();
+      console.log("AI gateway raw response length:", responseText.length);
+      aiResponse = JSON.parse(responseText);
+    } catch (parseErr) {
+      console.error("Failed to parse AI gateway response:", parseErr);
+      throw new Error("AI gateway returned invalid JSON");
+    }
     const content = aiResponse.choices?.[0]?.message?.content;
 
     if (!content) {
