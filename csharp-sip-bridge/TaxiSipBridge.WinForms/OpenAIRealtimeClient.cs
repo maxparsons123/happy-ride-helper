@@ -1112,26 +1112,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         }).ConfigureAwait(false);
                         await QueueResponseCreateAsync(delayMs: 10).ConfigureAwait(false);
 
-                        // Safety net: if AI hasn't ended the call within 15s, force the goodbye
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(15_000).ConfigureAwait(false);
-                            if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _closingScriptSpoken) == 0 && IsConnected)
-                            {
-                                Log("⏰ Forced goodbye injection (15s timeout)");
-                                await SendJsonAsync(new
-                                {
-                                    type = "conversation.item.create",
-                                    item = new
-                                    {
-                                        type = "message",
-                                        role = "system",
-                                        content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] The booking is done. Say EXACTLY: 'Thank you for using the TaxiBot demo. You will shortly receive your booking confirmation via WhatsApp. Goodbye.' Then IMMEDIATELY call end_call." } }
-                                    }
-                                }).ConfigureAwait(false);
-                                await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-                            }
-                        });
+                        // Termination handled by end_call tool + goodbye watchdog (5s)
                     }
                     break;
                 }
