@@ -57,6 +57,8 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private string _detectedLanguage = "en";
     private readonly BookingState _booking = new();
     private bool _awaitingConfirmation;
+    private string _lastAdaTranscript = "";       // v10.4: Track Ada's last spoken text
+    private volatile bool _toolCalledInResponse;   // v10.4: Whether a tool was called in the current response
 
     // =========================
     // WS + LIFECYCLE
@@ -474,6 +476,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             break; // Ignore duplicate
 
                         _activeResponseId = responseId;
+                        _toolCalledInResponse = false;  // v10.4: Reset tool tracking
                         Interlocked.Exchange(ref _responseActive, 1);
 
                         // CRITICAL: Record timestamp for transcript guard.
@@ -513,6 +516,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             !string.IsNullOrWhiteSpace(t.GetString()))
                         {
                             var text = t.GetString()!;
+                            _lastAdaTranscript = text;  // v10.4: Track for price-promise detection
                             Log($"💬 Ada: {text}");
                             OnTranscript?.Invoke($"Ada: {text}");
 
@@ -611,6 +615,43 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         Log("🤖 AI response completed");
                         OnResponseCompleted?.Invoke();
 
+                        // v10.4: Price-promise safety net
+                        // If Ada said "get the price" / "moment while I" but no tool was called,
+                        // force-inject a system instruction to call sync_booking_data
+                        if (!_toolCalledInResponse && !string.IsNullOrEmpty(_lastAdaTranscript) &&
+                            (_lastAdaTranscript.Contains("price", StringComparison.OrdinalIgnoreCase) ||
+                             _lastAdaTranscript.Contains("moment while", StringComparison.OrdinalIgnoreCase) ||
+                             _lastAdaTranscript.Contains("just a moment", StringComparison.OrdinalIgnoreCase) ||
+                             _lastAdaTranscript.Contains("get the fare", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            Log("⚠️ Price promise detected but no tool called - forcing sync_booking_data");
+                            _ = Task.Run(async () =>
+                            {
+                                await Task.Delay(40).ConfigureAwait(false);
+                                if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+
+                                await SendJsonAsync(new
+                                {
+                                    type = "conversation.item.create",
+                                    item = new
+                                    {
+                                        type = "message",
+                                        role = "system",
+                                        content = new[]
+                                        {
+                                            new
+                                            {
+                                                type = "input_text",
+                                                text = "[SYSTEM] You promised the user a price but did not call any tool. You MUST call sync_booking_data or book_taxi NOW to get the fare. Do NOT speak again without calling the tool first."
+                                            }
+                                        }
+                                    }
+                                }).ConfigureAwait(false);
+
+                                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, bypassTranscriptGuard: true).ConfigureAwait(false);
+                            });
+                        }
+
                         // Flush deferred response if pending
                         if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                         {
@@ -667,6 +708,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     }
 
                 case "response.function_call_arguments.done":
+                    _toolCalledInResponse = true;  // v10.4: Mark tool was called
                     await HandleToolCallAsync(doc.RootElement).ConfigureAwait(false);
                     break;
 
