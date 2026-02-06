@@ -263,12 +263,24 @@ public partial class FareCalculator
                 pickup = new EdgeAddress
                 {
                     address = extraction.PickupAddress,
+                    lat = extraction.PickupLat,
+                    lon = extraction.PickupLon,
+                    street_name = extraction.PickupStreet,
+                    street_number = extraction.PickupHouseNumber,
+                    postal_code = extraction.PickupPostalCode,
+                    city = extraction.PickupCity,
                     is_ambiguous = extraction.PickupAmbiguous,
                     alternatives = extraction.PickupAlternatives
                 },
                 dropoff = new EdgeAddress
                 {
                     address = extraction.DestinationAddress,
+                    lat = extraction.DestinationLat,
+                    lon = extraction.DestinationLon,
+                    street_name = extraction.DestinationStreet,
+                    street_number = extraction.DestinationHouseNumber,
+                    postal_code = extraction.DestinationPostalCode,
+                    city = extraction.DestinationCity,
                     is_ambiguous = extraction.DestinationAmbiguous,
                     alternatives = extraction.DestinationAlternatives
                 }
@@ -286,6 +298,12 @@ public partial class FareCalculator
     public class EdgeAddress
     {
         public string? address { get; set; }
+        public double? lat { get; set; }
+        public double? lon { get; set; }
+        public string? street_name { get; set; }
+        public string? street_number { get; set; }
+        public string? postal_code { get; set; }
+        public string? city { get; set; }
         public bool is_ambiguous { get; set; }
         public string[]? alternatives { get; set; }
     }
