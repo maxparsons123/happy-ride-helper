@@ -8,12 +8,12 @@ using TaxiSipBridge.Audio;
 namespace AdaMain.Ai;
 
 /// <summary>
-/// OpenAI Realtime API client with proper response lifecycle handling.
-/// Version 2.1 - Strict booking enforcement + natural voice style
+/// OpenAI Realtime API client with warm audio DSP pipeline.
+/// Version 4.4 - WarmAudioBridge integration (anti-alias + warmth EQ → A-law)
 /// </summary>
 public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "4.3";
+    public const string VERSION = "4.4";
     
     private readonly ILogger<OpenAiRealtimeClient> _logger;
     private readonly OpenAiSettings _settings;
@@ -34,6 +34,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     
     public bool IsConnected => _ws?.State == WebSocketState.Open;
     
+    /// <summary>Fired with 160-byte A-law RTP frames (warm DSP applied).</summary>
     public event Action<byte[]>? OnAudio;
     public event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     public event Action<string>? OnEnded;
@@ -54,6 +55,9 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     {
         _callerId = callerId;
         _detectedLanguage = DetectLanguage(callerId);
+        
+        // Reset DSP filter state for fresh call
+        _audioBridge.Reset();
         
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_settings.ApiKey}");
@@ -112,6 +116,10 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     public async Task CancelResponseAsync()
     {
         if (!IsConnected) return;
+        
+        // Clear any queued warm audio frames on barge-in
+        _audioBridge.Reset();
+        
         await SendJsonAsync(new { type = "response.cancel" });
     }
     
@@ -189,7 +197,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                         var b64 = delta.GetString() ?? "";
                         if (b64.Length > 0)
                         {
-                            // Process through WarmAudioBridge: anti-alias filter + warmth EQ + A-law encode
+                            // WarmAudioBridge: Butterworth LPF + 800Hz warmth EQ → 8kHz A-law frames
                             _audioBridge.ProcessAudioDelta(b64);
                             while (_audioBridge.OutboundQueue.TryDequeue(out var frame))
                                 OnAudio?.Invoke(frame);
