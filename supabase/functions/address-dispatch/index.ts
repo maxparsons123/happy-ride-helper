@@ -157,10 +157,16 @@ User Phone: ${phone || 'not provided'}`;
       throw new Error("No content in AI response");
     }
 
-    // Parse the JSON response from AI
+    // Parse the JSON response from AI (strip markdown code blocks if present)
     let parsed;
     try {
-      parsed = JSON.parse(content);
+      let jsonStr = content.trim();
+      // Strip ```json ... ``` wrapper that Gemini often adds
+      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (codeBlockMatch) {
+        jsonStr = codeBlockMatch[1].trim();
+      }
+      parsed = JSON.parse(jsonStr);
     } catch (parseErr) {
       console.error("Failed to parse AI JSON:", content);
       // Return a fallback structure
