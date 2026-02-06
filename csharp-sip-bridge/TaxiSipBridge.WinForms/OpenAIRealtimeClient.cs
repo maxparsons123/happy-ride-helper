@@ -16,7 +16,7 @@ namespace TaxiSipBridge;
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "10.2";
+    public const string VERSION = "10.3";
 
     // =========================
     // CONFIG
@@ -729,7 +729,87 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     var (newPickup, newDest) = ApplyBookingSnapshotFromArgsWithTracking(args);
                     await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
                     OnBookingUpdated?.Invoke(_booking);
-                    await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+
+                    // v10.3: Auto-quote — trigger fare calculation when travel fields are filled
+                    // Name is NOT required for fare calculation
+                    bool travelFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Pickup)
+                        && !string.IsNullOrWhiteSpace(_booking.Destination)
+                        && _booking.Passengers > 0
+                        && !string.IsNullOrWhiteSpace(_booking.PickupTime);
+
+                    object toolResult;
+                    if (travelFieldsFilled && string.IsNullOrWhiteSpace(_booking.Fare))
+                    {
+                        try
+                        {
+                            Log("💰 Auto-quote: all travel fields filled, calculating fare...");
+                            var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(
+                                _booking.Pickup, _booking.Destination, _callerId).ConfigureAwait(false);
+
+                            if (aiResult?.status == "clarification_needed")
+                            {
+                                Log("⚠️ Auto-quote: ambiguous addresses, asking user");
+                                toolResult = new
+                                {
+                                    success = false,
+                                    needs_clarification = true,
+                                    pickup_options = aiResult.pickup?.alternatives ?? Array.Empty<string>(),
+                                    destination_options = aiResult.dropoff?.alternatives ?? Array.Empty<string>(),
+                                    message = "I found multiple locations. Please ask the caller which city or area they are in."
+                                };
+                            }
+                            else
+                            {
+                                string resolvedP = aiResult?.pickup?.address ?? _booking.Pickup;
+                                string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
+
+                                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                                    resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+
+                                _booking.Fare = NormalizeEuroFare(fareResult.Fare);
+                                _booking.Eta = fareResult.Eta;
+                                _booking.PickupFormatted = fareResult.PickupFormatted;
+                                _booking.DestFormatted = fareResult.DestFormatted;
+                                _booking.PickupLat = fareResult.PickupLat;
+                                _booking.PickupLon = fareResult.PickupLon;
+                                _booking.DestLat = fareResult.DestLat;
+                                _booking.DestLon = fareResult.DestLon;
+                                _booking.PickupStreet ??= fareResult.PickupStreet;
+                                _booking.PickupNumber ??= fareResult.PickupNumber ?? FareCalculator.ExtractHouseNumber(_booking.Pickup);
+                                _booking.PickupPostalCode ??= fareResult.PickupPostalCode;
+                                _booking.PickupCity ??= fareResult.PickupCity;
+                                _booking.DestStreet ??= fareResult.DestStreet;
+                                _booking.DestNumber ??= fareResult.DestNumber ?? FareCalculator.ExtractHouseNumber(_booking.Destination);
+                                _booking.DestPostalCode ??= fareResult.DestPostalCode;
+                                _booking.DestCity ??= fareResult.DestCity;
+
+                                _awaitingConfirmation = true;
+                                OnBookingUpdated?.Invoke(_booking);
+
+                                var spokenFare = FormatFareForSpeech(_booking.Fare);
+                                Log($"💰 Auto-quote result: {_booking.Fare} ({spokenFare}), ETA: {_booking.Eta}");
+                                toolResult = new
+                                {
+                                    success = true,
+                                    fare = _booking.Fare,
+                                    fare_spoken = spokenFare,
+                                    eta = _booking.Eta,
+                                    message = $"ANNOUNCE THE FARE AND ASK FOR CONFIRMATION. The fare is {spokenFare} and ETA is {_booking.Eta}."
+                                };
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"⚠️ Auto-quote failed: {ex.Message}");
+                            toolResult = new { success = true, fare = "€12.50", fare_spoken = "12 euros 50", eta = "5 mins", message = "ANNOUNCE THE FARE AND ASK FOR CONFIRMATION." };
+                        }
+                    }
+                    else
+                    {
+                        toolResult = new { success = true };
+                    }
+
+                    await SendToolResultAsync(callId, toolResult).ConfigureAwait(false);
 
                     // v7.6: State grounding — inject current state into conversation context
                     // so OpenAI knows what's already collected and doesn't repeat questions
@@ -838,11 +918,15 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
                         _awaitingConfirmation = false;
 
-                        // Ensure we geocode one last time before dispatch if details are missing
-                        if (string.IsNullOrWhiteSpace(_booking.PickupStreet))
+                        // v10.3: Ensure geocoding before dispatch — check for missing street OR zero coords
+                        bool needsGeocode = string.IsNullOrWhiteSpace(_booking.PickupStreet)
+                            || (_booking.PickupLat == 0 && _booking.PickupLon == 0)
+                            || (_booking.DestLat == 0 && _booking.DestLon == 0);
+
+                        if (needsGeocode)
                         {
+                            Log("🔄 Confirmed path: resolving addresses via Gemini...");
                             var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(_booking.Pickup, _booking.Destination, _callerId).ConfigureAwait(false);
-                            // Skip Edge extraction in fare calc since we just did it
                             var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
 
                             // Map geocoded data to booking state for BSQD dispatch
@@ -861,6 +945,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             _booking.DestPostalCode ??= fareResult.DestPostalCode;
                             _booking.DestCity ??= fareResult.DestCity;
                             _booking.DestFormatted ??= fareResult.DestFormatted;
+
+                            // Override zero coords if Gemini/OSM returned valid ones
+                            if (_booking.PickupLat == 0 && fareResult.PickupLat != 0) _booking.PickupLat = fareResult.PickupLat;
+                            if (_booking.PickupLon == 0 && fareResult.PickupLon != 0) _booking.PickupLon = fareResult.PickupLon;
+                            if (_booking.DestLat == 0 && fareResult.DestLat != 0) _booking.DestLat = fareResult.DestLat;
+                            if (_booking.DestLon == 0 && fareResult.DestLon != 0) _booking.DestLon = fareResult.DestLon;
                         }
 
                         OnBookingUpdated?.Invoke(_booking);
@@ -1325,14 +1415,15 @@ BOOKING FLOW (STRICT)
 Follow this order exactly:
 
 Greet  
-→ NAME  
+→ NAME (call sync_booking_data IMMEDIATELY with caller_name after user provides their name)  
 → PICKUP  
 → DESTINATION  
 → PASSENGERS  
 → TIME  
 
 After EACH step, call sync_booking_data with ALL known fields.
-The system will AUTO-CALCULATE the fare once all 5 fields are filled.
+CRITICAL: This includes NAME. When the user says their name, call sync_booking_data with caller_name set.
+The system will AUTO-CALCULATE the fare once pickup, destination, passengers and time are filled.
 
 → After TIME: call sync_booking_data (the fare is returned instantly in the tool result)  
 → Announce the fare using the fare_spoken field from the tool result  
