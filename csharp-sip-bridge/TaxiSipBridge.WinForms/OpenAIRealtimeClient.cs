@@ -1132,8 +1132,42 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             case "end_call":
                 Log("📞 End call requested");
                 Interlocked.Exchange(ref _ignoreUserAudio, 1);
-                await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
-                SignalCallEnded("end_call");
+
+                // v10.4: Check if mandatory closing script was already spoken
+                const string CLOSING_SCRIPT = "Thank you for using the TaxiBot demo. You will shortly receive your booking confirmation via WhatsApp. Goodbye.";
+                bool alreadySpoken = !string.IsNullOrEmpty(_lastAdaTranscript) &&
+                    (_lastAdaTranscript.Contains("Thank you for using the TaxiBot", StringComparison.OrdinalIgnoreCase) ||
+                     _lastAdaTranscript.Contains("booking confirmation via WhatsApp", StringComparison.OrdinalIgnoreCase));
+
+                if (alreadySpoken)
+                {
+                    // Script already delivered — safe to hang up after drain
+                    Log("✅ Closing script already spoken — ending call");
+                    await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+                    SignalCallEnded("end_call");
+                }
+                else
+                {
+                    // Script NOT spoken — inject it, let Ada speak, then delayed hangup
+                    Log("⚠️ Closing script NOT spoken — injecting before hangup");
+                    await SendToolResultAsync(callId, new
+                    {
+                        success = true,
+                        instruction = $"You MUST say EXACTLY: '{CLOSING_SCRIPT}' NOW. Do not skip it."
+                    }).ConfigureAwait(false);
+                    await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, bypassTranscriptGuard: true).ConfigureAwait(false);
+
+                    // Delayed hangup — give Ada 12s to speak the script
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(12_000).ConfigureAwait(false);
+                        if (Volatile.Read(ref _callEnded) == 0)
+                        {
+                            Log("📴 Delayed hangup after closing script");
+                            SignalCallEnded("end_call_delayed");
+                        }
+                    });
+                }
                 break;
 
             default:
