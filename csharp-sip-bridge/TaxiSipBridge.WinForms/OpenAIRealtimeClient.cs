@@ -962,7 +962,12 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             BsqdDispatcher.Dispatch(_booking, _callerId);
                         });
 
-                        await SendToolResultAsync(callId, new { success = true, booking_ref = _booking.BookingRef, message = "Taxi booked!" }).ConfigureAwait(false);
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = true,
+                            booking_ref = _booking.BookingRef,
+                            message = $"Booking confirmed. Reference: {_booking.BookingRef}. Now say the reference, then ask 'Anything else?'. When the user says no, you MUST say EXACTLY: 'Thank you for using the TaxiBot system. You will shortly receive your booking confirmation over WhatsApp. Goodbye.' Then IMMEDIATELY call end_call. Do NOT rephrase or add anything."
+                        }).ConfigureAwait(false);
                         await QueueResponseCreateAsync(delayMs: 10).ConfigureAwait(false);
                     }
                     break;
