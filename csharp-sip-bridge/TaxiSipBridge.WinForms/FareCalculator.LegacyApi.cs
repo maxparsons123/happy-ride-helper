@@ -186,21 +186,47 @@ public partial class FareCalculator
 
                             Log($"💰 Using Edge addresses: pickup='{resolvedPickup}', dest='{resolvedDest}'");
 
-                            // Calculate fare with the better addresses
+                            // If Gemini returned valid coordinates, use them directly (skip OSM!)
+                            if (extraction.PickupLat.HasValue && extraction.PickupLon.HasValue &&
+                                extraction.DestinationLat.HasValue && extraction.DestinationLon.HasValue &&
+                                extraction.PickupLat.Value != 0 && extraction.DestinationLat.Value != 0)
+                            {
+                                Log($"✅ Using Gemini coordinates directly (skip OSM)");
+                                var result = calc.CalculateFromCoords(
+                                    extraction.PickupLat.Value, extraction.PickupLon.Value,
+                                    extraction.DestinationLat.Value, extraction.DestinationLon.Value);
+
+                                // Enrich with Edge-extracted address components
+                                result.PickupStreet = extraction.PickupStreet;
+                                result.PickupNumber = extraction.PickupHouseNumber;
+                                result.PickupPostalCode = extraction.PickupPostalCode;
+                                result.PickupCity = extraction.PickupCity ?? extraction.DetectedArea;
+                                result.PickupFormatted = resolvedPickup;
+                                result.DestStreet = extraction.DestinationStreet;
+                                result.DestNumber = extraction.DestinationHouseNumber;
+                                result.DestPostalCode = extraction.DestinationPostalCode;
+                                result.DestCity = extraction.DestinationCity ?? extraction.DetectedArea;
+                                result.DestFormatted = resolvedDest;
+
+                                Log($"💰 Quote: {result.Fare} ({result.DistanceMiles:F2} miles, pickup: {result.PickupCity}, dest: {result.DestCity})");
+                                return result;
+                            }
+
+                            // Fallback: Gemini didn't return coords, use OSM geocoding with resolved addresses
                             cancellationToken.ThrowIfCancellationRequested();
-                            var result = await calc.CalculateAsync(resolvedPickup, resolvedDest, phoneNumber).ConfigureAwait(false);
+                            var osmResult = await calc.CalculateAsync(resolvedPickup, resolvedDest, phoneNumber).ConfigureAwait(false);
 
                             // Enrich with Edge-extracted city info (may be more accurate than geocoding)
                             if (!string.IsNullOrEmpty(extraction.DetectedArea))
                             {
-                                if (string.IsNullOrEmpty(result.PickupCity))
-                                    result.PickupCity = extraction.DetectedArea;
-                                if (string.IsNullOrEmpty(result.DestCity))
-                                    result.DestCity = extraction.DetectedArea;
+                                if (string.IsNullOrEmpty(osmResult.PickupCity))
+                                    osmResult.PickupCity = extraction.DetectedArea;
+                                if (string.IsNullOrEmpty(osmResult.DestCity))
+                                    osmResult.DestCity = extraction.DetectedArea;
                             }
 
-                            Log($"💰 Quote: {result.Fare} (pickup: {result.PickupCity}, dest: {result.DestCity})");
-                            return result;
+                            Log($"💰 Quote: {osmResult.Fare} (pickup: {osmResult.PickupCity}, dest: {osmResult.DestCity})");
+                            return osmResult;
                         }
                         else
                         {
