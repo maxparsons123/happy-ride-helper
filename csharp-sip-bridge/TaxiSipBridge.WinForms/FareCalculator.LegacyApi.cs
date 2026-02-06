@@ -47,6 +47,11 @@ public partial class FareCalculator
         }
     }
 
+    /// <summary>
+    /// Public accessor for the default calculator instance (used by OpenAIRealtimeClient for CalculateFromCoords).
+    /// </summary>
+    public static FareCalculator GetDefaultCalc() => GetDefaultCalculator();
+
     private static EdgeAddressExtractor? GetEdgeExtractor()
     {
         lock (_staticLock)

@@ -763,8 +763,32 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                 string resolvedP = aiResult?.pickup?.address ?? _booking.Pickup;
                                 string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
 
-                                var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
-                                    resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                                // v10.4: Use Gemini coordinates directly when available (skip OSM)
+                                FareResult fareResult;
+                                if (aiResult?.pickup?.lat != null && aiResult?.pickup?.lon != null &&
+                                    aiResult?.dropoff?.lat != null && aiResult?.dropoff?.lon != null &&
+                                    aiResult.pickup.lat.Value != 0 && aiResult.dropoff.lat.Value != 0)
+                                {
+                                    Log("✅ Using Gemini coordinates directly (skip OSM)");
+                                    fareResult = FareCalculator.GetDefaultCalc().CalculateFromCoords(
+                                        aiResult.pickup.lat.Value, aiResult.pickup.lon.Value,
+                                        aiResult.dropoff.lat.Value, aiResult.dropoff.lon.Value);
+                                    fareResult.PickupStreet = aiResult.pickup.street_name;
+                                    fareResult.PickupNumber = aiResult.pickup.street_number;
+                                    fareResult.PickupPostalCode = aiResult.pickup.postal_code;
+                                    fareResult.PickupCity = aiResult.pickup.city ?? aiResult.detected_area;
+                                    fareResult.PickupFormatted = resolvedP;
+                                    fareResult.DestStreet = aiResult.dropoff.street_name;
+                                    fareResult.DestNumber = aiResult.dropoff.street_number;
+                                    fareResult.DestPostalCode = aiResult.dropoff.postal_code;
+                                    fareResult.DestCity = aiResult.dropoff.city ?? aiResult.detected_area;
+                                    fareResult.DestFormatted = resolvedD;
+                                }
+                                else
+                                {
+                                    fareResult = await FareCalculator.CalculateFareWithCoordsAsync(
+                                        resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                                }
 
                                 _booking.Fare = NormalizeEuroFare(fareResult.Fare);
                                 _booking.Eta = fareResult.Eta;
@@ -871,8 +895,31 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             string resolvedP = aiResult?.pickup?.address ?? _booking.Pickup;
                             string resolvedD = aiResult?.dropoff?.address ?? _booking.Destination;
 
-                            // Geocode and Calculate (skip Edge extraction since we already did it)
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            // v10.4: Use Gemini coordinates directly when available (skip OSM)
+                            FareResult fareResult;
+                            if (aiResult?.pickup?.lat != null && aiResult?.pickup?.lon != null &&
+                                aiResult?.dropoff?.lat != null && aiResult?.dropoff?.lon != null &&
+                                aiResult.pickup.lat.Value != 0 && aiResult.dropoff.lat.Value != 0)
+                            {
+                                Log("✅ Using Gemini coordinates directly (skip OSM)");
+                                fareResult = FareCalculator.GetDefaultCalc().CalculateFromCoords(
+                                    aiResult.pickup.lat.Value, aiResult.pickup.lon.Value,
+                                    aiResult.dropoff.lat.Value, aiResult.dropoff.lon.Value);
+                                fareResult.PickupStreet = aiResult.pickup.street_name;
+                                fareResult.PickupNumber = aiResult.pickup.street_number;
+                                fareResult.PickupPostalCode = aiResult.pickup.postal_code;
+                                fareResult.PickupCity = aiResult.pickup.city ?? aiResult.detected_area;
+                                fareResult.PickupFormatted = resolvedP;
+                                fareResult.DestStreet = aiResult.dropoff.street_name;
+                                fareResult.DestNumber = aiResult.dropoff.street_number;
+                                fareResult.DestPostalCode = aiResult.dropoff.postal_code;
+                                fareResult.DestCity = aiResult.dropoff.city ?? aiResult.detected_area;
+                                fareResult.DestFormatted = resolvedD;
+                            }
+                            else
+                            {
+                                fareResult = await FareCalculator.CalculateFareWithCoordsAsync(resolvedP, resolvedD, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            }
 
                             // Map all geocoded data to state
                             _booking.Fare = NormalizeEuroFare(fareResult.Fare);
@@ -927,7 +974,32 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         {
                             Log("🔄 Confirmed path: resolving addresses via Gemini...");
                             var aiResult = await FareCalculator.ExtractAddressesWithLovableAiAsync(_booking.Pickup, _booking.Destination, _callerId).ConfigureAwait(false);
-                            var fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            
+                            // v10.4: Use Gemini coordinates directly when available
+                            FareResult fareResult;
+                            if (aiResult?.pickup?.lat != null && aiResult?.pickup?.lon != null &&
+                                aiResult?.dropoff?.lat != null && aiResult?.dropoff?.lon != null &&
+                                aiResult.pickup.lat.Value != 0 && aiResult.dropoff.lat.Value != 0)
+                            {
+                                Log("✅ Confirmed path: using Gemini coordinates directly");
+                                fareResult = FareCalculator.GetDefaultCalc().CalculateFromCoords(
+                                    aiResult.pickup.lat.Value, aiResult.pickup.lon.Value,
+                                    aiResult.dropoff.lat.Value, aiResult.dropoff.lon.Value);
+                                fareResult.PickupStreet = aiResult.pickup.street_name;
+                                fareResult.PickupNumber = aiResult.pickup.street_number;
+                                fareResult.PickupPostalCode = aiResult.pickup.postal_code;
+                                fareResult.PickupCity = aiResult.pickup.city ?? aiResult.detected_area;
+                                fareResult.PickupFormatted = aiResult.pickup.address ?? _booking.Pickup;
+                                fareResult.DestStreet = aiResult.dropoff.street_name;
+                                fareResult.DestNumber = aiResult.dropoff.street_number;
+                                fareResult.DestPostalCode = aiResult.dropoff.postal_code;
+                                fareResult.DestCity = aiResult.dropoff.city ?? aiResult.detected_area;
+                                fareResult.DestFormatted = aiResult.dropoff.address ?? _booking.Destination;
+                            }
+                            else
+                            {
+                                fareResult = await FareCalculator.CalculateFareWithCoordsAsync(aiResult?.pickup?.address ?? _booking.Pickup, aiResult?.dropoff?.address ?? _booking.Destination, _callerId, skipEdgeExtraction: true).ConfigureAwait(false);
+                            }
 
                             // Map geocoded data to booking state for BSQD dispatch
                             _booking.PickupLat ??= fareResult.PickupLat;
