@@ -9,11 +9,11 @@ namespace AdaMain.Ai;
 
 /// <summary>
 /// OpenAI Realtime API client with warm audio DSP pipeline.
-/// Version 4.4 - WarmAudioBridge integration (anti-alias + warmth EQ → A-law)
+/// Version 4.5 - Speex ingress resampler + WarmAudioBridge egress
 /// </summary>
 public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "4.4";
+    public const string VERSION = "4.5";
     
     private readonly ILogger<OpenAiRealtimeClient> _logger;
     private readonly OpenAiSettings _settings;
@@ -25,6 +25,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
     private readonly WarmAudioBridge _audioBridge = new();
+    private readonly AlawToOpenAiPcm24k _ingressResampler = new();
     
     private int _disposed;
     private int _responseActive;
@@ -99,15 +100,18 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         _ws = null;
     }
     
-    public void SendAudio(byte[] pcm24k)
+    /// <summary>Send A-law RTP audio; resampled to 24kHz PCM16 via Speex.</summary>
+    public void SendAudio(byte[] alawRtp)
     {
-        if (!IsConnected || pcm24k.Length == 0)
+        if (!IsConnected || alawRtp.Length == 0)
             return;
+        
+        var pcm24kBytes = _ingressResampler.Process(alawRtp);
         
         var msg = JsonSerializer.Serialize(new
         {
             type = "input_audio_buffer.append",
-            audio = Convert.ToBase64String(pcm24k)
+            audio = Convert.ToBase64String(pcm24kBytes)
         });
         
         _ = SendTextAsync(msg);
