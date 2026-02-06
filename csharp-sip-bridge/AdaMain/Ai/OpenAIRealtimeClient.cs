@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AdaMain.Config;
 using Microsoft.Extensions.Logging;
+using TaxiSipBridge.Audio;
 
 namespace AdaMain.Ai;
 
@@ -23,6 +24,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     private Task? _receiveTask;
     
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
+    private readonly WarmAudioBridge _audioBridge = new();
     
     private int _disposed;
     private int _responseActive;
@@ -184,9 +186,14 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                 case "response.audio.delta":
                     if (doc.RootElement.TryGetProperty("delta", out var delta))
                     {
-                        var audio = Convert.FromBase64String(delta.GetString() ?? "");
-                        if (audio.Length > 0)
-                            OnAudio?.Invoke(audio);
+                        var b64 = delta.GetString() ?? "";
+                        if (b64.Length > 0)
+                        {
+                            // Process through WarmAudioBridge: anti-alias filter + warmth EQ + A-law encode
+                            _audioBridge.ProcessAudioDelta(b64);
+                            while (_audioBridge.OutboundQueue.TryDequeue(out var frame))
+                                OnAudio?.Invoke(frame);
+                        }
                     }
                     break;
                 
