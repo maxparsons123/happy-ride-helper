@@ -648,7 +648,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                     }
                                 }).ConfigureAwait(false);
 
-                                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, bypassTranscriptGuard: true).ConfigureAwait(false);
+                                await QueueResponseCreateAsync(delayMs: 40, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
                             });
                         }
 
@@ -1154,7 +1154,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             success = true,
                             instruction = $"You MUST say EXACTLY: '{CLOSING_SCRIPT}' NOW. Do not skip it."
                         }).ConfigureAwait(false);
-                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, bypassTranscriptGuard: true).ConfigureAwait(false);
+                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
 
                         _ = Task.Run(async () =>
                         {
