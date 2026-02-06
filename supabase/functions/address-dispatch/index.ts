@@ -48,11 +48,23 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - +31 or 0031 → Netherlands
    - 020 → Amsterdam, 010 → Rotterdam, 070 → The Hague, 030 → Utrecht
 
+ABBREVIATED / PARTIAL STREET NAME MATCHING (CRITICAL):
+Users frequently shorten or abbreviate street names. You MUST resolve partial names to real streets:
+- "Fargo" → "Fargosford Street" (partial prefix match in Coventry — do NOT invent "Fargo Street")
+- "Warwick Rd" → "Warwick Road"
+- "Kenilworth" → "Kenilworth Road" (when context suggests a street, not the town)
+- "Binley Rd" → "Binley Road"
+- "Holyhead" → "Holyhead Road"
+- "Stoney" → "Stoney Stanton Road"
+When a user says a word that is a prefix/abbreviation of a known street in the detected city, resolve to the FULL real street name. NEVER fabricate a street name — if "Fargo Street" does not exist in that city, check for real streets starting with "Fargo" (e.g., "Fargosford Street" in Coventry).
+
 ADDRESS EXTRACTION RULES:
 1. Preserve house numbers EXACTLY as spoken (e.g., "52A" stays "52A", "1214A" stays "1214A")
 2. Do NOT invent house numbers if not provided
 3. Append detected city to addresses for clarity
 4. For landmarks, resolve to actual street addresses if known
+5. ALWAYS include the postal code in the address field (e.g., "7 Russell Street, Coventry CV1 3BT")
+6. The postal_code field MUST be populated separately whenever determinable
 
 INTRA-CITY DISTRICT DISAMBIGUATION (CRITICAL):
 Even when the CITY is known (e.g., Birmingham from landline 0121), many street names exist in MULTIPLE districts within that city.
