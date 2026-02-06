@@ -1601,7 +1601,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
         return t;
     }
 
-    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.7.
+    private string GetSystemPrompt() => $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.8.
 
 ==============================
 VOICE STYLE
