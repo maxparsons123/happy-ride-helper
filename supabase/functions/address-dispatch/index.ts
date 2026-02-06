@@ -33,17 +33,27 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - 020 → Amsterdam, 010 → Rotterdam, 070 → The Hague, 030 → Utrecht
 
 ADDRESS EXTRACTION RULES:
-1. Preserve house numbers EXACTLY as spoken (e.g., "52A" stays "52A")
+1. Preserve house numbers EXACTLY as spoken (e.g., "52A" stays "52A", "1214A" stays "1214A")
 2. Do NOT invent house numbers if not provided
 3. Append detected city to addresses for clarity
 4. For landmarks, resolve to actual street addresses if known
+
+HOUSE NUMBER DISAMBIGUATION (CRITICAL):
+When a user provides a house number with a street name, USE the house number to disambiguate which street it is:
+- Example: "1214A Warwick Road" — many cities have a Warwick Road, but very few have numbers as high as 1214. 
+  A long road with 1200+ addresses is most likely the A41 Warwick Road in Birmingham/Acocks Green area.
+- Example: "52A David Road" with Coventry context — David Road in Coventry is a short residential street where 52A is plausible.
+- High house numbers (500+) strongly suggest long arterial roads, which narrows the candidates significantly.
+- Low house numbers (1-50) are common on short streets everywhere, so rely more on phone/city bias.
+- Alphanumeric suffixes (A, B, C) suggest subdivided properties, common in certain neighborhoods.
+This is a powerful signal — a street + house number combination is often unique to ONE specific road in the country.
 
 GEOCODING RULES (CRITICAL):
 1. You MUST provide lat/lon coordinates for EVERY resolved address
 2. Use your knowledge of real-world geography to provide accurate coordinates
 3. For specific street addresses with house numbers, provide coordinates as precisely as possible
 4. For landmarks, restaurants, hotels etc., provide their known location coordinates
-5. For ambiguous addresses, provide coordinates for the MOST LIKELY match based on phone bias
+5. For ambiguous addresses, provide coordinates for the MOST LIKELY match based on phone bias AND house number plausibility
 6. Coordinates must be realistic (UK lat ~50-58, lon ~-6 to 2; NL lat ~51-53, lon ~3-7)
 7. Extract structured components: street_name, street_number, postal_code, city
 
