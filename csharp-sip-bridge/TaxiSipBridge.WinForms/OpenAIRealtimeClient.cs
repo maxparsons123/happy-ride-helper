@@ -769,6 +769,38 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             case "sync_booking_data":
                 {
                     var (newPickup, newDest) = ApplyBookingSnapshotFromArgsWithTracking(args);
+
+                    // v10.5: Fast-path for name-only syncs — no geocoding or fare calc needed
+                    bool nameOnlySync = newPickup == null && newDest == null
+                        && !args.ContainsKey("passengers") && !args.ContainsKey("pickup_time");
+
+                    if (nameOnlySync)
+                    {
+                        Log($"⚡ Name-only sync (fast path): {_booking.Name}");
+                        OnBookingUpdated?.Invoke(_booking);
+                        await SendToolResultAsync(callId, new { success = true }).ConfigureAwait(false);
+
+                        // Inject state grounding
+                        if (IsConnected)
+                        {
+                            var stateText = $"[BRIDGE STATE] Name={_booking.Name ?? "?"}, Pickup={_booking.Pickup ?? "?"}, Destination={_booking.Destination ?? "?"}, Passengers={_booking.Passengers?.ToString() ?? "?"}, Time={_booking.PickupTime ?? "?"}";
+                            await SendJsonAsync(new
+                            {
+                                type = "conversation.item.create",
+                                item = new
+                                {
+                                    type = "message",
+                                    role = "system",
+                                    content = new[] { new { type = "input_text", text = stateText } }
+                                }
+                            }).ConfigureAwait(false);
+                            Log($"📋 State grounding injected: {stateText}");
+                        }
+
+                        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0).ConfigureAwait(false);
+                        break;
+                    }
+
                     await VerifyAndEnrichAddressesAsync(newPickup, newDest).ConfigureAwait(false);
                     OnBookingUpdated?.Invoke(_booking);
 
@@ -878,7 +910,6 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                     await SendToolResultAsync(callId, toolResult).ConfigureAwait(false);
 
                     // v7.6: State grounding — inject current state into conversation context
-                    // so OpenAI knows what's already collected and doesn't repeat questions
                     if (IsConnected)
                     {
                         var stateText = $"[BRIDGE STATE] Name={_booking.Name ?? "?"}, Pickup={_booking.Pickup ?? "?"}, Destination={_booking.Destination ?? "?"}, Passengers={_booking.Passengers?.ToString() ?? "?"}, Time={_booking.PickupTime ?? "?"}";
