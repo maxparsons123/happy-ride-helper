@@ -966,9 +966,30 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         {
                             success = true,
                             booking_ref = _booking.BookingRef,
-                            message = $"Booking confirmed. Reference: {_booking.BookingRef}. Now say the reference, then ask 'Anything else?'. When the user says no, you MUST say EXACTLY: 'Thank you for using the TaxiBot system. You will shortly receive your booking confirmation over WhatsApp. Goodbye.' Then IMMEDIATELY call end_call. Do NOT rephrase or add anything."
+                            message = $"Booking confirmed. Reference: {_booking.BookingRef}. Now tell the caller their reference number and ask 'Is there anything else I can help with?'. When the user says no or declines, you MUST say EXACTLY: 'Thank you for using the TaxiBot demo. You will shortly receive your booking confirmation via WhatsApp. Goodbye.' — then call end_call. Do NOT call end_call until AFTER you have spoken the goodbye message."
                         }).ConfigureAwait(false);
                         await QueueResponseCreateAsync(delayMs: 10).ConfigureAwait(false);
+
+                        // Safety net: if AI hasn't ended the call within 15s, force the goodbye
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(15_000).ConfigureAwait(false);
+                            if (Volatile.Read(ref _callEnded) == 0 && IsConnected)
+                            {
+                                Log("⏰ Forced goodbye injection (15s timeout)");
+                                await SendJsonAsync(new
+                                {
+                                    type = "conversation.item.create",
+                                    item = new
+                                    {
+                                        type = "message",
+                                        role = "system",
+                                        content = new[] { new { type = "input_text", text = "[BOOKING COMPLETE] The booking is done. Say EXACTLY: 'Thank you for using the TaxiBot demo. You will shortly receive your booking confirmation via WhatsApp. Goodbye.' Then IMMEDIATELY call end_call." } }
+                                    }
+                                }).ConfigureAwait(false);
+                                await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                            }
+                        });
                     }
                     break;
                 }
