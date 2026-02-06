@@ -241,9 +241,9 @@ public partial class FareCalculator
 
     /// <summary>
     /// Extract addresses using Lovable AI edge function and calculate fare.
-    /// Uses the address-dispatch edge function for AI-powered address resolution.
+    /// Uses the address-dispatch edge function for AI-powered address resolution with coordinates.
     /// </summary>
-    public async Task<FareResult> ExtractAddressesWithLovableAiAsync(
+    public async Task<FareResult> ExtractAndCalculateWithAiAsync(
         string? pickup,
         string? destination,
         string? phoneNumber = null)
