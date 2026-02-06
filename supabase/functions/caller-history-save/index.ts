@@ -12,7 +12,7 @@ serve(async (req) => {
   }
 
   try {
-    const { phone, name, pickup, destination } = await req.json();
+    const { phone, name, pickup, destination, call_id, booking_ref } = await req.json();
 
     if (!phone) {
       return new Response(JSON.stringify({ error: "phone is required" }), {
@@ -26,11 +26,10 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Normalize phone for consistent lookup
     const normalizedPhone = phone.replace(/^\+/, "");
     const phoneVariants = [phone, normalizedPhone, `+${normalizedPhone}`];
 
-    // Find existing caller
+    // === 1. Update caller's unique address history ===
     const { data: existing } = await supabase
       .from("callers")
       .select("*")
@@ -40,10 +39,8 @@ serve(async (req) => {
     const now = new Date().toISOString();
 
     if (existing) {
-      // Update existing caller — append addresses (deduplicated)
       const pickupAddrs = new Set<string>(existing.pickup_addresses || []);
       const dropoffAddrs = new Set<string>(existing.dropoff_addresses || []);
-
       if (pickup?.trim()) pickupAddrs.add(pickup.trim());
       if (destination?.trim()) dropoffAddrs.add(destination.trim());
 
@@ -54,24 +51,14 @@ serve(async (req) => {
         pickup_addresses: [...pickupAddrs],
         dropoff_addresses: [...dropoffAddrs],
       };
-
       if (pickup?.trim()) updateData.last_pickup = pickup.trim();
       if (destination?.trim()) updateData.last_destination = destination.trim();
       if (name?.trim() && !existing.name) updateData.name = name.trim();
 
-      const { error } = await supabase
-        .from("callers")
-        .update(updateData)
-        .eq("id", existing.id);
-
-      if (error) {
-        console.error("❌ Failed to update caller:", error);
-        throw error;
-      }
-
-      console.log(`✅ Updated caller ${existing.phone_number}: +${pickupAddrs.size} pickups, +${dropoffAddrs.size} dropoffs, bookings=${updateData.total_bookings}`);
+      const { error } = await supabase.from("callers").update(updateData).eq("id", existing.id);
+      if (error) throw error;
+      console.log(`✅ Updated caller ${existing.phone_number}: ${pickupAddrs.size} pickups, ${dropoffAddrs.size} dropoffs, bookings=${updateData.total_bookings}`);
     } else {
-      // Create new caller
       const insertData: Record<string, unknown> = {
         phone_number: normalizedPhone,
         total_bookings: 1,
@@ -79,19 +66,57 @@ serve(async (req) => {
         pickup_addresses: pickup?.trim() ? [pickup.trim()] : [],
         dropoff_addresses: destination?.trim() ? [destination.trim()] : [],
       };
-
       if (pickup?.trim()) insertData.last_pickup = pickup.trim();
       if (destination?.trim()) insertData.last_destination = destination.trim();
       if (name?.trim()) insertData.name = name.trim();
 
       const { error } = await supabase.from("callers").insert(insertData);
+      if (error) throw error;
+      console.log(`✅ Created new caller ${normalizedPhone}`);
+    }
 
-      if (error) {
-        console.error("❌ Failed to insert caller:", error);
-        throw error;
+    // === 2. Save transcript to booking for compliance ===
+    if (call_id) {
+      try {
+        // Fetch transcript from live_calls
+        const { data: liveCall } = await supabase
+          .from("live_calls")
+          .select("transcripts")
+          .eq("call_id", call_id)
+          .maybeSingle();
+
+        const transcript = liveCall?.transcripts || [];
+
+        // Find the booking to update
+        const { data: booking } = await supabase
+          .from("bookings")
+          .select("id, booking_details")
+          .eq("call_id", call_id)
+          .order("booked_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (booking) {
+          const details = (booking.booking_details as Record<string, unknown>) || {};
+          details.transcript = transcript;
+          details.transcript_saved_at = now;
+
+          const { error } = await supabase
+            .from("bookings")
+            .update({ booking_details: details })
+            .eq("id", booking.id);
+
+          if (error) {
+            console.error("⚠️ Failed to save transcript to booking:", error);
+          } else {
+            console.log(`✅ Transcript saved to booking ${booking.id} (${Array.isArray(transcript) ? transcript.length : 0} turns)`);
+          }
+        } else {
+          console.log(`⚠️ No booking found for call_id=${call_id}, transcript not saved`);
+        }
+      } catch (txErr) {
+        console.warn("⚠️ Transcript save failed (non-fatal):", txErr);
       }
-
-      console.log(`✅ Created new caller ${normalizedPhone} with ${pickup ? 1 : 0} pickup, ${destination ? 1 : 0} dropoff`);
     }
 
     return new Response(JSON.stringify({ success: true }), {
