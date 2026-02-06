@@ -37,6 +37,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
     private int _responseQueued;   // Per-call
     private int _greetingSent;     // Per-call
     private int _ignoreUserAudio;  // Per-call (set after goodbye starts)
+    private int _closingScriptSpoken; // Per-call (set when Ada speaks the farewell)
     private int _deferredResponsePending; // Per-call (queued response after response.done)
     private int _noReplyWatchdogId;      // Incremented to cancel stale watchdogs
     private int _transcriptPending;      // v2.5: Block response.create until transcript arrives
@@ -526,6 +527,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                  text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
                                  text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
                             {
+                                Interlocked.Exchange(ref _closingScriptSpoken, 1);
                                 Log("👋 Goodbye phrase detected - arming 5s hangup watchdog");
                                 _ = Task.Run(async () =>
                                 {
@@ -1114,7 +1116,7 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                         _ = Task.Run(async () =>
                         {
                             await Task.Delay(15_000).ConfigureAwait(false);
-                            if (Volatile.Read(ref _callEnded) == 0 && IsConnected)
+                            if (Volatile.Read(ref _callEnded) == 0 && Volatile.Read(ref _closingScriptSpoken) == 0 && IsConnected)
                             {
                                 Log("⏰ Forced goodbye injection (15s timeout)");
                                 await SendJsonAsync(new
