@@ -511,7 +511,7 @@ Be concise, warm, and professional.
                         Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (passthrough 8kHz){(applySoftGate ? " [gated]" : "")}");
                 }
 
-                // Audio monitor: decode G.711 → 8kHz PCM → resample to 24kHz for speaker
+                // Audio monitor: decode G.711 → raw 8kHz PCM for debugging
                 if (OnCallerAudioMonitor != null)
                 {
                     short[] monitorPcm8k;
@@ -519,10 +519,7 @@ Be concise, warm, and professional.
                         monitorPcm8k = AudioCodecs.ALawDecode(payload);
                     else
                         monitorPcm8k = AudioCodecs.MuLawDecode(payload);
-                    
-                    // Resample 8kHz → 24kHz (3x) to match PlayCallerAudioLocally expectation
-                    var monitorPcm24k = AudioCodecs.Resample(monitorPcm8k, 8000, 24000);
-                    OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitorPcm24k));
+                    OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitorPcm8k));
                 }
             }
             catch (Exception ex)
