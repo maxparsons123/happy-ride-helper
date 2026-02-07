@@ -511,15 +511,18 @@ Be concise, warm, and professional.
                         Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (passthrough 8kHz){(applySoftGate ? " [gated]" : "")}");
                 }
 
-                // Audio monitor (decode for monitoring if needed)
+                // Audio monitor: decode G.711 → 8kHz PCM → resample to 24kHz for speaker
                 if (OnCallerAudioMonitor != null)
                 {
-                    short[] monitorPcm;
+                    short[] monitorPcm8k;
                     if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                        monitorPcm = AudioCodecs.ALawDecode(payload);
+                        monitorPcm8k = AudioCodecs.ALawDecode(payload);
                     else
-                        monitorPcm = AudioCodecs.MuLawDecode(payload);
-                    OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitorPcm));
+                        monitorPcm8k = AudioCodecs.MuLawDecode(payload);
+                    
+                    // Resample 8kHz → 24kHz (3x) to match PlayCallerAudioLocally expectation
+                    var monitorPcm24k = AudioCodecs.Resample(monitorPcm8k, 8000, 24000);
+                    OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitorPcm24k));
                 }
             }
             catch (Exception ex)
