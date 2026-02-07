@@ -175,7 +175,9 @@ public partial class MainForm : Form
 
         try
         {
-            _monitorWaveProvider = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(48000, 16, 1))
+            // Use native 8kHz for raw SIP debugging
+            int sampleRate = _useG711Mode ? 8000 : 48000;
+            _monitorWaveProvider = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(sampleRate, 16, 1))
             {
                 BufferDuration = TimeSpan.FromSeconds(2),
                 DiscardOnBufferOverflow = true
@@ -185,7 +187,7 @@ public partial class MainForm : Form
             _monitorWaveOut.Init(_monitorWaveProvider);
             _monitorWaveOut.Play();
 
-            AddLog("🔊 Audio monitor started (48kHz speaker output)");
+            AddLog($"🔊 Audio monitor started ({sampleRate}Hz speaker output)");
         }
         catch (Exception ex)
         {
@@ -208,21 +210,29 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// Feed caller audio to local speaker (called from call handler).
-    /// Expects PCM16 at 24kHz, resamples to 48kHz for speaker.
+    /// Feed caller audio to local speaker.
+    /// G711 mode: raw 8kHz PCM16 (no resampling, true SIP debug).
+    /// Standard mode: 24kHz PCM16 → 48kHz for speaker.
     /// </summary>
-    private void PlayCallerAudioLocally(byte[] pcm24kHz)
+    private void PlayCallerAudioLocally(byte[] pcmBytes)
     {
         if (!_audioMonitorEnabled || _monitorWaveProvider == null) return;
 
         try
         {
-            // Resample 24kHz → 48kHz (2x interpolation)
-            var samples24 = AudioCodecs.BytesToShorts(pcm24kHz);
-            var samples48 = AudioCodecs.Resample(samples24, 24000, 48000);
-            var pcm48 = AudioCodecs.ShortsToBytes(samples48);
-
-            _monitorWaveProvider.AddSamples(pcm48, 0, pcm48.Length);
+            if (_useG711Mode)
+            {
+                // Raw 8kHz PCM direct to speaker — hear exactly what SIP delivers
+                _monitorWaveProvider.AddSamples(pcmBytes, 0, pcmBytes.Length);
+            }
+            else
+            {
+                // Resample 24kHz → 48kHz (2x interpolation)
+                var samples24 = AudioCodecs.BytesToShorts(pcmBytes);
+                var samples48 = AudioCodecs.Resample(samples24, 24000, 48000);
+                var pcm48 = AudioCodecs.ShortsToBytes(samples48);
+                _monitorWaveProvider.AddSamples(pcm48, 0, pcm48.Length);
+            }
         }
         catch { }
     }
