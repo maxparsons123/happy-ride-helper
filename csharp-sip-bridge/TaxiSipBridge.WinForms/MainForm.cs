@@ -449,7 +449,6 @@ public partial class MainForm : Form
                     // v4.2: Pass A-law direct mode flag to handler
                     const string dispatchWebhook = "https://coherent-civil-imp.ngrok.app/ada";
                     var localHandler = new LocalOpenAICallHandler(apiKey, dispatchWebhookUrl: dispatchWebhook);
-                    localHandler.UseALawDirect = _useALawDirect; // v4.2: Toggle A-law passthrough
                     _callHandler = localHandler;
 
                     // Configure Simli avatar if enabled
@@ -469,10 +468,7 @@ public partial class MainForm : Form
                     _sipLoginManager.SetCallHandler(_callHandler);
                     _sipLoginManager.Start();
                     
-                    if (_useALawDirect)
-                        AddLog("⚡ SIP LOCAL AI mode started - v4.2 A-law direct passthrough");
-                    else
-                        AddLog("🔊 SIP LOCAL AI mode started - PCM 24kHz with resampling");
+                    AddLog("🔊 SIP LOCAL AI mode started");
                 }
             }
             else
@@ -539,8 +535,7 @@ public partial class MainForm : Form
                 _localAiClient = new OpenAIRealtimeClient(
                     apiKey: apiKey,
                     model: "gpt-4o-mini-realtime-preview-2024-12-17",
-                    voice: "alloy",
-                    systemPrompt: "You are Ada, a friendly UK taxi dispatcher."
+                    voice: "alloy"
                 );
                 _localAiClient.OnLog += msg => SafeInvoke(() => AddLog(msg));
                 _localAiClient.OnTranscript += t => SafeInvoke(() => AddTranscript(t));
