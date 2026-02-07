@@ -511,16 +511,8 @@ Be concise, warm, and professional.
                         Log($"🎙️ [{callId}] Ingress: {_framesForwarded} frames (passthrough 8kHz){(applySoftGate ? " [gated]" : "")}");
                 }
 
-                // Audio monitor: decode G.711 → raw 8kHz PCM for debugging
-                if (OnCallerAudioMonitor != null)
-                {
-                    short[] monitorPcm8k;
-                    if (_negotiatedCodec == AudioCodecsEnum.PCMA)
-                        monitorPcm8k = AudioCodecs.ALawDecode(payload);
-                    else
-                        monitorPcm8k = AudioCodecs.MuLawDecode(payload);
-                    OnCallerAudioMonitor?.Invoke(AudioCodecs.ShortsToBytes(monitorPcm8k));
-                }
+                // Audio monitor: raw G.711 bytes straight off the wire (no decode)
+                OnCallerAudioMonitor?.Invoke(payload);
             }
             catch (Exception ex)
             {
