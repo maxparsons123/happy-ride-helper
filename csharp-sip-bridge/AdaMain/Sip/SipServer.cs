@@ -43,6 +43,8 @@ public sealed class SipServer : IAsyncDisposable
     public event Action<string>? OnCallStarted;
     public event Action<string>? OnCallEnded;
     public event Action<string>? OnServerResolved;
+    /// <summary>Fires with raw A-law RTP payload for local audio monitoring.</summary>
+    public event Action<byte[]>? OnCallerAudioMonitor;
 
     public SipServer(
         ILogger<SipServer> logger,
@@ -437,6 +439,9 @@ public sealed class SipServer : IAsyncDisposable
 
             var payload = pkt.Payload;
             if (payload == null || payload.Length == 0) return;
+
+            // Raw audio monitor — fires before any gating so you hear exactly what arrives on the wire
+            OnCallerAudioMonitor?.Invoke(payload);
 
             // 3) Soft gate: during bot speaking or echo guard, send silence unless barge-in
             bool applySoftGate = false;
