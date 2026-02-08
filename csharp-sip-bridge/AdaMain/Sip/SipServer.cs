@@ -316,13 +316,21 @@ public sealed class SipServer : IAsyncDisposable
 
     private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
     {
-        // Use raw RTPSession with explicit PCMA track — VoIPMediaSession has an internal
-        // audio source that conflicts with our SendRtpRaw calls (causes silent outbound).
-        var rtpSession = new SIPSorcery.Net.RTPSession(false, false, false);
-        var audioTrack = new SIPSorcery.Net.MediaStreamTrack(
-            new SIPSorceryMedia.Abstractions.AudioFormat(
-                SIPSorceryMedia.Abstractions.SDPWellKnownMediaFormatsEnum.PCMA));
-        rtpSession.addTrack(audioTrack);
+        // Match proven G711CallHandler pattern: VoIPMediaSession with AudioSourcesEnum.None
+        // This prevents the internal audio source from conflicting with our SendRtpRaw calls.
+        var audioEncoder = new SIPSorcery.Media.AudioEncoder();
+        var audioSource = new SIPSorceryMedia.Abstractions.AudioExtrasSource(
+            audioEncoder,
+            new SIPSorceryMedia.Abstractions.AudioSourceOptions
+            {
+                AudioSource = SIPSorceryMedia.Abstractions.AudioSourcesEnum.None
+            });
+
+        // Prefer PCMA (A-law) for pure passthrough
+        audioSource.RestrictFormats(fmt => fmt.Codec == SIPSorceryMedia.Abstractions.AudioCodecsEnum.PCMA);
+
+        var mediaEndPoints = new SIPSorcery.Media.MediaEndPoints { AudioSource = audioSource };
+        var rtpSession = new SIPSorcery.Media.VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
 
         var serverUa = ua.AcceptCall(req);
@@ -360,7 +368,7 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
-        // Create ALawRtpPlayout (v7.4 rebuffer engine)
+        // Create ALawRtpPlayout (v7.4 rebuffer engine) — exact same pattern as G711CallHandler
         var playout = new ALawRtpPlayout(rtpSession);
         playout.OnLog += msg => Log(msg);
         playout.OnQueueEmpty += () => session.NotifyPlayoutComplete();
