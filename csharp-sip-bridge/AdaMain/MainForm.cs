@@ -1,5 +1,8 @@
 using System.Text.Json;
 using AdaMain.Config;
+using AdaMain.Core;
+using AdaMain.Sip;
+using Microsoft.Extensions.Logging;
 
 namespace AdaMain;
 
@@ -9,12 +12,38 @@ public partial class MainForm : Form
     private bool _sipConnected;
     private bool _inCall;
 
+    private SipServer? _sipServer;
+    private ILoggerFactory? _loggerFactory;
+
     public MainForm()
     {
         InitializeComponent();
         _settings = LoadSettings();
         ApplySettingsToUi();
         Log("AdaMain started. Configure SIP and click Connect.");
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (_sipServer != null)
+        {
+            Log("Shutting down SIP…");
+            _sipServer.StopAsync().GetAwaiter().GetResult();
+            _sipServer = null;
+        }
+        _loggerFactory?.Dispose();
+        base.OnFormClosing(e);
+    }
+
+    // ── Logger factory ──
+
+    private ILoggerFactory GetLoggerFactory()
+    {
+        return _loggerFactory ??= LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Debug);
+            builder.AddProvider(new CallbackLoggerProvider(Log));
+        });
     }
 
     // ── Settings persistence ──
@@ -77,7 +106,7 @@ public partial class MainForm : Form
 
     // ── SIP connection ──
 
-    private void btnConnect_Click(object? sender, EventArgs e)
+    private async void btnConnect_Click(object? sender, EventArgs e)
     {
         ReadSipFromUi();
 
@@ -90,15 +119,78 @@ public partial class MainForm : Form
         SaveSettings();
         Log($"📞 Connecting to {_settings.Sip.Server}:{_settings.Sip.Port} as {_settings.Sip.Username} ({_settings.Sip.Transport})…");
 
-        // TODO: call SipServer.StartAsync(_settings.Sip)
-        SetSipConnected(true);
+        SetSipConnected(true);  // Disable fields immediately
+
+        try
+        {
+            var factory = GetLoggerFactory();
+            var sipLogger = factory.CreateLogger<SipServer>();
+            var smLogger = factory.CreateLogger<SessionManager>();
+
+            // Create a placeholder session factory (sessions not yet fully wired)
+            var sessionManager = new SessionManager(smLogger, (sid, cid) =>
+            {
+                Log($"⚠ Session factory not yet wired for {cid}");
+                throw new NotImplementedException("CallSession factory needs AI client wiring");
+            });
+
+            _sipServer = new SipServer(sipLogger, _settings.Sip, sessionManager);
+
+            // Wire SipServer events → MainForm
+            _sipServer.OnRegistered += msg => Invoke(() =>
+            {
+                Log($"✅ SIP Registered: {msg}");
+                lblSipStatus.Text = "● Registered";
+                lblSipStatus.ForeColor = Color.LimeGreen;
+                statusLabel.Text = "SIP Registered";
+            });
+
+            _sipServer.OnRegistrationFailed += msg => Invoke(() =>
+            {
+                Log($"❌ Registration failed: {msg}");
+                lblSipStatus.Text = "● Reg Failed";
+                lblSipStatus.ForeColor = Color.OrangeRed;
+                statusLabel.Text = "Registration Failed";
+            });
+
+            _sipServer.OnCallStarted += callerId => Invoke(() =>
+            {
+                OnIncomingCall(callerId);
+                SetInCall(true);
+            });
+
+            _sipServer.OnCallEnded += reason => Invoke(() =>
+            {
+                Log($"📴 Call ended: {reason}");
+                SetInCall(false);
+                statusCallId.Text = "";
+            });
+
+            await _sipServer.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ SIP start failed: {ex.Message}");
+            SetSipConnected(false);
+            _sipServer = null;
+        }
     }
 
-    private void btnDisconnect_Click(object? sender, EventArgs e)
+    private async void btnDisconnect_Click(object? sender, EventArgs e)
     {
         Log("📞 Disconnecting SIP…");
-        // TODO: call SipServer.Stop()
+        try
+        {
+            if (_sipServer != null)
+            {
+                await _sipServer.StopAsync();
+                _sipServer = null;
+            }
+        }
+        catch (Exception ex) { Log($"⚠ Disconnect error: {ex.Message}"); }
+
         SetSipConnected(false);
+        SetInCall(false);
     }
 
     private void SetSipConnected(bool connected)
@@ -107,9 +199,9 @@ public partial class MainForm : Form
         btnConnect.Enabled = !connected;
         btnDisconnect.Enabled = connected;
         SetSipFieldsEnabled(!connected);
-        lblSipStatus.Text = connected ? "● Connected" : "● Disconnected";
-        lblSipStatus.ForeColor = connected ? Color.LimeGreen : Color.Gray;
-        statusLabel.Text = connected ? "SIP Registered" : "Ready";
+        lblSipStatus.Text = connected ? "● Connecting…" : "● Disconnected";
+        lblSipStatus.ForeColor = connected ? Color.Yellow : Color.Gray;
+        statusLabel.Text = connected ? "Connecting…" : "Ready";
     }
 
     private void SetSipFieldsEnabled(bool enabled)
@@ -128,21 +220,26 @@ public partial class MainForm : Form
     private void btnAnswer_Click(object? sender, EventArgs e)
     {
         Log("✅ Answering incoming call…");
-        // TODO: answer call via SipServer
+        // TODO: signal SipServer to accept pending INVITE
         SetInCall(true);
     }
 
     private void btnReject_Click(object? sender, EventArgs e)
     {
         Log("❌ Rejecting incoming call.");
-        // TODO: reject call
+        // TODO: signal SipServer to reject pending INVITE
         SetInCall(false);
     }
 
-    private void btnHangUp_Click(object? sender, EventArgs e)
+    private async void btnHangUp_Click(object? sender, EventArgs e)
     {
         Log("📴 Hanging up call.");
-        // TODO: hang up
+        // SipServer will fire OnCallEnded → SetInCall(false)
+        if (_sipServer != null)
+        {
+            try { await _sipServer.HangupAsync(); }
+            catch (Exception ex) { Log($"⚠ Hangup error: {ex.Message}"); }
+        }
         SetInCall(false);
     }
 
