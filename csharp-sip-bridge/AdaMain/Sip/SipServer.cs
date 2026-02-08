@@ -4,8 +4,11 @@ using AdaMain.Audio;
 using AdaMain.Config;
 using AdaMain.Core;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.Media;
+using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
+using SIPSorceryMedia.Abstractions;
 
 namespace AdaMain.Sip;
 
@@ -317,20 +320,16 @@ public sealed class SipServer : IAsyncDisposable
     private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
     {
         // Match proven G711CallHandler pattern: VoIPMediaSession with AudioSourcesEnum.None
-        // This prevents the internal audio source from conflicting with our SendRtpRaw calls.
-        var audioEncoder = new SIPSorcery.Media.AudioEncoder();
-        var audioSource = new SIPSorceryMedia.Abstractions.AudioExtrasSource(
+        var audioEncoder = new AudioEncoder();
+        var audioSource = new AudioExtrasSource(
             audioEncoder,
-            new SIPSorceryMedia.Abstractions.AudioSourceOptions
-            {
-                AudioSource = SIPSorceryMedia.Abstractions.AudioSourcesEnum.None
-            });
+            new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
 
         // Prefer PCMA (A-law) for pure passthrough
-        audioSource.RestrictFormats(fmt => fmt.Codec == SIPSorceryMedia.Abstractions.AudioCodecsEnum.PCMA);
+        audioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA);
 
-        var mediaEndPoints = new SIPSorcery.Media.MediaEndPoints { AudioSource = audioSource };
-        var rtpSession = new SIPSorcery.Media.VoIPMediaSession(mediaEndPoints);
+        var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
+        var rtpSession = new VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
 
         var serverUa = ua.AcceptCall(req);
@@ -362,7 +361,7 @@ public sealed class SipServer : IAsyncDisposable
         // Wire up audio: SIP → AI
         rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
         {
-            if (mt == SIPSorcery.Net.SDPMediaTypesEnum.audio)
+            if (mt == SDPMediaTypesEnum.audio)
             {
                 session.ProcessInboundAudio(pkt.Payload);
             }
