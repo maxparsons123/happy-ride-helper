@@ -144,6 +144,12 @@ public partial class MainForm : Form
             // Wire SipServer events → MainForm
             _sipServer.OnLog += msg => Invoke(() => Log(msg));
 
+            _sipServer.OnServerResolved += ip => Invoke(() =>
+            {
+                txtSipServer.Text = ip;
+                Log($"📡 Server resolved → {ip}");
+            });
+
             _sipServer.OnRegistered += msg => Invoke(() =>
             {
                 Log($"✅ SIP Registered: {msg}");
