@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using AdaMain.Ai;
 using AdaMain.Ai;
 using AdaMain.Config;
 using AdaMain.Services;
@@ -18,7 +18,7 @@ public sealed class CallSession : ICallSession
     private readonly IFareCalculator _fareCalculator;
     private readonly IDispatcher _dispatcher;
     
-    private readonly ConcurrentQueue<byte[]> _outboundQueue = new();
+    
     private readonly BookingState _booking = new();
     
     private int _disposed;
@@ -33,6 +33,8 @@ public sealed class CallSession : ICallSession
     public event Action<ICallSession, string>? OnEnded;
     public event Action<BookingState>? OnBookingUpdated;
     public event Action<string, string>? OnTranscript;
+    public event Action<byte[]>? OnAudioOut;
+    public event Action? OnBargeIn;
     
     public CallSession(
         string sessionId,
@@ -57,12 +59,12 @@ public sealed class CallSession : ICallSession
         _aiClient.OnEnded += reason => _ = EndAsync(reason);
         _aiClient.OnTranscript += (role, text) => OnTranscript?.Invoke(role, text);
         
-        // Barge-in: clear outbound audio queue so AI audio stops immediately
+        // Barge-in: notify playout to clear
         if (_aiClient is OpenAiG711Client g711Client)
         {
             g711Client.OnBargeIn += () =>
             {
-                while (_outboundQueue.TryDequeue(out _)) { }
+                OnBargeIn?.Invoke();
             };
         }
     }
@@ -104,10 +106,10 @@ public sealed class CallSession : ICallSession
         _aiClient.SendAudio(alawRtp);
     }
     
-    /// <summary>Get next outbound G.711 A-law frame for SIP (160 bytes = 20ms).</summary>
+    /// <summary>Get next outbound G.711 A-law frame for SIP (160 bytes = 20ms). Legacy polling API.</summary>
     public byte[]? GetOutboundFrame()
     {
-        return _outboundQueue.TryDequeue(out var frame) ? frame : null;
+        return null; // Playout now uses OnAudioOut event directly
     }
     
     /// <summary>Notify that playout queue has drained - triggers echo guard + no-reply watchdog.</summary>
@@ -119,14 +121,10 @@ public sealed class CallSession : ICallSession
             g711Client.NotifyPlayoutComplete();
     }
     
-    /// <summary>Direct A-law frames from OpenAI - no resampling.</summary>
+    /// <summary>Direct A-law frames from OpenAI → playout via event.</summary>
     private void HandleAiAudio(byte[] alawFrame)
     {
-        // Overflow protection
-        while (_outboundQueue.Count >= 500)
-            _outboundQueue.TryDequeue(out _);
-        
-        _outboundQueue.Enqueue(alawFrame);
+        OnAudioOut?.Invoke(alawFrame);
     }
     
     private async Task<object> HandleToolCallAsync(string name, Dictionary<string, object?> args)
@@ -304,7 +302,5 @@ public sealed class CallSession : ICallSession
         await EndAsync("disposed");
         
         _aiClient.OnAudio -= HandleAiAudio;
-        
-        while (_outboundQueue.TryDequeue(out _)) { }
     }
 }
