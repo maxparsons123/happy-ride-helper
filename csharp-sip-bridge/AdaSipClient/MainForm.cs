@@ -1,3 +1,4 @@
+using AdaSipClient.Config;
 using AdaSipClient.Core;
 using AdaSipClient.Sip;
 using AdaSipClient.UI;
@@ -8,16 +9,17 @@ namespace AdaSipClient;
 /// <summary>
 /// Main application form — assembles panels, wires events.
 /// No business logic lives here; panels and services own that.
-/// v1.0 — Clean architecture scaffold.
+/// v2.0 — Full SIP + audio pipeline + settings persistence.
 /// </summary>
 public sealed class MainForm : Form
 {
-    private const string AppVersion = "1.0.0";
+    private const string AppVersion = "2.0.0";
 
     // ── Core ──
     private readonly AppState _state = new();
     private readonly LogPanel _logPanel;
     private ISipService? _sip;
+    private CallHandler? _callHandler;
 
     // ── UI Panels ──
     private readonly SipLoginPanel _sipPanel;
@@ -27,6 +29,9 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
+        // ── Load saved settings ──
+        SettingsStore.Load(_state);
+
         // ── Form setup ──
         Text = $"Ada SIP Client v{AppVersion}";
         Size = new Size(900, 700);
@@ -44,17 +49,6 @@ public sealed class MainForm : Form
         _avatarPanel = new AvatarPanel();
 
         // ── Layout ──
-        //
-        //  ┌──────────────────────────────────────┐
-        //  │          SIP Login Panel              │
-        //  ├───────────────────────┬───────────────┤
-        //  │  Call Control Panel   │  Avatar Panel │
-        //  ├───────────────────────┤               │
-        //  │  Volume Panel         │               │
-        //  ├───────────────────────┴───────────────┤
-        //  │          Log Panel                    │
-        //  └──────────────────────────────────────┘
-
         var mainSplit = new SplitContainer
         {
             Dock = DockStyle.Fill,
@@ -74,7 +68,6 @@ public sealed class MainForm : Form
             Panel2MinSize = 180
         };
 
-        // Left column: SIP + Call Control + Volume
         var leftStack = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -95,7 +88,6 @@ public sealed class MainForm : Form
         leftStack.Controls.Add(_callPanel);
         leftStack.Controls.Add(_volumePanel);
 
-        // Wire resize to fill width
         leftStack.Resize += (_, _) =>
         {
             int w = leftStack.ClientSize.Width - 6;
@@ -106,23 +98,27 @@ public sealed class MainForm : Form
 
         topSplit.Panel1.Controls.Add(leftStack);
 
-        // Right column: Avatar
         _avatarPanel.Dock = DockStyle.Fill;
         topSplit.Panel2.Controls.Add(_avatarPanel);
 
-        // Bottom: Logs
         _logPanel.Dock = DockStyle.Fill;
         mainSplit.Panel1.Controls.Add(topSplit);
         mainSplit.Panel2.Controls.Add(_logPanel);
 
         Controls.Add(mainSplit);
 
+        // ── Populate UI from loaded state ──
+        _sipPanel.LoadFromState();
+
         // ── Wire events ──
         _sipPanel.OnConnectRequested += HandleConnect;
         _sipPanel.OnDisconnectRequested += HandleDisconnect;
-        _callPanel.OnAnswerCall += () => _sip?.AnswerCall();
+        _callPanel.OnAnswerCall += HandleAnswerCall;
         _callPanel.OnRejectCall += () => _sip?.RejectCall();
-        _callPanel.OnHangUp += () => _sip?.HangUp();
+        _callPanel.OnHangUp += HandleHangUp;
+
+        // ── Save settings on any state change ──
+        _state.StateChanged += () => SettingsStore.Save(_state);
 
         // ── Log startup ──
         _logPanel.Log($"Ada SIP Client v{AppVersion} ready");
@@ -132,7 +128,10 @@ public sealed class MainForm : Form
     private async Task HandleConnect()
     {
         _sip?.Dispose();
+        _callHandler?.Dispose();
+
         _sip = new SipService(_logPanel);
+        _callHandler = new CallHandler(_state, _sip, _logPanel);
 
         _sip.OnIncomingCall += caller =>
         {
@@ -148,6 +147,7 @@ public sealed class MainForm : Form
         {
             BeginInvoke(() =>
             {
+                _callHandler?.StopPipeline();
                 _callPanel.ShowIdle();
                 _avatarPanel.SetStatus("Waiting for call...");
             });
@@ -165,8 +165,31 @@ public sealed class MainForm : Form
         _state.NotifyChanged();
     }
 
+    private async void HandleAnswerCall()
+    {
+        _sip?.AnswerCall();
+        _state.IsInCall = true;
+        _callPanel.ShowActiveCall(_state.CallerNumber ?? "Unknown");
+        _avatarPanel.SetStatus("In call", Theme.TextSuccess);
+
+        // Start the appropriate audio pipeline
+        if (_callHandler != null)
+            await _callHandler.StartPipelineAsync();
+    }
+
+    private void HandleHangUp()
+    {
+        _callHandler?.StopPipeline();
+        _sip?.HangUp();
+        _state.IsInCall = false;
+        _callPanel.ShowIdle();
+        _avatarPanel.SetStatus("Waiting for call...");
+    }
+
     private void HandleDisconnect()
     {
+        _callHandler?.Dispose();
+        _callHandler = null;
         _sip?.Dispose();
         _sip = null;
         _state.IsRegistered = false;
@@ -177,6 +200,8 @@ public sealed class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        SettingsStore.Save(_state);
+        _callHandler?.Dispose();
         _sip?.Dispose();
         base.OnFormClosing(e);
     }
