@@ -142,6 +142,8 @@ public partial class MainForm : Form
             _sipServer = new SipServer(sipLogger, _settings.Sip, sessionManager);
 
             // Wire SipServer events → MainForm
+            _sipServer.OnLog += msg => Invoke(() => Log(msg));
+
             _sipServer.OnRegistered += msg => Invoke(() =>
             {
                 Log($"✅ SIP Registered: {msg}");
