@@ -316,8 +316,14 @@ public sealed class SipServer : IAsyncDisposable
 
     private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
     {
-        // Configure media session
-        var rtpSession = new SIPSorcery.Media.VoIPMediaSession();
+        // Use raw RTPSession with explicit PCMA track — VoIPMediaSession has an internal
+        // audio source that conflicts with our SendRtpRaw calls (causes silent outbound).
+        var rtpSession = new SIPSorcery.Net.RTPSession(false, false, false);
+        var audioTrack = new SIPSorcery.Net.MediaStreamTrack(
+            new SIPSorceryMedia.Abstractions.AudioFormat(
+                SIPSorceryMedia.Abstractions.SDPWellKnownMediaFormatsEnum.PCMA));
+        rtpSession.addTrack(audioTrack);
+        rtpSession.AcceptRtpFromAny = true;
 
         var serverUa = ua.AcceptCall(req);
         var result = await ua.Answer(serverUa, rtpSession);
@@ -359,7 +365,7 @@ public sealed class SipServer : IAsyncDisposable
         playout.OnLog += msg => Log(msg);
         playout.OnQueueEmpty += () => session.NotifyPlayoutComplete();
 
-        // Wire AI audio → playout buffer (replaces GetOutboundFrame polling)
+        // Wire AI audio → playout buffer
         session.OnAudioOut += frame => playout.BufferALaw(frame);
 
         // Wire barge-in → playout clear
