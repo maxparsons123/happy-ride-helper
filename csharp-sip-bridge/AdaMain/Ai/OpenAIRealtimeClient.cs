@@ -24,7 +24,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     private Task? _receiveTask;
     
     private readonly SemaphoreSlim _sendMutex = new(1, 1);
-    private readonly PcmToSipG711Encoder _egressEncoder = new("alaw", 5);
+    private readonly AudioProcessorPlugin _audioPlugin = new();
     private readonly AlawToOpenAiPcm24k _ingressResampler = new();
     
     private int _disposed;
@@ -58,7 +58,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         _detectedLanguage = DetectLanguage(callerId);
         
         // Reset DSP filter state for fresh call
-        _egressEncoder.Reset();
+        _audioPlugin.Reset();
         
         _ws = new ClientWebSocket();
         _ws.Options.SetRequestHeader("Authorization", $"Bearer {_settings.ApiKey}");
@@ -121,8 +121,8 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
     {
         if (!IsConnected) return;
         
-        // Clear any queued audio frames on barge-in
-        _egressEncoder.Clear();
+        // Clear any queued audio on barge-in
+        _audioPlugin.Reset();
         
         await SendJsonAsync(new { type = "response.cancel" });
     }
@@ -201,10 +201,11 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                         var b64 = delta.GetString() ?? "";
                         if (b64.Length > 0)
                         {
-                            // SpeexDSP: 24kHz PCM16 → 8kHz A-law 20ms frames
+                            // AudioProcessorPlugin: decode, de-ess, warm, soft-clip → A-law frames
                             var pcmBytes = Convert.FromBase64String(b64);
-                            _egressEncoder.PushPcm16(pcmBytes);
-                            while (_egressEncoder.TryGetFrame(out var frame))
+                            var queue = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
+                            _audioPlugin.ProcessPcmBytes(pcmBytes, queue);
+                            while (queue.TryDequeue(out var frame))
                                 OnAudio?.Invoke(frame);
                         }
                     }
@@ -495,6 +496,6 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         await DisconnectAsync();
         _sendMutex.Dispose();
         _ingressResampler.Dispose();
-        _egressEncoder.Dispose();
+        _audioPlugin.Dispose();
     }
 }
