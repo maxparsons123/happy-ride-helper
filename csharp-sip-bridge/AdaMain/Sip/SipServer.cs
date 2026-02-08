@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using AdaMain.Audio;
 using AdaMain.Config;
 using AdaMain.Core;
 using Microsoft.Extensions.Logging;
@@ -353,85 +354,25 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
-        // Playout thread: AI → SIP using SendRtpRaw (frames are already G.711 A-law)
-        uint rtpTimestamp = (uint)Random.Shared.Next();
-        const int FRAME_SIZE = 160; // 20ms @ 8kHz
-        const byte ALAW_SILENCE = 0xD5;
-        const byte PT_ALAW = 8;
-        var silenceFrame = new byte[FRAME_SIZE];
-        Array.Fill(silenceFrame, ALAW_SILENCE);
+        // Create ALawRtpPlayout (v7.4 rebuffer engine)
+        var playout = new ALawRtpPlayout(rtpSession);
+        playout.OnLog += msg => Log(msg);
+        playout.OnQueueEmpty += () => session.NotifyPlayoutComplete();
 
-        var playoutThread = new Thread(() =>
+        // Wire AI audio → playout buffer (replaces GetOutboundFrame polling)
+        session.OnAudioOut += frame => playout.BufferALaw(frame);
+
+        // Wire barge-in → playout clear
+        session.OnBargeIn += () => playout.Clear();
+
+        // Start the playout engine
+        playout.Start();
+
+        // Cleanup: dispose playout when session ends
+        session.OnEnded += (s, reason) =>
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            double nextFrameMs = sw.Elapsed.TotalMilliseconds;
-            bool wasPlaying = false;
-
-            while (_currentSession == session && session.IsActive)
-            {
-                double now = sw.Elapsed.TotalMilliseconds;
-                if (now < nextFrameMs)
-                {
-                    double wait = nextFrameMs - now;
-                    if (wait > 2.0)
-                        Thread.Sleep((int)(wait - 1));
-                    else if (wait > 0.1)
-                        Thread.SpinWait(100);
-                    continue;
-                }
-
-                var frame = session.GetOutboundFrame();
-                if (frame != null)
-                {
-                    wasPlaying = true;
-                    try
-                    {
-                        rtpSession.SendRtpRaw(
-                            SIPSorcery.Net.SDPMediaTypesEnum.audio,
-                            frame,
-                            rtpTimestamp,
-                            0,
-                            PT_ALAW);
-                    }
-                    catch { }
-                }
-                else
-                {
-                    // Queue empty - notify playout complete (triggers echo guard + no-reply watchdog)
-                    if (wasPlaying)
-                    {
-                        wasPlaying = false;
-                        session.NotifyPlayoutComplete();
-                    }
-
-                    // Send silence to keep RTP stream alive
-                    try
-                    {
-                        rtpSession.SendRtpRaw(
-                            SIPSorcery.Net.SDPMediaTypesEnum.audio,
-                            silenceFrame,
-                            rtpTimestamp,
-                            0,
-                            PT_ALAW);
-                    }
-                    catch { }
-                }
-
-                rtpTimestamp += FRAME_SIZE;
-                nextFrameMs += 20;
-
-                // Drift correction
-                now = sw.Elapsed.TotalMilliseconds;
-                if (now - nextFrameMs > 40)
-                    nextFrameMs = now + 20;
-            }
-        })
-        {
-            IsBackground = true,
-            Priority = ThreadPriority.Highest,
-            Name = "AdaMain-RTP-Playout"
+            playout.Dispose();
         };
-        playoutThread.Start();
 
         OnCallStarted?.Invoke(caller);
     }

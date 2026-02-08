@@ -37,4 +37,10 @@ public interface ICallSession : IAsyncDisposable
     
     /// <summary>Fired when booking state changes.</summary>
     event Action<BookingState>? OnBookingUpdated;
+    
+    /// <summary>Fired when AI audio frame is ready for playout (160-byte A-law).</summary>
+    event Action<byte[]>? OnAudioOut;
+    
+    /// <summary>Fired on barge-in (playout should clear its buffer).</summary>
+    event Action? OnBargeIn;
 }
