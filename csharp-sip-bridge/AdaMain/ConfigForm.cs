@@ -114,6 +114,9 @@ public class ConfigForm : Form
         txtOpenAiKey.Text = Settings.OpenAi.ApiKey;
         txtOpenAiModel.Text = Settings.OpenAi.Model;
         txtOpenAiVoice.Text = Settings.OpenAi.Voice;
+        txtSimliApiKey.Text = Settings.Simli.ApiKey;
+        txtSimliFaceId.Text = Settings.Simli.FaceId;
+        txtDeepgramKey.Text = Settings.Stt.DeepgramApiKey;
         txtGoogleMapsKey.Text = Settings.GoogleMaps.ApiKey;
         txtBsqdWebhook.Text = Settings.Dispatch.BsqdWebhookUrl;
         txtBsqdApiKey.Text = Settings.Dispatch.BsqdApiKey;
@@ -130,6 +133,9 @@ public class ConfigForm : Form
         Settings.OpenAi.ApiKey = txtOpenAiKey.Text.Trim();
         Settings.OpenAi.Model = txtOpenAiModel.Text.Trim();
         Settings.OpenAi.Voice = txtOpenAiVoice.Text.Trim();
+        Settings.Simli.ApiKey = txtSimliApiKey.Text.Trim();
+        Settings.Simli.FaceId = txtSimliFaceId.Text.Trim();
+        Settings.Stt.DeepgramApiKey = txtDeepgramKey.Text.Trim();
         Settings.GoogleMaps.ApiKey = txtGoogleMapsKey.Text.Trim();
         Settings.Dispatch.BsqdWebhookUrl = txtBsqdWebhook.Text.Trim();
         Settings.Dispatch.BsqdApiKey = txtBsqdApiKey.Text.Trim();

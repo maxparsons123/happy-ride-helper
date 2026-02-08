@@ -2,6 +2,7 @@ namespace AdaMain.Ai;
 
 /// <summary>
 /// Interface for OpenAI Realtime API client.
+/// Supports both PCM16 (24kHz) and native G.711 A-law (8kHz) modes.
 /// </summary>
 public interface IOpenAiClient
 {
@@ -14,13 +15,17 @@ public interface IOpenAiClient
     /// <summary>Disconnect from OpenAI.</summary>
     Task DisconnectAsync();
     
-    /// <summary>Send audio to OpenAI (PCM16 @ 24kHz).</summary>
-    void SendAudio(byte[] pcm24k);
+    /// <summary>
+    /// Send audio to OpenAI.
+    /// For G.711 mode: raw A-law bytes (8kHz).
+    /// For PCM mode: PCM16 bytes (24kHz).
+    /// </summary>
+    void SendAudio(byte[] audioData);
     
     /// <summary>Cancel current response (barge-in).</summary>
     Task CancelResponseAsync();
     
-    /// <summary>Fired when audio received from AI.</summary>
+    /// <summary>Fired when audio received from AI (format matches input mode).</summary>
     event Action<byte[]>? OnAudio;
     
     /// <summary>Fired when tool call received.</summary>
@@ -32,6 +37,6 @@ public interface IOpenAiClient
     /// <summary>Fired when AI finishes speaking.</summary>
     event Action? OnPlayoutComplete;
     
-    /// <summary>Fired for transcripts.</summary>
-    event Action<string, string>? OnTranscript; // (role, text)
+    /// <summary>Fired for transcripts (role, text).</summary>
+    event Action<string, string>? OnTranscript;
 }

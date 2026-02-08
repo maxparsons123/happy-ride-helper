@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using AdaMain.Ai;
-using AdaMain.Audio;
 using AdaMain.Config;
 using AdaMain.Services;
 using Microsoft.Extensions.Logging;
@@ -8,15 +7,14 @@ using Microsoft.Extensions.Logging;
 namespace AdaMain.Core;
 
 /// <summary>
-/// Manages a single call session lifecycle.
-/// Coordinates audio flow between SIP and OpenAI.
+/// Manages a single call session lifecycle with G.711 A-law passthrough.
+/// No resampling - direct 8kHz A-law in/out.
 /// </summary>
 public sealed class CallSession : ICallSession
 {
     private readonly ILogger<CallSession> _logger;
     private readonly AppSettings _settings;
     private readonly IOpenAiClient _aiClient;
-    private readonly IAudioCodec _codec;
     private readonly IFareCalculator _fareCalculator;
     private readonly IDispatcher _dispatcher;
     
@@ -34,6 +32,7 @@ public sealed class CallSession : ICallSession
     
     public event Action<ICallSession, string>? OnEnded;
     public event Action<BookingState>? OnBookingUpdated;
+    public event Action<string, string>? OnTranscript;
     
     public CallSession(
         string sessionId,
@@ -41,7 +40,6 @@ public sealed class CallSession : ICallSession
         ILogger<CallSession> logger,
         AppSettings settings,
         IOpenAiClient aiClient,
-        IAudioCodec codec,
         IFareCalculator fareCalculator,
         IDispatcher dispatcher)
     {
@@ -50,7 +48,6 @@ public sealed class CallSession : ICallSession
         _logger = logger;
         _settings = settings;
         _aiClient = aiClient;
-        _codec = codec;
         _fareCalculator = fareCalculator;
         _dispatcher = dispatcher;
         
@@ -59,6 +56,7 @@ public sealed class CallSession : ICallSession
         _aiClient.OnToolCall += HandleToolCallAsync;
         _aiClient.OnEnded += reason => _ = EndAsync(reason);
         _aiClient.OnPlayoutComplete += () => Volatile.Write(ref _lastAdaFinishedAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        _aiClient.OnTranscript += (role, text) => OnTranscript?.Invoke(role, text);
     }
     
     public async Task StartAsync(CancellationToken ct = default)
@@ -66,7 +64,7 @@ public sealed class CallSession : ICallSession
         if (Interlocked.Exchange(ref _active, 1) == 1)
             return;
         
-        _logger.LogInformation("[{SessionId}] Starting session for {CallerId}", SessionId, CallerId);
+        _logger.LogInformation("[{SessionId}] Starting G.711 session for {CallerId}", SessionId, CallerId);
         
         await _aiClient.ConnectAsync(CallerId, ct);
     }
@@ -82,62 +80,36 @@ public sealed class CallSession : ICallSession
         OnEnded?.Invoke(this, reason);
     }
     
-    public void ProcessInboundAudio(byte[] g711Data)
+    /// <summary>Feed raw G.711 A-law RTP audio from SIP - direct passthrough.</summary>
+    public void ProcessInboundAudio(byte[] alawRtp)
     {
-        if (!IsActive || g711Data.Length == 0)
+        if (!IsActive || alawRtp.Length == 0)
             return;
         
         // Echo guard: skip audio right after AI speaks
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        if (now - Volatile.Read(ref _lastAdaFinishedAt) < _settings.Audio.EchoGuardMs)
+        var echoGuardMs = _settings.Audio.EchoGuardMs > 0 ? _settings.Audio.EchoGuardMs : 180;
+        if (now - Volatile.Read(ref _lastAdaFinishedAt) < echoGuardMs)
             return;
         
-        // Decode G.711 → PCM16 @ 8kHz
-        var pcm8k = _codec.Decode(g711Data);
-        
-        // Resample 8kHz → 24kHz for OpenAI
-        var pcm24k = AudioResampler.Resample8kTo24k(pcm8k);
-        
-        // Apply telephony DSP (volume boost, pre-emphasis)
-        var processed = TelephonyDsp.ProcessInbound(pcm24k, (float)_settings.Audio.VolumeBoost);
-        
-        // Send to AI
-        _aiClient.SendAudio(processed);
+        // Direct passthrough - no resampling!
+        _aiClient.SendAudio(alawRtp);
     }
     
+    /// <summary>Get next outbound G.711 A-law frame for SIP (160 bytes = 20ms).</summary>
     public byte[]? GetOutboundFrame()
     {
         return _outboundQueue.TryDequeue(out var frame) ? frame : null;
     }
     
-    private void HandleAiAudio(byte[] pcm24k)
+    /// <summary>Direct A-law frames from OpenAI - no resampling.</summary>
+    private void HandleAiAudio(byte[] alawFrame)
     {
-        // Resample 24kHz → 8kHz
-        var pcm8k = AudioResampler.Resample24kTo8k(pcm24k);
+        // Overflow protection
+        while (_outboundQueue.Count >= 500)
+            _outboundQueue.TryDequeue(out _);
         
-        // Encode PCM16 → G.711
-        var g711 = _codec.Encode(pcm8k);
-        
-        // Frame into 20ms chunks (160 bytes for G.711)
-        for (int i = 0; i < g711.Length; i += 160)
-        {
-            var frame = new byte[160];
-            var count = Math.Min(160, g711.Length - i);
-            Array.Copy(g711, i, frame, 0, count);
-            
-            // Pad short frames with silence
-            if (count < 160)
-            {
-                var silence = _codec.SilenceByte;
-                Array.Fill(frame, silence, count, 160 - count);
-            }
-            
-            // Overflow protection
-            while (_outboundQueue.Count >= 800)
-                _outboundQueue.TryDequeue(out _);
-            
-            _outboundQueue.Enqueue(frame);
-        }
+        _outboundQueue.Enqueue(alawFrame);
     }
     
     private async Task<object> HandleToolCallAsync(string name, Dictionary<string, object?> args)
