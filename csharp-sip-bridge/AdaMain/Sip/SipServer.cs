@@ -92,17 +92,30 @@ public sealed class SipServer : IAsyncDisposable
         _regAgent?.Stop();
         _regAgent = null;
         
-        if (_activeCall != null)
-        {
-            _activeCall.Hangup();
-            _activeCall = null;
-        }
+        await HangupAsync();
         
         _transport?.Shutdown();
         _transport = null;
         
         _isRunning = false;
         _logger.LogInformation("SIP server stopped");
+    }
+
+    /// <summary>Hang up any active call.</summary>
+    public async Task HangupAsync()
+    {
+        SIPUserAgent? ua;
+        lock (_callLock)
+        {
+            ua = _activeCall;
+            _activeCall = null;
+        }
+
+        if (ua != null)
+        {
+            try { ua.Hangup(); } catch { }
+            await CleanupCallAsync("user_hangup");
+        }
     }
     
     private async Task OnRequestReceived(SIPEndPoint localEndPoint, SIPEndPoint remoteEndPoint, SIPRequest request)
