@@ -10,6 +10,8 @@ public sealed class AppSettings
     public AudioSettings Audio { get; set; } = new();
     public DispatchSettings Dispatch { get; set; } = new();
     public GoogleMapsSettings GoogleMaps { get; set; } = new();
+    public SimliSettings Simli { get; set; } = new();
+    public SttSettings Stt { get; set; } = new();
 }
 
 public sealed class SipSettings
@@ -48,4 +50,15 @@ public sealed class DispatchSettings
 public sealed class GoogleMapsSettings
 {
     public string ApiKey { get; set; } = "";
+}
+
+public sealed class SimliSettings
+{
+    public string ApiKey { get; set; } = "";
+    public string FaceId { get; set; } = "";
+}
+
+public sealed class SttSettings
+{
+    public string DeepgramApiKey { get; set; } = "";
 }
