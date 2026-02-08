@@ -324,9 +324,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         if (!IsConnected || alawRtp == null || alawRtp.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
-        // Echo guard: skip audio right after AI speaks
-        if (NowMs() - Volatile.Read(ref _lastAdaFinishedAt) < 200)
-            return;
+        // NOTE: Echo guard removed — SipServer's soft gate (120ms + RMS barge-in)
+        // is the single source of truth for echo suppression, matching G711CallHandler.
+        // Double/triple gating caused audio dropouts ("grit").
 
         var msg = JsonSerializer.SerializeToUtf8Bytes(new
         {
