@@ -64,13 +64,11 @@ public sealed class AlawToOpenAiPcm24k : IDisposable
         return result;
     }
 
+    private static readonly IAudioCodec _alawCodec = new G711ALawCodec();
+
     private static short[] DecodeALaw(byte[] alaw)
     {
-        int len = alaw.Length;
-        short[] pcm = new short[len];
-        for (int i = 0; i < len; i++)
-            pcm[i] = ALawDecoder.ALawToLinearSample(alaw[i]);
-        return pcm;
+        return _alawCodec.Decode(alaw);
     }
 
     private static void RemoveDcOffset(short[] samples)

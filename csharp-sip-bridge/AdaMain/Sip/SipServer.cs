@@ -67,13 +67,13 @@ public sealed class SipServer : IAsyncDisposable
             serverUri.ToString(),
             120); // Expiry seconds
         
-        _regAgent.RegistrationSuccessful += (uri) =>
+        _regAgent.RegistrationSuccessful += (uri, resp) =>
         {
             _logger.LogInformation("Registered: {Uri}", uri);
             OnRegistered?.Invoke(uri.ToString());
         };
         
-        _regAgent.RegistrationFailed += (uri, response, message) =>
+        _regAgent.RegistrationFailed += (uri, resp, message) =>
         {
             _logger.LogWarning("Registration failed: {Message}", message);
             OnRegistrationFailed?.Invoke(message ?? "Unknown error");
@@ -128,11 +128,8 @@ public sealed class SipServer : IAsyncDisposable
         {
             var ua = new SIPUserAgent(_transport, null);
             
-            // Configure media
-            var rtpSession = new VoIPMediaSession(new MediaEndPoints
-            {
-                AudioSource = new AudioExtrasSource()
-            });
+            // Configure media - SIPSorcery 6.2.4 compatible
+            var rtpSession = new VoIPMediaSession();
             
             ua.OnCallHungup += async (dialog) =>
             {
