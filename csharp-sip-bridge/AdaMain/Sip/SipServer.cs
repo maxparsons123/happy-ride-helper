@@ -137,7 +137,8 @@ public sealed class SipServer : IAsyncDisposable
                 await CleanupCallAsync("hangup");
             };
             
-            var result = await ua.Answer(request, rtpSession);
+            var serverUa = ua.AcceptCall(request);
+            var result = await ua.Answer(serverUa, rtpSession);
             
             if (!result)
             {

@@ -29,7 +29,6 @@ public static class Program
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
             .AddEnvironmentVariables()
-            .AddCommandLine(args)
             .Build();
         
         var settings = config.Get<AppSettings>() ?? new AppSettings();
