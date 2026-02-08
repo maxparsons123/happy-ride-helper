@@ -38,6 +38,7 @@ public sealed class SipServer : IAsyncDisposable
     public event Action<string>? OnRegistrationFailed;
     public event Action<string>? OnCallStarted;
     public event Action<string>? OnCallEnded;
+    public event Action<string>? OnServerResolved;
 
     public SipServer(
         ILogger<SipServer> logger,
@@ -56,6 +57,11 @@ public sealed class SipServer : IAsyncDisposable
         Log("🚀 SipServer starting...");
         Log($"➡ SIP Server: {_settings.Server}:{_settings.Port} ({_settings.Transport})");
         Log($"➡ User: {_settings.Username}");
+
+        // Resolve server hostname → IP and notify UI so it shows the resolved address
+        var resolvedIp = ResolveDns(_settings.Server);
+        if (resolvedIp != _settings.Server)
+            OnServerResolved?.Invoke(resolvedIp);
 
         _localIp = GetLocalIp();
         Log($"➡ Local IP: {_localIp}");
