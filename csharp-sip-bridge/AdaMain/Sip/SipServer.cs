@@ -341,6 +341,10 @@ public sealed class SipServer : IAsyncDisposable
         };
 
         var serverUa = ua.AcceptCall(req);
+
+        // v7.6: 200ms pre-answer delay (matches G711CallHandler) — lets SIP signaling settle
+        await Task.Delay(200);
+
         var result = await ua.Answer(serverUa, rtpSession);
 
         if (!result)
@@ -383,6 +387,7 @@ public sealed class SipServer : IAsyncDisposable
         bool isBotSpeaking = false;
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
+        bool watchdogPending = false;
 
         // Track bot speaking state from playout activity
         session.OnAudioOut += _ =>
@@ -393,12 +398,18 @@ public sealed class SipServer : IAsyncDisposable
 
         playout.OnQueueEmpty += () =>
         {
+            // v7.6: Match G711CallHandler — only notify when bot was actually speaking
             if (adaHasStartedSpeaking && isBotSpeaking)
             {
                 isBotSpeaking = false;
                 botStoppedSpeakingAt = DateTime.UtcNow;
+                session.NotifyPlayoutComplete();
             }
-            session.NotifyPlayoutComplete();
+            else if (watchdogPending)
+            {
+                watchdogPending = false;
+                session.NotifyPlayoutComplete();
+            }
         };
 
         rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
