@@ -168,14 +168,11 @@ public sealed class SipServer : IAsyncDisposable
     {
         var authUser = string.IsNullOrWhiteSpace(_settings.AuthId) ? _settings.Username : _settings.AuthId;
 
-        // Use HOSTNAME (not resolved IP) in SIP headers for correct digest auth.
-        // The resolved IP is only used for the outbound proxy (routing).
-        var registrarHostWithPort = _settings.Port == 5060
-            ? _settings.Server
-            : $"{_settings.Server}:{_settings.Port}";
-
-        // Resolve IP for routing only
+        // Resolve DNS first - use resolved IP in registrar host (matches SipLoginManager behavior)
         var resolvedHost = ResolveDns(_settings.Server);
+        var registrarHostWithPort = _settings.Port == 5060
+            ? resolvedHost
+            : $"{resolvedHost}:{_settings.Port}";
 
         if (authUser != _settings.Username)
         {
