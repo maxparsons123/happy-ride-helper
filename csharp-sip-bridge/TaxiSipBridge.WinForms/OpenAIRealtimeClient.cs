@@ -13,10 +13,11 @@ namespace TaxiSipBridge;
 /// <summary>
 /// OpenAI Realtime API client with correct response lifecycle handling.
 /// Key rule: DO NOT set _responseActive manually. Only OpenAI events control it.
+/// v10.8 - AudioProcessorPlugin egress (de-ess, anti-lisp, warmth, soft-clip, dither)
 /// </summary>
 public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
 {
-    public const string VERSION = "10.7";
+    public const string VERSION = "10.8";
 
     // =========================
     // CONFIG
