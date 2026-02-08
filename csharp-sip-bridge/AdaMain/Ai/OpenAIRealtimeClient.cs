@@ -9,11 +9,11 @@ namespace AdaMain.Ai;
 
 /// <summary>
 /// OpenAI Realtime API client with warm audio DSP pipeline.
-/// Version 4.5 - Speex ingress resampler + WarmAudioBridge egress
+/// Version 4.6 - AudioProcessorPlugin egress (de-ess, warmth, soft-clip, dither)
 /// </summary>
 public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "4.5";
+    public const string VERSION = "4.6";
     
     private readonly ILogger<OpenAiRealtimeClient> _logger;
     private readonly OpenAiSettings _settings;
