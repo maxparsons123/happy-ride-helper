@@ -49,8 +49,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private int _accCount;
     private readonly object _accLock = new();
 
-    // RTP session reference for sending (raw RTPSession, NOT VoIPMediaSession)
-    private readonly SIPSorcery.Net.RTPSession _rtpSession;
+    // RTP session reference for sending
+    private readonly SIPSorcery.Media.VoIPMediaSession _mediaSession;
 
     // Threading/state
     private Thread? _playoutThread;
@@ -73,11 +73,11 @@ public sealed class ALawRtpPlayout : IDisposable
     public int QueuedFrames => Volatile.Read(ref _queueCount);
     public int FramesSent => _framesSent;
 
-    public ALawRtpPlayout(SIPSorcery.Net.RTPSession rtpSession)
+    public ALawRtpPlayout(SIPSorcery.Media.VoIPMediaSession mediaSession)
     {
-        _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
-        _rtpSession.AcceptRtpFromAny = true;
-        _rtpSession.OnRtpPacketReceived += HandleSymmetricRtp;
+        _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
+        _mediaSession.AcceptRtpFromAny = true;
+        _mediaSession.OnRtpPacketReceived += HandleSymmetricRtp;
 
         Array.Fill(_silenceFrame, ALAW_SILENCE);
 
@@ -95,7 +95,7 @@ public sealed class ALawRtpPlayout : IDisposable
             _lastRemoteEndpoint = ep;
             try
             {
-                _rtpSession.SetDestination(SDPMediaTypesEnum.audio, ep, ep);
+                _mediaSession.SetDestination(SDPMediaTypesEnum.audio, ep, ep);
                 _natBindingEstablished = true;
                 SafeLog($"[NAT] ✓ RTP locked to {ep}");
             }
@@ -268,7 +268,7 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         try
         {
-            _rtpSession.SendRtpRaw(
+            _mediaSession.SendRtpRaw(
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
@@ -307,7 +307,7 @@ public sealed class ALawRtpPlayout : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         Stop();
         _natKeepaliveTimer?.Dispose();
-        _rtpSession.OnRtpPacketReceived -= HandleSymmetricRtp;
+        _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp;
         Clear();
         GC.SuppressFinalize(this);
     }
