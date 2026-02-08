@@ -24,6 +24,14 @@ public sealed class SipSettings
     public string? AuthId { get; set; }
     public string? Domain { get; set; }
     public bool AutoAnswer { get; set; } = true;
+
+    // STUN / NAT settings
+    public bool EnableStun { get; set; } = true;
+    public string StunServer { get; set; } = "stun.l.google.com";
+    public int StunPort { get; set; } = 19302;
+
+    /// <summary>Gets the effective auth username (AuthId if set, otherwise Username).</summary>
+    public string EffectiveAuthUser => string.IsNullOrWhiteSpace(AuthId) ? Username : AuthId;
 }
 
 public sealed class OpenAiSettings
