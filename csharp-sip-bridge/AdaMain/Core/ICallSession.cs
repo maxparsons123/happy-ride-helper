@@ -29,6 +29,9 @@ public interface ICallSession : IAsyncDisposable
     /// <summary>Get next outbound audio frame for SIP (G.711 encoded).</summary>
     byte[]? GetOutboundFrame();
     
+    /// <summary>Notify that playout queue has drained (triggers echo guard + no-reply watchdog).</summary>
+    void NotifyPlayoutComplete();
+    
     /// <summary>Fired when session ends.</summary>
     event Action<ICallSession, string>? OnEnded;
     

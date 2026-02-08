@@ -358,11 +358,14 @@ public sealed class SipServer : IAsyncDisposable
         const int FRAME_SIZE = 160; // 20ms @ 8kHz
         const byte ALAW_SILENCE = 0xD5;
         const byte PT_ALAW = 8;
+        var silenceFrame = new byte[FRAME_SIZE];
+        Array.Fill(silenceFrame, ALAW_SILENCE);
 
         var playoutThread = new Thread(() =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             double nextFrameMs = sw.Elapsed.TotalMilliseconds;
+            bool wasPlaying = false;
 
             while (_currentSession == session && session.IsActive)
             {
@@ -380,27 +383,33 @@ public sealed class SipServer : IAsyncDisposable
                 var frame = session.GetOutboundFrame();
                 if (frame != null)
                 {
+                    wasPlaying = true;
                     try
                     {
                         rtpSession.SendRtpRaw(
                             SIPSorcery.Net.SDPMediaTypesEnum.audio,
                             frame,
                             rtpTimestamp,
-                            0, // marker
+                            0,
                             PT_ALAW);
                     }
                     catch { }
                 }
                 else
                 {
+                    // Queue empty - notify playout complete (triggers echo guard + no-reply watchdog)
+                    if (wasPlaying)
+                    {
+                        wasPlaying = false;
+                        session.NotifyPlayoutComplete();
+                    }
+
                     // Send silence to keep RTP stream alive
                     try
                     {
-                        var silence = new byte[FRAME_SIZE];
-                        Array.Fill(silence, ALAW_SILENCE);
                         rtpSession.SendRtpRaw(
                             SIPSorcery.Net.SDPMediaTypesEnum.audio,
-                            silence,
+                            silenceFrame,
                             rtpTimestamp,
                             0,
                             PT_ALAW);
