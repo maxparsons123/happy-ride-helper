@@ -319,8 +319,9 @@ public sealed class SipServer : IAsyncDisposable
 
     private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
     {
-        // Match proven G711CallHandler pattern: VoIPMediaSession with AudioSourcesEnum.None
+        // Match proven G711CallHandler pattern: AudioSourcesEnum.None + PCMA restriction
         var audioEncoder = new AudioEncoder();
+
         var audioSource = new AudioExtrasSource(
             audioEncoder,
             new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
@@ -332,6 +333,13 @@ public sealed class SipServer : IAsyncDisposable
         var rtpSession = new VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
 
+        // Track negotiated codec (matches G711CallHandler)
+        rtpSession.OnAudioFormatsNegotiated += formats =>
+        {
+            var fmt = formats.FirstOrDefault();
+            Log($"🎵 Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
+        };
+
         var serverUa = ua.AcceptCall(req);
         var result = await ua.Answer(serverUa, rtpSession);
 
@@ -341,7 +349,9 @@ public sealed class SipServer : IAsyncDisposable
             return;
         }
 
-        Log("✅ Call answered");
+        // CRITICAL: Start RTP session (missing in previous version → degraded audio)
+        await rtpSession.Start();
+        Log("✅ Call answered and RTP started");
 
         ua.OnCallHungup += async (dialog) =>
         {
