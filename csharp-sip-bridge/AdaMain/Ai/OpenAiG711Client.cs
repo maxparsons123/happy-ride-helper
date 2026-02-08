@@ -525,20 +525,11 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                         var b64 = delta.GetString() ?? "";
                         if (b64.Length > 0)
                         {
+                            // v2.1: Pass raw A-law bytes directly — ALawRtpPlayout handles framing.
+                            // Do NOT frame here; double-framing with silence padding causes warble.
                             var alawBytes = Convert.FromBase64String(b64);
-
-                            // Frame into 160-byte RTP packets (20ms @ 8kHz)
-                            for (int i = 0; i < alawBytes.Length; i += 160)
-                            {
-                                var frameSize = Math.Min(160, alawBytes.Length - i);
-                                var frame = new byte[160];
-                                Buffer.BlockCopy(alawBytes, i, frame, 0, frameSize);
-
-                                if (frameSize < 160)
-                                    Array.Fill(frame, (byte)0xD5, frameSize, 160 - frameSize);
-
-                                OnAudio?.Invoke(frame);
-                            }
+                            if (alawBytes.Length > 0)
+                                OnAudio?.Invoke(alawBytes);
                         }
                     }
                     break;
