@@ -502,10 +502,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _activeResponseId = null;
                     Interlocked.Exchange(ref _responseActive, 0);
 
-                    var transcriptStillPending = Volatile.Read(ref _transcriptPending) == 1;
-
-                    // Flush deferred response if transcript still pending
-                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1 && transcriptStillPending)
+                    // Always flush deferred response (tool results, etc.)
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
                     {
                         Log("🔄 Flushing deferred response.create");
                         _ = Task.Run(async () =>
@@ -514,6 +512,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                             if (Volatile.Read(ref _callEnded) == 0 && IsConnected)
                             {
                                 await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                                Log("🔄 response.create sent (deferred)");
                             }
                         });
                     }
