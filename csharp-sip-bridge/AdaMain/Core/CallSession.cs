@@ -90,19 +90,16 @@ public sealed class CallSession : ICallSession
         OnEnded?.Invoke(this, reason);
     }
     
-    /// <summary>Feed raw G.711 A-law RTP audio from SIP - direct passthrough.</summary>
+    /// <summary>Feed raw G.711 A-law RTP audio from SIP - direct passthrough.
+    /// NOTE: Echo guard is handled by SipServer's soft gate (matching G711CallHandler pattern).
+    /// Do NOT add a second echo guard here — triple-gating causes audio dropouts.</summary>
     public void ProcessInboundAudio(byte[] alawRtp)
     {
         if (!IsActive || alawRtp.Length == 0)
             return;
         
-        // Echo guard: skip audio right after AI speaks
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var echoGuardMs = _settings.Audio.EchoGuardMs > 0 ? _settings.Audio.EchoGuardMs : 180;
-        if (now - Volatile.Read(ref _lastAdaFinishedAt) < echoGuardMs)
-            return;
-        
-        // Direct passthrough - no resampling!
+        // Direct passthrough - no resampling, no echo guard here!
+        // SipServer soft gate already handles echo suppression + barge-in detection.
         _aiClient.SendAudio(alawRtp);
     }
     
