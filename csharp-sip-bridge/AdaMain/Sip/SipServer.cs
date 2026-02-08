@@ -368,21 +368,101 @@ public sealed class SipServer : IAsyncDisposable
             _currentSession = session;
         }
 
-        // Wire up audio: SIP → AI
-        rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
-        {
-            if (mt == SDPMediaTypesEnum.audio)
-            {
-                session.ProcessInboundAudio(pkt.Payload);
-            }
-        };
-
-        // Create ALawRtpPlayout (v7.4 rebuffer engine) — exact same pattern as G711CallHandler
+        // Create ALawRtpPlayout FIRST (v7.4 rebuffer engine) — needed for RTP wiring below
         var playout = new ALawRtpPlayout(rtpSession);
         playout.OnLog += msg => Log(msg);
-        playout.OnQueueEmpty += () => session.NotifyPlayoutComplete();
 
-        // Wire AI audio → playout buffer
+        // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler)
+        const int FLUSH_PACKETS = 20;
+        const int EARLY_PROTECTION_MS = 500;
+        const int ECHO_GUARD_MS = 120;
+        const float BARGE_IN_RMS_THRESHOLD = 1500f;
+        int inboundPacketCount = 0;
+        bool inboundFlushComplete = false;
+        var callStartedAt = DateTime.UtcNow;
+        bool isBotSpeaking = false;
+        bool adaHasStartedSpeaking = false;
+        DateTime botStoppedSpeakingAt = DateTime.MinValue;
+
+        // Track bot speaking state from playout activity
+        session.OnAudioOut += _ =>
+        {
+            isBotSpeaking = true;
+            adaHasStartedSpeaking = true;
+        };
+
+        playout.OnQueueEmpty += () =>
+        {
+            if (adaHasStartedSpeaking && isBotSpeaking)
+            {
+                isBotSpeaking = false;
+                botStoppedSpeakingAt = DateTime.UtcNow;
+            }
+            session.NotifyPlayoutComplete();
+        };
+
+        rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
+        {
+            if (mt != SDPMediaTypesEnum.audio) return;
+
+            inboundPacketCount++;
+
+            // 1) Flush first N packets (initial junk/noise)
+            if (!inboundFlushComplete)
+            {
+                if (inboundPacketCount <= FLUSH_PACKETS)
+                {
+                    if (inboundPacketCount == 1)
+                        Log($"🧹 Flushing inbound audio ({FLUSH_PACKETS} packets)...");
+                    return;
+                }
+                inboundFlushComplete = true;
+                Log("✅ Inbound flush complete");
+            }
+
+            // 2) Early protection: ignore audio for first 500ms
+            if ((DateTime.UtcNow - callStartedAt).TotalMilliseconds < EARLY_PROTECTION_MS)
+                return;
+
+            var payload = pkt.Payload;
+            if (payload == null || payload.Length == 0) return;
+
+            // 3) Soft gate: during bot speaking or echo guard, send silence unless barge-in
+            bool applySoftGate = false;
+            if (isBotSpeaking)
+            {
+                applySoftGate = true;
+            }
+            else if (adaHasStartedSpeaking && botStoppedSpeakingAt != DateTime.MinValue)
+            {
+                if ((DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds < ECHO_GUARD_MS)
+                    applySoftGate = true;
+            }
+
+            byte[] audioToSend = payload;
+            if (applySoftGate)
+            {
+                // Check RMS for barge-in detection
+                double sumSq = 0;
+                for (int i = 0; i < payload.Length; i++)
+                {
+                    short sample = ALawDecode(payload[i]);
+                    sumSq += (double)sample * sample;
+                }
+                float rms = (float)Math.Sqrt(sumSq / payload.Length);
+
+                if (rms < BARGE_IN_RMS_THRESHOLD)
+                {
+                    // Not barge-in — replace with silence
+                    audioToSend = new byte[payload.Length];
+                    Array.Fill(audioToSend, (byte)0xD5);
+                }
+            }
+
+            session.ProcessInboundAudio(audioToSend);
+        };
+
+        // Wire AI audio → playout buffer (OnAudioOut tracking is also wired above for soft gate)
         session.OnAudioOut += frame => playout.BufferALaw(frame);
 
         // Wire barge-in → playout clear
@@ -564,6 +644,17 @@ public sealed class SipServer : IAsyncDisposable
     }
 
     #endregion
+
+    /// <summary>Quick inline A-law decode for RMS check (ITU-T G.711).</summary>
+    private static short ALawDecode(byte alaw)
+    {
+        alaw ^= 0x55;
+        int sign = (alaw & 0x80) != 0 ? -1 : 1;
+        int segment = (alaw >> 4) & 0x07;
+        int value = (alaw & 0x0F) << 4 | 0x08;
+        if (segment > 0) value = (value + 0x100) << (segment - 1);
+        return (short)(sign * value);
+    }
 
     private void Log(string msg)
     {
