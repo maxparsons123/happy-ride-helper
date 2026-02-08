@@ -1,6 +1,8 @@
 using System.Text.Json;
+using AdaMain.Ai;
 using AdaMain.Config;
 using AdaMain.Core;
+using AdaMain.Services;
 using AdaMain.Sip;
 using Microsoft.Extensions.Logging;
 
@@ -14,13 +16,14 @@ public partial class MainForm : Form
 
     private SipServer? _sipServer;
     private ILoggerFactory? _loggerFactory;
+    private ICallSession? _currentSession;
 
     public MainForm()
     {
         InitializeComponent();
         _settings = LoadSettings();
         ApplySettingsToUi();
-        Log("AdaMain started. Configure SIP and click Connect.");
+        Log("AdaMain v1.0 started. Configure SIP and click Connect.");
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -116,6 +119,12 @@ public partial class MainForm : Form
             return;
         }
 
+        if (string.IsNullOrWhiteSpace(_settings.OpenAi.ApiKey))
+        {
+            MessageBox.Show("OpenAI API Key is required. Go to File → Settings to configure.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         SaveSettings();
         Log($"📞 Connecting to {_settings.Sip.Server}:{_settings.Sip.Port} as {_settings.Sip.Username} ({_settings.Sip.Transport})…");
 
@@ -127,12 +136,8 @@ public partial class MainForm : Form
             var sipLogger = factory.CreateLogger<SipServer>();
             var smLogger = factory.CreateLogger<SessionManager>();
 
-            // Create a placeholder session factory (sessions not yet fully wired)
-            var sessionManager = new SessionManager(smLogger, (sid, cid) =>
-            {
-                Log($"⚠ Session factory not yet wired for {cid}");
-                throw new NotImplementedException("CallSession factory needs AI client wiring");
-            });
+            // Create session factory with full pipeline wiring
+            var sessionManager = new SessionManager(smLogger, CreateCallSession);
 
             _sipServer = new SipServer(sipLogger, _settings.Sip, sessionManager);
 
@@ -164,6 +169,7 @@ public partial class MainForm : Form
                 Log($"📴 Call ended: {reason}");
                 SetInCall(false);
                 statusCallId.Text = "";
+                _currentSession = null;
             });
 
             await _sipServer.StartAsync();
@@ -174,6 +180,58 @@ public partial class MainForm : Form
             SetSipConnected(false);
             _sipServer = null;
         }
+    }
+
+    /// <summary>Factory method to create fully-wired CallSession.</summary>
+    private ICallSession CreateCallSession(string sessionId, string callerId)
+    {
+        var factory = GetLoggerFactory();
+        
+        // Create AI client (G.711 passthrough mode)
+        var aiClient = new OpenAiG711Client(
+            factory.CreateLogger<OpenAiG711Client>(),
+            _settings.OpenAi);
+        
+        // Create fare calculator
+        var fareCalculator = new FareCalculator(
+            factory.CreateLogger<FareCalculator>(),
+            _settings.GoogleMaps);
+        
+        // Create dispatcher
+        var dispatcher = new BsqdDispatcher(
+            factory.CreateLogger<BsqdDispatcher>(),
+            _settings.Dispatch);
+        
+        // Create session
+        var session = new CallSession(
+            sessionId,
+            callerId,
+            factory.CreateLogger<CallSession>(),
+            _settings,
+            aiClient,
+            fareCalculator,
+            dispatcher);
+        
+        // Wire session events → UI
+        session.OnTranscript += (role, text) => Invoke(() =>
+        {
+            Log($"💬 {role}: {text}");
+        });
+        
+        session.OnBookingUpdated += booking => Invoke(() =>
+        {
+            var info = new List<string>();
+            if (!string.IsNullOrEmpty(booking.Name)) info.Add($"Name: {booking.Name}");
+            if (!string.IsNullOrEmpty(booking.Pickup)) info.Add($"From: {booking.Pickup}");
+            if (!string.IsNullOrEmpty(booking.Destination)) info.Add($"To: {booking.Destination}");
+            if (!string.IsNullOrEmpty(booking.Fare)) info.Add($"Fare: {booking.Fare}");
+            if (booking.Confirmed) info.Add($"REF: {booking.BookingRef}");
+            
+            lblCallInfo.Text = info.Count > 0 ? string.Join(" | ", info) : "Call in progress";
+        });
+        
+        _currentSession = session;
+        return session;
     }
 
     private async void btnDisconnect_Click(object? sender, EventArgs e)
@@ -220,21 +278,19 @@ public partial class MainForm : Form
     private void btnAnswer_Click(object? sender, EventArgs e)
     {
         Log("✅ Answering incoming call…");
-        // TODO: signal SipServer to accept pending INVITE
+        // In auto-answer mode, SipServer handles this automatically
         SetInCall(true);
     }
 
     private void btnReject_Click(object? sender, EventArgs e)
     {
         Log("❌ Rejecting incoming call.");
-        // TODO: signal SipServer to reject pending INVITE
         SetInCall(false);
     }
 
     private async void btnHangUp_Click(object? sender, EventArgs e)
     {
         Log("📴 Hanging up call.");
-        // SipServer will fire OnCallEnded → SetInCall(false)
         if (_sipServer != null)
         {
             try { await _sipServer.HangupAsync(); }
