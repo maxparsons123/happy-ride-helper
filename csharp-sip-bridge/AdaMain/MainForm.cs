@@ -5,6 +5,7 @@ using AdaMain.Core;
 using AdaMain.Services;
 using AdaMain.Sip;
 using Microsoft.Extensions.Logging;
+using NAudio.Wave;
 
 namespace AdaMain;
 
@@ -18,6 +19,10 @@ public partial class MainForm : Form
     private ILoggerFactory? _loggerFactory;
     private ICallSession? _currentSession;
 
+    // Audio monitor (hear raw SIP audio locally)
+    private WaveOutEvent? _monitorOut;
+    private BufferedWaveProvider? _monitorBuffer;
+
     public MainForm()
     {
         InitializeComponent();
@@ -28,6 +33,7 @@ public partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        StopAudioMonitor();
         if (_sipServer != null)
         {
             Log("Shutting down SIP…");
@@ -178,7 +184,14 @@ public partial class MainForm : Form
                 SetInCall(false);
                 statusCallId.Text = "";
                 _currentSession = null;
+                StopAudioMonitor();
             });
+
+            // Wire caller audio monitor — hear raw SIP audio through local speakers
+            _sipServer.OnCallerAudioMonitor += alawPayload =>
+            {
+                _monitorBuffer?.AddSamples(alawPayload, 0, alawPayload.Length);
+            };
 
             await _sipServer.StartAsync();
         }
@@ -329,6 +342,7 @@ public partial class MainForm : Form
 
         Log($"📲 Incoming call from {callerId}");
         statusCallId.Text = callerId;
+        StartAudioMonitor();
 
         if (chkAutoAnswer.Checked && !chkManualMode.Checked)
         {
@@ -413,5 +427,40 @@ public partial class MainForm : Form
     {
         if (InvokeRequired) { Invoke(() => SetAvatarStatus(status)); return; }
         lblAvatarStatus.Text = status;
+    }
+
+    // ── Audio monitor (hear caller audio locally) ──
+
+    private void StartAudioMonitor()
+    {
+        StopAudioMonitor();
+        try
+        {
+            _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
+            {
+                BufferDuration = TimeSpan.FromSeconds(5),
+                DiscardOnBufferOverflow = true
+            };
+            _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
+            _monitorOut.Init(_monitorBuffer);
+            _monitorOut.Play();
+            Log("🔊 Audio monitor started — hearing raw SIP audio");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Audio monitor failed: {ex.Message}");
+        }
+    }
+
+    private void StopAudioMonitor()
+    {
+        try
+        {
+            _monitorOut?.Stop();
+            _monitorOut?.Dispose();
+        }
+        catch { }
+        _monitorOut = null;
+        _monitorBuffer = null;
     }
 }
