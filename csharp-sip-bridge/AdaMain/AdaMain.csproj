@@ -7,7 +7,46 @@
     <Nullable>enable</Nullable>
     <RootNamespace>AdaMain</RootNamespace>
     <AssemblyName>AdaMain</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Root -->
+    <Compile Include="Program.cs" />
+
+    <!-- AI -->
+    <Compile Include="Ai\IOpenAiClient.cs" />
+    <Compile Include="Ai\OpenAIRealtimeClient.cs" />
+
+    <!-- Audio -->
+    <Compile Include="Audio\AlawToOpenAiPcm24k.cs" />
+    <Compile Include="Audio\AudioProcessorPlugin.cs" />
+    <Compile Include="Audio\AudioResampler.cs" />
+    <Compile Include="Audio\G711Codec.cs" />
+    <Compile Include="Audio\IAudioCodec.cs" />
+    <Compile Include="Audio\PcmToSipG711Encoder.cs" />
+    <Compile Include="Audio\TelephonyDsp.cs" />
+
+    <!-- Config -->
+    <Compile Include="Config\Settings.cs" />
+
+    <!-- Core -->
+    <Compile Include="Core\BookingState.cs" />
+    <Compile Include="Core\CallSession.cs" />
+    <Compile Include="Core\ICallSession.cs" />
+    <Compile Include="Core\SessionManager.cs" />
+
+    <!-- Services -->
+    <Compile Include="Services\BsqdDispatcher.cs" />
+    <Compile Include="Services\FareCalculator.cs" />
+    <Compile Include="Services\IDispatcher.cs" />
+    <Compile Include="Services\IFareCalculator.cs" />
+
+    <!-- SIP -->
+    <Compile Include="Sip\CallerIdExtractor.cs" />
+    <Compile Include="Sip\SipConfig.cs" />
+    <Compile Include="Sip\SipServer.cs" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
