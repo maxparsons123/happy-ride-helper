@@ -353,19 +353,76 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
-        // Playout task: AI → SIP (20ms frames)
-        _ = Task.Run(async () =>
+        // Playout thread: AI → SIP using SendRtpRaw (frames are already G.711 A-law)
+        uint rtpTimestamp = (uint)Random.Shared.Next();
+        const int FRAME_SIZE = 160; // 20ms @ 8kHz
+        const byte ALAW_SILENCE = 0xD5;
+        const byte PT_ALAW = 8;
+
+        var playoutThread = new Thread(() =>
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            double nextFrameMs = sw.Elapsed.TotalMilliseconds;
+
             while (_currentSession == session && session.IsActive)
             {
+                double now = sw.Elapsed.TotalMilliseconds;
+                if (now < nextFrameMs)
+                {
+                    double wait = nextFrameMs - now;
+                    if (wait > 2.0)
+                        Thread.Sleep((int)(wait - 1));
+                    else if (wait > 0.1)
+                        Thread.SpinWait(100);
+                    continue;
+                }
+
                 var frame = session.GetOutboundFrame();
                 if (frame != null)
                 {
-                    rtpSession.SendAudio((uint)frame.Length * 10, frame);
+                    try
+                    {
+                        rtpSession.SendRtpRaw(
+                            SIPSorcery.Net.SDPMediaTypesEnum.audio,
+                            frame,
+                            rtpTimestamp,
+                            0, // marker
+                            PT_ALAW);
+                    }
+                    catch { }
                 }
-                await Task.Delay(20);
+                else
+                {
+                    // Send silence to keep RTP stream alive
+                    try
+                    {
+                        var silence = new byte[FRAME_SIZE];
+                        Array.Fill(silence, ALAW_SILENCE);
+                        rtpSession.SendRtpRaw(
+                            SIPSorcery.Net.SDPMediaTypesEnum.audio,
+                            silence,
+                            rtpTimestamp,
+                            0,
+                            PT_ALAW);
+                    }
+                    catch { }
+                }
+
+                rtpTimestamp += FRAME_SIZE;
+                nextFrameMs += 20;
+
+                // Drift correction
+                now = sw.Elapsed.TotalMilliseconds;
+                if (now - nextFrameMs > 40)
+                    nextFrameMs = now + 20;
             }
-        });
+        })
+        {
+            IsBackground = true,
+            Priority = ThreadPriority.Highest,
+            Name = "AdaMain-RTP-Playout"
+        };
+        playoutThread.Start();
 
         OnCallStarted?.Invoke(caller);
     }
