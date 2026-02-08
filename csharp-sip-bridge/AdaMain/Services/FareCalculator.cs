@@ -5,13 +5,18 @@ using Microsoft.Extensions.Logging;
 namespace AdaMain.Services;
 
 /// <summary>
-/// Fare calculator with Google Maps geocoding.
+/// Fare calculator with Google Maps geocoding + address-dispatch edge function integration.
+/// Ports the WinForms FareCalculator.ExtractAndCalculateWithAiAsync pattern.
 /// </summary>
 public sealed class FareCalculator : IFareCalculator
 {
     private readonly ILogger<FareCalculator> _logger;
     private readonly GoogleMapsSettings _settings;
     private readonly HttpClient _httpClient;
+    
+    // Edge function config
+    private const string EDGE_FUNCTION_URL = "https://oerketnvlmptpfvttysy.supabase.co/functions/v1/address-dispatch";
+    private const string SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
     
     // Pricing constants
     private const decimal BaseFare = 3.50m;
@@ -24,9 +29,200 @@ public sealed class FareCalculator : IFareCalculator
     {
         _logger = logger;
         _settings = settings;
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaMain/1.0");
     }
+    
+    // =========================
+    // AI-POWERED ADDRESS RESOLUTION (edge function)
+    // =========================
+    
+    /// <summary>
+    /// Resolve addresses via address-dispatch edge function (Gemini AI) + calculate fare.
+    /// Returns coordinates, structured address components, and handles disambiguation.
+    /// Falls back to basic geocoding on timeout/error (2s timeout).
+    /// </summary>
+    public async Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber)
+    {
+        if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
+            return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
+
+        try
+        {
+            _logger.LogInformation("🤖 Calling address-dispatch edge function: pickup='{Pickup}', dest='{Dest}'", pickup, destination);
+
+            var requestBody = JsonSerializer.Serialize(new
+            {
+                pickup = pickup ?? "",
+                destination = destination ?? "",
+                phone = phoneNumber ?? ""
+            });
+
+            var request = new HttpRequestMessage(HttpMethod.Post, EDGE_FUNCTION_URL)
+            {
+                Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
+            };
+            request.Headers.Add("apikey", SUPABASE_ANON_KEY);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            var response = await _httpClient.SendAsync(request, cts.Token);
+            var responseJson = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Edge function error: {Status} - {Body}", (int)response.StatusCode, responseJson);
+                return await CalculateAsync(pickup, destination, phoneNumber);
+            }
+
+            using var doc = JsonDocument.Parse(responseJson);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("error", out _))
+            {
+                _logger.LogWarning("Edge function returned error, falling back to geocoding");
+                return await CalculateAsync(pickup, destination, phoneNumber);
+            }
+
+            var result = new FareResult();
+
+            // Extract detected area
+            string? detectedArea = null;
+            if (root.TryGetProperty("detected_area", out var areaEl))
+                detectedArea = areaEl.GetString();
+            _logger.LogInformation("🌍 Detected area: {Area}", detectedArea ?? "unknown");
+
+            // Parse pickup
+            string resolvedPickup = pickup ?? "";
+            double? pickupLat = null, pickupLon = null;
+            string? pickupStreet = null, pickupNumber = null, pickupPostal = null, pickupCity = null;
+
+            if (root.TryGetProperty("pickup", out var pickupEl))
+            {
+                if (pickupEl.TryGetProperty("address", out var addr))
+                    resolvedPickup = addr.GetString() ?? pickup ?? "";
+                if (pickupEl.TryGetProperty("lat", out var lat) && lat.ValueKind == JsonValueKind.Number)
+                    pickupLat = lat.GetDouble();
+                if (pickupEl.TryGetProperty("lon", out var lon) && lon.ValueKind == JsonValueKind.Number)
+                    pickupLon = lon.GetDouble();
+                if (pickupEl.TryGetProperty("street_name", out var st)) pickupStreet = st.GetString();
+                if (pickupEl.TryGetProperty("street_number", out var num)) pickupNumber = num.GetString();
+                if (pickupEl.TryGetProperty("postal_code", out var pc)) pickupPostal = pc.GetString();
+                if (pickupEl.TryGetProperty("city", out var city)) pickupCity = city.GetString();
+
+                if (pickupEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
+                {
+                    result.NeedsClarification = true;
+                    if (pickupEl.TryGetProperty("alternatives", out var alts))
+                        result.PickupAlternatives = alts.EnumerateArray()
+                            .Select(a => a.GetString() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToArray();
+                }
+            }
+
+            // Parse dropoff
+            string resolvedDest = destination ?? "";
+            double? destLat = null, destLon = null;
+            string? destStreet = null, destNumber = null, destPostal = null, destCity = null;
+
+            if (root.TryGetProperty("dropoff", out var dropoffEl))
+            {
+                if (dropoffEl.TryGetProperty("address", out var addr))
+                    resolvedDest = addr.GetString() ?? destination ?? "";
+                if (dropoffEl.TryGetProperty("lat", out var lat) && lat.ValueKind == JsonValueKind.Number)
+                    destLat = lat.GetDouble();
+                if (dropoffEl.TryGetProperty("lon", out var lon) && lon.ValueKind == JsonValueKind.Number)
+                    destLon = lon.GetDouble();
+                if (dropoffEl.TryGetProperty("street_name", out var st)) destStreet = st.GetString();
+                if (dropoffEl.TryGetProperty("street_number", out var num)) destNumber = num.GetString();
+                if (dropoffEl.TryGetProperty("postal_code", out var pc)) destPostal = pc.GetString();
+                if (dropoffEl.TryGetProperty("city", out var city)) destCity = city.GetString();
+
+                if (dropoffEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
+                {
+                    result.NeedsClarification = true;
+                    if (dropoffEl.TryGetProperty("alternatives", out var alts))
+                        result.DestAlternatives = alts.EnumerateArray()
+                            .Select(a => a.GetString() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToArray();
+                }
+            }
+
+            // Check global status
+            if (root.TryGetProperty("status", out var statusEl) && statusEl.GetString() == "clarification_needed")
+                result.NeedsClarification = true;
+
+            _logger.LogInformation("📍 Resolved: pickup='{Pickup}' ({PLat},{PLon}), dest='{Dest}' ({DLat},{DLon})",
+                resolvedPickup, pickupLat, pickupLon, resolvedDest, destLat, destLon);
+
+            // If Gemini returned valid coordinates for both, use them directly (skip geocoding!)
+            if (pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
+                pickupLat.Value != 0 && destLat.Value != 0)
+            {
+                var distanceMiles = HaversineDistance(pickupLat.Value, pickupLon.Value, destLat.Value, destLon.Value);
+                var fare = Math.Max(MinFare, BaseFare + (decimal)distanceMiles * PerMile);
+                fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2;
+                var etaMinutes = (int)Math.Ceiling(distanceMiles / AvgSpeedMph * 60) + BufferMinutes;
+
+                result.Fare = $"£{fare:F2}";
+                result.Eta = $"{etaMinutes} minutes";
+                result.PickupLat = pickupLat.Value;
+                result.PickupLon = pickupLon.Value;
+                result.PickupStreet = pickupStreet;
+                result.PickupNumber = pickupNumber;
+                result.PickupPostalCode = pickupPostal;
+                result.PickupCity = pickupCity ?? detectedArea;
+                result.PickupFormatted = resolvedPickup;
+                result.DestLat = destLat.Value;
+                result.DestLon = destLon.Value;
+                result.DestStreet = destStreet;
+                result.DestNumber = destNumber;
+                result.DestPostalCode = destPostal;
+                result.DestCity = destCity ?? detectedArea;
+                result.DestFormatted = resolvedDest;
+
+                _logger.LogInformation("✅ Using Gemini coordinates directly — {Distance:F2} miles → {Fare}", distanceMiles, result.Fare);
+                return result;
+            }
+
+            // Fallback: Gemini didn't return coords, geocode resolved addresses
+            _logger.LogWarning("Gemini returned no coordinates, falling back to geocoding");
+            var fareResult = await CalculateAsync(resolvedPickup, resolvedDest, phoneNumber);
+
+            // Merge clarification info + AI-extracted components
+            fareResult.NeedsClarification = result.NeedsClarification;
+            fareResult.PickupAlternatives = result.PickupAlternatives;
+            fareResult.DestAlternatives = result.DestAlternatives;
+
+            // Override with AI-extracted components where available (higher accuracy)
+            if (!string.IsNullOrEmpty(pickupStreet)) fareResult.PickupStreet = pickupStreet;
+            if (!string.IsNullOrEmpty(pickupNumber)) fareResult.PickupNumber = pickupNumber;
+            if (!string.IsNullOrEmpty(pickupPostal)) fareResult.PickupPostalCode = pickupPostal;
+            if (!string.IsNullOrEmpty(pickupCity)) fareResult.PickupCity = pickupCity;
+            if (!string.IsNullOrEmpty(destStreet)) fareResult.DestStreet = destStreet;
+            if (!string.IsNullOrEmpty(destNumber)) fareResult.DestNumber = destNumber;
+            if (!string.IsNullOrEmpty(destPostal)) fareResult.DestPostalCode = destPostal;
+            if (!string.IsNullOrEmpty(destCity)) fareResult.DestCity = destCity;
+            if (!string.IsNullOrEmpty(detectedArea))
+            {
+                fareResult.PickupCity ??= detectedArea;
+                fareResult.DestCity ??= detectedArea;
+            }
+
+            return fareResult;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("⏱️ Edge function timeout (2s), falling back to geocoding");
+            return await CalculateAsync(pickup, destination, phoneNumber);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Edge function error, falling back to geocoding");
+            return await CalculateAsync(pickup, destination, phoneNumber);
+        }
+    }
+    
+    // =========================
+    // BASIC GEOCODING (existing)
+    // =========================
     
     public async Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber)
     {
@@ -81,7 +277,7 @@ public sealed class FareCalculator : IFareCalculator
                 destGeo.Lat, destGeo.Lon);
             
             var fare = Math.Max(MinFare, BaseFare + (decimal)distanceMiles * PerMile);
-            fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2; // Round to nearest 50c
+            fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2;
             
             var etaMinutes = (int)Math.Ceiling(distanceMiles / AvgSpeedMph * 60) + BufferMinutes;
             

@@ -23,6 +23,11 @@ public sealed class FareResult
     public string? DestPostalCode { get; set; }
     public string? DestCity { get; set; }
     public string? DestFormatted { get; set; }
+    
+    // Clarification / disambiguation
+    public bool NeedsClarification { get; set; }
+    public string[]? PickupAlternatives { get; set; }
+    public string[]? DestAlternatives { get; set; }
 }
 
 /// <summary>
@@ -31,7 +36,14 @@ public sealed class FareResult
 public interface IFareCalculator
 {
     /// <summary>
-    /// Calculate fare with geocoding.
+    /// Calculate fare with geocoding (basic — no edge function).
     /// </summary>
     Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber);
+    
+    /// <summary>
+    /// AI-powered address resolution via address-dispatch edge function + fare calculation.
+    /// Uses Gemini for disambiguation, coordinate extraction, and caller history matching.
+    /// Falls back to basic CalculateAsync on timeout or error.
+    /// </summary>
+    Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber);
 }
