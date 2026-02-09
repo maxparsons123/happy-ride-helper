@@ -55,6 +55,9 @@ public sealed class AudioSettings
     /// Recommended: 1200-2000. Default: 1500.
     /// </summary>
     public float BargeInRmsThreshold { get; set; } = 1500f;
+
+    /// <summary>Enable periodic audio quality diagnostics logging on the RTP thread. Disable to reduce jitter.</summary>
+    public bool EnableDiagnostics { get; set; } = true;
 }
 
 public sealed class DispatchSettings
@@ -79,6 +82,9 @@ public sealed class SimliSettings
 {
     public string ApiKey { get; set; } = "vlw7tr7vxhhs52bi3rum7";
     public string FaceId { get; set; } = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+
+    /// <summary>Enable Simli avatar audio feeding during calls. Disable to eliminate potential jitter from upsampling/WebRTC.</summary>
+    public bool Enabled { get; set; } = true;
 }
 
 public sealed class SttSettings

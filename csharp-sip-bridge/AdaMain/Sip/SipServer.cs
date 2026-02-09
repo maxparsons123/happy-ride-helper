@@ -470,32 +470,35 @@ public sealed class SipServer : IAsyncDisposable
             }
             float rms = (float)Math.Sqrt(sumSq / payload.Length);
 
-            // ── Audio quality diagnostics ──
-            _dqFrameCount++;
-            _dqRmsSum += rms;
-            if (rms > _dqPeakRms) _dqPeakRms = rms;
-            if (rms < _dqMinRms) _dqMinRms = rms;
-            if (rms < 50) _dqSilentFrames++;
-            if (rms > 28000) _dqClippedFrames++;
-
-            if (_dqFrameCount >= DQ_LOG_INTERVAL_FRAMES)
+            // ── Audio quality diagnostics (gated by setting) ──
+            if (_audioSettings.EnableDiagnostics)
             {
-                var avgRms = _dqRmsSum / _dqFrameCount;
-                var silPct = _dqSilentFrames * 100.0 / _dqFrameCount;
-                var clipPct = _dqClippedFrames * 100.0 / _dqFrameCount;
-                var quality = clipPct > 5 ? "⚠️ CLIPPING" :
-                              avgRms < 100 ? "❌ VERY LOW" :
-                              avgRms < 500 ? "⚠️ LOW" : "✅ GOOD";
+                _dqFrameCount++;
+                _dqRmsSum += rms;
+                if (rms > _dqPeakRms) _dqPeakRms = rms;
+                if (rms < _dqMinRms) _dqMinRms = rms;
+                if (rms < 50) _dqSilentFrames++;
+                if (rms > 28000) _dqClippedFrames++;
 
-                Log($"📊 Audio: avg={avgRms:F0} peak={_dqPeakRms:F0} min={_dqMinRms:F0} " +
-                    $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+                if (_dqFrameCount >= DQ_LOG_INTERVAL_FRAMES)
+                {
+                    var avgRms = _dqRmsSum / _dqFrameCount;
+                    var silPct = _dqSilentFrames * 100.0 / _dqFrameCount;
+                    var clipPct = _dqClippedFrames * 100.0 / _dqFrameCount;
+                    var quality = clipPct > 5 ? "⚠️ CLIPPING" :
+                                  avgRms < 100 ? "❌ VERY LOW" :
+                                  avgRms < 500 ? "⚠️ LOW" : "✅ GOOD";
 
-                _dqFrameCount = 0;
-                _dqRmsSum = 0;
-                _dqPeakRms = 0;
-                _dqMinRms = float.MaxValue;
-                _dqSilentFrames = 0;
-                _dqClippedFrames = 0;
+                    Log($"📊 Audio: avg={avgRms:F0} peak={_dqPeakRms:F0} min={_dqMinRms:F0} " +
+                        $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+
+                    _dqFrameCount = 0;
+                    _dqRmsSum = 0;
+                    _dqPeakRms = 0;
+                    _dqMinRms = float.MaxValue;
+                    _dqSilentFrames = 0;
+                    _dqClippedFrames = 0;
+                }
             }
 
             // ── Soft gate: suppress echo during bot speech ──

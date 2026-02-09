@@ -567,6 +567,12 @@ public partial class MainForm : Form
     /// <summary>Ensure Simli is initialized, then connect when a call starts.</summary>
     private async Task ConnectSimliAsync()
     {
+        if (!_settings.Simli.Enabled)
+        {
+            Log("🎭 Simli disabled — skipping avatar connection");
+            return;
+        }
+
         // Safety net: if InitSimliAvatar failed at startup, retry now
         if (_simliAvatar == null)
         {
@@ -594,6 +600,7 @@ public partial class MainForm : Form
     /// <summary>Feed A-law audio from Ada's TTS output to Simli (decode + upsample).</summary>
     private void FeedSimliAudio(byte[] alawFrame)
     {
+        if (!_settings.Simli.Enabled) return;
         if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
             return;
 
