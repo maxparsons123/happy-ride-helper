@@ -38,6 +38,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
     // FIXED 200ms buffer (10 frames) - absorbs OpenAI burst delivery + network jitter towards end of responses
     private const int JITTER_BUFFER_FRAMES = 10;
+    private const int RESUME_BUFFER_FRAMES = 2;  // After initial fill, only need 40ms to resume (prevents mid-speech gaps)
     private const int REBUFFER_THRESHOLD = 0;    // Disable mid-stream rebuffering — only buffer on initial fill
     private const int MAX_QUEUE_FRAMES = 2000;   // ~40s safety cap (matches G711CallHandler)
 
@@ -47,6 +48,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // Pre-allocated accumulator (avoids GC pressure → smoother audio)
     private byte[] _accumulator = new byte[8192];
     private int _accCount;
+    private bool _initialFillDone;   // After first buffer fill, use smaller re-buffer threshold
     private readonly object _accLock = new();
 
     // RTP session reference for sending
@@ -160,6 +162,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _running = true;
         _isBuffering = true;
+        _initialFillDone = false;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
 
@@ -235,13 +238,16 @@ public sealed class ALawRtpPlayout : IDisposable
         }
 
         // Fixed jitter buffer: wait until we have enough frames
-        if (_isBuffering && queueCount < JITTER_BUFFER_FRAMES)
+        // After initial fill, use smaller threshold to prevent mid-speech gaps
+        int requiredFrames = _initialFillDone ? RESUME_BUFFER_FRAMES : JITTER_BUFFER_FRAMES;
+        if (_isBuffering && queueCount < requiredFrames)
         {
             SendRtpFrame(_silenceFrame, false);
             return;
         }
 
         _isBuffering = false;
+        _initialFillDone = true;
 
         // Get frame or send instant silence (NO fade-out → prevents G.711 warbling)
         if (_frameQueue.TryDequeue(out var frame))
@@ -293,6 +299,7 @@ public sealed class ALawRtpPlayout : IDisposable
         }
 
         _isBuffering = true;
+        _initialFillDone = false;
         _wasPlaying = false;
     }
 
