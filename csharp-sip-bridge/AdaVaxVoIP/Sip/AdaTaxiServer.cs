@@ -35,7 +35,11 @@ public class AdaTaxiServer : cVaxServerCOM
             return false;
         }
 
-        if (!OpenNetworkUDP("", _settings.Sip.Port))
+        // Discover local IP
+        var localIp = GetLocalIp();
+        Log($"➡ Local IP: {localIp}");
+
+        if (!OpenNetworkUDP(localIp, _settings.Sip.Port))
         {
             _logger.LogError("VaxVoIP OpenNetworkUDP failed on port {Port}: {Error}", _settings.Sip.Port, GetVaxErrorText());
             UnInitialize();
@@ -44,6 +48,23 @@ public class AdaTaxiServer : cVaxServerCOM
 
         SetListenPortRangeRTP(_settings.VaxVoIP.RtpPortMin, _settings.VaxVoIP.RtpPortMax);
         AudioSessionLost(true, 30);
+
+        // STUN: discover public IP and set network routes for NAT traversal
+        if (_settings.Sip.EnableStun)
+        {
+            var publicIp = DiscoverPublicIp();
+            if (publicIp != null)
+            {
+                Log($"🌐 Public IP (STUN): {publicIp}");
+                AddNetworkRouteSIP(localIp, publicIp);
+                AddNetworkRouteRTP(localIp, publicIp);
+                Log($"📡 Network routes set: {localIp} → {publicIp}");
+            }
+            else
+            {
+                Log("⚠️ STUN discovery failed; NAT traversal may not work");
+            }
+        }
 
         // Add anonymous UDP line for accepting calls from any source
         AddLine("AnonymousUDP", VAX_LINE_TYPE_UDP, "", "", "", "", "", "255.255.255.255", -1, "32");
@@ -114,6 +135,118 @@ public class AdaTaxiServer : cVaxServerCOM
 
         Log($"⚠️ Could not resolve {host}, using hostname directly");
         return host;
+    }
+
+    /// <summary>
+    /// Discover public IP via STUN (RFC 5389) — same implementation as AdaMain.
+    /// </summary>
+    private string? DiscoverPublicIp()
+    {
+        try
+        {
+            var stunServer = _settings.Sip.StunServer ?? "stun.l.google.com";
+            var stunPort = _settings.Sip.StunPort > 0 ? _settings.Sip.StunPort : 19302;
+
+            Log($"🌐 Querying STUN: {stunServer}:{stunPort}...");
+
+            using var udp = new UdpClient();
+            var stunAddr = Dns.GetHostAddresses(stunServer)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+
+            if (stunAddr == null)
+            {
+                Log("⚠️ Could not resolve STUN server");
+                return null;
+            }
+
+            // STUN Binding Request (RFC 5389)
+            var request = new byte[20];
+            request[0] = 0x00; request[1] = 0x01; // Binding Request
+            request[2] = 0x00; request[3] = 0x00; // Message Length = 0
+            // Magic Cookie
+            request[4] = 0x21; request[5] = 0x12; request[6] = 0xA4; request[7] = 0x42;
+            // Transaction ID (12 bytes random)
+            Random.Shared.NextBytes(request.AsSpan(8, 12));
+
+            udp.Send(request, request.Length, new IPEndPoint(stunAddr, stunPort));
+            udp.Client.ReceiveTimeout = 3000;
+
+            var ep = new IPEndPoint(IPAddress.Any, 0);
+            var response = udp.Receive(ref ep);
+
+            return ParseStunResponse(response);
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ STUN failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static string? ParseStunResponse(byte[] response)
+    {
+        if (response.Length < 20) return null;
+
+        var msgLen = (response[2] << 8) | response[3];
+        var offset = 20;
+
+        while (offset + 4 <= response.Length && offset < 20 + msgLen)
+        {
+            var attrType = (response[offset] << 8) | response[offset + 1];
+            var attrLen = (response[offset + 2] << 8) | response[offset + 3];
+            offset += 4;
+
+            // XOR-MAPPED-ADDRESS (0x0020) or MAPPED-ADDRESS (0x0001)
+            if ((attrType == 0x0020 || attrType == 0x0001) && attrLen >= 8)
+            {
+                var family = response[offset + 1];
+                if (family == 0x01) // IPv4
+                {
+                    byte[] ip = new byte[4];
+                    if (attrType == 0x0020)
+                    {
+                        ip[0] = (byte)(response[offset + 4] ^ 0x21);
+                        ip[1] = (byte)(response[offset + 5] ^ 0x12);
+                        ip[2] = (byte)(response[offset + 6] ^ 0xA4);
+                        ip[3] = (byte)(response[offset + 7] ^ 0x42);
+                    }
+                    else
+                    {
+                        Array.Copy(response, offset + 4, ip, 0, 4);
+                    }
+                    return new IPAddress(ip).ToString();
+                }
+            }
+
+            offset += attrLen;
+            if (attrLen % 4 != 0) offset += 4 - (attrLen % 4);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Get the local network IP by connecting a UDP socket to the SIP server.
+    /// </summary>
+    private string GetLocalIp()
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(_settings.Sip.Server, _settings.Sip.Port);
+            var localEp = socket.LocalEndPoint as IPEndPoint;
+            return localEp?.Address.ToString() ?? "0.0.0.0";
+        }
+        catch
+        {
+            var host = Dns.GetHostEntry(Dns.GetHostName());
+            foreach (var ip in host.AddressList)
+            {
+                if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                    return ip.ToString();
+            }
+            return "0.0.0.0";
+        }
     }
 
     public void Stop()
