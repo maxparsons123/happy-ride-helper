@@ -153,7 +153,7 @@ public partial class MainForm : Form
             // Create session factory with full pipeline wiring
             var sessionManager = new SessionManager(smLogger, CreateCallSession);
 
-            _sipServer = new SipServer(sipLogger, _settings.Sip, sessionManager);
+            _sipServer = new SipServer(sipLogger, _settings.Sip, _settings.Audio, sessionManager);
 
             // Wire SipServer events → MainForm
             _sipServer.OnLog += msg => Invoke(() => Log(msg));

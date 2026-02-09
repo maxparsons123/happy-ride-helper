@@ -21,6 +21,7 @@ public sealed class SipServer : IAsyncDisposable
 {
     private readonly ILogger<SipServer> _logger;
     private readonly SipSettings _settings;
+    private readonly AudioSettings _audioSettings;
     private readonly SessionManager _sessionManager;
 
     private SIPTransport? _transport;
@@ -60,10 +61,12 @@ public sealed class SipServer : IAsyncDisposable
     public SipServer(
         ILogger<SipServer> logger,
         SipSettings settings,
+        AudioSettings audioSettings,
         SessionManager sessionManager)
     {
         _logger = logger;
         _settings = settings;
+        _audioSettings = audioSettings;
         _sessionManager = sessionManager;
     }
 
@@ -263,6 +266,15 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeUserAgent()
     {
         _userAgent = new SIPUserAgent(_transport, null);
+
+        // NAT fix: inject STUN-discovered public IP into SDP so the provider
+        // sees our real address instead of 192.168.x.x in Contact/SDP headers.
+        if (_publicIp != null)
+        {
+            Log($"🌐 Injecting public IP {_publicIp} into SDP media address");
+            _userAgent.SdpMediaAddressOverride = _publicIp;
+        }
+
         _userAgent.OnIncomingCall += OnIncomingCallAsync;
     }
 
@@ -394,7 +406,7 @@ public sealed class SipServer : IAsyncDisposable
         const int FLUSH_PACKETS = 20;
         const int EARLY_PROTECTION_MS = 500;
         const int ECHO_GUARD_MS = 120;
-        const float BARGE_IN_RMS_THRESHOLD = 1500f;
+        float BARGE_IN_RMS_THRESHOLD = _audioSettings.BargeInRmsThreshold;
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
         var callStartedAt = DateTime.UtcNow;
