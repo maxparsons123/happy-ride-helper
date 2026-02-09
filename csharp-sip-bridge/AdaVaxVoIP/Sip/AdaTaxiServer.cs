@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
 using AdaVaxVoIP.Config;
 using Microsoft.Extensions.Logging;
 
@@ -71,16 +73,47 @@ public class AdaTaxiServer : cVaxServerCOM
             _ => VAX_LINE_TYPE_UDP
         };
 
+        // Resolve hostname to IP address for the SDK
+        var resolvedServer = ResolveDns(_settings.Sip.Server);
+
         AddLine("SipTrunk", lineType,
             _settings.Sip.Username, _settings.Sip.Username,
             _settings.Sip.EffectiveAuthUser, _settings.Sip.Password,
             _settings.Sip.Domain ?? _settings.Sip.Server,
-            _settings.Sip.Server, _settings.Sip.Port, "32");
+            resolvedServer, _settings.Sip.Port, "32");
 
         RegisterLine("SipTrunk", 3600);
-        Log("📡 Registering with SIP trunk: " + _settings.Sip.Server);
+        Log($"📡 Registering with SIP trunk: {_settings.Sip.Server} (resolved → {resolvedServer})");
+    }
 
-        Log($"📡 Registered SIP trunk: {_settings.Sip.Server}");
+    /// <summary>
+    /// Resolve hostname to IPv4 address. Returns IP as-is if already an IP.
+    /// </summary>
+    private string ResolveDns(string host)
+    {
+        if (IPAddress.TryParse(host, out _))
+        {
+            Log($"📡 Using IP address directly: {host}");
+            return host;
+        }
+
+        try
+        {
+            var addresses = Dns.GetHostAddresses(host);
+            var ipv4 = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+            if (ipv4 != null)
+            {
+                Log($"📡 Resolved {host} → {ipv4}");
+                return ipv4.ToString();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ DNS resolution failed for {host}: {ex.Message}");
+        }
+
+        Log($"⚠️ Could not resolve {host}, using hostname directly");
+        return host;
     }
 
     public void Stop()
