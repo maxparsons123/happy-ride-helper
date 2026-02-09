@@ -351,28 +351,28 @@ public sealed class SipServer : IAsyncDisposable
 
     private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
     {
-        // Match proven G711CallHandler pattern: AudioSourcesEnum.None + PCMA restriction
+        // Match proven G711CallHandler v7.5 pattern: AudioSourcesEnum.None + codec preference ordering
         var audioEncoder = new AudioEncoder();
 
         var audioSource = new AudioExtrasSource(
             audioEncoder,
             new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
 
-        // Prefer PCMA (A-law) for pure passthrough
-        audioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA);
+        // Prefer PCMA (A-law) but also allow PCMU (μ-law) for broader carrier compatibility
+        // G711CallHandler orders: PCMA first, then PCMU, then everything else
+        audioSource.RestrictFormats(fmt => 
+            fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
 
         var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
         var rtpSession = new VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
 
-        // NAT: AcceptRtpFromAny handles inbound RTP from any source IP.
-        // For outbound SDP, SIPSorcery auto-mangles the connection address
-        // when it detects the remote endpoint is on a different subnet.
-
-        // Track negotiated codec (matches G711CallHandler)
+        // Track negotiated codec for transcoding decisions (matches G711CallHandler)
+        AudioCodecsEnum negotiatedCodec = AudioCodecsEnum.PCMA;
         rtpSession.OnAudioFormatsNegotiated += formats =>
         {
             var fmt = formats.FirstOrDefault();
+            negotiatedCodec = fmt.Codec;
             Log($"🎵 Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
         };
 
@@ -494,7 +494,8 @@ public sealed class SipServer : IAsyncDisposable
         // Start the playout engine
         playout.Start();
 
-        // ── Wire SIP RTP → AI session (soft gate + diagnostics + monitor) ──
+        // ── Wire SIP RTP → AI session (v7.5 pure passthrough with PCMU transcoding) ──
+        int framesForwarded = 0;
         rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
         {
             if (mediaType != SDPMediaTypesEnum.audio) return;
@@ -518,59 +519,23 @@ public sealed class SipServer : IAsyncDisposable
             if ((DateTime.UtcNow - callStartedAt).TotalMilliseconds < EARLY_PROTECTION_MS)
                 return;
 
-            // ── RMS calculation for soft gate ──
-            double sumSq = 0;
-            for (int i = 0; i < payload.Length; i++)
+            // ── v5.2: TRUE passthrough — no decode/DSP/re-encode (eliminates quantization noise) ──
+            // Transcode μ-law → A-law if needed (OpenAI expects A-law)
+            byte[] g711ToSend;
+            if (negotiatedCodec == AudioCodecsEnum.PCMU)
             {
-                short pcm = ALawDecode(payload[i]);
-                sumSq += pcm * (double)pcm;
+                // Direct μ-law → A-law transcode (no PCM intermediate)
+                g711ToSend = Audio.G711.Transcode.MuLawToALaw(payload);
             }
-            float rms = (float)Math.Sqrt(sumSq / payload.Length);
-
-            // ── Audio quality diagnostics (gated by setting) ──
-            if (_audioSettings.EnableDiagnostics)
+            else
             {
-                int rmsFixed = (int)(rms * 1000); // fixed-point for Interlocked
-                var frameCount = Interlocked.Increment(ref _dqFrameCount);
-                Interlocked.Add(ref _dqRmsSum, rmsFixed);
-                InterlockedMax(ref _dqPeakRms, rmsFixed);
-                InterlockedMin(ref _dqMinRms, rmsFixed);
-                if (rms < 50) Interlocked.Increment(ref _dqSilentFrames);
-                if (rms > 28000) Interlocked.Increment(ref _dqClippedFrames);
-
-                if (frameCount >= DQ_LOG_INTERVAL_FRAMES)
-                {
-                    // Snapshot and reset atomically
-                    var totalRms = Interlocked.Exchange(ref _dqRmsSum, 0);
-                    var fc = Interlocked.Exchange(ref _dqFrameCount, 0);
-                    var peak = Interlocked.Exchange(ref _dqPeakRms, 0);
-                    var min = Interlocked.Exchange(ref _dqMinRms, int.MaxValue);
-                    var silent = Interlocked.Exchange(ref _dqSilentFrames, 0);
-                    var clipped = Interlocked.Exchange(ref _dqClippedFrames, 0);
-
-                    if (fc > 0)
-                    {
-                        var avgRms = (totalRms / 1000.0) / fc;
-                        // Only log when average RMS exceeds threshold (reduces log spam)
-                        if (avgRms >= 500)
-                        {
-                            var peakRms = peak / 1000.0;
-                            var minRms = min == int.MaxValue ? 0 : min / 1000.0;
-                            var silPct = silent * 100.0 / fc;
-                            var clipPct = clipped * 100.0 / fc;
-                            var quality = clipPct > 5 ? "⚠️ CLIPPING" : "✅ GOOD";
-
-                            Log($"📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
-                                $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
-                        }
-                    }
-                }
+                // Pure A-law passthrough — zero processing
+                g711ToSend = payload;
             }
 
-            // ── Soft gate with RMS barge-in detection (matches G711CallHandler v7.5) ──
-            // During bot speaking or echo guard, send silence UNLESS user is barging in (RMS > 1500)
+            // ── Soft gate: during bot speaking or echo guard, send silence unless barge-in ──
             bool applySoftGate = false;
-            
+
             if (Volatile.Read(ref isBotSpeaking) == 1)
             {
                 applySoftGate = true;
@@ -584,11 +549,18 @@ public sealed class SipServer : IAsyncDisposable
                 }
             }
 
-            // ── Apply soft gate: silence or pass-through based on RMS ──
-            byte[] audioToSend = payload;
             if (applySoftGate)
             {
-                // Check RMS for barge-in detection (decode only for check)
+                // Check RMS for barge-in detection (decode only for RMS check, then discard)
+                var pcmCheck = new short[g711ToSend.Length];
+                double sumSq = 0;
+                for (int i = 0; i < g711ToSend.Length; i++)
+                {
+                    pcmCheck[i] = ALawDecode(g711ToSend[i]);
+                    sumSq += (double)pcmCheck[i] * pcmCheck[i];
+                }
+                float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+
                 if (rms >= 1500)
                 {
                     // Barge-in detected — let audio through
@@ -597,8 +569,56 @@ public sealed class SipServer : IAsyncDisposable
                 else
                 {
                     // Not a barge-in — send silence to prevent echo
-                    audioToSend = new byte[payload.Length];
-                    Array.Fill(audioToSend, (byte)0xD5); // A-law silence
+                    g711ToSend = new byte[payload.Length];
+                    Array.Fill(g711ToSend, (byte)0xD5); // A-law silence
+                }
+            }
+            else
+            {
+                // ── Audio quality diagnostics (only when not gated, gated by setting) ──
+                if (_audioSettings.EnableDiagnostics)
+                {
+                    double sumSq = 0;
+                    for (int i = 0; i < g711ToSend.Length; i++)
+                    {
+                        short pcm = ALawDecode(g711ToSend[i]);
+                        sumSq += pcm * (double)pcm;
+                    }
+                    float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+
+                    int rmsFixed = (int)(rms * 1000);
+                    var frameCount = Interlocked.Increment(ref _dqFrameCount);
+                    Interlocked.Add(ref _dqRmsSum, rmsFixed);
+                    InterlockedMax(ref _dqPeakRms, rmsFixed);
+                    InterlockedMin(ref _dqMinRms, rmsFixed);
+                    if (rms < 50) Interlocked.Increment(ref _dqSilentFrames);
+                    if (rms > 28000) Interlocked.Increment(ref _dqClippedFrames);
+
+                    if (frameCount >= DQ_LOG_INTERVAL_FRAMES)
+                    {
+                        var totalRms = Interlocked.Exchange(ref _dqRmsSum, 0);
+                        var fc = Interlocked.Exchange(ref _dqFrameCount, 0);
+                        var peak = Interlocked.Exchange(ref _dqPeakRms, 0);
+                        var min = Interlocked.Exchange(ref _dqMinRms, int.MaxValue);
+                        var silent = Interlocked.Exchange(ref _dqSilentFrames, 0);
+                        var clipped = Interlocked.Exchange(ref _dqClippedFrames, 0);
+
+                        if (fc > 0)
+                        {
+                            var avgRms = (totalRms / 1000.0) / fc;
+                            if (avgRms >= 500)
+                            {
+                                var peakRms = peak / 1000.0;
+                                var minRms = min == int.MaxValue ? 0 : min / 1000.0;
+                                var silPct = silent * 100.0 / fc;
+                                var clipPct = clipped * 100.0 / fc;
+                                var quality = clipPct > 5 ? "⚠️ CLIPPING" : "✅ GOOD";
+
+                                Log($"📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
+                                    $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -606,15 +626,19 @@ public sealed class SipServer : IAsyncDisposable
             var ingressGain = (float)_audioSettings.IngressVolumeBoost;
             if (ingressGain > 1.01f)
             {
-                var boosted = new byte[audioToSend.Length];
-                Buffer.BlockCopy(audioToSend, 0, boosted, 0, audioToSend.Length);
+                var boosted = new byte[g711ToSend.Length];
+                Buffer.BlockCopy(g711ToSend, 0, boosted, 0, g711ToSend.Length);
                 Audio.ALawVolumeBoost.ApplyInPlace(boosted, ingressGain);
                 session.ProcessInboundAudio(boosted);
-                return;
+            }
+            else
+            {
+                session.ProcessInboundAudio(g711ToSend);
             }
 
-            // ── Forward audio to AI session ──
-            session.ProcessInboundAudio(audioToSend);
+            framesForwarded++;
+            if (framesForwarded % 250 == 0)
+                Log($"🎙️ Ingress: {framesForwarded} frames (passthrough 8kHz)");
         };
 
         // Cleanup: dispose playout when session ends
