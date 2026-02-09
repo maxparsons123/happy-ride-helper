@@ -118,6 +118,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
     public Func<int>? GetQueuedFrames { get; set; }
     
+    /// <summary>Optional: check if an auto-quote is in progress (prevents safety net race).</summary>
+    public Func<bool>? IsAutoQuoteInProgress { get; set; }
+    
     /// <summary>Whether OpenAI is currently streaming a response.</summary>
     public bool IsResponseActive => Volatile.Read(ref _responseActive) == 1;
 
@@ -614,6 +617,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     else if (Volatile.Read(ref _bookingConfirmed) == 0 &&
                              Volatile.Read(ref _toolCalledInResponse) == 0 &&
                              Volatile.Read(ref _syncCallCount) > 0 &&  // GUARD: only trigger if booking data exists
+                             !(IsAutoQuoteInProgress?.Invoke() ?? false) && // GUARD: don't race with background fare calc
                              !string.IsNullOrEmpty(_lastAdaTranscript) &&
                              HasBookingIntent(_lastAdaTranscript))
                     {
