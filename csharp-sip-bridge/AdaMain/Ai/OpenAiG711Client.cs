@@ -69,6 +69,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private string? _lastAdaTranscript;
     private bool _awaitingConfirmation;    // Longer watchdog timeout when waiting for confirmation
     private int _bookingConfirmed;         // Set once book_taxi succeeds — disables safety net
+    private int _syncCallCount;            // How many sync_booking_data calls have been made — safety net requires ≥1
 
     // =========================
     // CALLER STATE (per-call)
@@ -548,6 +549,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     // CRITICAL: Skip if booking already confirmed — prevents infinite loop
                     else if (Volatile.Read(ref _bookingConfirmed) == 0 &&
                              Volatile.Read(ref _toolCalledInResponse) == 0 &&
+                             Volatile.Read(ref _syncCallCount) > 0 &&  // GUARD: only trigger if booking data exists
                              !string.IsNullOrEmpty(_lastAdaTranscript) &&
                              HasBookingIntent(_lastAdaTranscript))
                     {
@@ -748,6 +750,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
         // STATE GROUNDING: After sync_booking_data, inject state snapshot into conversation
         // This ensures the AI KNOWS what was synced and prevents redundant questions
+        if (name == "sync_booking_data")
+            Interlocked.Increment(ref _syncCallCount);
+        
         if (name == "sync_booking_data" && IsConnected)
         {
             // Build state text from args (we don't have BookingState here, CallSession does)
