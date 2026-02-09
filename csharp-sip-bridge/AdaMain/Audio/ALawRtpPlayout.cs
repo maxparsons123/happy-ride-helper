@@ -42,6 +42,9 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int REBUFFER_THRESHOLD = 0;    // Disable mid-stream rebuffering — only buffer on initial fill
     private const int MAX_QUEUE_FRAMES = 2000;   // ~40s safety cap (matches G711CallHandler)
 
+    // Stopwatch tick→nanosecond conversion (hardware-independent)
+    private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
+
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
 
@@ -63,6 +66,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
+    private int _consecutiveSendErrors;
+    private DateTime _lastErrorLog;
     private DateTime _lastRtpSendTime = DateTime.UtcNow;
 
     // NAT state
@@ -196,11 +201,11 @@ public sealed class ALawRtpPlayout : IDisposable
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
-        long nextFrameNs = sw.ElapsedTicks * 100; // 100ns units
+        long nextFrameNs = (long)(sw.ElapsedTicks * TicksToNs);
 
         while (_running && Volatile.Read(ref _disposed) == 0)
         {
-            long nowNs = sw.ElapsedTicks * 100;
+            long nowNs = (long)(sw.ElapsedTicks * TicksToNs);
 
             // Smooth wait: sleep most of the time, spin only for final precision
             if (nowNs < nextFrameNs)
@@ -216,10 +221,10 @@ public sealed class ALawRtpPlayout : IDisposable
             SendNextFrame();
 
             // Schedule next frame based on WALL CLOCK (no accumulation)
-            nextFrameNs += 20_000_000; // 20ms in 100ns units
+            nextFrameNs += 20_000_000; // 20ms in nanoseconds
 
             // Gentle drift correction: only snap if >100ms behind (prevents micro-stutters)
-            long currentNs = sw.ElapsedTicks * 100;
+            long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
             if (currentNs - nextFrameNs > 100_000_000) // >100ms behind
                 nextFrameNs = currentNs + 20_000_000;
         }
@@ -283,8 +288,22 @@ public sealed class ALawRtpPlayout : IDisposable
             );
             _timestamp += FRAME_SIZE;
             _lastRtpSendTime = DateTime.UtcNow;
+            _consecutiveSendErrors = 0;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _consecutiveSendErrors++;
+            if (_consecutiveSendErrors <= 3 || (DateTime.UtcNow - _lastErrorLog).TotalSeconds > 5)
+            {
+                SafeLog($"[RTP] ⚠ Send failed ({_consecutiveSendErrors}x): {ex.Message}");
+                _lastErrorLog = DateTime.UtcNow;
+            }
+            if (_consecutiveSendErrors > 100)
+            {
+                _running = false;
+                SafeLog("[RTP] ❌ Circuit breaker — stopping playout after 100 consecutive send failures");
+            }
+        }
     }
 
     public void Clear()
