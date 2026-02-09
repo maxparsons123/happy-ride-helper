@@ -16,6 +16,7 @@ public sealed class SimliAvatar : UserControl
     private readonly Label _statusLabel;
     private readonly ILogger<SimliAvatar> _logger;
     private bool _isInitialized;
+    private readonly TaskCompletionSource<bool> _initTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private string? _apiKey;
     private string? _faceId;
     private long _audioBytesSent;
@@ -66,6 +67,7 @@ public sealed class SimliAvatar : UserControl
             _webView.CoreWebView2.Settings.AreDevToolsEnabled = true;
             _webView.CoreWebView2.NavigateToString(GetSimliHtml());
             _isInitialized = true;
+            _initTcs.TrySetResult(true);
             SetStatus("Ready", System.Drawing.Color.Orange);
             _logger.LogInformation("🎭 Simli avatar initialized");
         }
@@ -73,6 +75,7 @@ public sealed class SimliAvatar : UserControl
         {
             SetStatus("WebView2 failed", System.Drawing.Color.Red);
             _logger.LogError("🎭 WebView2 init failed: {Msg}", ex.Message);
+            _initTcs.TrySetResult(false);
         }
     }
 
@@ -90,9 +93,13 @@ public sealed class SimliAvatar : UserControl
     /// <summary>Establish WebRTC session with Simli.</summary>
     public async Task ConnectAsync()
     {
-        if (!_isInitialized || string.IsNullOrEmpty(_apiKey) || string.IsNullOrEmpty(_faceId))
+        // Wait up to 10s for WebView2 to finish initializing
+        var initOk = await Task.WhenAny(_initTcs.Task, Task.Delay(10_000)) == _initTcs.Task && _initTcs.Task.Result;
+        
+        if (!initOk || string.IsNullOrEmpty(_apiKey) || string.IsNullOrEmpty(_faceId))
         {
-            _logger.LogWarning("🎭 Cannot connect: not configured or not initialized");
+            _logger.LogWarning("🎭 Cannot connect: init={Init}, apiKey={HasKey}, faceId={HasFace}",
+                initOk, !string.IsNullOrEmpty(_apiKey), !string.IsNullOrEmpty(_faceId));
             return;
         }
 
