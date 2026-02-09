@@ -15,6 +15,7 @@ import LiveKitTest from "./pages/LiveKitTest";
 import TtsTest from "./pages/TtsTest";
 import DualBrainTest from "./pages/DualBrainTest";
 import CallFlowDebugger from "./pages/CallFlowDebugger";
+import VaxVoIPTest from "./pages/VaxVoIPTest";
 
 const queryClient = new QueryClient();
 
@@ -27,6 +28,7 @@ const App = () => (
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/voice-test" element={<VoiceTest />} />
+          <Route path="/vaxvoip" element={<VaxVoIPTest />} />
           <Route path="/live" element={<LiveCalls />} />
           <Route path="/sip-config" element={<SipConfig />} />
           <Route path="/agents" element={<Agents />} />
