@@ -647,14 +647,11 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                 Log("👋 Goodbye detected - will end call after audio drains");
                                 
                                 // Wait for OpenAI to finish sending audio, THEN wait for playout drain
-                                // The OnPlayoutComplete event fires when OpenAI's response.done arrives
-                                // After that, we give the jitter buffer time to fully drain
                                 _ = Task.Run(async () =>
                                 {
-                                    // Wait up to 15s for OpenAI to finish streaming the goodbye audio
+                                    // Phase 1: Wait for OpenAI to finish streaming (response.done)
                                     var waitStart = Environment.TickCount64;
                                     const int MAX_STREAM_WAIT_MS = 15000;
-                                    const int MAX_DRAIN_WAIT_MS = 20000;
                                     
                                     while (Volatile.Read(ref _responseActive) == 1 &&
                                            Environment.TickCount64 - waitStart < MAX_STREAM_WAIT_MS)
@@ -664,7 +661,15 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                             return;
                                     }
                                     
-                                    // Poll playout queue until drained (or fallback timeout)
+                                    // Phase 2: Mandatory settling delay — transcript deltas arrive
+                                    // before audio frames are fully enqueued to the playout buffer.
+                                    // Without this, GetQueuedFrames returns 0 prematurely.
+                                    await Task.Delay(2000);
+                                    if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                        return;
+                                    
+                                    // Phase 3: Poll playout queue until drained (or fallback timeout)
+                                    const int MAX_DRAIN_WAIT_MS = 20000;
                                     var drainStart = Environment.TickCount64;
                                     while (Environment.TickCount64 - drainStart < MAX_DRAIN_WAIT_MS)
                                     {
@@ -681,7 +686,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                         await Task.Delay(200);
                                     }
                                     
-                                    // Final 1s margin for last frames to reach the caller
+                                    // Phase 4: Final margin for last RTP packets to reach the phone
                                     await Task.Delay(1000);
                                     
                                     if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
