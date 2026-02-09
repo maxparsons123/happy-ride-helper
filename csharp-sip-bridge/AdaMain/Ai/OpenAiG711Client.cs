@@ -933,13 +933,30 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private static string ApplySttCorrections(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;
+        var Rx = System.Text.RegularExpressions.Regex;
+        var IC = System.Text.RegularExpressions.RegexOptions.IgnoreCase;
 
         // Common Whisper misrecognitions on telephony audio
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bThank you for watching\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlease subscribe\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bLike and subscribe\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bCircuits awaiting\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = Rx.Replace(text, @"\bThank you for watching\b", "", IC);
+        text = Rx.Replace(text, @"\bPlease subscribe\b", "", IC);
+        text = Rx.Replace(text, @"\bLike and subscribe\b", "", IC);
+        text = Rx.Replace(text, @"\bCircuits awaiting\b", "", IC);
 
+        // ── Alphanumeric house number recovery ──
+        // Whisper often drops the letter suffix or merges "52 A" into "58", "to A" etc.
+        // Pattern: number followed by "A/B/C/D" as separate word → merge into single token
+        // e.g. "52 A David Road" → "52A David Road"
+        text = Rx.Replace(text, @"\b(\d{1,4})\s+([A-Da-d])\b(?=\s)", "$1$2", IC);
+
+        // "to A" / "2 A" after digits context — e.g. "5 to A" → preserve as-is (ambiguous)
+        // But "It's 2A" should stay "2A"
+        
+        // Common Whisper number→number mishearings for addresses with letter suffixes
+        // "fifty-two A" → sometimes heard as "58" (5+2+A≈8), fix when followed by road context
+        // We can't blindly replace "58" with "52A" but we flag it for Ada's attention
+        // Instead, add partial corrections for KNOWN local addresses:
+        // (Add your local corrections below as needed)
+        
         return text.Trim();
     }
 
@@ -1303,6 +1320,27 @@ House numbers are NOT ranges unless the USER explicitly says so.
 Examples:
 1214A → spoken ""twelve fourteen A""
 12-14 → spoken ""twelve to fourteen"" (ONLY if user said dash/to)
+
+==============================
+ALPHANUMERIC ADDRESS VIGILANCE (CRITICAL)
+==============================
+
+Many house numbers contain a LETTER SUFFIX (e.g. 52A, 1214A, 7B, 33C).
+Speech recognition OFTEN drops or merges the letter, producing wrong numbers.
+
+RULES:
+1. If a user says a number that sounds like it MIGHT end with A/B/C/D
+   (e.g. ""fifty-two-ay"", ""twelve-fourteen-ay"", ""seven-bee""),
+   ALWAYS store the letter: 52A, 1214A, 7B.
+2. If the transcript shows a number that seems slightly off from what was
+   expected (e.g. ""58"" instead of ""52A"", ""28"" instead of ""2A""),
+   and the user then corrects — accept the correction IMMEDIATELY on the
+   FIRST attempt. Do NOT require a second correction.
+3. When a user corrects ANY part of an address, even just the house number,
+   update it IMMEDIATELY via sync_booking_data and acknowledge briefly.
+   Do NOT re-ask the same question.
+4. If the user says ""no"", ""that's wrong"", or repeats an address with emphasis,
+   treat the NEW value as FINAL and move to the next question immediately.
 
 ==============================
 PICKUP TIME HANDLING
