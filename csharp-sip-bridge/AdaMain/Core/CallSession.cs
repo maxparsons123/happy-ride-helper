@@ -141,12 +141,38 @@ public sealed class CallSession : ICallSession
     
     private async Task<object> HandleSyncBookingAsync(Dictionary<string, object?> args)
     {
+        // Track previous values to detect corrections
+        var prevPickup = _booking.Pickup;
+        var prevDest = _booking.Destination;
+        var prevPax = _booking.Passengers;
+        var prevTime = _booking.PickupTime;
+        
         if (args.TryGetValue("caller_name", out var n)) _booking.Name = n?.ToString();
         if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
         if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
             _booking.Passengers = pn;
         if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+        
+        // If any travel field changed after a fare was already calculated, reset fare to force re-quote
+        bool travelFieldChanged = !string.IsNullOrWhiteSpace(_booking.Fare) && (
+            !string.Equals(prevPickup, _booking.Pickup, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(prevDest, _booking.Destination, StringComparison.OrdinalIgnoreCase) ||
+            prevPax != _booking.Passengers ||
+            !string.Equals(prevTime, _booking.PickupTime, StringComparison.OrdinalIgnoreCase));
+        
+        if (travelFieldChanged)
+        {
+            _logger.LogInformation("[{SessionId}] 🔄 Travel field changed — resetting fare for re-quote", SessionId);
+            _booking.Fare = null;
+            _booking.Eta = null;
+            _booking.PickupLat = _booking.PickupLon = _booking.DestLat = _booking.DestLon = null;
+            _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+            _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+            
+            if (_aiClient is OpenAiG711Client g711Reset)
+                g711Reset.SetAwaitingConfirmation(false);
+        }
         
         // Check if all travel fields are filled → auto-quote (matching WinForms fast-sync logic)
         bool allFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Pickup)
