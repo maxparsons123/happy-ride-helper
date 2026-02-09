@@ -1,8 +1,6 @@
 using System.Drawing;
 using System.Windows.Forms;
 using AdaVaxVoIP.Config;
-using AdaVaxVoIP.Core;
-using AdaVaxVoIP.Services;
 using AdaVaxVoIP.Sip;
 using Microsoft.Extensions.Logging;
 
@@ -23,15 +21,13 @@ public class MainForm : Form
     private readonly Button _btnSettings;
 
     // Runtime
-    private VaxVoIPSipServer? _sipServer;
-    private TaxiBookingOrchestrator? _orchestrator;
+    private AdaTaxiServer? _server;
     private ILoggerFactory? _loggerFactory;
-    private CancellationTokenSource? _cts;
     private bool _running;
 
     public MainForm()
     {
-        Text = "Ada Taxi — VaxVoIP Booking System v3.0";
+        Text = "Ada Taxi — VaxVoIP Booking System v4.0";
         Size = new Size(820, 580);
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(700, 400);
@@ -39,7 +35,6 @@ public class MainForm : Form
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 9F);
 
-        // Load settings from appsettings.json
         _settings = SettingsStore.Load();
 
         // === Control Panel ===
@@ -125,11 +120,10 @@ public class MainForm : Form
         };
         grpLog.Controls.Add(_txtLog);
 
-        // Add controls in reverse dock order
         Controls.Add(grpLog);
         Controls.Add(pnlControls);
 
-        Log($"Settings loaded from appsettings.json (SIP: {_settings.Sip.Server}:{_settings.Sip.Port})", Color.Gray);
+        Log($"Settings loaded (SIP: {_settings.Sip.Server}:{_settings.Sip.Port})", Color.Gray);
     }
 
     private void BtnSettings_Click(object? sender, EventArgs e)
@@ -139,17 +133,13 @@ public class MainForm : Form
         {
             _settings = dlg.Settings;
             SettingsStore.Save(_settings);
-            Log("✅ Settings saved to appsettings.json", Color.LimeGreen);
+            Log("✅ Settings saved", Color.LimeGreen);
         }
     }
 
     private void Log(string message, Color? color = null)
     {
-        if (InvokeRequired)
-        {
-            BeginInvoke(() => Log(message, color));
-            return;
-        }
+        if (InvokeRequired) { BeginInvoke(() => Log(message, color)); return; }
 
         _txtLog.SelectionStart = _txtLog.TextLength;
         _txtLog.SelectionColor = color ?? Color.LightGreen;
@@ -164,13 +154,13 @@ public class MainForm : Form
         }
     }
 
-    private async void BtnStart_Click(object? sender, EventArgs e)
+    private void BtnStart_Click(object? sender, EventArgs e)
     {
         if (_running) return;
 
         if (string.IsNullOrWhiteSpace(_settings.OpenAi.ApiKey))
         {
-            MessageBox.Show("OpenAI API Key is required. Open ⚙ Settings to configure.", "Error",
+            MessageBox.Show("OpenAI API Key is required.\nOpen ⚙ Settings → 🤖 OpenAI tab.", "Missing API Key",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
@@ -183,83 +173,24 @@ public class MainForm : Form
 
         try
         {
-            _loggerFactory = LoggerFactory.Create(b =>
+            _loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+
+            _server = new AdaTaxiServer(_loggerFactory.CreateLogger<AdaTaxiServer>(), _settings);
+            _server.OnLog += msg => Log(msg);
+
+            if (!_server.Start())
             {
-                b.AddConsole();
-                b.SetMinimumLevel(LogLevel.Information);
-            });
-
-            var vaxSettings = new VaxVoIPSettings
-            {
-                LicenseKey = _settings.VaxVoIP.LicenseKey,
-                DomainRealm = _settings.VaxVoIP.DomainRealm,
-                RtpPortMin = _settings.VaxVoIP.RtpPortMin,
-                RtpPortMax = _settings.VaxVoIP.RtpPortMax,
-                EnableRecording = _settings.VaxVoIP.EnableRecording,
-                RecordingsPath = _settings.VaxVoIP.RecordingsPath
-            };
-
-            // SIP port comes from the SIP settings (shared with AdaMain)
-            var taxiSettings = new TaxiBookingSettings
-            {
-                CompanyName = _settings.Taxi.CompanyName,
-                AutoAnswer = _settings.Sip.AutoAnswer
-            };
-
-            var openAISettings = new Config.OpenAiSettings
-            {
-                ApiKey = _settings.OpenAi.ApiKey,
-                Voice = _settings.OpenAi.Voice,
-                Model = _settings.OpenAi.Model
-            };
-
-            var fareCalculator = new FareCalculator(
-                _loggerFactory.CreateLogger<FareCalculator>(),
-                new Config.GoogleMapsSettings { ApiKey = _settings.GoogleMaps.ApiKey },
-                new Config.SupabaseSettings { Url = _settings.Supabase.Url, AnonKey = _settings.Supabase.AnonKey });
-
-            var dispatcher = new Dispatcher(
-                _loggerFactory.CreateLogger<Dispatcher>(),
-                new Config.DispatchSettings
-                {
-                    BsqdWebhookUrl = _settings.Dispatch.BsqdWebhookUrl,
-                    BsqdApiKey = _settings.Dispatch.BsqdApiKey,
-                    WhatsAppWebhookUrl = _settings.Dispatch.WhatsAppWebhookUrl
-                });
-
-            _sipServer = new VaxVoIPSipServer(
-                _loggerFactory.CreateLogger<VaxVoIPSipServer>(), vaxSettings, taxiSettings);
-
-            _sipServer.OnCallStarted += (callId, callerId) =>
-            {
-                Log($"📞 Call started: {callerId} [{callId}]", Color.Cyan);
-                BeginInvoke(() => _lblActiveCalls.Text = "Calls: active");
-            };
-            _sipServer.OnCallEnded += callId =>
-            {
-                Log($"📴 Call ended: [{callId}]", Color.Orange);
-                BeginInvoke(() => _lblActiveCalls.Text = "Calls: 0");
-            };
-
-            _orchestrator = new TaxiBookingOrchestrator(
-                _loggerFactory.CreateLogger<TaxiBookingOrchestrator>(),
-                _loggerFactory,
-                _sipServer,
-                openAISettings,
-                fareCalculator,
-                dispatcher);
-
-            _cts = new CancellationTokenSource();
-            await _sipServer.StartAsync(_cts.Token);
+                throw new Exception("VaxVoIP server failed to start. Check SDK installation and ports.");
+            }
 
             _running = true;
             _lblStatus.Text = "● Running";
             _lblStatus.ForeColor = Color.LimeGreen;
-            Log($"🚀 Server started — SIP {_settings.Sip.Server}:{_settings.Sip.Port}", Color.LimeGreen);
+            Log($"🚀 Ada Taxi server running — SIP port {_settings.Sip.Port}", Color.LimeGreen);
         }
         catch (Exception ex)
         {
-            Log($"❌ Failed to start: {ex.Message}", Color.Red);
+            Log($"❌ {ex.Message}", Color.Red);
             _lblStatus.Text = "● Error";
             _lblStatus.ForeColor = Color.Red;
             _btnStart.Enabled = true;
@@ -268,7 +199,7 @@ public class MainForm : Form
         }
     }
 
-    private async void BtnStop_Click(object? sender, EventArgs e)
+    private void BtnStop_Click(object? sender, EventArgs e)
     {
         if (!_running) return;
 
@@ -277,16 +208,15 @@ public class MainForm : Form
 
         try
         {
-            _cts?.Cancel();
-            if (_orchestrator != null) await _orchestrator.DisposeAsync();
-            if (_sipServer != null) await _sipServer.DisposeAsync();
+            _server?.Stop();
             _loggerFactory?.Dispose();
         }
         catch (Exception ex)
         {
-            Log($"⚠ Error stopping: {ex.Message}", Color.Yellow);
+            Log($"⚠ {ex.Message}", Color.Yellow);
         }
 
+        _server = null;
         _running = false;
         _btnStart.Enabled = true;
         _btnStop.Enabled = false;
