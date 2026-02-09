@@ -436,6 +436,16 @@ public sealed class SipServer : IAsyncDisposable
         // Wire barge-in → playout clear
         session.OnBargeIn += () => playout.Clear();
 
+        // Wire playout queue empty → reset bot speaking state
+        playout.OnQueueEmpty += () =>
+        {
+            if (adaHasStartedSpeaking)
+            {
+                isBotSpeaking = false;
+                botStoppedSpeakingAt = DateTime.UtcNow;
+            }
+        };
+
         // Start the playout engine
         playout.Start();
 
