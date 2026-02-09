@@ -110,7 +110,18 @@ public partial class MainForm : Form
             if (File.Exists(SettingsPath))
             {
                 var json = File.ReadAllText(SettingsPath);
-                return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+                var settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+                
+                // Restore defaults for critical fields that may be empty in older config files
+                var defaults = new DispatchSettings();
+                if (string.IsNullOrWhiteSpace(settings.Dispatch.BsqdWebhookUrl))
+                    settings.Dispatch.BsqdWebhookUrl = defaults.BsqdWebhookUrl;
+                if (string.IsNullOrWhiteSpace(settings.Dispatch.BsqdApiKey))
+                    settings.Dispatch.BsqdApiKey = defaults.BsqdApiKey;
+                if (string.IsNullOrWhiteSpace(settings.Dispatch.WhatsAppWebhookUrl))
+                    settings.Dispatch.WhatsAppWebhookUrl = defaults.WhatsAppWebhookUrl;
+                
+                return settings;
             }
         }
         catch { /* fall through */ }
