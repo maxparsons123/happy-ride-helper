@@ -127,7 +127,7 @@ partial class MainForm
         {
             Text = "🎧 Call Controls",
             Location = new Point(12, 200),
-            Size = new Size(560, 65),
+            Size = new Size(560, 95),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -145,12 +145,22 @@ partial class MainForm
         btnHangUp.Enabled = false;
         btnHangUp.Click += btnHangUp_Click;
 
-        chkManualMode = new CheckBox { Text = "🎤 Manual Mode", Location = new Point(350, 28), Size = new Size(120, 23), ForeColor = orange, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
+        btnMute = MakeButton("🔊 Mute", 350, 25, 90, 30, Color.FromArgb(80, 80, 85));
+        btnMute.Enabled = false;
+        btnMute.Click += btnMute_Click;
+
+        chkManualMode = new CheckBox { Text = "🎤 Operator Mode", Location = new Point(15, 62), Size = new Size(140, 23), ForeColor = orange, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
         chkManualMode.CheckedChanged += chkManualMode_CheckedChanged;
 
-        lblCallInfo = new Label { Text = "No active call", Location = new Point(350, 48), Size = new Size(200, 15), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F) };
+        btnPtt = MakeButton("🎙 Push-to-Talk", 165, 58, 130, 30, purple);
+        btnPtt.Enabled = false;
+        btnPtt.Visible = false;
+        btnPtt.MouseDown += btnPtt_MouseDown;
+        btnPtt.MouseUp += btnPtt_MouseUp;
 
-        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, chkManualMode, lblCallInfo });
+        lblCallInfo = new Label { Text = "No active call", Location = new Point(310, 65), Size = new Size(240, 15), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F) };
+
+        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, btnPtt, lblCallInfo });
 
         // ══════════════════════════════════════════
         //  SIMLI AVATAR GROUP (right side)
@@ -159,7 +169,7 @@ partial class MainForm
         {
             Text = "🎭 Simli Avatar",
             Location = new Point(580, 30),
-            Size = new Size(200, 235),
+            Size = new Size(200, 265),
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -192,8 +202,8 @@ partial class MainForm
         grpLogs = new GroupBox
         {
             Text = "📋 Logs & Transcripts",
-            Location = new Point(12, 272),
-            Size = new Size(768, 288),
+            Location = new Point(12, 302),
+            Size = new Size(768, 258),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -314,7 +324,9 @@ partial class MainForm
     private Button btnAnswer;
     private Button btnReject;
     private Button btnHangUp;
+    private Button btnMute;
     private CheckBox chkManualMode;
+    private Button btnPtt;
     private Label lblCallInfo;
 
     // Avatar

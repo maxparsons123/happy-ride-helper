@@ -27,6 +27,7 @@ public sealed class SipServer : IAsyncDisposable
     private SIPRegistrationUserAgent? _regAgent;
     private SIPUserAgent? _userAgent;
     private ICallSession? _currentSession;
+    private VoIPMediaSession? _activeRtpSession;
     private IPAddress? _localIp;
     private IPAddress? _publicIp;
 
@@ -372,6 +373,7 @@ public sealed class SipServer : IAsyncDisposable
         lock (_callLock)
         {
             _currentSession = session;
+            _activeRtpSession = rtpSession;
         }
 
         // Create ALawRtpPlayout FIRST (v7.4 rebuffer engine) — needed for RTP wiring below
@@ -508,6 +510,7 @@ public sealed class SipServer : IAsyncDisposable
         {
             session = _currentSession;
             _currentSession = null;
+            _activeRtpSession = null;
         }
 
         if (session != null)
@@ -517,6 +520,27 @@ public sealed class SipServer : IAsyncDisposable
 
         OnCallEnded?.Invoke(reason);
         Log($"📴 Call cleaned up: {reason}");
+    }
+
+    /// <summary>
+    /// Send operator microphone audio directly into the SIP RTP stream (A-law encoded).
+    /// Used in Operator Mode with Push-to-Talk.
+    /// </summary>
+    public void SendOperatorAudio(byte[] alawData)
+    {
+        VoIPMediaSession? rtp;
+        lock (_callLock)
+        {
+            rtp = _activeRtpSession;
+        }
+
+        if (rtp == null || alawData.Length == 0) return;
+
+        try
+        {
+            rtp.SendAudioFrame(0, (int)SDPMediaFormatsEnum.PCMA, alawData);
+        }
+        catch { /* ignore send errors during teardown */ }
     }
 
     #endregion
