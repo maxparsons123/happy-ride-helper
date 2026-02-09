@@ -298,6 +298,25 @@ public sealed class CallSession : ICallSession
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
                 return new { success = false, error = "Missing pickup or destination" };
             
+            // ── Wait for in-progress auto-quote from sync_booking_data instead of starting a duplicate ──
+            if (Volatile.Read(ref _autoQuoteInProgress) == 1)
+            {
+                _logger.LogInformation("[{SessionId}] 💰 Auto-quote in progress — waiting up to 12s...", SessionId);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (Volatile.Read(ref _autoQuoteInProgress) == 1 && sw.ElapsedMilliseconds < 12000)
+                    await Task.Delay(200);
+                
+                if (!string.IsNullOrWhiteSpace(_booking.Fare))
+                {
+                    _logger.LogInformation("[{SessionId}] 💰 Auto-quote completed while waiting: {Fare}", SessionId, _booking.Fare);
+                    // Fall through to reuse block below
+                }
+                else
+                {
+                    _logger.LogWarning("[{SessionId}] ⏱️ Auto-quote did not produce fare, proceeding with own calc", SessionId);
+                }
+            }
+            
             // ── REUSE existing auto-quote if fare already calculated by sync_booking_data ──
             if (!string.IsNullOrWhiteSpace(_booking.Fare) && !string.IsNullOrWhiteSpace(_booking.Eta))
             {
