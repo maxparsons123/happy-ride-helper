@@ -933,20 +933,17 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private static string ApplySttCorrections(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;
-        var Rx = System.Text.RegularExpressions.Regex;
-        var IC = System.Text.RegularExpressions.RegexOptions.IgnoreCase;
+        const System.Text.RegularExpressions.RegexOptions IC = System.Text.RegularExpressions.RegexOptions.IgnoreCase;
 
         // Common Whisper misrecognitions on telephony audio
-        text = Rx.Replace(text, @"\bThank you for watching\b", "", IC);
-        text = Rx.Replace(text, @"\bPlease subscribe\b", "", IC);
-        text = Rx.Replace(text, @"\bLike and subscribe\b", "", IC);
-        text = Rx.Replace(text, @"\bCircuits awaiting\b", "", IC);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bThank you for watching\b", "", IC);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlease subscribe\b", "", IC);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bLike and subscribe\b", "", IC);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bCircuits awaiting\b", "", IC);
 
         // ── Alphanumeric house number recovery ──
-        // Whisper often drops the letter suffix or merges "52 A" into "58", "to A" etc.
-        // Pattern: number followed by "A/B/C/D" as separate word → merge into single token
         // e.g. "52 A David Road" → "52A David Road"
-        text = Rx.Replace(text, @"\b(\d{1,4})\s+([A-Da-d])\b(?=\s)", "$1$2", IC);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\b(\d{1,4})\s+([A-Da-d])\b(?=\s)", "$1$2", IC);
 
         // "to A" / "2 A" after digits context — e.g. "5 to A" → preserve as-is (ambiguous)
         // But "It's 2A" should stay "2A"
