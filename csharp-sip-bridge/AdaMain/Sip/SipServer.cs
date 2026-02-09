@@ -413,7 +413,7 @@ public sealed class SipServer : IAsyncDisposable
         // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler)
         const int FLUSH_PACKETS = 20;
         const int EARLY_PROTECTION_MS = 500;
-        const int ECHO_GUARD_MS = 120;
+        const int ECHO_GUARD_MS = 300;
         float BARGE_IN_RMS_THRESHOLD = _audioSettings.BargeInRmsThreshold;
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
@@ -421,6 +421,8 @@ public sealed class SipServer : IAsyncDisposable
         bool isBotSpeaking = false;
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
+        DateTime lastBargeInAt = DateTime.MinValue;
+        const int BARGE_IN_COOLDOWN_MS = 500;
         bool watchdogPending = false;
 
         // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
@@ -506,9 +508,12 @@ public sealed class SipServer : IAsyncDisposable
             {
                 // Allow barge-in only if caller audio is loud enough
                 if (rms < BARGE_IN_RMS_THRESHOLD) return;
-                // Genuine barge-in detected
+                // Genuine barge-in detected — apply cooldown to prevent flood
+                var now = DateTime.UtcNow;
+                if ((now - lastBargeInAt).TotalMilliseconds < BARGE_IN_COOLDOWN_MS) return;
+                lastBargeInAt = now;
                 isBotSpeaking = false;
-                botStoppedSpeakingAt = DateTime.UtcNow;
+                botStoppedSpeakingAt = now;
                 Log($"🎤 Barge-in detected (RMS={rms:F0})");
             }
 
