@@ -83,7 +83,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
     private const int MAX_NO_REPLY_PROMPTS = 3;
     private const int NO_REPLY_TIMEOUT_MS = 15000;
-    private const int CONFIRMATION_TIMEOUT_MS = 20000;
+    private const int CONFIRMATION_TIMEOUT_MS = 30000;
 
     // =========================
     // WEBSOCKET
@@ -1473,6 +1473,22 @@ CONFIRMATION DETECTION
 
 These mean YES:
 yes, yeah, yep, sure, ok, okay, correct, that's right, go ahead, book it, confirm, that's fine
+
+==============================
+NEGATIVE CONFIRMATION HANDLING (CRITICAL)
+==============================
+
+These mean NO to a fare quote or booking confirmation:
+no, nope, nah, no thanks, too much, too expensive, that's too much, I don't want it, cancel
+
+When the user says NO after a fare quote or confirmation question:
+- Do NOT end the call
+- Do NOT run the closing script
+- Do NOT call end_call
+- Ask what they would like to change (pickup, destination, passengers, or time)
+- If they want to cancel entirely, acknowledge and THEN do FINAL CLOSING + end_call
+
+""Nope"" or ""No"" to ""Would you like to proceed?"" means they want to EDIT or CANCEL — NOT that they are done.
 
 ==============================
 RESPONSE STYLE
