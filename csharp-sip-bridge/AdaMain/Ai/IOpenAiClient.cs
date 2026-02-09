@@ -25,6 +25,9 @@ public interface IOpenAiClient
     /// <summary>Cancel current response (barge-in).</summary>
     Task CancelResponseAsync();
     
+    /// <summary>Inject a system message into the conversation and trigger a response.</summary>
+    Task InjectMessageAndRespondAsync(string message);
+    
     /// <summary>Fired when audio received from AI (format matches input mode).</summary>
     event Action<byte[]>? OnAudio;
     
