@@ -13,10 +13,12 @@ public class ConfigForm : Form
     private TextBox txtOpenAiKey = null!, txtOpenAiModel = null!, txtOpenAiVoice = null!;
     private TextBox txtGoogleMapsKey = null!;
     private TextBox txtSimliApiKey = null!, txtSimliFaceId = null!;
+    private CheckBox chkSimliEnabled = null!;
     private TextBox txtDeepgramKey = null!;
     private TextBox txtBsqdWebhook = null!, txtBsqdApiKey = null!, txtWhatsAppWebhook = null!;
     private ComboBox cmbCodec = null!;
     private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!;
+    private CheckBox chkDiagnostics = null!;
 
     public ConfigForm(AppSettings settings)
     {
@@ -52,6 +54,8 @@ public class ConfigForm : Form
         var tabSimli = new TabPage("🎭 Simli") { BackColor = BackColor };
         txtSimliApiKey = AddField(tabSimli, "API Key:", 20, bgInput, fgInput, masked: true);
         txtSimliFaceId = AddField(tabSimli, "Face ID:", 60, bgInput, fgInput);
+        chkSimliEnabled = new CheckBox { Text = "Enable Simli avatar during calls", Location = new Point(15, 100), AutoSize = true, ForeColor = fgInput };
+        tabSimli.Controls.Add(chkSimliEnabled);
 
         // ── STT / Deepgram Tab ──
         var tabStt = new TabPage("🎤 STT") { BackColor = BackColor };
@@ -78,8 +82,9 @@ public class ConfigForm : Form
 
         var lblEcho = new Label { Text = "Echo Guard (ms):", Location = new Point(15, 89), AutoSize = true };
         nudEchoGuard = new NumericUpDown { Location = new Point(120, 86), Size = new Size(80, 23), Minimum = 0, Maximum = 1000, Increment = 50, BackColor = bgInput, ForeColor = fgInput };
+        chkDiagnostics = new CheckBox { Text = "Enable audio diagnostics logging", Location = new Point(15, 122), AutoSize = true, ForeColor = fgInput };
 
-        tabAudio.Controls.AddRange(new Control[] { lblCodec, cmbCodec, lblVol, nudVolumeBoost, lblEcho, nudEchoGuard });
+        tabAudio.Controls.AddRange(new Control[] { lblCodec, cmbCodec, lblVol, nudVolumeBoost, lblEcho, nudEchoGuard, chkDiagnostics });
 
         tabs.TabPages.AddRange(new TabPage[] { tabAi, tabSimli, tabStt, tabMaps, tabDispatch, tabAudio });
 
@@ -116,6 +121,7 @@ public class ConfigForm : Form
         txtOpenAiVoice.Text = Settings.OpenAi.Voice;
         txtSimliApiKey.Text = Settings.Simli.ApiKey;
         txtSimliFaceId.Text = Settings.Simli.FaceId;
+        chkSimliEnabled.Checked = Settings.Simli.Enabled;
         txtDeepgramKey.Text = Settings.Stt.DeepgramApiKey;
         txtGoogleMapsKey.Text = Settings.GoogleMaps.ApiKey;
         txtBsqdWebhook.Text = Settings.Dispatch.BsqdWebhookUrl;
@@ -126,6 +132,7 @@ public class ConfigForm : Form
         if (cmbCodec.SelectedIndex < 0) cmbCodec.SelectedIndex = 0;
         nudVolumeBoost.Value = (decimal)Settings.Audio.VolumeBoost;
         nudEchoGuard.Value = Settings.Audio.EchoGuardMs;
+        chkDiagnostics.Checked = Settings.Audio.EnableDiagnostics;
     }
 
     private void WriteToSettings()
@@ -135,6 +142,7 @@ public class ConfigForm : Form
         Settings.OpenAi.Voice = txtOpenAiVoice.Text.Trim();
         Settings.Simli.ApiKey = txtSimliApiKey.Text.Trim();
         Settings.Simli.FaceId = txtSimliFaceId.Text.Trim();
+        Settings.Simli.Enabled = chkSimliEnabled.Checked;
         Settings.Stt.DeepgramApiKey = txtDeepgramKey.Text.Trim();
         Settings.GoogleMaps.ApiKey = txtGoogleMapsKey.Text.Trim();
         Settings.Dispatch.BsqdWebhookUrl = txtBsqdWebhook.Text.Trim();
@@ -144,6 +152,7 @@ public class ConfigForm : Form
         Settings.Audio.PreferredCodec = cmbCodec.SelectedItem?.ToString() ?? "PCMA";
         Settings.Audio.VolumeBoost = (double)nudVolumeBoost.Value;
         Settings.Audio.EchoGuardMs = (int)nudEchoGuard.Value;
+        Settings.Audio.EnableDiagnostics = chkDiagnostics.Checked;
     }
 
     private static AppSettings Clone(AppSettings src)
