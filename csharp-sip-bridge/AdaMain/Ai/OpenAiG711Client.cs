@@ -52,6 +52,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private int _noReplyWatchdogId;       // Incremented to cancel stale watchdogs
     private int _transcriptPending;       // Block response.create until transcript arrives
     private int _noReplyCount;            // Per-call
+    private int _toolCalledInResponse;    // Track if tool was called during current response
     private long _lastAdaFinishedAt;      // RTP playout completion time (echo guard source of truth)
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -61,6 +62,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // Response ID deduplication
     private string? _activeResponseId;
     private string? _lastCompletedResponseId;
+
+    // Price-promise safety net: track Ada's last transcript per response
+    private string? _lastAdaTranscript;
+    private bool _awaitingConfirmation;    // Longer watchdog timeout when waiting for confirmation
 
     // =========================
     // CALLER STATE (per-call)
@@ -73,6 +78,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
     private const int MAX_NO_REPLY_PROMPTS = 3;
     private const int NO_REPLY_TIMEOUT_MS = 15000;
+    private const int CONFIRMATION_TIMEOUT_MS = 20000;
 
     // =========================
     // WEBSOCKET
@@ -169,10 +175,13 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _deferredResponsePending, 0);
         Interlocked.Exchange(ref _transcriptPending, 0);
         Interlocked.Exchange(ref _noReplyCount, 0);
+        Interlocked.Exchange(ref _toolCalledInResponse, 0);
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
         _lastCompletedResponseId = null;
+        _lastAdaTranscript = null;
+        _awaitingConfirmation = false;
 
         Volatile.Write(ref _lastAdaFinishedAt, 0);
         Volatile.Write(ref _lastUserSpeechAt, 0);
@@ -360,11 +369,12 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
     private void StartNoReplyWatchdog()
     {
+        var timeoutMs = _awaitingConfirmation ? CONFIRMATION_TIMEOUT_MS : NO_REPLY_TIMEOUT_MS;
         var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
 
         _ = Task.Run(async () =>
         {
-            await Task.Delay(NO_REPLY_TIMEOUT_MS);
+            await Task.Delay(timeoutMs);
 
             if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
             if (Volatile.Read(ref _callEnded) != 0) return;
@@ -482,6 +492,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
                     _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
+                    Interlocked.Exchange(ref _toolCalledInResponse, 0); // Reset per-response
+                    _lastAdaTranscript = null; // Reset per-response
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
                     // Clear audio buffer on response start
@@ -516,6 +528,41 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                             }
                         });
                     }
+                    // PRICE-PROMISE SAFETY NET (ported from WinForms):
+                    // If Ada promised to finalize/book but no tool was called, force create_booking
+                    else if (Volatile.Read(ref _toolCalledInResponse) == 0 &&
+                             !string.IsNullOrEmpty(_lastAdaTranscript) &&
+                             HasBookingIntent(_lastAdaTranscript))
+                    {
+                        Log("⚠️ Price-promise safety net triggered: Ada promised booking but no tool called");
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(40).ConfigureAwait(false);
+                            if (Volatile.Read(ref _callEnded) != 0 || !IsConnected) return;
+
+                            await SendJsonAsync(new
+                            {
+                                type = "conversation.item.create",
+                                item = new
+                                {
+                                    type = "message",
+                                    role = "system",
+                                    content = new[]
+                                    {
+                                        new
+                                        {
+                                            type = "input_text",
+                                            text = "[SYSTEM OVERRIDE] You just told the customer you would finalize their booking but FAILED to call create_booking. Call create_booking NOW with the pickup, destination and passenger count you already know. Do NOT ask any more questions."
+                                        }
+                                    }
+                                }
+                            });
+
+                            await Task.Delay(20).ConfigureAwait(false);
+                            await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
+                            Log("🔄 Safety net: forced create_booking response");
+                        });
+                    }
                     break;
                 }
 
@@ -541,6 +588,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                         if (!string.IsNullOrEmpty(text))
                         {
                             OnTranscript?.Invoke("Ada", text);
+                            _lastAdaTranscript = text; // Track for price-promise safety net
 
                             // Goodbye detection → arm 5s hangup watchdog
                             if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
@@ -626,8 +674,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     {
         // NOTE: Debounce removed (was 200ms). Sequential tool calls (sync_booking_data → create_booking)
         // were being silently dropped, causing Ada to say "I'll finalize" without actually booking.
-        // Duplicate protection is handled by call_id uniqueness instead.
         Volatile.Write(ref _lastToolCallAt, NowMs());
+        Interlocked.Exchange(ref _toolCalledInResponse, 1); // Mark tool called for price-promise safety net
 
         var callId = root.TryGetProperty("call_id", out var cid) ? cid.GetString() : "";
         var name = root.TryGetProperty("name", out var n) ? n.GetString() : "";
@@ -753,6 +801,38 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
     // HELPERS
     // =========================
+
+    /// <summary>
+    /// Detect if Ada's transcript indicates she promised to finalize/book
+    /// but no tool was actually called (price-promise safety net).
+    /// </summary>
+    private static bool HasBookingIntent(string transcript)
+    {
+        var lower = transcript.ToLowerInvariant();
+        return (lower.Contains("finalize") || lower.Contains("finalise") ||
+                lower.Contains("book") || lower.Contains("booking") ||
+                lower.Contains("moment while") || lower.Contains("one moment") ||
+                lower.Contains("let me") || lower.Contains("i'll get")) &&
+               !lower.Contains("would you like") && // Not asking for confirmation
+               !lower.Contains("shall i") &&
+               !lower.Contains("do you want");
+    }
+
+    /// <summary>
+    /// Called by CallSession when awaiting booking confirmation (longer watchdog timeout).
+    /// </summary>
+    public void SetAwaitingConfirmation(bool awaiting)
+    {
+        _awaitingConfirmation = awaiting;
+    }
+
+    /// <summary>Cancel any pending deferred response.</summary>
+    public void CancelDeferredResponse()
+    {
+        if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+            Log("🔄 Deferred response.create cancelled");
+    }
+
     private void SignalCallEnded(string reason)
     {
         if (Interlocked.Exchange(ref _callEnded, 1) == 0)
