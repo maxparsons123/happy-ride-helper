@@ -430,8 +430,10 @@ public sealed class SipServer : IAsyncDisposable
         volatile int botSpeakingFlag = 0; // 0=false, 1=true; volatile for cross-thread visibility
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
+        DateTime lastAudioEnqueuedAt = DateTime.MinValue; // track when last TTS frame arrived
         DateTime lastBargeInAt = DateTime.MinValue;
         const int BARGE_IN_COOLDOWN_MS = 500;
+        const int BOT_SPEAKING_GRACE_MS = 500; // after last enqueued frame, stop treating user speech as barge-in
         bool watchdogPending = false;
 
         // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
@@ -439,6 +441,7 @@ public sealed class SipServer : IAsyncDisposable
         {
             Interlocked.Exchange(ref botSpeakingFlag, 1);
             adaHasStartedSpeaking = true;
+            lastAudioEnqueuedAt = DateTime.UtcNow;
             playout.BufferALaw(frame);
         };
 
@@ -532,18 +535,29 @@ public sealed class SipServer : IAsyncDisposable
             }
 
             // ── Hard mute during bot speech (prevent echo feedback) ──
+            // Grace period: if no new TTS frames arrived for BOT_SPEAKING_GRACE_MS,
+            // Ada has finished — treat user audio as normal speech, not barge-in.
             if (Volatile.Read(ref botSpeakingFlag) == 1)
             {
-                // Only allow genuine barge-in: require 3x normal threshold to cut through
-                float bargeInCutThrough = BARGE_IN_RMS_THRESHOLD * 3f;
-                if (rms < bargeInCutThrough) return; // fully muted — no audio forwarded
-                // Genuine barge-in detected — apply cooldown to prevent flood
-                var now = DateTime.UtcNow;
-                if ((now - lastBargeInAt).TotalMilliseconds < BARGE_IN_COOLDOWN_MS) return;
-                lastBargeInAt = now;
-                Interlocked.Exchange(ref botSpeakingFlag, 0);
-                botStoppedSpeakingAt = now;
-                Log($"🎤 Barge-in detected (RMS={rms:F0}, threshold={bargeInCutThrough:F0})");
+                var msSinceLastEnqueue = (DateTime.UtcNow - lastAudioEnqueuedAt).TotalMilliseconds;
+                if (msSinceLastEnqueue > BOT_SPEAKING_GRACE_MS)
+                {
+                    // Ada stopped sending audio — auto-clear bot speaking state
+                    Interlocked.Exchange(ref botSpeakingFlag, 0);
+                    botStoppedSpeakingAt = DateTime.UtcNow;
+                }
+                else
+                {
+                    // Still actively speaking — only allow genuine barge-in (3x threshold)
+                    float bargeInCutThrough = BARGE_IN_RMS_THRESHOLD * 3f;
+                    if (rms < bargeInCutThrough) return; // fully muted
+                    var now = DateTime.UtcNow;
+                    if ((now - lastBargeInAt).TotalMilliseconds < BARGE_IN_COOLDOWN_MS) return;
+                    lastBargeInAt = now;
+                    Interlocked.Exchange(ref botSpeakingFlag, 0);
+                    botStoppedSpeakingAt = now;
+                    Log($"🎤 Barge-in detected (RMS={rms:F0}, threshold={bargeInCutThrough:F0})");
+                }
             }
 
             // ── Echo guard: brief mute after bot stops speaking ──
