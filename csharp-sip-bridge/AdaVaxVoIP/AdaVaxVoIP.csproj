@@ -13,8 +13,7 @@
 
   <ItemGroup>
     <Reference Include="Interop.VaxServerVoAILib">
-      <HintPath>.\Interop.VaxServerVoAILib.dll</HintPath>
-      <EmbedInteropTypes>true</EmbedInteropTypes>
+      <HintPath>bin\Debug\Interop.VaxServerVoAILib.dll</HintPath>
     </Reference>
   </ItemGroup>
 
