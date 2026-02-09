@@ -247,7 +247,9 @@ public sealed class CallSession : ICallSession
                 fare = _booking.Fare,
                 fare_spoken = spokenFare,
                 eta = _booking.Eta,
-                message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is {spokenFare} with an estimated arrival in {_booking.Eta}. Would you like to proceed or edit any of the details?'"
+                pickup_address = _booking.Pickup,
+                destination_address = _booking.Destination,
+                message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
             };
         }
         catch (Exception ex)
@@ -263,7 +265,9 @@ public sealed class CallSession : ICallSession
                 fare = "€12.50",
                 fare_spoken = "12 euros 50",
                 eta = "6 minutes",
-                message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is 12 euros 50 with an estimated arrival in 6 minutes. Would you like to proceed or edit any of the details?'"
+                pickup_address = _booking.Pickup,
+                destination_address = _booking.Destination,
+                message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is approximately 12 euros 50, estimated arrival 6 minutes. Ask if they want to proceed or edit any details."
             };
         }
     }
@@ -331,7 +335,9 @@ public sealed class CallSession : ICallSession
                     fare = _booking.Fare,
                     fare_spoken = spokenFare,
                     eta = _booking.Eta,
-                    message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is {spokenFare} with an estimated arrival in {_booking.Eta}. Would you like to proceed or edit any of the details?'"
+                    pickup_address = _booking.Pickup,
+                    destination_address = _booking.Destination,
+                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
                 };
             }
             catch (Exception ex)
@@ -347,7 +353,9 @@ public sealed class CallSession : ICallSession
                     fare = _booking.Fare,
                     fare_spoken = "12 euros 50",
                     eta = _booking.Eta,
-                    message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is approximately 12 euros 50 with an estimated arrival in 6 minutes. Would you like to proceed or edit any of the details?'"
+                    pickup_address = _booking.Pickup,
+                    destination_address = _booking.Destination,
+                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is approximately 12 euros 50, estimated arrival 6 minutes. Ask if they want to proceed or edit any details."
                 };
             }
         }
@@ -595,9 +603,39 @@ public sealed class CallSession : ICallSession
     
     private object HandleEndCall(Dictionary<string, object?> args)
     {
+        // Drain-aware hangup: wait for playout buffer to empty before ending
         _ = Task.Run(async () =>
         {
-            await Task.Delay(5000);
+            // Wait for OpenAI to finish streaming audio (response.done)
+            await Task.Delay(1000);
+            
+            // Then wait for playout buffer to drain (max 20s safety)
+            if (_aiClient is OpenAiG711Client g711)
+            {
+                var waitStart = Environment.TickCount64;
+                const int MAX_DRAIN_MS = 20000;
+                const int POLL_MS = 100;
+                
+                while (Environment.TickCount64 - waitStart < MAX_DRAIN_MS)
+                {
+                    var queued = g711.GetQueuedFrames?.Invoke() ?? 0;
+                    if (queued == 0)
+                    {
+                        _logger.LogInformation("[{SessionId}] ✅ Audio drained, ending call", SessionId);
+                        break;
+                    }
+                    await Task.Delay(POLL_MS);
+                }
+                
+                // Extra margin so last frames reach the phone
+                await Task.Delay(1000);
+            }
+            else
+            {
+                // Fallback: fixed delay for non-G711 clients
+                await Task.Delay(5000);
+            }
+            
             await EndAsync("end_call tool");
         });
         
