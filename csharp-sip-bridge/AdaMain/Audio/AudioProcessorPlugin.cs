@@ -17,7 +17,8 @@ public sealed class AudioProcessorPlugin : IDisposable
     private const float DEESS_RATIO = 0.30f;
     private const float PREEMPH_CORRECTION = 0.94f;
     private const float LOWPASS_COEFF = 0.12f;
-    private const float SOFT_CLIP_GAIN = 1.05f;
+    private const float SOFT_CLIP_GAIN = 0.85f;
+    private const float OUTPUT_GAIN = 0.70f;  // Reduce hot output to prevent clipping/distortion
     private const float HARMONIC_AMOUNT = 0.015f;
     private const float DC_BLOCK_COEFF = 0.998f;
     private const float SLEW_MAX = 0.20f;
@@ -174,7 +175,7 @@ public sealed class AudioProcessorPlugin : IDisposable
         if (delta < -SLEW_MAX) delta = -SLEW_MAX + (delta + SLEW_MAX) * 0.1f;
 
         _lastOutput += delta;
-        return _lastOutput * 32767f;
+        return _lastOutput * OUTPUT_GAIN * 32767f;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
