@@ -1,19 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>AdaVaxVoIP</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>
-    <COMReference Include="VaxTeleServerSDK">
-      <WrapperTool>tlbimp</WrapperTool>
+    <Reference Include="Interop.VaxServerVoAILib">
+      <HintPath>.\Interop.VaxServerVoAILib.dll</HintPath>
       <EmbedInteropTypes>true</EmbedInteropTypes>
-    </COMReference>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>
@@ -22,9 +23,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Interop.VaxServerVoAILib">
-      <HintPath>bin\Debug\net8.0-windows\Interop.VaxServerVoAILib.dll</HintPath>
-    </Reference>
+    <None Include="VaxServerVoAI.dll" CopyToOutputDirectory="Always" />
+    <None Include="VaxServerVoAI.sxs.manifest" CopyToOutputDirectory="Always" />
+    <None Include="VaxServerFileSIP.bin" CopyToOutputDirectory="Always" />
   </ItemGroup>
 
 </Project>
