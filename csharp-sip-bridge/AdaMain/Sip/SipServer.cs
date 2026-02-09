@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using AdaMain.Ai;
 using AdaMain.Audio;
 using AdaMain.Config;
 using AdaMain.Core;
