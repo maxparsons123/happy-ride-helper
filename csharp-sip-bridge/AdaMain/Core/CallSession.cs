@@ -136,95 +136,106 @@ public sealed class CallSession : ICallSession
     }
     
     // =========================
-    // SYNC BOOKING (with address verification via edge function)
+    // SYNC BOOKING (fast path + auto-quote when all fields filled)
     // =========================
     
     private async Task<object> HandleSyncBookingAsync(Dictionary<string, object?> args)
     {
-        string? newPickup = null, newDest = null;
-        
         if (args.TryGetValue("caller_name", out var n)) _booking.Name = n?.ToString();
-        if (args.TryGetValue("pickup", out var p))
-        {
-            newPickup = p?.ToString();
-            _booking.Pickup = newPickup;
-        }
-        if (args.TryGetValue("destination", out var d))
-        {
-            newDest = d?.ToString();
-            _booking.Destination = newDest;
-        }
+        if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
+        if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
             _booking.Passengers = pn;
         if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
         
-        // Verify new addresses with edge function in parallel (non-blocking, fire-and-forget enrichment)
-        var verifyTasks = new List<Task>();
+        // Check if all travel fields are filled → auto-quote (matching WinForms fast-sync logic)
+        bool allFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Pickup)
+            && !string.IsNullOrWhiteSpace(_booking.Destination)
+            && _booking.Passengers > 0
+            && !string.IsNullOrWhiteSpace(_booking.PickupTime)
+            && string.IsNullOrWhiteSpace(_booking.Fare); // Only auto-quote once
         
-        if (!string.IsNullOrWhiteSpace(newPickup))
+        if (!allFieldsFilled)
         {
-            verifyTasks.Add(Task.Run(async () =>
+            // Fast path: just store data, skip geocoding, move on quickly
+            _logger.LogInformation("[{SessionId}] ⚡ Fast sync: Name={Name}, Pickup={Pickup}, Dest={Dest}, Pax={Pax}, Time={Time}",
+                SessionId, _booking.Name, _booking.Pickup ?? "?", _booking.Destination ?? "?",
+                _booking.Passengers, _booking.PickupTime ?? "?");
+            
+            OnBookingUpdated?.Invoke(_booking.Clone());
+            return new { success = true };
+        }
+        
+        // Full path: all travel fields complete — resolve addresses + calculate fare (auto-quote)
+        _logger.LogInformation("[{SessionId}] 💰 All travel fields filled — auto-quoting...", SessionId);
+        
+        try
+        {
+            var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
+            var completed = await Task.WhenAny(aiTask, Task.Delay(2500));
+            
+            FareResult result;
+            if (completed == aiTask)
             {
-                try
+                result = await aiTask;
+                
+                if (result.NeedsClarification)
                 {
-                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(newPickup, null, CallerId);
-                    if (result.PickupLat.HasValue && result.PickupLat.Value != 0)
+                    _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses in auto-quote", SessionId);
+                    OnBookingUpdated?.Invoke(_booking.Clone());
+                    return new
                     {
-                        _booking.PickupLat = result.PickupLat;
-                        _booking.PickupLon = result.PickupLon;
-                        _booking.PickupStreet = result.PickupStreet;
-                        _booking.PickupNumber = result.PickupNumber;
-                        _booking.PickupPostalCode = result.PickupPostalCode;
-                        _booking.PickupCity = result.PickupCity;
-                        _booking.PickupFormatted = result.PickupFormatted;
-                        _logger.LogInformation("[{SessionId}] 📍 Pickup verified: {Number} {Street}, {City} ({PostalCode})",
-                            SessionId, result.PickupNumber, result.PickupStreet, result.PickupCity, result.PickupPostalCode);
-                    }
+                        success = false,
+                        needs_clarification = true,
+                        pickup_options = result.PickupAlternatives ?? Array.Empty<string>(),
+                        destination_options = result.DestAlternatives ?? Array.Empty<string>(),
+                        message = "I found multiple locations. Please ask the caller which city or area they are in."
+                    };
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[{SessionId}] Pickup verification failed", SessionId);
-                }
-            }));
-        }
-        
-        if (!string.IsNullOrWhiteSpace(newDest))
-        {
-            verifyTasks.Add(Task.Run(async () =>
+            }
+            else
             {
-                try
-                {
-                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(null, newDest, CallerId);
-                    if (result.DestLat.HasValue && result.DestLat.Value != 0)
-                    {
-                        _booking.DestLat = result.DestLat;
-                        _booking.DestLon = result.DestLon;
-                        _booking.DestStreet = result.DestStreet;
-                        _booking.DestNumber = result.DestNumber;
-                        _booking.DestPostalCode = result.DestPostalCode;
-                        _booking.DestCity = result.DestCity;
-                        _booking.DestFormatted = result.DestFormatted;
-                        _logger.LogInformation("[{SessionId}] 📍 Dest verified: {Number} {Street}, {City} ({PostalCode})",
-                            SessionId, result.DestNumber, result.DestStreet, result.DestCity, result.DestPostalCode);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[{SessionId}] Dest verification failed", SessionId);
-                }
-            }));
+                _logger.LogWarning("[{SessionId}] ⏱️ Auto-quote AI extraction timed out, using fallback", SessionId);
+                result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
+            }
+            
+            // Store all geocoded results
+            ApplyFareResult(result);
+            
+            if (_aiClient is OpenAiG711Client g711)
+                g711.SetAwaitingConfirmation(true);
+            
+            OnBookingUpdated?.Invoke(_booking.Clone());
+            
+            var spokenFare = FormatFareForSpeech(_booking.Fare);
+            _logger.LogInformation("[{SessionId}] 💰 Auto-quote: {Fare} ({Spoken}), ETA: {Eta}",
+                SessionId, _booking.Fare, spokenFare, _booking.Eta);
+            
+            return new
+            {
+                success = true,
+                fare = _booking.Fare,
+                fare_spoken = spokenFare,
+                eta = _booking.Eta,
+                message = $"ANNOUNCE THE FARE AND ASK FOR CONFIRMATION. The fare is {spokenFare} and ETA is {_booking.Eta}."
+            };
         }
-        
-        // Wait for verification (with 2s timeout to not block the conversation)
-        if (verifyTasks.Count > 0)
+        catch (Exception ex)
         {
-            await Task.WhenAny(
-                Task.WhenAll(verifyTasks),
-                Task.Delay(2000));
+            _logger.LogWarning(ex, "[{SessionId}] Auto-quote failed, using fallback", SessionId);
+            _booking.Fare = "€12.50";
+            _booking.Eta = "6 minutes";
+            OnBookingUpdated?.Invoke(_booking.Clone());
+            
+            return new
+            {
+                success = true,
+                fare = "€12.50",
+                fare_spoken = "12 euros 50",
+                eta = "6 minutes",
+                message = "ANNOUNCE THE FARE AND ASK FOR CONFIRMATION."
+            };
         }
-        
-        OnBookingUpdated?.Invoke(_booking.Clone());
-        return new { success = true };
     }
     
     // =========================
@@ -273,23 +284,11 @@ public sealed class CallSession : ICallSession
                     result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
                 }
                 
-                // Store results
-                _booking.Fare = result.Fare;
-                _booking.Eta = result.Eta;
-                _booking.PickupLat = result.PickupLat;
-                _booking.PickupLon = result.PickupLon;
-                _booking.PickupStreet = result.PickupStreet;
-                _booking.PickupNumber = result.PickupNumber;
-                _booking.PickupPostalCode = result.PickupPostalCode;
-                _booking.PickupCity = result.PickupCity;
-                _booking.PickupFormatted = result.PickupFormatted;
-                _booking.DestLat = result.DestLat;
-                _booking.DestLon = result.DestLon;
-                _booking.DestStreet = result.DestStreet;
-                _booking.DestNumber = result.DestNumber;
-                _booking.DestPostalCode = result.DestPostalCode;
-                _booking.DestCity = result.DestCity;
-                _booking.DestFormatted = result.DestFormatted;
+                // Store results using helper
+                ApplyFareResult(result);
+                
+                if (_aiClient is OpenAiG711Client g711q)
+                    g711q.SetAwaitingConfirmation(true);
                 
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 _logger.LogInformation("[{SessionId}] 💰 Quote: {Fare} (pickup: {PickupCity}, dest: {DestCity})",
@@ -308,7 +307,7 @@ public sealed class CallSession : ICallSession
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[{SessionId}] Fare calculation failed", SessionId);
-                _booking.Fare = "£12.50";
+                _booking.Fare = "€12.50";
                 _booking.Eta = "6 minutes";
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 
@@ -316,9 +315,9 @@ public sealed class CallSession : ICallSession
                 {
                     success = true,
                     fare = _booking.Fare,
-                    fare_spoken = "12 pounds 50",
+                    fare_spoken = "12 euros 50",
                     eta = _booking.Eta,
-                    message = $"The fare is approximately 12 pounds 50, driver arrives in 6 minutes."
+                    message = $"The fare is approximately 12 euros 50, driver arrives in 6 minutes."
                 };
             }
         }
@@ -460,7 +459,7 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[{SessionId}] Fare error, using fallback", SessionId);
-            _booking.Fare = "£12.50";
+            _booking.Fare = "€12.50";
             _booking.Eta = "6 minutes";
         }
         
@@ -516,6 +515,27 @@ public sealed class CallSession : ICallSession
             return cents > 0 ? $"{euros} euros {cents}" : $"{euros} euros";
         }
         return fare;
+    }
+    
+    /// <summary>Apply fare result fields to booking state (DRY helper).</summary>
+    private void ApplyFareResult(FareResult result)
+    {
+        _booking.Fare = result.Fare;
+        _booking.Eta = result.Eta;
+        _booking.PickupLat = result.PickupLat;
+        _booking.PickupLon = result.PickupLon;
+        _booking.PickupStreet = result.PickupStreet;
+        _booking.PickupNumber = result.PickupNumber;
+        _booking.PickupPostalCode = result.PickupPostalCode;
+        _booking.PickupCity = result.PickupCity;
+        _booking.PickupFormatted = result.PickupFormatted;
+        _booking.DestLat = result.DestLat;
+        _booking.DestLon = result.DestLon;
+        _booking.DestStreet = result.DestStreet;
+        _booking.DestNumber = result.DestNumber;
+        _booking.DestPostalCode = result.DestPostalCode;
+        _booking.DestCity = result.DestCity;
+        _booking.DestFormatted = result.DestFormatted;
     }
     
     private object HandleEndCall(Dictionary<string, object?> args)

@@ -48,6 +48,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private int _responseQueued;          // Per-call
     private int _greetingSent;            // Per-call
     private int _ignoreUserAudio;         // Per-call (set after goodbye starts)
+    private int _closingScriptSpoken;     // Per-call (set when Ada speaks the farewell)
     private int _deferredResponsePending; // Per-call (queued response after response.done)
     private int _noReplyWatchdogId;       // Incremented to cancel stale watchdogs
     private int _transcriptPending;       // Block response.create until transcript arrives
@@ -172,6 +173,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _responseQueued, 0);
         Interlocked.Exchange(ref _greetingSent, 0);
         Interlocked.Exchange(ref _ignoreUserAudio, 0);
+        Interlocked.Exchange(ref _closingScriptSpoken, 0);
         Interlocked.Exchange(ref _deferredResponsePending, 0);
         Interlocked.Exchange(ref _transcriptPending, 0);
         Interlocked.Exchange(ref _noReplyCount, 0);
@@ -596,6 +598,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                  text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
                                  text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
                             {
+                                Interlocked.Exchange(ref _closingScriptSpoken, 1);
                                 Log("👋 Goodbye detected - arming 5s hangup watchdog");
                                 _ = Task.Run(async () =>
                                 {
@@ -614,13 +617,24 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
                 case "conversation.item.input_audio_transcription.completed":
                 {
-                    Interlocked.Exchange(ref _transcriptPending, 0);
+                    // v3.4: Delay clearing transcriptPending to let Whisper settle (ported from WinForms)
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(120).ConfigureAwait(false);
+                        Interlocked.Exchange(ref _transcriptPending, 0);
+                    });
 
                     if (doc.RootElement.TryGetProperty("transcript", out var userText))
                     {
-                        var text = userText.GetString();
+                        var text = ApplySttCorrections(userText.GetString() ?? "");
                         if (!string.IsNullOrEmpty(text))
+                        {
+                            var msSinceSpeechStopped = NowMs() - Volatile.Read(ref _speechStoppedAt);
+                            if (Volatile.Read(ref _responseActive) == 1)
+                                Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped: {text}");
+
                             OnTranscript?.Invoke("User", text);
+                        }
                     }
 
                     // Trigger response if not already active
@@ -811,6 +825,22 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
 
     /// <summary>
+    /// Apply common STT corrections for telephony speech recognition (ported from WinForms).
+    /// </summary>
+    private static string ApplySttCorrections(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text;
+
+        // Common Whisper misrecognitions on telephony audio
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bThank you for watching\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlease subscribe\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bLike and subscribe\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bCircuits awaiting\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        return text.Trim();
+    }
+
+    /// <summary>
     /// Detect if Ada's transcript indicates she promised to finalize/book
     /// but no tool was actually called (price-promise safety net).
     /// </summary>
@@ -820,8 +850,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         return (lower.Contains("finalize") || lower.Contains("finalise") ||
                 lower.Contains("book") || lower.Contains("booking") ||
                 lower.Contains("moment while") || lower.Contains("one moment") ||
-                lower.Contains("let me") || lower.Contains("i'll get")) &&
-               !lower.Contains("would you like") && // Not asking for confirmation
+                lower.Contains("let me") || lower.Contains("i'll get") ||
+                lower.Contains("price") || lower.Contains("fare") ||
+                lower.Contains("just a moment")) &&
+               !lower.Contains("would you like") &&
                !lower.Contains("shall i") &&
                !lower.Contains("do you want");
     }
