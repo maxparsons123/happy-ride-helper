@@ -660,8 +660,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                             return;
                                     }
                                     
-                                    // Now give the playout buffer time to drain (buffer size + margin)
-                                    await Task.Delay(3000);
+                                    // Now give the playout buffer time to drain
+                                    // The goodbye script is ~5-6s of speech; 6s drain ensures full playback
+                                    await Task.Delay(6000);
                                     
                                     if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                         return;
