@@ -882,10 +882,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 input_audio_transcription = new { model = "whisper-1" }, // No language constraint — let Whisper auto-detect for language switching
                 turn_detection = new
                 {
-                    type = "server_vad",
-                    threshold = 0.5,
-                    prefix_padding_ms = 400,
-                    silence_duration_ms = 1200
+                    type = "semantic_vad",
+                    eagerness = "low"
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
