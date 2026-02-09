@@ -612,17 +612,35 @@ public sealed class CallSession : ICallSession
         // Drain-aware hangup: wait for playout buffer to empty before ending
         _ = Task.Run(async () =>
         {
-            // Wait for OpenAI to finish streaming audio (response.done)
-            await Task.Delay(1000);
-            
-            // Then wait for playout buffer to drain (max 20s safety)
             if (_aiClient is OpenAiG711Client g711)
             {
-                var waitStart = Environment.TickCount64;
+                // Phase 1: Wait for OpenAI to finish streaming (response still active)
+                var streamStart = Environment.TickCount64;
+                const int MAX_STREAM_WAIT_MS = 15000;
+                while (g711.IsResponseActive &&
+                       Environment.TickCount64 - streamStart < MAX_STREAM_WAIT_MS)
+                {
+                    await Task.Delay(200);
+                }
+                
+                // Phase 2: Wait for audio to actually enter the playout buffer
+                const int MAX_ENQUEUE_WAIT_MS = 5000;
+                var enqueueStart = Environment.TickCount64;
+                while ((g711.GetQueuedFrames?.Invoke() ?? 0) == 0 &&
+                       Environment.TickCount64 - enqueueStart < MAX_ENQUEUE_WAIT_MS)
+                {
+                    await Task.Delay(100);
+                }
+                
+                // Phase 3: Settling delay to let buffer fill fully
+                await Task.Delay(2000);
+                
+                // Phase 4: Poll playout queue until drained (max 20s safety)
+                var drainStart = Environment.TickCount64;
                 const int MAX_DRAIN_MS = 20000;
                 const int POLL_MS = 100;
                 
-                while (Environment.TickCount64 - waitStart < MAX_DRAIN_MS)
+                while (Environment.TickCount64 - drainStart < MAX_DRAIN_MS)
                 {
                     var queued = g711.GetQueuedFrames?.Invoke() ?? 0;
                     if (queued == 0)
