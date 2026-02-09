@@ -11,12 +11,9 @@ namespace AdaMain.Services;
 public sealed class FareCalculator : IFareCalculator
 {
     private readonly ILogger<FareCalculator> _logger;
-    private readonly GoogleMapsSettings _settings;
+    private readonly GoogleMapsSettings _googleSettings;
+    private readonly SupabaseSettings _supabaseSettings;
     private readonly HttpClient _httpClient;
-    
-    // Edge function config
-    private const string EDGE_FUNCTION_URL = "https://oerketnvlmptpfvttysy.supabase.co/functions/v1/address-dispatch";
-    private const string SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
     
     // Pricing constants
     private const decimal BaseFare = 3.50m;
@@ -25,10 +22,13 @@ public sealed class FareCalculator : IFareCalculator
     private const double AvgSpeedMph = 20.0;
     private const int BufferMinutes = 3;
     
-    public FareCalculator(ILogger<FareCalculator> logger, GoogleMapsSettings settings)
+    private string EdgeFunctionUrl => $"{_supabaseSettings.Url}/functions/v1/address-dispatch";
+    
+    public FareCalculator(ILogger<FareCalculator> logger, GoogleMapsSettings googleSettings, SupabaseSettings supabaseSettings)
     {
         _logger = logger;
-        _settings = settings;
+        _googleSettings = googleSettings;
+        _supabaseSettings = supabaseSettings;
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaMain/1.0");
     }
@@ -58,11 +58,11 @@ public sealed class FareCalculator : IFareCalculator
                 phone = phoneNumber ?? ""
             });
 
-            var request = new HttpRequestMessage(HttpMethod.Post, EDGE_FUNCTION_URL)
+            var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
                 Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
             };
-            request.Headers.Add("apikey", SUPABASE_ANON_KEY);
+            request.Headers.Add("apikey", _supabaseSettings.AnonKey);
 
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             var response = await _httpClient.SendAsync(request, cts.Token);
@@ -300,7 +300,7 @@ public sealed class FareCalculator : IFareCalculator
     {
         try
         {
-            if (!string.IsNullOrEmpty(_settings.ApiKey))
+            if (!string.IsNullOrEmpty(_googleSettings.ApiKey))
             {
                 return await GeocodeGoogleAsync(address, regionBias);
             }
@@ -319,7 +319,7 @@ public sealed class FareCalculator : IFareCalculator
         var url = $"https://maps.googleapis.com/maps/api/geocode/json" +
                   $"?address={Uri.EscapeDataString(address)}" +
                   $"&region={regionBias}" +
-                  $"&key={_settings.ApiKey}";
+                  $"&key={_googleSettings.ApiKey}";
         
         var response = await _httpClient.GetStringAsync(url);
         using var doc = JsonDocument.Parse(response);
