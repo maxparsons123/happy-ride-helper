@@ -532,6 +532,13 @@ public sealed class SipServer : IAsyncDisposable
             if ((DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds < ECHO_GUARD_MS)
                 return;
 
+            // ── Ingress volume boost (caller audio often quiet on SIP trunks) ──
+            var ingressGain = (float)_audioSettings.IngressVolumeBoost;
+            if (ingressGain > 1.01f)
+            {
+                Audio.ALawVolumeBoost.ApplyInPlace(payload, ingressGain);
+            }
+
             // ── Forward audio to AI session ──
             session.ProcessInboundAudio(payload);
         };
