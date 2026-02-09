@@ -19,11 +19,11 @@ public sealed class AppSettings
 
 public sealed class SipSettings
 {
-    public string Server { get; set; } = "sip.example.com";
+    public string Server { get; set; } = "bellen.dcota.nl";
     public int Port { get; set; } = 5060;
     public string Transport { get; set; } = "UDP";
-    public string Username { get; set; } = "";
-    public string Password { get; set; } = "";
+    public string Username { get; set; } = "1234";
+    public string Password { get; set; } = "293183719426";
     public string? AuthId { get; set; }
     public string? Domain { get; set; }
     public bool AutoAnswer { get; set; } = true;
@@ -36,7 +36,7 @@ public sealed class SipSettings
 
 public sealed class OpenAiSettings
 {
-    public string ApiKey { get; set; } = "";
+    public string ApiKey { get; set; } = "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";
     public string Model { get; set; } = "gpt-4o-mini-realtime-preview-2024-12-17";
     public string Voice { get; set; } = "shimmer";
 }
