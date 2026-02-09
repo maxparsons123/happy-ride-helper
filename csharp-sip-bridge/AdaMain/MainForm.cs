@@ -534,28 +534,52 @@ public partial class MainForm : Form
 
     private void InitSimliAvatar()
     {
-        // Fall back to hardcoded defaults if saved settings are empty
-        var apiKey = _settings.Simli.ApiKey;
-        var faceId = _settings.Simli.FaceId;
-        
-        if (string.IsNullOrWhiteSpace(apiKey))
-            apiKey = _settings.Simli.ApiKey = "vlw7tr7vxhhs52bi3rum7";
-        if (string.IsNullOrWhiteSpace(faceId))
-            faceId = _settings.Simli.FaceId = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+        try
+        {
+            // Fall back to hardcoded defaults if saved settings are empty
+            var apiKey = _settings.Simli.ApiKey;
+            var faceId = _settings.Simli.FaceId;
+            
+            if (string.IsNullOrWhiteSpace(apiKey))
+                apiKey = _settings.Simli.ApiKey = "vlw7tr7vxhhs52bi3rum7";
+            if (string.IsNullOrWhiteSpace(faceId))
+                faceId = _settings.Simli.FaceId = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
 
-        var factory = GetLoggerFactory();
-        _simliAvatar = new SimliAvatar(factory.CreateLogger<SimliAvatar>());
-        _simliAvatar.Configure(apiKey, faceId);
-        _simliAvatar.Dock = DockStyle.Fill;
-        pnlAvatarHost.Controls.Clear();
-        pnlAvatarHost.Controls.Add(_simliAvatar);
-        lblAvatarStatus.Text = "Ready";
+            Log($"🎭 InitSimliAvatar: apiKey={apiKey[..Math.Min(6, apiKey.Length)]}..., faceId={faceId[..Math.Min(8, faceId.Length)]}...");
+
+            var factory = GetLoggerFactory();
+            _simliAvatar = new SimliAvatar(factory.CreateLogger<SimliAvatar>());
+            _simliAvatar.Configure(apiKey, faceId);
+            _simliAvatar.Dock = DockStyle.Fill;
+            pnlAvatarHost.Controls.Clear();
+            pnlAvatarHost.Controls.Add(_simliAvatar);
+            lblAvatarStatus.Text = "Ready";
+            Log("🎭 Simli avatar initialized successfully");
+        }
+        catch (Exception ex)
+        {
+            Log($"🎭 Simli init FAILED: {ex.Message}");
+            lblAvatarStatus.Text = $"Init failed: {ex.Message}";
+            _simliAvatar = null;
+        }
     }
 
-    /// <summary>Connect Simli when a call starts, disconnect when it ends.</summary>
+    /// <summary>Ensure Simli is initialized, then connect when a call starts.</summary>
     private async Task ConnectSimliAsync()
     {
-        if (_simliAvatar == null) return;
+        // Safety net: if InitSimliAvatar failed at startup, retry now
+        if (_simliAvatar == null)
+        {
+            Log("🎭 Simli was null at call start — retrying init...");
+            InitSimliAvatar();
+        }
+
+        if (_simliAvatar == null)
+        {
+            Log("🎭 Simli still null after retry — skipping avatar");
+            return;
+        }
+
         try { await _simliAvatar.ConnectAsync(); }
         catch (Exception ex) { Log($"🎭 Simli connect error: {ex.Message}"); }
     }
