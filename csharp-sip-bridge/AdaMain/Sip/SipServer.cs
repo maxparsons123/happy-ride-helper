@@ -534,30 +534,19 @@ public sealed class SipServer : IAsyncDisposable
                 }
             }
 
-            // ── Hard mute during bot speech (prevent echo feedback) ──
-            // Grace period: if no new TTS frames arrived for BOT_SPEAKING_GRACE_MS,
-            // Ada has finished — treat user audio as normal speech, not barge-in.
+            // ── No hard mute: OpenAI's server-side VAD handles echo rejection ──
+            // It knows its own output audio and can distinguish echo from real speech.
+            // We only apply a brief echo guard after bot stops to catch trailing RTP frames.
             if (Volatile.Read(ref botSpeakingFlag) == 1)
             {
                 var msSinceLastEnqueue = (DateTime.UtcNow - lastAudioEnqueuedAt).TotalMilliseconds;
                 if (msSinceLastEnqueue > BOT_SPEAKING_GRACE_MS)
                 {
-                    // Ada stopped sending audio — auto-clear bot speaking state
+                    // Ada stopped sending audio — clear flag
                     Interlocked.Exchange(ref botSpeakingFlag, 0);
                     botStoppedSpeakingAt = DateTime.UtcNow;
                 }
-                else
-                {
-                    // Still actively speaking — only allow genuine barge-in (3x threshold)
-                    float bargeInCutThrough = BARGE_IN_RMS_THRESHOLD * 3f;
-                    if (rms < bargeInCutThrough) return; // fully muted
-                    var now = DateTime.UtcNow;
-                    if ((now - lastBargeInAt).TotalMilliseconds < BARGE_IN_COOLDOWN_MS) return;
-                    lastBargeInAt = now;
-                    Interlocked.Exchange(ref botSpeakingFlag, 0);
-                    botStoppedSpeakingAt = now;
-                    Log($"🎤 Barge-in detected (RMS={rms:F0}, threshold={bargeInCutThrough:F0})");
-                }
+                // Audio flows through regardless — no muting, no barge-in threshold
             }
 
             // ── Echo guard: brief mute after bot stops speaking ──
