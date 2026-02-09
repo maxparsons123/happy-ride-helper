@@ -609,20 +609,38 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                             OnTranscript?.Invoke("Ada", text);
                             _lastAdaTranscript = text; // Track for price-promise safety net
 
-                            // Goodbye detection → arm 5s hangup watchdog
+                            // Goodbye detection → arm drain-aware hangup
                             if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
                                 (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
                                  text.Contains("Thank you for using", StringComparison.OrdinalIgnoreCase) ||
                                  text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
                             {
                                 Interlocked.Exchange(ref _closingScriptSpoken, 1);
-                                Log("👋 Goodbye detected - arming 8s hangup watchdog");
+                                Log("👋 Goodbye detected - will end call after audio drains");
+                                
+                                // Wait for OpenAI to finish sending audio, THEN wait for playout drain
+                                // The OnPlayoutComplete event fires when OpenAI's response.done arrives
+                                // After that, we give the jitter buffer time to fully drain
                                 _ = Task.Run(async () =>
                                 {
-                                    await Task.Delay(8000); // 8s buffer for playout to drain fully
+                                    // Wait up to 15s for OpenAI to finish streaming the goodbye audio
+                                    var waitStart = Environment.TickCount64;
+                                    const int MAX_WAIT_MS = 15000;
+                                    
+                                    while (Volatile.Read(ref _responseActive) == 1 &&
+                                           Environment.TickCount64 - waitStart < MAX_WAIT_MS)
+                                    {
+                                        await Task.Delay(200);
+                                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                            return;
+                                    }
+                                    
+                                    // Now give the playout buffer time to drain (buffer size + margin)
+                                    await Task.Delay(3000);
+                                    
                                     if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                         return;
-                                    Log("⏰ Goodbye watchdog triggered - ending call");
+                                    Log("⏰ Goodbye watchdog triggered - ending call (audio drained)");
                                     Interlocked.Exchange(ref _ignoreUserAudio, 1);
                                     SignalCallEnded("goodbye_watchdog");
                                     OnEnded?.Invoke("goodbye_watchdog");
