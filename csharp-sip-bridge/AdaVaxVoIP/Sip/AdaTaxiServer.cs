@@ -80,8 +80,7 @@ public class AdaTaxiServer : cVaxServerCOM
         RegisterLine("SipTrunk", 3600);
         Log("📡 Registering with SIP trunk: " + _settings.Sip.Server);
 
-        Log($"✅ VaxVoIP Server started on UDP port {_settings.Sip.Port} (RTP {_settings.VaxVoIP.RtpPortMin}-{_settings.VaxVoIP.RtpPortMax})");
-        return true;
+        Log($"📡 Registered SIP trunk: {_settings.Sip.Server}");
     }
 
     public void Stop()
