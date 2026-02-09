@@ -196,80 +196,80 @@ public sealed class CallSession : ICallSession
             return new { success = true };
         }
         
-        // Full path: all travel fields complete — resolve addresses + calculate fare (auto-quote)
-        _logger.LogInformation("[{SessionId}] 💰 All travel fields filled — auto-quoting...", SessionId);
+        // Full path: all travel fields complete — calculate fare asynchronously
+        // Return immediately with an interjection so Ada speaks while we calculate
+        _logger.LogInformation("[{SessionId}] 💰 All travel fields filled — starting async fare calculation...", SessionId);
         
-        try
+        // Fire-and-forget: calculate fare in background, then inject result
+        _ = Task.Run(async () =>
         {
-            var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
-            var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
-            
-            FareResult result;
-            if (completed == aiTask)
+            try
             {
-                result = await aiTask;
+                var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
+                var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
                 
-                if (result.NeedsClarification)
+                FareResult result;
+                if (completed == aiTask)
                 {
-                    _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses in auto-quote", SessionId);
-                    OnBookingUpdated?.Invoke(_booking.Clone());
-                    return new
+                    result = await aiTask;
+                    
+                    if (result.NeedsClarification)
                     {
-                        success = false,
-                        needs_clarification = true,
-                        pickup_options = result.PickupAlternatives ?? Array.Empty<string>(),
-                        destination_options = result.DestAlternatives ?? Array.Empty<string>(),
-                        message = "I found multiple locations. Please ask the caller which city or area they are in."
-                    };
+                        _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses in auto-quote", SessionId);
+                        OnBookingUpdated?.Invoke(_booking.Clone());
+                        var clarifMsg = "I found multiple possible locations for your addresses. " +
+                            (result.PickupAlternatives?.Length > 0 ? $"Pickup options: {string.Join(", ", result.PickupAlternatives)}. " : "") +
+                            (result.DestAlternatives?.Length > 0 ? $"Destination options: {string.Join(", ", result.DestAlternatives)}. " : "") +
+                            "Please ask the caller which one they mean.";
+                        await _aiClient.InjectMessageAndRespondAsync($"[SYSTEM] {clarifMsg}");
+                        return;
+                    }
                 }
+                else
+                {
+                    _logger.LogWarning("[{SessionId}] ⏱️ Auto-quote AI extraction timed out, using fallback", SessionId);
+                    result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
+                }
+                
+                // Store all geocoded results
+                ApplyFareResult(result);
+                
+                if (_aiClient is OpenAiG711Client g711)
+                    g711.SetAwaitingConfirmation(true);
+                
+                OnBookingUpdated?.Invoke(_booking.Clone());
+                
+                var spokenFare = FormatFareForSpeech(_booking.Fare);
+                _logger.LogInformation("[{SessionId}] 💰 Auto-quote: {Fare} ({Spoken}), ETA: {Eta}",
+                    SessionId, _booking.Fare, spokenFare, _booking.Eta);
+                
+                // Inject fare result into conversation so Ada announces it
+                var fareMsg = $"[FARE RESULT] For the booking from {_booking.Pickup} to {_booking.Destination}, " +
+                    $"the fare is {spokenFare}, estimated arrival {_booking.Eta}. " +
+                    "Tell the caller this fare and ask if they want to proceed or edit any details.";
+                await _aiClient.InjectMessageAndRespondAsync(fareMsg);
             }
-            else
+            catch (Exception ex)
             {
-                _logger.LogWarning("[{SessionId}] ⏱️ Auto-quote AI extraction timed out, using fallback", SessionId);
-                result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
+                _logger.LogWarning(ex, "[{SessionId}] Auto-quote failed, using fallback", SessionId);
+                _booking.Fare = "€12.50";
+                _booking.Eta = "6 minutes";
+                OnBookingUpdated?.Invoke(_booking.Clone());
+                
+                var fareMsg = $"[FARE RESULT] For the booking from {_booking.Pickup} to {_booking.Destination}, " +
+                    "the fare is approximately 12 euros 50, estimated arrival 6 minutes. " +
+                    "Tell the caller this fare and ask if they want to proceed or edit any details.";
+                await _aiClient.InjectMessageAndRespondAsync(fareMsg);
             }
-            
-            // Store all geocoded results
-            ApplyFareResult(result);
-            
-            if (_aiClient is OpenAiG711Client g711)
-                g711.SetAwaitingConfirmation(true);
-            
-            OnBookingUpdated?.Invoke(_booking.Clone());
-            
-            var spokenFare = FormatFareForSpeech(_booking.Fare);
-            _logger.LogInformation("[{SessionId}] 💰 Auto-quote: {Fare} ({Spoken}), ETA: {Eta}",
-                SessionId, _booking.Fare, spokenFare, _booking.Eta);
-            
-            return new
-            {
-                success = true,
-                fare = _booking.Fare,
-                fare_spoken = spokenFare,
-                eta = _booking.Eta,
-                pickup_address = _booking.Pickup,
-                destination_address = _booking.Destination,
-                message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
-            };
-        }
-        catch (Exception ex)
+        });
+        
+        // Return immediately — Ada will say "let me get you a price" while fare calculates in background
+        OnBookingUpdated?.Invoke(_booking.Clone());
+        return new
         {
-            _logger.LogWarning(ex, "[{SessionId}] Auto-quote failed, using fallback", SessionId);
-            _booking.Fare = "€12.50";
-            _booking.Eta = "6 minutes";
-            OnBookingUpdated?.Invoke(_booking.Clone());
-            
-            return new
-            {
-                success = true,
-                fare = "€12.50",
-                fare_spoken = "12 euros 50",
-                eta = "6 minutes",
-                pickup_address = _booking.Pickup,
-                destination_address = _booking.Destination,
-                message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is approximately 12 euros 50, estimated arrival 6 minutes. Ask if they want to proceed or edit any details."
-            };
-        }
+            success = true,
+            message = "Say to the caller: 'Let me get you a price on that journey' — then wait for the fare result which will arrive shortly."
+        };
     }
     
     // =========================

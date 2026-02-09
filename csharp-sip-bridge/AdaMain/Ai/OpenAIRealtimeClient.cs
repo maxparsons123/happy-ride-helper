@@ -126,8 +126,24 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         
         await SendJsonAsync(new { type = "response.cancel" });
     }
-    
-    private async Task ReceiveLoopAsync()
+
+    public async Task InjectMessageAndRespondAsync(string message)
+    {
+        if (!IsConnected) return;
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "user",
+                content = new[] { new { type = "input_text", text = message } }
+            }
+        });
+        await Task.Delay(20);
+        await SendJsonAsync(new { type = "response.create" });
+    }
+
     {
         var buffer = new byte[64 * 1024];
         var sb = new StringBuilder();

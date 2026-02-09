@@ -364,7 +364,30 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     }
 
     /// <summary>
-    /// Called by SipServer playout thread when audio queue drains.
+    /// Inject a system-level message and immediately trigger an AI response.
+    /// Used for interjections like "Let me get you a price" before async operations.
+    /// </summary>
+    public async Task InjectMessageAndRespondAsync(string message)
+    {
+        if (!IsConnected) return;
+        
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "user",
+                content = new[] { new { type = "input_text", text = message } }
+            }
+        });
+        
+        await Task.Delay(20);
+        Interlocked.Exchange(ref _responseTriggeredByTool, 1);
+        await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true);
+        Log($"💬 Interjection injected: {message}");
+    }
+
     /// Sets the echo guard timestamp and starts no-reply watchdog.
     /// </summary>
     public void NotifyPlayoutComplete()
