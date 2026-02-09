@@ -35,6 +35,16 @@ public sealed class SipServer : IAsyncDisposable
     private volatile bool _isRunning;
     private volatile bool _disposed;
 
+    // ── Audio quality diagnostics ──
+    private int _dqFrameCount;
+    private double _dqRmsSum;
+    private float _dqPeakRms;
+    private float _dqMinRms = float.MaxValue;
+    private int _dqSilentFrames;
+    private int _dqClippedFrames;
+    private DateTime _dqLastLogAt = DateTime.MinValue;
+    private const int DQ_LOG_INTERVAL_FRAMES = 100; // ~2 seconds at 20ms/frame
+
     public bool IsRegistered { get; private set; }
     public bool IsConnected => _transport != null && IsRegistered;
 
@@ -443,6 +453,56 @@ public sealed class SipServer : IAsyncDisposable
             if (payload == null || payload.Length == 0) return;
 
             // Raw audio monitor — fires before any gating so you hear exactly what arrives on the wire
+            // ── Audio quality diagnostics ──
+            {
+                double sumSqDq = 0;
+                short peakSample = 0;
+                int clippedCount = 0;
+                for (int i = 0; i < payload.Length; i++)
+                {
+                    short s = ALawDecode(payload[i]);
+                    short abs = Math.Abs(s);
+                    sumSqDq += (double)s * s;
+                    if (abs > peakSample) peakSample = abs;
+                    if (abs > 31000) clippedCount++; // Near-max for 16-bit
+                }
+                float rmsFrame = (float)Math.Sqrt(sumSqDq / payload.Length);
+
+                _dqFrameCount++;
+                _dqRmsSum += rmsFrame;
+                if (rmsFrame > _dqPeakRms) _dqPeakRms = rmsFrame;
+                if (rmsFrame < _dqMinRms) _dqMinRms = rmsFrame;
+                if (rmsFrame < 50) _dqSilentFrames++;
+                if (clippedCount > 0) _dqClippedFrames++;
+
+                if (_dqFrameCount >= DQ_LOG_INTERVAL_FRAMES)
+                {
+                    float avgRms = (float)(_dqRmsSum / _dqFrameCount);
+                    float silencePct = _dqSilentFrames * 100f / _dqFrameCount;
+                    float clippedPct = _dqClippedFrames * 100f / _dqFrameCount;
+
+                    // Quality rating
+                    string quality;
+                    if (avgRms < 100) quality = "❌ VERY LOW (mic muted or no signal?)";
+                    else if (avgRms < 300) quality = "⚠️ LOW (quiet caller or poor connection)";
+                    else if (avgRms < 800) quality = "⚠️ FAIR (acceptable but quiet)";
+                    else if (avgRms < 3000) quality = "✅ GOOD";
+                    else if (avgRms < 6000) quality = "✅ STRONG";
+                    else if (clippedPct > 10) quality = "⚠️ CLIPPING (too loud, distortion likely)";
+                    else quality = "✅ LOUD";
+
+                    Log($"🎙️ Audio: avg={avgRms:F0} peak={_dqPeakRms:F0} min={_dqMinRms:F0} silent={silencePct:F0}% clipped={clippedPct:F0}% → {quality}");
+
+                    // Reset counters
+                    _dqFrameCount = 0;
+                    _dqRmsSum = 0;
+                    _dqPeakRms = 0;
+                    _dqMinRms = float.MaxValue;
+                    _dqSilentFrames = 0;
+                    _dqClippedFrames = 0;
+                }
+            }
+
             OnCallerAudioMonitor?.Invoke(payload);
 
             // 3) Soft gate: during bot speaking or echo guard, send silence unless barge-in
