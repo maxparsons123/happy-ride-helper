@@ -37,15 +37,17 @@ public sealed class SipServer : IAsyncDisposable
     private volatile bool _isRunning;
     private volatile bool _disposed;
 
-    // ── Audio quality diagnostics ──
+    // ── Audio quality diagnostics (thread-safe via Interlocked) ──
     private int _dqFrameCount;
-    private double _dqRmsSum;
-    private float _dqPeakRms;
-    private float _dqMinRms = float.MaxValue;
+    private long _dqRmsSum;  // stored as fixed-point (x1000) for Interlocked
+    private int _dqPeakRms;  // stored as int (x1000) for Interlocked
+    private int _dqMinRms = int.MaxValue;  // stored as int (x1000)
     private int _dqSilentFrames;
     private int _dqClippedFrames;
-    private DateTime _dqLastLogAt = DateTime.MinValue;
     private const int DQ_LOG_INTERVAL_FRAMES = 100; // ~2 seconds at 20ms/frame
+
+    // ── Operator RTP timestamp (cumulative for multi-frame sends) ──
+    private uint _operatorTimestamp;
 
     public bool IsRegistered { get; private set; }
     public bool IsConnected => _transport != null && IsRegistered;
@@ -409,6 +411,8 @@ public sealed class SipServer : IAsyncDisposable
         // Wire playout queue depth query for drain-aware goodbye shutdown
         if (session.AiClient is OpenAiG711Client g711Wire)
             g711Wire.GetQueuedFrames = () => playout.QueuedFrames;
+        else
+            Log("⚠️ AI client is not G.711 client — drain detection disabled");
 
         // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler)
         const int FLUSH_PACKETS = 20;
@@ -418,7 +422,7 @@ public sealed class SipServer : IAsyncDisposable
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
         var callStartedAt = DateTime.UtcNow;
-        bool isBotSpeaking = false;
+        volatile int botSpeakingFlag = 0; // 0=false, 1=true; volatile for cross-thread visibility
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
         DateTime lastBargeInAt = DateTime.MinValue;
@@ -428,7 +432,7 @@ public sealed class SipServer : IAsyncDisposable
         // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
         session.OnAudioOut += frame =>
         {
-            isBotSpeaking = true;
+            Interlocked.Exchange(ref botSpeakingFlag, 1);
             adaHasStartedSpeaking = true;
             playout.BufferALaw(frame);
         };
@@ -441,7 +445,7 @@ public sealed class SipServer : IAsyncDisposable
         {
             if (adaHasStartedSpeaking)
             {
-                isBotSpeaking = false;
+                Interlocked.Exchange(ref botSpeakingFlag, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
             }
         };
@@ -485,36 +489,43 @@ public sealed class SipServer : IAsyncDisposable
             // ── Audio quality diagnostics (gated by setting) ──
             if (_audioSettings.EnableDiagnostics)
             {
-                _dqFrameCount++;
-                _dqRmsSum += rms;
-                if (rms > _dqPeakRms) _dqPeakRms = rms;
-                if (rms < _dqMinRms) _dqMinRms = rms;
-                if (rms < 50) _dqSilentFrames++;
-                if (rms > 28000) _dqClippedFrames++;
+                int rmsFixed = (int)(rms * 1000); // fixed-point for Interlocked
+                var frameCount = Interlocked.Increment(ref _dqFrameCount);
+                Interlocked.Add(ref _dqRmsSum, rmsFixed);
+                InterlockedMax(ref _dqPeakRms, rmsFixed);
+                InterlockedMin(ref _dqMinRms, rmsFixed);
+                if (rms < 50) Interlocked.Increment(ref _dqSilentFrames);
+                if (rms > 28000) Interlocked.Increment(ref _dqClippedFrames);
 
-                if (_dqFrameCount >= DQ_LOG_INTERVAL_FRAMES)
+                if (frameCount >= DQ_LOG_INTERVAL_FRAMES)
                 {
-                    var avgRms = _dqRmsSum / _dqFrameCount;
-                    var silPct = _dqSilentFrames * 100.0 / _dqFrameCount;
-                    var clipPct = _dqClippedFrames * 100.0 / _dqFrameCount;
-                    var quality = clipPct > 5 ? "⚠️ CLIPPING" :
-                                  avgRms < 100 ? "❌ VERY LOW" :
-                                  avgRms < 500 ? "⚠️ LOW" : "✅ GOOD";
+                    // Snapshot and reset atomically
+                    var totalRms = Interlocked.Exchange(ref _dqRmsSum, 0);
+                    var fc = Interlocked.Exchange(ref _dqFrameCount, 0);
+                    var peak = Interlocked.Exchange(ref _dqPeakRms, 0);
+                    var min = Interlocked.Exchange(ref _dqMinRms, int.MaxValue);
+                    var silent = Interlocked.Exchange(ref _dqSilentFrames, 0);
+                    var clipped = Interlocked.Exchange(ref _dqClippedFrames, 0);
 
-                    Log($"📊 Audio: avg={avgRms:F0} peak={_dqPeakRms:F0} min={_dqMinRms:F0} " +
-                        $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+                    if (fc > 0)
+                    {
+                        var avgRms = (totalRms / 1000.0) / fc;
+                        var peakRms = peak / 1000.0;
+                        var minRms = min == int.MaxValue ? 0 : min / 1000.0;
+                        var silPct = silent * 100.0 / fc;
+                        var clipPct = clipped * 100.0 / fc;
+                        var quality = clipPct > 5 ? "⚠️ CLIPPING" :
+                                      avgRms < 100 ? "❌ VERY LOW" :
+                                      avgRms < 500 ? "⚠️ LOW" : "✅ GOOD";
 
-                    _dqFrameCount = 0;
-                    _dqRmsSum = 0;
-                    _dqPeakRms = 0;
-                    _dqMinRms = float.MaxValue;
-                    _dqSilentFrames = 0;
-                    _dqClippedFrames = 0;
+                        Log($"📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
+                            $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+                    }
                 }
             }
 
             // ── Hard mute during bot speech (prevent echo feedback) ──
-            if (isBotSpeaking)
+            if (Volatile.Read(ref botSpeakingFlag) == 1)
             {
                 // Only allow genuine barge-in: require 3x normal threshold to cut through
                 float bargeInCutThrough = BARGE_IN_RMS_THRESHOLD * 3f;
@@ -523,7 +534,7 @@ public sealed class SipServer : IAsyncDisposable
                 var now = DateTime.UtcNow;
                 if ((now - lastBargeInAt).TotalMilliseconds < BARGE_IN_COOLDOWN_MS) return;
                 lastBargeInAt = now;
-                isBotSpeaking = false;
+                Interlocked.Exchange(ref botSpeakingFlag, 0);
                 botStoppedSpeakingAt = now;
                 Log($"🎤 Barge-in detected (RMS={rms:F0}, threshold={bargeInCutThrough:F0})");
             }
@@ -533,10 +544,15 @@ public sealed class SipServer : IAsyncDisposable
                 return;
 
             // ── Ingress volume boost (caller audio often quiet on SIP trunks) ──
+            // Copy before boost so OnCallerAudioMonitor gets original audio
             var ingressGain = (float)_audioSettings.IngressVolumeBoost;
             if (ingressGain > 1.01f)
             {
-                Audio.ALawVolumeBoost.ApplyInPlace(payload, ingressGain);
+                var boosted = new byte[payload.Length];
+                Buffer.BlockCopy(payload, 0, boosted, 0, payload.Length);
+                Audio.ALawVolumeBoost.ApplyInPlace(boosted, ingressGain);
+                session.ProcessInboundAudio(boosted);
+                return; // skip the default forward below
             }
 
             // ── Forward audio to AI session ──
@@ -579,6 +595,7 @@ public sealed class SipServer : IAsyncDisposable
     /// <summary>
     /// Send operator microphone audio directly into the SIP RTP stream (A-law encoded).
     /// Used in Operator Mode with Push-to-Talk.
+    /// Uses cumulative timestamp to handle concatenated/variable-length frames correctly.
     /// </summary>
     public void SendOperatorAudio(byte[] alawData)
     {
@@ -592,15 +609,13 @@ public sealed class SipServer : IAsyncDisposable
 
         try
         {
-            // SIPSorcery 10.x: SendRtpRaw is on VoIPMediaSession, not AudioStream
-            // PCMA is 8-bit encoding: 1 byte = 1 sample, so alawData.Length == sample count.
-            // At 8kHz, a 20ms frame = 160 bytes = 160 samples → timestamp increment of 160.
             rtp.SendRtpRaw(
                 SDPMediaTypesEnum.audio,
                 alawData,
-                (uint)alawData.Length,  // timestamp increment = sample count (correct for 8-bit codecs)
+                _operatorTimestamp,
                 0,  // marker bit
                 8); // PCMA payload type
+            _operatorTimestamp += (uint)alawData.Length; // cumulative for next packet
         }
         catch { /* ignore send errors during teardown */ }
     }
@@ -756,6 +771,22 @@ public sealed class SipServer : IAsyncDisposable
         int value = (alaw & 0x0F) << 4 | 0x08;
         if (segment > 0) value = (value + 0x100) << (segment - 1);
         return (short)(sign * value);
+    }
+
+    /// <summary>Thread-safe max update using Interlocked compare-and-swap.</summary>
+    private static void InterlockedMax(ref int location, int value)
+    {
+        int current;
+        do { current = Volatile.Read(ref location); }
+        while (value > current && Interlocked.CompareExchange(ref location, value, current) != current);
+    }
+
+    /// <summary>Thread-safe min update using Interlocked compare-and-swap.</summary>
+    private static void InterlockedMin(ref int location, int value)
+    {
+        int current;
+        do { current = Volatile.Read(ref location); }
+        while (value < current && Interlocked.CompareExchange(ref location, value, current) != current);
     }
 
     private void Log(string msg)
