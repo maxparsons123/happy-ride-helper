@@ -175,26 +175,27 @@ partial class MainForm
             BackColor = bgPanel
         };
 
-        picAvatar = new PictureBox
+        // SimliAvatar placeholder panel — actual SimliAvatar is created in MainForm.cs
+        // because it requires ILogger which needs the logger factory.
+        pnlAvatarHost = new Panel
         {
             Location = new Point(10, 22),
-            Size = new Size(180, 175),
+            Size = new Size(180, 200),
             BackColor = Color.Black,
-            SizeMode = PictureBoxSizeMode.Zoom,
             BorderStyle = BorderStyle.FixedSingle
         };
 
         lblAvatarStatus = new Label
         {
             Text = "Not connected",
-            Location = new Point(10, 202),
+            Location = new Point(10, 228),
             Size = new Size(180, 20),
             ForeColor = Color.Gray,
             TextAlign = ContentAlignment.MiddleCenter,
             Font = new Font("Segoe UI", 8F)
         };
 
-        grpAvatar.Controls.AddRange(new Control[] { picAvatar, lblAvatarStatus });
+        grpAvatar.Controls.AddRange(new Control[] { pnlAvatarHost, lblAvatarStatus });
 
         // ══════════════════════════════════════════
         //  LOGS PANEL
@@ -331,7 +332,7 @@ partial class MainForm
 
     // Avatar
     private GroupBox grpAvatar;
-    private PictureBox picAvatar;
+    private Panel pnlAvatarHost;
     private Label lblAvatarStatus;
 
     // Logs
