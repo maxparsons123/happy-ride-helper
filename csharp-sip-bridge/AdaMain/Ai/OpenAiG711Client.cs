@@ -932,7 +932,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     type = "server_vad",
                     threshold = 0.5,
                     prefix_padding_ms = 300,
-                    silence_duration_ms = 1000 // 1s — safer for address dictation with pauses
+                    silence_duration_ms = 500
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
