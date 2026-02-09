@@ -9,12 +9,19 @@
     <RootNamespace>AdaVaxVoIP</RootNamespace>
   </PropertyGroup>
 
+  <!-- VaxVoIP COM reference — only resolves when SDK is installed locally.
+       The server uses late-binding (dynamic) so builds succeed without the SDK.
+       To enable early-binding, uncomment and set the correct GUID from your installation:
   <ItemGroup>
     <COMReference Include="VaxTeleServerSDK">
+      <Guid>{YOUR-VAXVOIP-GUID-HERE}</Guid>
+      <VersionMajor>1</VersionMajor>
+      <VersionMinor>0</VersionMinor>
       <WrapperTool>tlbimp</WrapperTool>
       <EmbedInteropTypes>true</EmbedInteropTypes>
     </COMReference>
   </ItemGroup>
+  -->
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
