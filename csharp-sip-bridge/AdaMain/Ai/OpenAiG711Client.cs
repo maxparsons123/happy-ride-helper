@@ -783,7 +783,18 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     Interlocked.Increment(ref _noReplyWatchdogId); // Cancel pending watchdog
                     Interlocked.Exchange(ref _noReplyCount, 0);    // Reset no-reply count
                     Interlocked.Exchange(ref _transcriptPending, 1);
-                    Log("✂️ Barge-in detected");
+                    
+                    // FIX: Cancel any active response immediately on barge-in
+                    // Without this, the AI keeps talking while the user is speaking
+                    if (Volatile.Read(ref _responseActive) == 1)
+                    {
+                        _ = CancelResponseAsync();
+                        Log("✂️ Barge-in: cancelling active response");
+                    }
+                    else
+                    {
+                        Log("✂️ Barge-in detected");
+                    }
                     OnBargeIn?.Invoke();
                     
                     // ARM FALLBACK: If this barge-in is a false positive (VAD never commits),
@@ -977,20 +988,26 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     /// <summary>
     /// Apply common STT corrections for telephony speech recognition (ported from WinForms).
     /// </summary>
+    // Pre-compiled regex patterns for STT corrections (avoids recompilation per call)
+    private static readonly System.Text.RegularExpressions.Regex s_thankYouRegex = new(@"\bThank you for watching\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex s_subscribeRegex = new(@"\bPlease subscribe\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex s_likeSubscribeRegex = new(@"\bLike and subscribe\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex s_circuitsRegex = new(@"\bCircuits awaiting\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex s_alphanumericHouseRegex = new(@"(\d+)\s*[-,\s]\s*([A-Da-d])\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private static string ApplySttCorrections(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;
-        const System.Text.RegularExpressions.RegexOptions IC = System.Text.RegularExpressions.RegexOptions.IgnoreCase;
 
         // Common Whisper misrecognitions on telephony audio
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bThank you for watching\b", "", IC);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlease subscribe\b", "", IC);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bLike and subscribe\b", "", IC);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bCircuits awaiting\b", "", IC);
+        text = s_thankYouRegex.Replace(text, "");
+        text = s_subscribeRegex.Replace(text, "");
+        text = s_likeSubscribeRegex.Replace(text, "");
+        text = s_circuitsRegex.Replace(text, "");
 
         // ── Alphanumeric house number recovery (aggressive) ──
         // Catches "52 A", "52 - A", "52, A" → "52A"
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"(\d+)\s*[-,\s]\s*([A-Da-d])\b", "$1$2", IC);
+        text = s_alphanumericHouseRegex.Replace(text, "$1$2");
 
         // "to A" / "2 A" after digits context — e.g. "5 to A" → preserve as-is (ambiguous)
         // But "It's 2A" should stay "2A"
@@ -1070,10 +1087,18 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     {
         if (_ws?.State != WebSocketState.Open) return;
 
-        await _sendMutex.WaitAsync();
+        await _sendMutex.WaitAsync().ConfigureAwait(false);
         try
         {
-            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, _cts?.Token ?? CancellationToken.None);
+            // FIX: Add 5s timeout to prevent WebSocket send from hanging indefinitely
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(
+                _cts?.Token ?? CancellationToken.None);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            Log("⚠️ WebSocket send timed out (5s)");
         }
         finally
         {
