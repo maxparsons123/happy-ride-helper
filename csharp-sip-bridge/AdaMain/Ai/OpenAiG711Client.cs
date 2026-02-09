@@ -117,6 +117,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     
     /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
     public Func<int>? GetQueuedFrames { get; set; }
+    
+    /// <summary>Whether OpenAI is currently streaming a response.</summary>
+    public bool IsResponseActive => Volatile.Read(ref _responseActive) == 1;
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
