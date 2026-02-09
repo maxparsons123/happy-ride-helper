@@ -1119,6 +1119,14 @@ After EVERY user message that provides OR corrects booking data:
 - If the user repeats an address differently, THIS IS A CORRECTION
 - Store addresses EXACTLY as spoken (verbatim)
 
+CRITICAL — OUT-OF-ORDER / BATCHED DATA:
+Callers often give multiple fields in one turn (e.g. ""52A David Road, going to Leicester"").
+Even if these fields are ahead of the strict sequence (e.g. pickup + destination before name):
+1. Call sync_booking_data IMMEDIATELY with ALL data the user just provided
+2. THEN ask for the next missing field in the flow order (e.g. name)
+NEVER defer syncing data just because you haven't asked for that field yet.
+The user's words are the source of truth — capture them the moment they arrive.
+
 The bridge tracks the real state. Your memory alone does NOT persist data.
 If you skip a sync_booking_data call, the booking state will be wrong.
 
