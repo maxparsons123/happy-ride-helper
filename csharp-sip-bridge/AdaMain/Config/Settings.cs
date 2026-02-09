@@ -59,9 +59,9 @@ public sealed class AudioSettings
 
 public sealed class DispatchSettings
 {
-    public string BsqdWebhookUrl { get; set; } = "";
-    public string BsqdApiKey { get; set; } = "";
-    public string WhatsAppWebhookUrl { get; set; } = "";
+    public string BsqdWebhookUrl { get; set; } = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/voice_AI_taxibot";
+    public string BsqdApiKey { get; set; } = "sriifvfedn5ktsbw4for7noulxtapb2ff6wf326v";
+    public string WhatsAppWebhookUrl { get; set; } = "https://bsqd.me/api/bot/c443ed53-9769-48c3-a777-2f290bd9ba07/master/event/Avaya";
 }
 
 public sealed class GoogleMapsSettings
