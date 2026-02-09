@@ -419,39 +419,75 @@ public sealed class SipServer : IAsyncDisposable
         else
             Log("⚠️ AI client is not G.711 client — drain detection disabled");
 
-        // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler)
+        // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler v7.5)
         const int FLUSH_PACKETS = 20;
         const int EARLY_PROTECTION_MS = 500;
-        const int ECHO_GUARD_MS = 300;
+        const int ECHO_GUARD_MS = 120; // v7.5: 120ms reduced echo guard (was 300ms — caused delays)
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
         var callStartedAt = DateTime.UtcNow;
-        volatile int botSpeakingFlag = 0; // 0=false, 1=true; volatile for cross-thread visibility
+        volatile int isBotSpeaking = 0; // 0=false, 1=true
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
-        DateTime lastAudioEnqueuedAt = DateTime.MinValue; // track when last TTS frame arrived
-        const int BOT_SPEAKING_GRACE_MS = 500; // after last enqueued frame, auto-clear bot speaking flag
-        bool watchdogPending = false;
+        volatile bool watchdogPending = false;
 
         // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
         session.OnAudioOut += frame =>
         {
-            Interlocked.Exchange(ref botSpeakingFlag, 1);
+            Interlocked.Exchange(ref isBotSpeaking, 1);
             adaHasStartedSpeaking = true;
-            lastAudioEnqueuedAt = DateTime.UtcNow;
             playout.BufferALaw(frame);
         };
 
-        // Wire barge-in → playout clear
-        session.OnBargeIn += () => playout.Clear();
+        // Wire barge-in → playout clear (only if bot is actually speaking)
+        session.OnBargeIn += () =>
+        {
+            if (Volatile.Read(ref isBotSpeaking) == 0 && playout.QueuedFrames == 0)
+                return; // Normal turn start, not a barge-in
+            
+            playout.Clear();
+            Interlocked.Exchange(ref isBotSpeaking, 0);
+            adaHasStartedSpeaking = true;
+            Log($"✂️ Barge-in (VAD): cleared playout queue");
+        };
 
-        // Wire playout queue empty → reset bot speaking state
+        // Wire AI response completed → precise bot speaking tracking (matches G711CallHandler v7.4)
+        // Listen to the AI client's OnPlayoutComplete which fires on response.done
+        if (session.AiClient is OpenAiG711Client g711Client)
+        {
+            g711Client.OnResponseCompleted += () =>
+            {
+                Interlocked.Exchange(ref isBotSpeaking, 0);
+                botStoppedSpeakingAt = DateTime.UtcNow;
+                
+                // If queue is already empty, notify immediately; otherwise set pending flag
+                if (playout.QueuedFrames == 0)
+                {
+                    Log($"🔔 Queue already empty - starting watchdog now");
+                    g711Client.NotifyPlayoutComplete();
+                }
+                else
+                {
+                    watchdogPending = true;
+                }
+            };
+        }
+
+        // Wire playout queue empty → reset bot speaking state (matches G711CallHandler v7.4)
         playout.OnQueueEmpty += () =>
         {
-            if (adaHasStartedSpeaking)
+            if (adaHasStartedSpeaking && Volatile.Read(ref isBotSpeaking) == 1)
             {
-                Interlocked.Exchange(ref botSpeakingFlag, 0);
+                Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
+                Log($"🔇 Playout queue empty - echo guard started");
+                session.NotifyPlayoutComplete();
+            }
+            else if (watchdogPending)
+            {
+                watchdogPending = false;
+                Log($"🔇 Playout drained post-response - starting watchdog");
+                session.NotifyPlayoutComplete();
             }
         };
 
@@ -531,39 +567,54 @@ public sealed class SipServer : IAsyncDisposable
                 }
             }
 
-            // ── No hard mute: OpenAI's server-side VAD handles echo rejection ──
-            // It knows its own output audio and can distinguish echo from real speech.
-            // We only apply a brief echo guard after bot stops to catch trailing RTP frames.
-            if (Volatile.Read(ref botSpeakingFlag) == 1)
+            // ── Soft gate with RMS barge-in detection (matches G711CallHandler v7.5) ──
+            // During bot speaking or echo guard, send silence UNLESS user is barging in (RMS > 1500)
+            bool applySoftGate = false;
+            
+            if (Volatile.Read(ref isBotSpeaking) == 1)
             {
-                var msSinceLastEnqueue = (DateTime.UtcNow - lastAudioEnqueuedAt).TotalMilliseconds;
-                if (msSinceLastEnqueue > BOT_SPEAKING_GRACE_MS)
+                applySoftGate = true;
+            }
+            else if (adaHasStartedSpeaking && botStoppedSpeakingAt != DateTime.MinValue)
+            {
+                var msSinceBotStopped = (DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds;
+                if (msSinceBotStopped < ECHO_GUARD_MS)
                 {
-                    // Ada stopped sending audio — clear flag
-                    Interlocked.Exchange(ref botSpeakingFlag, 0);
-                    botStoppedSpeakingAt = DateTime.UtcNow;
+                    applySoftGate = true;
                 }
-                // Audio flows through regardless — no muting, no barge-in threshold
             }
 
-            // ── Echo guard: brief mute after bot stops speaking ──
-            if ((DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds < ECHO_GUARD_MS)
-                return;
+            // ── Apply soft gate: silence or pass-through based on RMS ──
+            byte[] audioToSend = payload;
+            if (applySoftGate)
+            {
+                // Check RMS for barge-in detection (decode only for check)
+                if (rms >= 1500)
+                {
+                    // Barge-in detected — let audio through
+                    Log($"✂️ Barge-in detected (RMS={rms:F0})");
+                }
+                else
+                {
+                    // Not a barge-in — send silence to prevent echo
+                    audioToSend = new byte[payload.Length];
+                    Array.Fill(audioToSend, (byte)0xD5); // A-law silence
+                }
+            }
 
             // ── Ingress volume boost (caller audio often quiet on SIP trunks) ──
-            // Copy before boost so OnCallerAudioMonitor gets original audio
             var ingressGain = (float)_audioSettings.IngressVolumeBoost;
             if (ingressGain > 1.01f)
             {
-                var boosted = new byte[payload.Length];
-                Buffer.BlockCopy(payload, 0, boosted, 0, payload.Length);
+                var boosted = new byte[audioToSend.Length];
+                Buffer.BlockCopy(audioToSend, 0, boosted, 0, audioToSend.Length);
                 Audio.ALawVolumeBoost.ApplyInPlace(boosted, ingressGain);
                 session.ProcessInboundAudio(boosted);
-                return; // skip the default forward below
+                return;
             }
 
             // ── Forward audio to AI session ──
-            session.ProcessInboundAudio(payload);
+            session.ProcessInboundAudio(audioToSend);
         };
 
         // Cleanup: dispose playout when session ends

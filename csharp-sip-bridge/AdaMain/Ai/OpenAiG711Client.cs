@@ -115,6 +115,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     public event Action<string, string>? OnTranscript;
     public event Action? OnBargeIn;
     
+    /// <summary>Fired when AI response stream completes (response.done) — use for precise bot-speaking tracking.</summary>
+    public event Action? OnResponseCompleted;
+    
     /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
     public Func<int>? GetQueuedFrames { get; set; }
     
@@ -587,6 +590,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _lastCompletedResponseId = responseId;
                     _activeResponseId = null;
                     Interlocked.Exchange(ref _responseActive, 0);
+                    try { OnResponseCompleted?.Invoke(); } catch { }
 
                     // Check if this response was triggered by a tool result
                     var wasToolTriggered = Interlocked.Exchange(ref _responseTriggeredByTool, 0) == 1;
