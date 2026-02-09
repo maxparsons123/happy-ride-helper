@@ -534,15 +534,18 @@ public partial class MainForm : Form
 
     private void InitSimliAvatar()
     {
-        if (string.IsNullOrWhiteSpace(_settings.Simli.ApiKey) || string.IsNullOrWhiteSpace(_settings.Simli.FaceId))
-        {
-            lblAvatarStatus.Text = "Not configured";
-            return;
-        }
+        // Fall back to hardcoded defaults if saved settings are empty
+        var apiKey = _settings.Simli.ApiKey;
+        var faceId = _settings.Simli.FaceId;
+        
+        if (string.IsNullOrWhiteSpace(apiKey))
+            apiKey = _settings.Simli.ApiKey = "vlw7tr7vxhhs52bi3rum7";
+        if (string.IsNullOrWhiteSpace(faceId))
+            faceId = _settings.Simli.FaceId = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
 
         var factory = GetLoggerFactory();
         _simliAvatar = new SimliAvatar(factory.CreateLogger<SimliAvatar>());
-        _simliAvatar.Configure(_settings.Simli.ApiKey, _settings.Simli.FaceId);
+        _simliAvatar.Configure(apiKey, faceId);
         _simliAvatar.Dock = DockStyle.Fill;
         pnlAvatarHost.Controls.Clear();
         pnlAvatarHost.Controls.Add(_simliAvatar);
