@@ -9,12 +9,22 @@
     <RootNamespace>AdaVaxVoIP</RootNamespace>
   </PropertyGroup>
 
-  <!-- VaxVoIP SDK uses late-binding (dynamic). No COM reference needed at build time.
-       If you want early-binding, add a COMReference with the GUID from your VaxVoIP installation. -->
+  <ItemGroup>
+    <COMReference Include="VaxTeleServerSDK">
+      <WrapperTool>tlbimp</WrapperTool>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+    </COMReference>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Interop.VaxServerVoAILib">
+      <HintPath>bin\Debug\net8.0-windows\Interop.VaxServerVoAILib.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>
