@@ -624,10 +624,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
     private async Task HandleToolCallAsync(JsonElement root)
     {
-        var now = NowMs();
-        if (now - Volatile.Read(ref _lastToolCallAt) < 200)
-            return;
-        Volatile.Write(ref _lastToolCallAt, now);
+        // NOTE: Debounce removed (was 200ms). Sequential tool calls (sync_booking_data → create_booking)
+        // were being silently dropped, causing Ada to say "I'll finalize" without actually booking.
+        // Duplicate protection is handled by call_id uniqueness instead.
+        Volatile.Write(ref _lastToolCallAt, NowMs());
 
         var callId = root.TryGetProperty("call_id", out var cid) ? cid.GetString() : "";
         var name = root.TryGetProperty("name", out var n) ? n.GetString() : "";
@@ -797,25 +797,26 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         {
             type = "function",
             name = "sync_booking_data",
-            description = "Save booking data as collected. Call after EACH user input.",
+            description = "MANDATORY: Save booking data after EVERY user message that provides info. You MUST call this — your memory alone does NOT persist data. Include ALL known fields each time.",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
                     ["caller_name"] = new { type = "string", description = "Customer name" },
-                    ["pickup"] = new { type = "string", description = "Pickup address" },
-                    ["destination"] = new { type = "string", description = "Destination address" },
+                    ["pickup"] = new { type = "string", description = "Pickup address (verbatim as spoken)" },
+                    ["destination"] = new { type = "string", description = "Destination address (verbatim as spoken)" },
                     ["passengers"] = new { type = "integer", description = "Number of passengers" },
-                    ["pickup_time"] = new { type = "string", description = "Pickup time" }
-                }
+                    ["pickup_time"] = new { type = "string", description = "Pickup time (e.g. 'now', 'in 10 minutes')" }
+                },
+                required = new[] { "caller_name" }
             }
         },
         new
         {
             type = "function",
             name = "create_booking",
-            description = "Books a taxi for the user. Call as soon as you have pickup and destination.",
+            description = "MANDATORY: Books the taxi. You MUST call this immediately after collecting pickup + destination + passengers. Do NOT ask for confirmation — just call it.",
             parameters = new
             {
                 type = "object",
@@ -825,21 +826,22 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     ["dropoff_address"] = new { type = "string", description = "Dropoff/destination address" },
                     ["passenger_count"] = new { type = "integer", description = "Number of passengers (default 1)" }
                 },
-                required = new[] { "pickup_address" }
+                required = new[] { "pickup_address", "dropoff_address" }
             }
         },
         new
         {
             type = "function",
             name = "end_call",
-            description = "End the call after goodbye",
+            description = "End the call. Call this IMMEDIATELY after saying goodbye.",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
                     ["reason"] = new { type = "string", description = "Reason for ending call" }
-                }
+                },
+                required = new[] { "reason" }
             }
         }
     };

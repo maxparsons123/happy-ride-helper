@@ -14,6 +14,9 @@ public partial class MainForm : Form
     private AppSettings _settings;
     private bool _sipConnected;
     private bool _inCall;
+    private bool _muted;
+    private bool _operatorMode;
+    private bool _pttActive;
 
     private SipServer? _sipServer;
     private ILoggerFactory? _loggerFactory;
@@ -22,6 +25,10 @@ public partial class MainForm : Form
     // Audio monitor (hear raw SIP audio locally)
     private WaveOutEvent? _monitorOut;
     private BufferedWaveProvider? _monitorBuffer;
+
+    // Operator microphone (send local mic audio to SIP)
+    private WaveInEvent? _micInput;
+    private readonly object _micLock = new();
 
     public MainForm()
     {
@@ -33,6 +40,7 @@ public partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        StopMicrophone();
         StopAudioMonitor();
         if (_sipServer != null)
         {
@@ -322,8 +330,56 @@ public partial class MainForm : Form
 
     private void chkManualMode_CheckedChanged(object? sender, EventArgs e)
     {
-        var manual = chkManualMode.Checked;
-        Log(manual ? "🎤 Manual mode ON – you will speak directly" : "🤖 Auto-answer mode – AI will respond");
+        _operatorMode = chkManualMode.Checked;
+        btnPtt.Visible = _operatorMode;
+        btnPtt.Enabled = _operatorMode && _inCall;
+
+        if (_operatorMode)
+        {
+            Log("🎤 Operator mode ON – use Push-to-Talk to speak directly to caller");
+        }
+        else
+        {
+            Log("🤖 Auto mode – AI will respond to calls");
+            StopMicrophone();
+        }
+    }
+
+    private void btnMute_Click(object? sender, EventArgs e)
+    {
+        _muted = !_muted;
+        btnMute.Text = _muted ? "🔇 Unmute" : "🔊 Mute";
+        btnMute.BackColor = _muted ? Color.FromArgb(180, 50, 50) : Color.FromArgb(80, 80, 85);
+
+        if (_muted)
+        {
+            _monitorOut?.Pause();
+            Log("🔇 Audio monitor muted");
+        }
+        else
+        {
+            _monitorOut?.Play();
+            Log("🔊 Audio monitor unmuted");
+        }
+    }
+
+    private void btnPtt_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (!_inCall || !_operatorMode) return;
+        _pttActive = true;
+        btnPtt.BackColor = Color.FromArgb(200, 50, 50);
+        btnPtt.Text = "🔴 Speaking…";
+        StartMicrophone();
+        Log("🎙 PTT active – speaking to caller");
+    }
+
+    private void btnPtt_MouseUp(object? sender, MouseEventArgs e)
+    {
+        _pttActive = false;
+        btnPtt.BackColor = Color.FromArgb(156, 39, 176);
+        btnPtt.Text = "🎙 Push-to-Talk";
+        StopMicrophone();
+        Log("🎙 PTT released");
     }
 
     public void SetInCall(bool inCall)
@@ -332,8 +388,18 @@ public partial class MainForm : Form
         btnAnswer.Enabled = !inCall && _sipConnected;
         btnReject.Enabled = !inCall && _sipConnected;
         btnHangUp.Enabled = inCall;
+        btnMute.Enabled = inCall;
+        btnPtt.Enabled = inCall && _operatorMode;
         lblCallInfo.Text = inCall ? "Call in progress" : "No active call";
         lblCallInfo.ForeColor = inCall ? Color.LimeGreen : Color.Gray;
+
+        if (!inCall)
+        {
+            _muted = false;
+            btnMute.Text = "🔊 Mute";
+            btnMute.BackColor = Color.FromArgb(80, 80, 85);
+            StopMicrophone();
+        }
     }
 
     public void OnIncomingCall(string callerId)
@@ -443,7 +509,7 @@ public partial class MainForm : Form
             };
             _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
             _monitorOut.Init(_monitorBuffer);
-            _monitorOut.Play();
+            if (!_muted) _monitorOut.Play();
             Log("🔊 Audio monitor started — hearing raw SIP audio");
         }
         catch (Exception ex)
@@ -462,5 +528,60 @@ public partial class MainForm : Form
         catch { }
         _monitorOut = null;
         _monitorBuffer = null;
+    }
+
+    // ── Operator microphone (Push-to-Talk → SIP) ──
+
+    private void StartMicrophone()
+    {
+        lock (_micLock)
+        {
+            if (_micInput != null) return;
+
+            try
+            {
+                _micInput = new WaveInEvent
+                {
+                    WaveFormat = new WaveFormat(8000, 16, 1), // 8kHz PCM16 mono
+                    BufferMilliseconds = 20
+                };
+
+                _micInput.DataAvailable += (s, e) =>
+                {
+                    if (!_pttActive || _currentSession == null) return;
+
+                    // Convert PCM16 → A-law and feed into session as if it were SIP audio
+                    var alawData = new byte[e.BytesRecorded / 2];
+                    for (int i = 0; i < alawData.Length; i++)
+                    {
+                        short sample = BitConverter.ToInt16(e.Buffer, i * 2);
+                        alawData[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(sample);
+                    }
+
+                    // Send directly to the SIP RTP stream via SipServer
+                    _sipServer?.SendOperatorAudio(alawData);
+                };
+
+                _micInput.StartRecording();
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠ Microphone failed: {ex.Message}");
+            }
+        }
+    }
+
+    private void StopMicrophone()
+    {
+        lock (_micLock)
+        {
+            try
+            {
+                _micInput?.StopRecording();
+                _micInput?.Dispose();
+            }
+            catch { }
+            _micInput = null;
+        }
     }
 }
