@@ -118,9 +118,15 @@ public sealed class CallSession : ICallSession
             g711Client.NotifyPlayoutComplete();
     }
     
-    /// <summary>Direct A-law frames from OpenAI → playout via event.</summary>
+    /// <summary>Direct A-law frames from OpenAI → playout via event (with volume boost).</summary>
     private void HandleAiAudio(byte[] alawFrame)
     {
+        // Apply configurable volume boost in A-law domain (decode→amplify→re-encode)
+        var gain = (float)_settings.Audio.VolumeBoost;
+        if (gain > 1.01f || gain < 0.99f)
+        {
+            Audio.ALawVolumeBoost.ApplyInPlace(alawFrame, gain);
+        }
         OnAudioOut?.Invoke(alawFrame);
     }
     
