@@ -614,10 +614,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                  text.Contains("for calling", StringComparison.OrdinalIgnoreCase)))
                             {
                                 Interlocked.Exchange(ref _closingScriptSpoken, 1);
-                                Log("👋 Goodbye detected - arming 5s hangup watchdog");
+                                Log("👋 Goodbye detected - arming 8s hangup watchdog");
                                 _ = Task.Run(async () =>
                                 {
-                                    await Task.Delay(5000);
+                                    await Task.Delay(8000); // 8s buffer for playout to drain fully
                                     if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                         return;
                                     Log("⏰ Goodbye watchdog triggered - ending call");
