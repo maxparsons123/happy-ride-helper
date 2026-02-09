@@ -9,14 +9,14 @@ public class ConfigForm : Form
 {
     public AppSettings Settings { get; private set; }
 
-    private TabControl tabs;
-    private TextBox txtOpenAiKey, txtOpenAiModel, txtOpenAiVoice;
-    private TextBox txtGoogleMapsKey;
-    private TextBox txtSimliApiKey, txtSimliFaceId;
-    private TextBox txtDeepgramKey;
-    private TextBox txtBsqdWebhook, txtBsqdApiKey, txtWhatsAppWebhook;
-    private ComboBox cmbCodec;
-    private NumericUpDown nudVolumeBoost, nudEchoGuard;
+    private TabControl tabs = null!;
+    private TextBox txtOpenAiKey = null!, txtOpenAiModel = null!, txtOpenAiVoice = null!;
+    private TextBox txtGoogleMapsKey = null!;
+    private TextBox txtSimliApiKey = null!, txtSimliFaceId = null!;
+    private TextBox txtDeepgramKey = null!;
+    private TextBox txtBsqdWebhook = null!, txtBsqdApiKey = null!, txtWhatsAppWebhook = null!;
+    private ComboBox cmbCodec = null!;
+    private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!;
 
     public ConfigForm(AppSettings settings)
     {
