@@ -54,6 +54,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private int _transcriptPending;       // Block response.create until transcript arrives
     private int _noReplyCount;            // Per-call
     private int _toolCalledInResponse;    // Track if tool was called during current response
+    private int _responseTriggeredByTool;  // Set when response.create is sent after a tool result
     private long _lastAdaFinishedAt;      // RTP playout completion time (echo guard source of truth)
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -178,6 +179,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _transcriptPending, 0);
         Interlocked.Exchange(ref _noReplyCount, 0);
         Interlocked.Exchange(ref _toolCalledInResponse, 0);
+        Interlocked.Exchange(ref _responseTriggeredByTool, 0);
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -516,11 +518,17 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _activeResponseId = null;
                     Interlocked.Exchange(ref _responseActive, 0);
 
-                    // Flush deferred response ONLY if no tool was called in this response.
-                    // If a tool WAS called, the tool handler already queues its own response.create,
-                    // so flushing the deferred one here causes double-speak (Ada announces fare twice).
+                    // Check if this response was triggered by a tool result
+                    var wasToolTriggered = Interlocked.Exchange(ref _responseTriggeredByTool, 0) == 1;
+
+                    // Flush deferred response ONLY if:
+                    // 1. No tool was called in this response (tool handler queues its own response.create)
+                    // 2. This response was NOT triggered by a tool result (prevents hallucination loop)
+                    // Without check #2, the sequence is: tool → response.create → Ada speaks →
+                    // response.done → deferred flush → ANOTHER response.create → OpenAI hallucinates answer
                     if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1 &&
-                        Volatile.Read(ref _toolCalledInResponse) == 0)
+                        Volatile.Read(ref _toolCalledInResponse) == 0 &&
+                        !wasToolTriggered)
                     {
                         Log("🔄 Flushing deferred response.create");
                         _ = Task.Run(async () =>
@@ -640,9 +648,11 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                         }
                     }
 
-                    // Trigger response if not already active
-                    if (Volatile.Read(ref _responseActive) == 0)
-                        _ = QueueResponseCreateAsync(delayMs: 50, waitForCurrentResponse: false);
+                    // DO NOT auto-queue response.create here.
+                    // With server_vad, OpenAI will auto-respond after speech_stopped + commit.
+                    // The tool handler already queues its own response.create after processing.
+                    // Auto-queuing here caused deferred responses that made OpenAI hallucinate
+                    // answers the user never spoke (e.g., fabricating addresses).
                     break;
                 }
 
@@ -758,8 +768,12 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
 
         // Trigger new response immediately - bypass transcript guard since we have tool result
+        // Mark as tool-triggered so response.done won't flush deferred responses after this
         if (IsConnected)
+        {
+            Interlocked.Exchange(ref _responseTriggeredByTool, 1);
             await QueueResponseCreateAsync(delayMs: 10, waitForCurrentResponse: false, maxWaitMs: 0, bypassTranscriptGuard: true).ConfigureAwait(false);
+        }
     }
 
     // =========================
