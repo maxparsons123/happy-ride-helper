@@ -144,6 +144,7 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
         await SendJsonAsync(new { type = "response.create" });
     }
 
+    private async Task ReceiveLoopAsync()
     {
         var buffer = new byte[64 * 1024];
         var sb = new StringBuilder();
