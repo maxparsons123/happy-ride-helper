@@ -133,6 +133,7 @@ public sealed class CallSession : ICallSession
             "sync_booking_data" => await HandleSyncBookingAsync(args),
             "book_taxi" => await HandleBookTaxiAsync(args),
             "create_booking" => await HandleCreateBookingAsync(args),
+            "find_local_events" => HandleFindLocalEvents(args),
             "end_call" => HandleEndCall(args),
             _ => new { error = $"Unknown tool: {name}" }
         };
@@ -565,6 +566,31 @@ public sealed class CallSession : ICallSession
         _booking.DestPostalCode = result.DestPostalCode;
         _booking.DestCity = result.DestCity;
         _booking.DestFormatted = result.DestFormatted;
+    }
+    
+    private object HandleFindLocalEvents(Dictionary<string, object?> args)
+    {
+        var category = args.TryGetValue("category", out var cat) ? cat?.ToString() ?? "all" : "all";
+        var near = args.TryGetValue("near", out var n) ? n?.ToString() : null;
+        var date = args.TryGetValue("date", out var dt) ? dt?.ToString() ?? "this weekend" : "this weekend";
+        
+        _logger.LogInformation("[{SessionId}] 🎭 Events lookup: {Category} near {Near} on {Date}",
+            SessionId, category, near ?? "unknown", date);
+        
+        // Mock response - in production this would call an events API
+        var mockEvents = new[]
+        {
+            new { name = "Live Music at The Empire", venue = near ?? "city centre", date = "Tonight, 8pm", type = "concert" },
+            new { name = "Comedy Night at The Kasbah", venue = near ?? "city centre", date = "Saturday, 9pm", type = "comedy" },
+            new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
+        };
+        
+        return new
+        {
+            success = true,
+            events = mockEvents,
+            message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+        };
     }
     
     private object HandleEndCall(Dictionary<string, object?> args)

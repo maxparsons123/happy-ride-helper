@@ -1057,6 +1057,23 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         new
         {
             type = "function",
+            name = "find_local_events",
+            description = "Look up local events near a location. Use when the caller asks about events, things to do, or what's on nearby.",
+            parameters = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["category"] = new { type = "string", description = "Event category: all, concert, comedy, theatre, sports, festival" },
+                    ["near"] = new { type = "string", description = "Location or city to search near" },
+                    ["date"] = new { type = "string", description = "When: 'tonight', 'this weekend', 'tomorrow', or a specific date" }
+                },
+                required = new[] { "near" }
+            }
+        },
+        new
+        {
+            type = "function",
             name = "end_call",
             description = "End the call. Call this IMMEDIATELY after the FINAL CLOSING script. Never before.",
             parameters = new
