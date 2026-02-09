@@ -14,6 +14,9 @@ public sealed class CallSession : ICallSession
     private readonly ILogger<CallSession> _logger;
     private readonly AppSettings _settings;
     private readonly IOpenAiClient _aiClient;
+    
+    /// <summary>Expose AI client for wiring (e.g., playout queue depth).</summary>
+    public IOpenAiClient AiClient => _aiClient;
     private readonly IFareCalculator _fareCalculator;
     private readonly IDispatcher _dispatcher;
     

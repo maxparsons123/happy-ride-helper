@@ -113,6 +113,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     public event Action? OnPlayoutComplete;
     public event Action<string, string>? OnTranscript;
     public event Action? OnBargeIn;
+    
+    /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
+    public Func<int>? GetQueuedFrames { get; set; }
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
@@ -650,19 +653,36 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                 {
                                     // Wait up to 15s for OpenAI to finish streaming the goodbye audio
                                     var waitStart = Environment.TickCount64;
-                                    const int MAX_WAIT_MS = 15000;
+                                    const int MAX_STREAM_WAIT_MS = 15000;
+                                    const int MAX_DRAIN_WAIT_MS = 20000;
                                     
                                     while (Volatile.Read(ref _responseActive) == 1 &&
-                                           Environment.TickCount64 - waitStart < MAX_WAIT_MS)
+                                           Environment.TickCount64 - waitStart < MAX_STREAM_WAIT_MS)
                                     {
                                         await Task.Delay(200);
                                         if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                             return;
                                     }
                                     
-                                    // Now give the playout buffer time to drain
-                                    // The goodbye script is ~5-6s of speech; 6s drain ensures full playback
-                                    await Task.Delay(6000);
+                                    // Poll playout queue until drained (or fallback timeout)
+                                    var drainStart = Environment.TickCount64;
+                                    while (Environment.TickCount64 - drainStart < MAX_DRAIN_WAIT_MS)
+                                    {
+                                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                            return;
+                                        
+                                        var queued = GetQueuedFrames?.Invoke() ?? 0;
+                                        if (queued == 0)
+                                        {
+                                            Log($"✅ Playout queue drained — waiting 1s before hangup");
+                                            break;
+                                        }
+                                        
+                                        await Task.Delay(200);
+                                    }
+                                    
+                                    // Final 1s margin for last frames to reach the caller
+                                    await Task.Delay(1000);
                                     
                                     if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                         return;
