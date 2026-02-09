@@ -86,7 +86,7 @@ public sealed class SimliSettings
     public string FaceId { get; set; } = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
 
     /// <summary>Enable Simli avatar audio feeding during calls. Disable to eliminate potential jitter from upsampling/WebRTC.</summary>
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; } = false; // Default OFF — toggle on explicitly when needed
 }
 
 public sealed class SttSettings

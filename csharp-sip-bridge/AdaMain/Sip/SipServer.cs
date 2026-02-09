@@ -510,16 +510,18 @@ public sealed class SipServer : IAsyncDisposable
                     if (fc > 0)
                     {
                         var avgRms = (totalRms / 1000.0) / fc;
-                        var peakRms = peak / 1000.0;
-                        var minRms = min == int.MaxValue ? 0 : min / 1000.0;
-                        var silPct = silent * 100.0 / fc;
-                        var clipPct = clipped * 100.0 / fc;
-                        var quality = clipPct > 5 ? "⚠️ CLIPPING" :
-                                      avgRms < 100 ? "❌ VERY LOW" :
-                                      avgRms < 500 ? "⚠️ LOW" : "✅ GOOD";
+                        // Only log when average RMS exceeds threshold (reduces log spam)
+                        if (avgRms >= 500)
+                        {
+                            var peakRms = peak / 1000.0;
+                            var minRms = min == int.MaxValue ? 0 : min / 1000.0;
+                            var silPct = silent * 100.0 / fc;
+                            var clipPct = clipped * 100.0 / fc;
+                            var quality = clipPct > 5 ? "⚠️ CLIPPING" : "✅ GOOD";
 
-                        Log($"📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
-                            $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+                            Log($"📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
+                                $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
+                        }
                     }
                 }
             }
