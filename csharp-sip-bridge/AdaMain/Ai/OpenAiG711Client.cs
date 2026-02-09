@@ -883,9 +883,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.6,
-                    prefix_padding_ms = 300,
-                    silence_duration_ms = 1000
+                    threshold = 0.5,
+                    prefix_padding_ms = 400,
+                    silence_duration_ms = 1200
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
