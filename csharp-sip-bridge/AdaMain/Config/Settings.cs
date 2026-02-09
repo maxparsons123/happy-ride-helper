@@ -77,8 +77,8 @@ public sealed class SupabaseSettings
 
 public sealed class SimliSettings
 {
-    public string ApiKey { get; set; } = "";
-    public string FaceId { get; set; } = "";
+    public string ApiKey { get; set; } = "vlw7tr7vxhhs52bi3rum7";
+    public string FaceId { get; set; } = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
 }
 
 public sealed class SttSettings
