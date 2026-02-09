@@ -38,7 +38,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
     // FIXED 100ms buffer (5 frames) - absorbs OpenAI burst delivery
     private const int JITTER_BUFFER_FRAMES = 5;
-    private const int REBUFFER_THRESHOLD = 2;    // Re-buffer if queue drops below this
+    private const int REBUFFER_THRESHOLD = 0;    // Disable mid-stream rebuffering — only buffer on initial fill
     private const int MAX_QUEUE_FRAMES = 1500;   // ~30s safety cap
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
