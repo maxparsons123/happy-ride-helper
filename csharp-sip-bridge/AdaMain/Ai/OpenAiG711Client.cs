@@ -55,6 +55,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private int _noReplyCount;            // Per-call
     private int _toolCalledInResponse;    // Track if tool was called during current response
     private int _responseTriggeredByTool;  // Set when response.create is sent after a tool result
+    private int _hasEnqueuedAudio;         // FIX #2: Set when playout queue has received audio this response
     private long _lastAdaFinishedAt;      // RTP playout completion time (echo guard source of truth)
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -186,6 +187,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _toolCalledInResponse, 0);
         Interlocked.Exchange(ref _responseTriggeredByTool, 0);
         Interlocked.Exchange(ref _bookingConfirmed, 0);
+        Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -470,8 +472,11 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
             if (!IsConnected) return;
 
+            // FIX #3: Clear transcript guard — without this, AI is gate-blocked forever
+            Interlocked.Exchange(ref _transcriptPending, 0);
+            
             // Still stuck — re-arm the normal no-reply watchdog
-            Log("⏰ Barge-in fallback: no VAD commit detected — re-arming no-reply watchdog");
+            Log("⏰ Barge-in fallback: no VAD commit detected — clearing transcript guard & re-arming watchdog");
             StartNoReplyWatchdog();
         });
     }
@@ -551,6 +556,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
                     Interlocked.Exchange(ref _toolCalledInResponse, 0); // Reset per-response
+                    Interlocked.Exchange(ref _hasEnqueuedAudio, 0);     // FIX #2: Reset per-response
                     _lastAdaTranscript = null; // Reset per-response
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
@@ -565,8 +571,12 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
                     if (responseId == null || responseId == _lastCompletedResponseId)
                         break;
+                    // FIX #1: Use Response ID tracking — ignore stale response.done from previous turns
                     if (_activeResponseId != null && responseId != _activeResponseId)
+                    {
+                        Log($"⚠️ Ignoring stale response.done (got {responseId}, expected {_activeResponseId})");
                         break;
+                    }
 
                     _lastCompletedResponseId = responseId;
                     _activeResponseId = null;
@@ -644,9 +654,12 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                         {
                             // v2.1: Pass raw A-law bytes directly — ALawRtpPlayout handles framing.
                             // Do NOT frame here; double-framing with silence padding causes warble.
-                            var alawBytes = Convert.FromBase64String(b64);
-                            if (alawBytes.Length > 0)
-                                OnAudio?.Invoke(alawBytes);
+                        var alawBytes = Convert.FromBase64String(b64);
+                        if (alawBytes.Length > 0)
+                        {
+                            Interlocked.Exchange(ref _hasEnqueuedAudio, 1); // FIX #2: Mark audio received
+                            OnAudio?.Invoke(alawBytes);
+                        }
                         }
                     }
                     break;
@@ -684,10 +697,21 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                             return;
                                     }
                                     
-                                    // Phase 2: Mandatory settling delay — transcript deltas arrive
-                                    // before audio frames are fully enqueued to the playout buffer.
-                                    // Without this, GetQueuedFrames returns 0 prematurely.
-                                    await Task.Delay(2000);
+                                    // FIX #2: Wait until audio has actually been enqueued before polling drain.
+                                    // Without this, GetQueuedFrames returns 0 because buffer hasn't filled yet,
+                                    // causing premature hangup mid-sentence on high-latency connections.
+                                    const int MAX_ENQUEUE_WAIT_MS = 5000;
+                                    var enqueueStart = Environment.TickCount64;
+                                    while (Volatile.Read(ref _hasEnqueuedAudio) == 0 &&
+                                           Environment.TickCount64 - enqueueStart < MAX_ENQUEUE_WAIT_MS)
+                                    {
+                                        await Task.Delay(100);
+                                        if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
+                                            return;
+                                    }
+                                    
+                                    // Phase 2: Settling delay after audio started arriving
+                                    await Task.Delay(1500);
                                     if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0)
                                         return;
                                     
@@ -908,7 +932,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     type = "server_vad",
                     threshold = 0.5,
                     prefix_padding_ms = 300,
-                    silence_duration_ms = 500
+                    silence_duration_ms = 1000 // 1s — safer for address dictation with pauses
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
@@ -964,9 +988,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         text = System.Text.RegularExpressions.Regex.Replace(text, @"\bLike and subscribe\b", "", IC);
         text = System.Text.RegularExpressions.Regex.Replace(text, @"\bCircuits awaiting\b", "", IC);
 
-        // ── Alphanumeric house number recovery ──
-        // e.g. "52 A David Road" → "52A David Road"
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\b(\d{1,4})\s+([A-Da-d])\b(?=\s)", "$1$2", IC);
+        // ── Alphanumeric house number recovery (aggressive) ──
+        // Catches "52 A", "52 - A", "52, A" → "52A"
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"(\d+)\s*[-,\s]\s*([A-Da-d])\b", "$1$2", IC);
 
         // "to A" / "2 A" after digits context — e.g. "5 to A" → preserve as-is (ambiguous)
         // But "It's 2A" should stay "2A"
