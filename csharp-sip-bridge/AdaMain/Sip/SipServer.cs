@@ -359,6 +359,9 @@ public sealed class SipServer : IAsyncDisposable
 
     private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
     {
+        // Reset cleanup guard for new call
+        Interlocked.Exchange(ref _cleanupDone, 0);
+
         // Match proven G711CallHandler v7.5 pattern: AudioSourcesEnum.None + codec preference ordering
         var audioEncoder = new AudioEncoder();
 
@@ -674,8 +677,14 @@ public sealed class SipServer : IAsyncDisposable
 
     #region Cleanup
 
+    private int _cleanupDone; // 0=pending, 1=done (atomic guard against re-entrant cleanup)
+
     private async Task CleanupCallAsync(string reason)
     {
+        // Atomic guard: only the FIRST caller executes cleanup
+        if (Interlocked.Exchange(ref _cleanupDone, 1) == 1)
+            return;
+
         ICallSession? session;
 
         lock (_callLock)
