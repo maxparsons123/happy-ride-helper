@@ -424,6 +424,14 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _callEnded) != 0) return;
             if (Volatile.Read(ref _disposed) != 0) return;
             if (!IsConnected) return;
+            
+            // Don't fire if a response is currently active (e.g. fare still being spoken)
+            if (Volatile.Read(ref _responseActive) == 1)
+            {
+                Log("⏰ No-reply watchdog suppressed — response still active, re-arming");
+                StartNoReplyWatchdog(); // Re-arm with fresh timeout
+                return;
+            }
 
             var count = Interlocked.Increment(ref _noReplyCount);
 
