@@ -566,6 +566,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     Interlocked.Exchange(ref _responseActive, 1);
                     Interlocked.Exchange(ref _toolCalledInResponse, 0); // Reset per-response
                     Interlocked.Exchange(ref _hasEnqueuedAudio, 0);     // FIX #2: Reset per-response
+                    Interlocked.Increment(ref _noReplyWatchdogId);      // Cancel stale watchdog (e.g. fare interjection arriving after tool response)
                     _lastAdaTranscript = null; // Reset per-response
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
