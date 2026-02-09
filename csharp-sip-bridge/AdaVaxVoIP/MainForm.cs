@@ -17,6 +17,9 @@ public class MainForm : Form
     private readonly TextBox _txtRecordingsPath;
     private readonly TextBox _txtSupabaseUrl;
     private readonly TextBox _txtVoice;
+    private readonly TextBox _txtSipServer;
+    private readonly TextBox _txtSipUser;
+    private readonly TextBox _txtSipPassword;
 
     // Status
     private readonly Label _lblStatus;
@@ -50,7 +53,7 @@ public class MainForm : Form
             Text = "⚙️ Settings",
             ForeColor = Color.White,
             Dock = DockStyle.Top,
-            Height = 200,
+            Height = 260,
             Padding = new Padding(10)
         };
 
@@ -58,7 +61,7 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 4,
-            RowCount = 3,
+            RowCount = 5,
             AutoSize = false
         };
         settingsTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
@@ -79,6 +82,10 @@ public class MainForm : Form
         _txtRecordingsPath.Text = @"C:\TaxiRecordings\";
         _txtSupabaseUrl = AddSettingRow(settingsTable, "Supabase URL:", 2, 2);
         _txtSupabaseUrl.Text = "https://oerketnvlmptpfvttysy.supabase.co";
+
+        _txtSipServer = AddSettingRow(settingsTable, "SIP Server:", 3, 0);
+        _txtSipUser = AddSettingRow(settingsTable, "SIP User:", 3, 2);
+        _txtSipPassword = AddSettingRow(settingsTable, "SIP Password:", 4, 0, true);
 
         grpSettings.Controls.Add(settingsTable);
 
