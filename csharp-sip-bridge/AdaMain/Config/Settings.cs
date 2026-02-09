@@ -47,6 +47,14 @@ public sealed class AudioSettings
     public string PreferredCodec { get; set; } = "PCMA";
     public double VolumeBoost { get; set; } = 2.5;
     public int EchoGuardMs { get; set; } = 200;
+
+    /// <summary>
+    /// RMS threshold for barge-in detection during soft gate.
+    /// Lower = more sensitive (user can interrupt more easily).
+    /// Higher = less sensitive (better noise rejection).
+    /// Recommended: 1200-2000. Default: 1500.
+    /// </summary>
+    public float BargeInRmsThreshold { get; set; } = 1500f;
 }
 
 public sealed class DispatchSettings
