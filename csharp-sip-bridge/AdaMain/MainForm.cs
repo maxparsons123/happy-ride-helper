@@ -46,15 +46,43 @@ public partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        Log("🛑 Shutting down…");
+
+        // Stop operator mic
         StopMicrophone();
+
+        // Stop local audio monitor
         StopAudioMonitor();
+
+        // End active call session
+        try { (_currentSession as IDisposable)?.Dispose(); }
+        catch { }
+        _currentSession = null;
+
+        // Disconnect and dispose Simli avatar
+        try
+        {
+            if (_simliAvatar != null)
+            {
+                _simliAvatar.DisconnectAsync().GetAwaiter().GetResult();
+                _simliAvatar.Dispose();
+                _simliAvatar = null;
+            }
+        }
+        catch { }
+
+        // Shut down SIP server
         if (_sipServer != null)
         {
-            Log("Shutting down SIP…");
-            _sipServer.StopAsync().GetAwaiter().GetResult();
+            try { _sipServer.StopAsync().GetAwaiter().GetResult(); }
+            catch { }
             _sipServer = null;
         }
+
+        // Dispose logger factory
         _loggerFactory?.Dispose();
+        _loggerFactory = null;
+
         base.OnFormClosing(e);
     }
 
