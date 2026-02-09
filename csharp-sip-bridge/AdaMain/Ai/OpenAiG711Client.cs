@@ -783,8 +783,19 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     Interlocked.Increment(ref _noReplyWatchdogId); // Cancel pending watchdog
                     Interlocked.Exchange(ref _noReplyCount, 0);    // Reset no-reply count
                     Interlocked.Exchange(ref _transcriptPending, 1);
-                    Log("✂️ Barge-in detected");
-                    OnBargeIn?.Invoke();
+                    
+                    // Only treat as barge-in if Ada is actively responding with audio
+                    if (Volatile.Read(ref _responseActive) == 1 && Volatile.Read(ref _hasEnqueuedAudio) == 1)
+                    {
+                        Log("✂️ Barge-in detected (interrupting active response)");
+                        OnBargeIn?.Invoke();
+                        // Cancel active response so OpenAI stops generating
+                        _ = SendJsonAsync(new { type = "response.cancel" });
+                    }
+                    else
+                    {
+                        Log("🎤 User speech detected (no active response — normal turn)");
+                    }
                     
                     // ARM FALLBACK: If this barge-in is a false positive (VAD never commits),
                     // re-arm the no-reply watchdog after a generous timeout so the call doesn't hang.
