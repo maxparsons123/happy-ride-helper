@@ -853,7 +853,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 voice = _settings.Voice,
                 input_audio_format = "g711_alaw",
                 output_audio_format = "g711_alaw",
-                input_audio_transcription = new { model = "whisper-1", language = _detectedLanguage },
+                input_audio_transcription = new { model = "whisper-1" }, // No language constraint — let Whisper auto-detect for language switching
                 turn_detection = new
                 {
                     type = "server_vad",
@@ -1070,14 +1070,17 @@ Speak naturally, like a friendly professional taxi dispatcher.
 LANGUAGE
 ==============================
 
-Start in English based on the caller's phone number.
-CONTINUOUSLY MONITOR the caller's spoken language.
-If they speak another language or ask to switch, IMMEDIATELY switch for all responses.
+You MUST detect the caller's spoken language from their VERY FIRST utterance.
+If the caller speaks Dutch, respond in Dutch. If French, respond in French. And so on.
+Do NOT assume English — listen to what they actually say and match it.
+
+If the caller switches language mid-call, IMMEDIATELY switch to match them.
+The initial greeting language is just a guess from the phone number — the caller's spoken language ALWAYS overrides it.
 
 Supported languages:
 English, Dutch, French, German, Spanish, Italian, Polish, Portuguese.
 
-Default to English if uncertain.
+Default to English ONLY if the speech is unclear or mixed.
 
 ==============================
 BOOKING FLOW (STRICT)
