@@ -448,6 +448,7 @@ public sealed class SipServer : IAsyncDisposable
         const int ECHO_GUARD_MS = 120; // v7.5: 120ms reduced echo guard (was 300ms — caused delays)
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
+        DateTime lastBargeInLogAt = DateTime.MinValue; // Throttle barge-in logs to 1/sec
         var callStartedAt = DateTime.UtcNow;
         int isBotSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
         int adaHasStartedSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked — was non-atomic bool)
@@ -586,8 +587,13 @@ public sealed class SipServer : IAsyncDisposable
 
                 if (rms >= 1500)
                 {
-                    // Barge-in detected — let audio through
-                    Log($"✂️ Barge-in detected (RMS={rms:F0})");
+                    // Barge-in detected — let audio through (throttle log to 1/sec)
+                    var now = DateTime.UtcNow;
+                    if ((now - lastBargeInLogAt).TotalMilliseconds >= 1000)
+                    {
+                        lastBargeInLogAt = now;
+                        Log($"✂️ Barge-in detected (RMS={rms:F0})");
+                    }
                 }
                 else
                 {

@@ -1478,10 +1478,11 @@ RESPONSE STYLE
 ==============================
 
 - One question at a time
-- Under 20 words per response
+- Under 15 words per response — be concise
 - Calm, professional, human
 - Acknowledge corrections briefly, then move on
-- NEVER say ""Just a moment"" or filler phrases
+- NEVER say filler phrases: ""just a moment"", ""please hold on"", ""let me check"", ""one moment"", ""please wait""
+- When fare is being calculated, say ONLY the interjection (e.g. ""Let me get you a price on that journey."") — do NOT add extra sentences
 - NEVER call end_call except after the FINAL CLOSING
     ";
 
