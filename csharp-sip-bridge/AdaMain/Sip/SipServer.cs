@@ -121,10 +121,12 @@ public sealed class SipServer : IAsyncDisposable
 
         if (_regAgent != null)
         {
-            _regAgent.RegistrationSuccessful -= OnRegistrationSuccess;
-            _regAgent.RegistrationFailed -= OnRegistrationFailure;
-            try { _regAgent.Stop(); } catch { }
+            // Unsubscribe BEFORE Stop() to prevent callbacks during shutdown
+            var agent = _regAgent;
             _regAgent = null;
+            agent.RegistrationSuccessful -= OnRegistrationSuccess;
+            agent.RegistrationFailed -= OnRegistrationFailure;
+            try { agent.Stop(); } catch { }
         }
 
         if (_userAgent != null)
@@ -306,7 +308,11 @@ public sealed class SipServer : IAsyncDisposable
     /// </summary>
     private void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
     {
-        _ = HandleIncomingCallSafeAsync(ua, req);
+        _ = HandleIncomingCallSafeAsync(ua, req).ContinueWith(t =>
+        {
+            if (t.IsFaulted)
+                Log($"💥 Unhandled call exception: {t.Exception?.InnerException?.Message}");
+        }, TaskScheduler.Default);
     }
 
     private async Task HandleIncomingCallSafeAsync(SIPUserAgent ua, SIPRequest req)
@@ -442,7 +448,7 @@ public sealed class SipServer : IAsyncDisposable
         bool inboundFlushComplete = false;
         var callStartedAt = DateTime.UtcNow;
         int isBotSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
-        bool adaHasStartedSpeaking = false;
+        int adaHasStartedSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked — was non-atomic bool)
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
         int watchdogPending = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
 
@@ -450,7 +456,7 @@ public sealed class SipServer : IAsyncDisposable
         session.OnAudioOut += frame =>
         {
             Interlocked.Exchange(ref isBotSpeaking, 1);
-            adaHasStartedSpeaking = true;
+            Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
             playout.BufferALaw(frame);
         };
 
@@ -462,7 +468,7 @@ public sealed class SipServer : IAsyncDisposable
             
             playout.Clear();
             Interlocked.Exchange(ref isBotSpeaking, 0);
-            adaHasStartedSpeaking = true;
+            Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
             Log($"✂️ Barge-in (VAD): cleared playout queue");
         };
 
@@ -491,7 +497,7 @@ public sealed class SipServer : IAsyncDisposable
         // Wire playout queue empty → reset bot speaking state (matches G711CallHandler v7.4)
         playout.OnQueueEmpty += () =>
         {
-            if (adaHasStartedSpeaking && Volatile.Read(ref isBotSpeaking) == 1)
+            if (Volatile.Read(ref adaHasStartedSpeaking) == 1 && Volatile.Read(ref isBotSpeaking) == 1)
             {
                 Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
@@ -555,7 +561,7 @@ public sealed class SipServer : IAsyncDisposable
             {
                 applySoftGate = true;
             }
-            else if (adaHasStartedSpeaking && botStoppedSpeakingAt != DateTime.MinValue)
+            else if (Volatile.Read(ref adaHasStartedSpeaking) == 1 && botStoppedSpeakingAt != DateTime.MinValue)
             {
                 var msSinceBotStopped = (DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds;
                 if (msSinceBotStopped < ECHO_GUARD_MS)
@@ -656,10 +662,10 @@ public sealed class SipServer : IAsyncDisposable
                 Log($"🎙️ Ingress: {framesForwarded} frames (passthrough 8kHz)");
         };
 
-        // Cleanup: dispose playout when session ends
+        // Cleanup: dispose playout when session ends (safe even if called multiple times)
         session.OnEnded += (s, reason) =>
         {
-            playout.Dispose();
+            try { playout.Dispose(); } catch { }
         };
 
         OnCallStarted?.Invoke(caller);
@@ -712,7 +718,9 @@ public sealed class SipServer : IAsyncDisposable
                 _operatorTimestamp,
                 0,  // marker bit
                 8); // PCMA payload type
-            _operatorTimestamp += (uint)alawData.Length; // cumulative for next packet
+            // PCMA at 8kHz: each byte = 1 sample, so byte count == sample count.
+            // This is valid ONLY for 8-bit codecs (A-law/μ-law) at 8kHz.
+            _operatorTimestamp += (uint)alawData.Length;
         }
         catch { /* ignore send errors during teardown */ }
     }
@@ -859,16 +867,26 @@ public sealed class SipServer : IAsyncDisposable
 
     #endregion
 
-    /// <summary>Quick inline A-law decode for RMS check (ITU-T G.711).</summary>
-    private static short ALawDecode(byte alaw)
+    /// <summary>Quick inline A-law decode for RMS check (ITU-T G.711).
+    /// Uses a pre-built lookup table to avoid repeated decode on hot path.</summary>
+    private static readonly short[] ALawDecodeTable = BuildALawTable();
+
+    private static short[] BuildALawTable()
     {
-        alaw ^= 0x55;
-        int sign = (alaw & 0x80) != 0 ? -1 : 1;
-        int segment = (alaw >> 4) & 0x07;
-        int value = (alaw & 0x0F) << 4 | 0x08;
-        if (segment > 0) value = (value + 0x100) << (segment - 1);
-        return (short)(sign * value);
+        var table = new short[256];
+        for (int i = 0; i < 256; i++)
+        {
+            int a = i ^ 0x55;
+            int sign = (a & 0x80) != 0 ? -1 : 1;
+            int segment = (a >> 4) & 0x07;
+            int value = (a & 0x0F) << 4 | 0x08;
+            if (segment > 0) value = (value + 0x100) << (segment - 1);
+            table[i] = (short)(sign * value);
+        }
+        return table;
     }
+
+    private static short ALawDecode(byte alaw) => ALawDecodeTable[alaw];
 
     /// <summary>Thread-safe max update using Interlocked compare-and-swap.</summary>
     private static void InterlockedMax(ref int location, int value)
@@ -888,9 +906,18 @@ public sealed class SipServer : IAsyncDisposable
 
     /// <summary>Non-blocking log: enqueues message and drains on ThreadPool.
     /// Safe to call from RTP/playout threads without blocking audio.</summary>
+    private const int MAX_LOG_QUEUE_SIZE = 1000;
+
     private void Log(string msg)
     {
         if (_disposed) return;
+
+        // Drop oldest if queue grows unbounded (prevents OOM under high RTP traffic)
+        while (_logQueue.Count >= MAX_LOG_QUEUE_SIZE)
+        {
+            _logQueue.TryDequeue(out _);
+        }
+
         _logQueue.Enqueue($"{DateTime.Now:HH:mm:ss.fff} {msg}");
 
         // Only one drain loop at a time
