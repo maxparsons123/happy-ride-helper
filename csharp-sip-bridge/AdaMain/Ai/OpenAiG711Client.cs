@@ -213,7 +213,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               (bypassTranscriptGuard || NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 200);
+               (bypassTranscriptGuard || NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300);
     }
 
     private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000, bool bypassTranscriptGuard = false)
@@ -783,18 +783,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     Interlocked.Increment(ref _noReplyWatchdogId); // Cancel pending watchdog
                     Interlocked.Exchange(ref _noReplyCount, 0);    // Reset no-reply count
                     Interlocked.Exchange(ref _transcriptPending, 1);
-                    
-                    // FIX: Cancel any active response immediately on barge-in
-                    // Without this, the AI keeps talking while the user is speaking
-                    if (Volatile.Read(ref _responseActive) == 1)
-                    {
-                        _ = CancelResponseAsync();
-                        Log("✂️ Barge-in: cancelling active response");
-                    }
-                    else
-                    {
-                        Log("✂️ Barge-in detected");
-                    }
+                    Log("✂️ Barge-in detected");
                     OnBargeIn?.Invoke();
                     
                     // ARM FALLBACK: If this barge-in is a false positive (VAD never commits),
