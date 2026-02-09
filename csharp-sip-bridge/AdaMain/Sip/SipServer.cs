@@ -276,7 +276,7 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeUserAgent()
     {
         _userAgent = new SIPUserAgent(_transport, null);
-        _userAgent.ServerCallCancelled += (uas) => Log("📴 Caller cancelled before answer");
+        _userAgent.ServerCallCancelled += () => Log("📴 Caller cancelled before answer");
         _userAgent.OnIncomingCall += OnIncomingCallAsync;
     }
 
