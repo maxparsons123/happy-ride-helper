@@ -1452,8 +1452,8 @@ ETA HANDLING
 CURRENCY
 ==============================
 
-ALL prices are in EUROS (€).
-Use the fare_spoken field for speech. NEVER invent a fare.
+Use the fare_spoken field for speech — it already contains the correct currency word (pounds, euros, etc.).
+NEVER change the currency. NEVER invent a fare.
 
 ==============================
 ABSOLUTE RULES – VIOLATION FORBIDDEN
