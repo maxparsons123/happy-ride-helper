@@ -209,7 +209,8 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                 
                 case "response.done":
                     Interlocked.Exchange(ref _responseActive, 0);
-                    OnPlayoutComplete?.Invoke();
+                    // Don't fire OnPlayoutComplete here - let ALawRtpPlayout.OnQueueEmpty handle it
+                    // Firing immediately causes jitter at end because playout buffer still has frames
                     break;
                 
                 case "response.audio.delta":
