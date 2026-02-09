@@ -59,7 +59,7 @@ public static class G711Codec
             mask = 0xFF;
         }
 
-        pcm = (short)Math.Min(pcm, cClip);
+        pcm = (short)Math.Min((int)pcm, (int)cClip);
         pcm += 0x84;
 
         int seg;
