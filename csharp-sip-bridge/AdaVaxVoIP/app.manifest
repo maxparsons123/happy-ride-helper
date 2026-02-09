@@ -13,7 +13,7 @@
   <!-- Registration-free COM activation for VaxVoIP SDK -->
   <dependency>
     <dependentAssembly>
-      <assemblyIdentity type="win32" name="VaxServerVoAI" version="1.0.0.0" />
+      <assemblyIdentity type="win32" name="VaxServerVoAI.sxs" version="1.0.0.0" />
     </dependentAssembly>
   </dependency>
 </assembly>
