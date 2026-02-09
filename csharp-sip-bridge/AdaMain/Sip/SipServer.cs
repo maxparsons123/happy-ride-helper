@@ -426,10 +426,10 @@ public sealed class SipServer : IAsyncDisposable
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
         var callStartedAt = DateTime.UtcNow;
-        volatile int isBotSpeaking = 0; // 0=false, 1=true
+        int isBotSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
-        volatile bool watchdogPending = false;
+        int watchdogPending = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
 
         // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
         session.OnAudioOut += frame =>
@@ -468,7 +468,7 @@ public sealed class SipServer : IAsyncDisposable
                 }
                 else
                 {
-                    watchdogPending = true;
+                    Interlocked.Exchange(ref watchdogPending, 1);
                 }
             };
         }
@@ -483,9 +483,9 @@ public sealed class SipServer : IAsyncDisposable
                 Log($"🔇 Playout queue empty - echo guard started");
                 session.NotifyPlayoutComplete();
             }
-            else if (watchdogPending)
+            else if (Volatile.Read(ref watchdogPending) == 1)
             {
-                watchdogPending = false;
+                Interlocked.Exchange(ref watchdogPending, 0);
                 Log($"🔇 Playout drained post-response - starting watchdog");
                 session.NotifyPlayoutComplete();
             }
