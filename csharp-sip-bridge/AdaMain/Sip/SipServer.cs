@@ -300,7 +300,16 @@ public sealed class SipServer : IAsyncDisposable
 
     #region Call Handling
 
-    private async void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
+    /// <summary>
+    /// SIPSorcery requires a sync delegate, so we use a fire-and-forget wrapper
+    /// with top-level exception handling to prevent unobserved task crashes.
+    /// </summary>
+    private void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
+    {
+        _ = HandleIncomingCallSafeAsync(ua, req);
+    }
+
+    private async Task HandleIncomingCallSafeAsync(SIPUserAgent ua, SIPRequest req)
     {
         var caller = CallerIdExtractor.Extract(req);
         Log($"📞 Incoming call from {caller}");
@@ -331,7 +340,6 @@ public sealed class SipServer : IAsyncDisposable
             else
             {
                 Log("⏳ Waiting for manual answer (auto-answer disabled)...");
-                // Store the UA/request for manual answer later
                 OnCallStarted?.Invoke(caller);
             }
         }
@@ -415,145 +423,13 @@ public sealed class SipServer : IAsyncDisposable
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
         bool watchdogPending = false;
 
-        // Track bot speaking state from playout activity
-        session.OnAudioOut += _ =>
+        // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
+        session.OnAudioOut += frame =>
         {
             isBotSpeaking = true;
             adaHasStartedSpeaking = true;
+            playout.BufferALaw(frame);
         };
-
-        playout.OnQueueEmpty += () =>
-        {
-            // v7.6: Match G711CallHandler — only notify when bot was actually speaking
-            if (adaHasStartedSpeaking && isBotSpeaking)
-            {
-                isBotSpeaking = false;
-                botStoppedSpeakingAt = DateTime.UtcNow;
-                session.NotifyPlayoutComplete();
-            }
-            else if (watchdogPending)
-            {
-                watchdogPending = false;
-                session.NotifyPlayoutComplete();
-            }
-        };
-
-        rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
-        {
-            if (mt != SDPMediaTypesEnum.audio) return;
-
-            inboundPacketCount++;
-
-            // 1) Flush first N packets (initial junk/noise)
-            if (!inboundFlushComplete)
-            {
-                if (inboundPacketCount <= FLUSH_PACKETS)
-                {
-                    if (inboundPacketCount == 1)
-                        Log($"🧹 Flushing inbound audio ({FLUSH_PACKETS} packets)...");
-                    return;
-                }
-                inboundFlushComplete = true;
-                Log("✅ Inbound flush complete");
-            }
-
-            // 2) Early protection: ignore audio for first 500ms
-            if ((DateTime.UtcNow - callStartedAt).TotalMilliseconds < EARLY_PROTECTION_MS)
-                return;
-
-            var payload = pkt.Payload;
-            if (payload == null || payload.Length == 0) return;
-
-            // Raw audio monitor — fires before any gating so you hear exactly what arrives on the wire
-            // ── Audio quality diagnostics ──
-            {
-                double sumSqDq = 0;
-                short peakSample = 0;
-                int clippedCount = 0;
-                for (int i = 0; i < payload.Length; i++)
-                {
-                    short s = ALawDecode(payload[i]);
-                    short abs = Math.Abs(s);
-                    sumSqDq += (double)s * s;
-                    if (abs > peakSample) peakSample = abs;
-                    if (abs > 31000) clippedCount++; // Near-max for 16-bit
-                }
-                float rmsFrame = (float)Math.Sqrt(sumSqDq / payload.Length);
-
-                _dqFrameCount++;
-                _dqRmsSum += rmsFrame;
-                if (rmsFrame > _dqPeakRms) _dqPeakRms = rmsFrame;
-                if (rmsFrame < _dqMinRms) _dqMinRms = rmsFrame;
-                if (rmsFrame < 50) _dqSilentFrames++;
-                if (clippedCount > 0) _dqClippedFrames++;
-
-                if (_dqFrameCount >= DQ_LOG_INTERVAL_FRAMES)
-                {
-                    float avgRms = (float)(_dqRmsSum / _dqFrameCount);
-                    float silencePct = _dqSilentFrames * 100f / _dqFrameCount;
-                    float clippedPct = _dqClippedFrames * 100f / _dqFrameCount;
-
-                    // Quality rating
-                    string quality;
-                    if (avgRms < 100) quality = "❌ VERY LOW (mic muted or no signal?)";
-                    else if (avgRms < 300) quality = "⚠️ LOW (quiet caller or poor connection)";
-                    else if (avgRms < 800) quality = "⚠️ FAIR (acceptable but quiet)";
-                    else if (avgRms < 3000) quality = "✅ GOOD";
-                    else if (avgRms < 6000) quality = "✅ STRONG";
-                    else if (clippedPct > 10) quality = "⚠️ CLIPPING (too loud, distortion likely)";
-                    else quality = "✅ LOUD";
-
-                    Log($"🎙️ Audio: avg={avgRms:F0} peak={_dqPeakRms:F0} min={_dqMinRms:F0} silent={silencePct:F0}% clipped={clippedPct:F0}% → {quality}");
-
-                    // Reset counters
-                    _dqFrameCount = 0;
-                    _dqRmsSum = 0;
-                    _dqPeakRms = 0;
-                    _dqMinRms = float.MaxValue;
-                    _dqSilentFrames = 0;
-                    _dqClippedFrames = 0;
-                }
-            }
-
-            OnCallerAudioMonitor?.Invoke(payload);
-
-            // 3) Soft gate: during bot speaking or echo guard, send silence unless barge-in
-            bool applySoftGate = false;
-            if (isBotSpeaking)
-            {
-                applySoftGate = true;
-            }
-            else if (adaHasStartedSpeaking && botStoppedSpeakingAt != DateTime.MinValue)
-            {
-                if ((DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds < ECHO_GUARD_MS)
-                    applySoftGate = true;
-            }
-
-            byte[] audioToSend = payload;
-            if (applySoftGate)
-            {
-                // Check RMS for barge-in detection
-                double sumSq = 0;
-                for (int i = 0; i < payload.Length; i++)
-                {
-                    short sample = ALawDecode(payload[i]);
-                    sumSq += (double)sample * sample;
-                }
-                float rms = (float)Math.Sqrt(sumSq / payload.Length);
-
-                if (rms < BARGE_IN_RMS_THRESHOLD)
-                {
-                    // Not barge-in — replace with silence
-                    audioToSend = new byte[payload.Length];
-                    Array.Fill(audioToSend, (byte)0xD5);
-                }
-            }
-
-            session.ProcessInboundAudio(audioToSend);
-        };
-
-        // Wire AI audio → playout buffer (OnAudioOut tracking is also wired above for soft gate)
-        session.OnAudioOut += frame => playout.BufferALaw(frame);
 
         // Wire barge-in → playout clear
         session.OnBargeIn += () => playout.Clear();
@@ -611,10 +487,12 @@ public sealed class SipServer : IAsyncDisposable
         try
         {
             // SIPSorcery 10.x: SendRtpRaw is on VoIPMediaSession, not AudioStream
+            // PCMA is 8-bit encoding: 1 byte = 1 sample, so alawData.Length == sample count.
+            // At 8kHz, a 20ms frame = 160 bytes = 160 samples → timestamp increment of 160.
             rtp.SendRtpRaw(
                 SDPMediaTypesEnum.audio,
                 alawData,
-                (uint)(alawData.Length),  // timestamp increment = sample count
+                (uint)alawData.Length,  // timestamp increment = sample count (correct for 8-bit codecs)
                 0,  // marker bit
                 8); // PCMA payload type
         }
