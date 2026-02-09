@@ -68,6 +68,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // Price-promise safety net: track Ada's last transcript per response
     private string? _lastAdaTranscript;
     private bool _awaitingConfirmation;    // Longer watchdog timeout when waiting for confirmation
+    private int _bookingConfirmed;         // Set once book_taxi succeeds — disables safety net
 
     // =========================
     // CALLER STATE (per-call)
@@ -180,6 +181,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _noReplyCount, 0);
         Interlocked.Exchange(ref _toolCalledInResponse, 0);
         Interlocked.Exchange(ref _responseTriggeredByTool, 0);
+        Interlocked.Exchange(ref _bookingConfirmed, 0);
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -543,7 +545,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     }
                     // PRICE-PROMISE SAFETY NET (ported from WinForms):
                     // If Ada promised to finalize/book but no tool was called, force create_booking
-                    else if (Volatile.Read(ref _toolCalledInResponse) == 0 &&
+                    // CRITICAL: Skip if booking already confirmed — prevents infinite loop
+                    else if (Volatile.Read(ref _bookingConfirmed) == 0 &&
+                             Volatile.Read(ref _toolCalledInResponse) == 0 &&
                              !string.IsNullOrEmpty(_lastAdaTranscript) &&
                              HasBookingIntent(_lastAdaTranscript))
                     {
@@ -712,6 +716,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             return;
 
         Log($"🔧 Tool: {name}");
+
+        // Mark booking as confirmed to disable price-promise safety net
+        if (name == "book_taxi")
+            Interlocked.Exchange(ref _bookingConfirmed, 1);
 
         Dictionary<string, object?> args;
         try { args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsStr ?? "{}") ?? new(); }
