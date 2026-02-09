@@ -516,8 +516,11 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _activeResponseId = null;
                     Interlocked.Exchange(ref _responseActive, 0);
 
-                    // Always flush deferred response (tool results, etc.)
-                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1)
+                    // Flush deferred response ONLY if no tool was called in this response.
+                    // If a tool WAS called, the tool handler already queues its own response.create,
+                    // so flushing the deferred one here causes double-speak (Ada announces fare twice).
+                    if (Interlocked.Exchange(ref _deferredResponsePending, 0) == 1 &&
+                        Volatile.Read(ref _toolCalledInResponse) == 0)
                     {
                         Log("🔄 Flushing deferred response.create");
                         _ = Task.Run(async () =>
@@ -797,14 +800,14 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
         var greeting = _detectedLanguage switch
         {
-            "nl" => "Hallo, welkom bij Voice Taxibot. Wat is uw naam alstublieft?",
-            "fr" => "Bonjour, bienvenue chez Voice Taxibot. Quel est votre nom s'il vous plaît?",
-            "de" => "Hallo, willkommen bei Voice Taxibot. Wie ist Ihr Name bitte?",
-            "es" => "Hola, bienvenido a Voice Taxibot. ¿Cuál es su nombre por favor?",
-            "it" => "Ciao, benvenuto a Voice Taxibot. Come si chiama per favore?",
-            "pl" => "Witam, witamy w Voice Taxibot. Jak się Pan/Pani nazywa?",
-            "pt" => "Olá, bem-vindo ao Voice Taxibot. Qual é o seu nome por favor?",
-            _ => "Hello, welcome to Voice Taxibot. May I have your name please?"
+            "nl" => "Hallo, welkom bij Ada Taxibot. Wat is uw naam alstublieft?",
+            "fr" => "Bonjour, bienvenue chez Ada Taxibot. Quel est votre nom s'il vous plaît?",
+            "de" => "Hallo, willkommen bei Ada Taxibot. Wie ist Ihr Name bitte?",
+            "es" => "Hola, bienvenido a Ada Taxibot. ¿Cuál es su nombre por favor?",
+            "it" => "Ciao, benvenuto a Ada Taxibot. Come si chiama per favore?",
+            "pl" => "Witam, witamy w Ada Taxibot. Jak się Pan/Pani nazywa?",
+            "pt" => "Olá, bem-vindo ao Ada Taxibot. Qual é o seu nome por favor?",
+            _ => "Hello, welcome to Ada Taxibot. May I have your name please?"
         };
 
         await SendJsonAsync(new
