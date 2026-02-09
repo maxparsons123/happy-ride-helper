@@ -19,6 +19,7 @@ public class MainForm : Form
     private readonly Button _btnStart;
     private readonly Button _btnStop;
     private readonly Button _btnSettings;
+    private readonly Button _btnAddLine;
 
     // Runtime
     private AdaTaxiServer? _server;
@@ -80,6 +81,18 @@ public class MainForm : Form
         };
         _btnSettings.Click += BtnSettings_Click;
 
+        _btnAddLine = new Button
+        {
+            Text = "📡 Add Trunk",
+            BackColor = Color.FromArgb(50, 50, 120),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(120, 35),
+            Enabled = false,
+            Font = new Font("Segoe UI", 10F)
+        };
+        _btnAddLine.Click += BtnAddLine_Click;
+
         _lblStatus = new Label
         {
             Text = "● Stopped",
@@ -98,7 +111,7 @@ public class MainForm : Form
             Padding = new Padding(15, 10, 0, 0)
         };
 
-        pnlControls.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnSettings, _lblStatus, _lblActiveCalls });
+        pnlControls.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnSettings, _btnAddLine, _lblStatus, _lblActiveCalls });
 
         // === Log Panel ===
         var grpLog = new GroupBox
@@ -184,6 +197,7 @@ public class MainForm : Form
             }
 
             _running = true;
+            _btnAddLine.Enabled = true;
             _lblStatus.Text = "● Running";
             _lblStatus.ForeColor = Color.LimeGreen;
             Log($"🚀 Ada Taxi server running — SIP port {_settings.Sip.Port}", Color.LimeGreen);
@@ -221,9 +235,33 @@ public class MainForm : Form
         _btnStart.Enabled = true;
         _btnStop.Enabled = false;
         _btnSettings.Enabled = true;
+        _btnAddLine.Enabled = false;
         _lblStatus.Text = "● Stopped";
         _lblStatus.ForeColor = Color.Gray;
         Log("Server stopped.", Color.Gray);
+    }
+
+    private void BtnAddLine_Click(object? sender, EventArgs e)
+    {
+        if (_server == null || !_running) return;
+
+        var sip = _settings.Sip;
+        if (string.IsNullOrWhiteSpace(sip.Server) || sip.Server == "sip.example.com")
+        {
+            MessageBox.Show("Configure a SIP server in ⚙ Settings first.", "No SIP Trunk",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        try
+        {
+            _server.RegisterSipTrunk();
+            Log("📡 SIP trunk registration triggered", Color.Cyan);
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Trunk registration failed: {ex.Message}", Color.Red);
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

@@ -47,25 +47,38 @@ public class AdaTaxiServer : cVaxServerCOM
         AddLine("AnonymousUDP", VAX_LINE_TYPE_UDP, "", "", "", "", "", "255.255.255.255", -1, "32");
 
         // Register with external SIP trunk if configured
-        if (!string.IsNullOrWhiteSpace(_settings.Sip.Server) && _settings.Sip.Server != "sip.example.com"
-            && !string.IsNullOrWhiteSpace(_settings.Sip.Username))
+        RegisterSipTrunkInternal();
+
+        Log($"✅ VaxVoIP Server started on UDP port {_settings.Sip.Port} (RTP {_settings.VaxVoIP.RtpPortMin}-{_settings.VaxVoIP.RtpPortMax})");
+        return true;
+    }
+
+    /// <summary>
+    /// Register/re-register the SIP trunk at runtime (called from UI button or on start).
+    /// </summary>
+    public void RegisterSipTrunk() => RegisterSipTrunkInternal();
+
+    private void RegisterSipTrunkInternal()
+    {
+        if (string.IsNullOrWhiteSpace(_settings.Sip.Server) || _settings.Sip.Server == "sip.example.com"
+            || string.IsNullOrWhiteSpace(_settings.Sip.Username))
+            return;
+
+        var lineType = _settings.Sip.Transport.ToUpperInvariant() switch
         {
-            var lineType = _settings.Sip.Transport.ToUpperInvariant() switch
-            {
-                "TCP" => VAX_LINE_TYPE_TCP,
-                "TLS" => VAX_LINE_TYPE_TLS,
-                _ => VAX_LINE_TYPE_UDP
-            };
+            "TCP" => VAX_LINE_TYPE_TCP,
+            "TLS" => VAX_LINE_TYPE_TLS,
+            _ => VAX_LINE_TYPE_UDP
+        };
 
-            AddLine("SipTrunk", lineType,
-                _settings.Sip.Username, _settings.Sip.Username,
-                _settings.Sip.EffectiveAuthUser, _settings.Sip.Password,
-                _settings.Sip.Domain ?? _settings.Sip.Server,
-                _settings.Sip.Server, _settings.Sip.Port, "32");
+        AddLine("SipTrunk", lineType,
+            _settings.Sip.Username, _settings.Sip.Username,
+            _settings.Sip.EffectiveAuthUser, _settings.Sip.Password,
+            _settings.Sip.Domain ?? _settings.Sip.Server,
+            _settings.Sip.Server, _settings.Sip.Port, "32");
 
-            RegisterLine("SipTrunk", 3600);
-            Log("📡 Registering with SIP trunk: " + _settings.Sip.Server);
-        }
+        RegisterLine("SipTrunk", 3600);
+        Log("📡 Registering with SIP trunk: " + _settings.Sip.Server);
 
         Log($"✅ VaxVoIP Server started on UDP port {_settings.Sip.Port} (RTP {_settings.VaxVoIP.RtpPortMin}-{_settings.VaxVoIP.RtpPortMax})");
         return true;
