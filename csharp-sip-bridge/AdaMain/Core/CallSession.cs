@@ -365,6 +365,19 @@ public sealed class CallSession : ICallSession
             _ = _dispatcher.DispatchAsync(_booking, CallerId);
             _ = _dispatcher.SendWhatsAppAsync(CallerId);
             
+            // Post-booking timeout: force farewell after 15s if user doesn't respond
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(15000);
+                if (!IsActive) return;
+                if (_aiClient is OpenAiG711Client g711)
+                {
+                    if (!g711.IsConnected) return;
+                    g711.CancelDeferredResponse();
+                    _logger.LogInformation("[{SessionId}] ⏰ Post-booking timeout - requesting farewell", SessionId);
+                }
+            });
+            
             return new
             {
                 success = true,
@@ -461,6 +474,19 @@ public sealed class CallSession : ICallSession
         // Dispatch (fire-and-forget)
         _ = _dispatcher.DispatchAsync(_booking, CallerId);
         _ = _dispatcher.SendWhatsAppAsync(CallerId);
+        
+        // Post-booking timeout: force farewell after 15s if user doesn't respond
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(15000);
+            if (!IsActive) return;
+            if (_aiClient is OpenAiG711Client g711)
+            {
+                if (!g711.IsConnected) return;
+                g711.CancelDeferredResponse();
+                _logger.LogInformation("[{SessionId}] ⏰ Post-booking timeout - requesting farewell", SessionId);
+            }
+        });
         
         var fareSpoken = FormatFareForSpeech(_booking.Fare);
         
