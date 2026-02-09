@@ -425,6 +425,31 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Fallback for false barge-ins: if VAD fires speech_started but never speech_stopped,
+    /// the normal no-reply watchdog is cancelled and never re-armed. This ensures a watchdog
+    /// still fires so the call doesn't hang indefinitely.
+    /// </summary>
+    private void ArmBargeInFallbackWatchdog()
+    {
+        const int FALLBACK_MS = 20000; // 20s — generous since user may still be speaking
+        var fallbackId = Volatile.Read(ref _noReplyWatchdogId); // Capture current ID
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(FALLBACK_MS);
+
+            // If watchdog ID changed, a real speech_stopped or NotifyPlayoutComplete happened → abort
+            if (Volatile.Read(ref _noReplyWatchdogId) != fallbackId) return;
+            if (Volatile.Read(ref _callEnded) != 0 || Volatile.Read(ref _disposed) != 0) return;
+            if (!IsConnected) return;
+
+            // Still stuck — re-arm the normal no-reply watchdog
+            Log("⏰ Barge-in fallback: no VAD commit detected — re-arming no-reply watchdog");
+            StartNoReplyWatchdog();
+        });
+    }
+
     // =========================
     // RECEIVE LOOP
     // =========================
@@ -687,6 +712,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     Interlocked.Exchange(ref _transcriptPending, 1);
                     Log("✂️ Barge-in detected");
                     OnBargeIn?.Invoke();
+                    
+                    // ARM FALLBACK: If this barge-in is a false positive (VAD never commits),
+                    // re-arm the no-reply watchdog after a generous timeout so the call doesn't hang.
+                    ArmBargeInFallbackWatchdog();
                     break;
 
                 case "input_audio_buffer.speech_stopped":
