@@ -509,7 +509,7 @@ public sealed class SipServer : IAsyncDisposable
                 return;
 
             // ── Forward audio to AI session ──
-            session.SendAudio(payload);
+            session.ProcessInboundAudio(payload);
         };
 
         // Cleanup: dispose playout when session ends
