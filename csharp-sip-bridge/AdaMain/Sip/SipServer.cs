@@ -274,6 +274,7 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeUserAgent()
     {
         _userAgent = new SIPUserAgent(_transport, null);
+        _userAgent.ServerCallCancelled += (uas) => Log("📴 Caller cancelled before answer");
         _userAgent.OnIncomingCall += OnIncomingCallAsync;
     }
 
@@ -346,6 +347,8 @@ public sealed class SipServer : IAsyncDisposable
         {
             Log($"🔥 Error handling incoming call: {ex.Message}");
             _logger.LogError(ex, "Error handling call from {Caller}", caller);
+            // Ghost call catch: ensure cleanup if session init failed
+            await CleanupCallAsync("call_init_failed");
         }
     }
 
@@ -399,8 +402,20 @@ public sealed class SipServer : IAsyncDisposable
             await CleanupCallAsync("remote_hangup");
         };
 
-        // Create AI session
-        var session = await _sessionManager.CreateSessionAsync(caller);
+        // Create AI session (wrapped in try-catch to prevent ghost calls on API outage)
+        ICallSession session;
+        try
+        {
+            session = await _sessionManager.CreateSessionAsync(caller);
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ AI Session Init Failed: {ex.Message}. Ending call.");
+            try { ua.Hangup(); } catch { }
+            rtpSession.Close("ai_init_failed");
+            return;
+        }
+
         session.OnEnded += async (s, reason) => await CleanupCallAsync(reason);
 
         lock (_callLock)
