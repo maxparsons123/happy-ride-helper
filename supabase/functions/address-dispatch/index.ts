@@ -6,6 +6,44 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// ── Fare calculation constants (matching C# FareCalculator) ──
+const BASE_FARE = 3.50;
+const PER_MILE = 1.00;
+const MIN_FARE = 4.00;
+const AVG_SPEED_MPH = 20.0;
+const BUFFER_MINUTES = 3;
+
+function haversineDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3958.8; // Earth radius in miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function calculateFare(distanceMiles: number): { fare: string; fare_spoken: string; eta: string; distance_miles: number } {
+  const rawFare = Math.max(MIN_FARE, BASE_FARE + distanceMiles * PER_MILE);
+  // Round to nearest 0.50
+  const fare = Math.round(rawFare * 2) / 2;
+  const etaMinutes = Math.ceil(distanceMiles / AVG_SPEED_MPH * 60) + BUFFER_MINUTES;
+
+  const fareStr = `£${fare.toFixed(2)}`;
+
+  // Generate spoken fare (e.g., "12 euros 50" or "25 euros")
+  const euros = Math.floor(fare);
+  const cents = Math.round((fare - euros) * 100);
+  const fareSpoken = cents > 0 ? `${euros} euros ${cents}` : `${euros} euros`;
+
+  return {
+    fare: fareStr,
+    fare_spoken: fareSpoken,
+    eta: `${etaMinutes} minutes`,
+    distance_miles: Math.round(distanceMiles * 100) / 100,
+  };
+}
+
 const SYSTEM_PROMPT = `Role: Professional Taxi Dispatch Logic System for UK & Netherlands.
 
 Objective: Extract, validate, and GEOCODE pickup and drop-off addresses from user messages, using phone number patterns to determine geographic bias.
@@ -245,7 +283,6 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
     let parsed;
     try {
       let jsonStr = content.trim();
-      // Strip ```json ... ``` wrapper that Gemini often adds
       const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (codeBlockMatch) {
         jsonStr = codeBlockMatch[1].trim();
@@ -253,7 +290,6 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       parsed = JSON.parse(jsonStr);
     } catch (parseErr) {
       console.error("Failed to parse AI JSON:", content);
-      // Return a fallback structure
       parsed = {
         detected_area: "unknown",
         phone_analysis: {
@@ -267,7 +303,25 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       };
     }
 
-    console.log(`✅ Address dispatch result:`, JSON.stringify(parsed, null, 2));
+    // ── Calculate fare from Gemini coordinates ──
+    const pLat = parsed.pickup?.lat;
+    const pLon = parsed.pickup?.lon;
+    const dLat = parsed.dropoff?.lat;
+    const dLon = parsed.dropoff?.lon;
+
+    if (typeof pLat === "number" && typeof pLon === "number" &&
+        typeof dLat === "number" && typeof dLon === "number" &&
+        pLat !== 0 && dLat !== 0) {
+      const distMiles = haversineDistanceMiles(pLat, pLon, dLat, dLon);
+      const fareCalc = calculateFare(distMiles);
+      parsed.fare = fareCalc;
+      console.log(`💰 Fare calculated: ${fareCalc.fare} (${fareCalc.distance_miles} miles, ETA ${fareCalc.eta})`);
+    } else {
+      console.log(`⚠️ No valid coordinates for fare calculation`);
+      parsed.fare = null;
+    }
+
+    console.log(`✅ Address dispatch result: area=${parsed.detected_area}, status=${parsed.status}, fare=${parsed.fare?.fare || 'N/A'}`);
 
     return new Response(JSON.stringify(parsed), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

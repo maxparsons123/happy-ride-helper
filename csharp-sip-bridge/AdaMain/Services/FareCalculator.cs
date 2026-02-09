@@ -152,17 +152,35 @@ public sealed class FareCalculator : IFareCalculator
             _logger.LogInformation("📍 Resolved: pickup='{Pickup}' ({PLat},{PLon}), dest='{Dest}' ({DLat},{DLon})",
                 resolvedPickup, pickupLat, pickupLon, resolvedDest, destLat, destLon);
 
+            // Try to use edge-calculated fare first (single source of truth)
+            string? edgeFare = null, edgeFareSpoken = null, edgeEta = null;
+            if (root.TryGetProperty("fare", out var fareEl) && fareEl.ValueKind == JsonValueKind.Object)
+            {
+                if (fareEl.TryGetProperty("fare", out var fv)) edgeFare = fv.GetString();
+                if (fareEl.TryGetProperty("fare_spoken", out var fs)) edgeFareSpoken = fs.GetString();
+                if (fareEl.TryGetProperty("eta", out var ev)) edgeEta = ev.GetString();
+                _logger.LogInformation("💰 Edge function returned fare: {Fare}, ETA: {Eta}", edgeFare, edgeEta);
+            }
+
             // If Gemini returned valid coordinates for both, use them directly (skip geocoding!)
             if (pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
                 pickupLat.Value != 0 && destLat.Value != 0)
             {
-                var distanceMiles = HaversineDistance(pickupLat.Value, pickupLon.Value, destLat.Value, destLon.Value);
-                var fare = Math.Max(MinFare, BaseFare + (decimal)distanceMiles * PerMile);
-                fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2;
-                var etaMinutes = (int)Math.Ceiling(distanceMiles / AvgSpeedMph * 60) + BufferMinutes;
-
-                result.Fare = $"£{fare:F2}";
-                result.Eta = $"{etaMinutes} minutes";
+                // Prefer edge-calculated fare, fall back to local calculation
+                if (!string.IsNullOrWhiteSpace(edgeFare))
+                {
+                    result.Fare = edgeFare;
+                    result.Eta = edgeEta ?? "10 minutes";
+                }
+                else
+                {
+                    var distanceMiles = HaversineDistance(pickupLat.Value, pickupLon.Value, destLat.Value, destLon.Value);
+                    var fare = Math.Max(MinFare, BaseFare + (decimal)distanceMiles * PerMile);
+                    fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2;
+                    var etaMinutes = (int)Math.Ceiling(distanceMiles / AvgSpeedMph * 60) + BufferMinutes;
+                    result.Fare = $"£{fare:F2}";
+                    result.Eta = $"{etaMinutes} minutes";
+                }
                 result.PickupLat = pickupLat.Value;
                 result.PickupLon = pickupLon.Value;
                 result.PickupStreet = pickupStreet;
