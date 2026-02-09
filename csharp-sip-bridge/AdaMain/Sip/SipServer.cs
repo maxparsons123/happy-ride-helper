@@ -266,15 +266,6 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeUserAgent()
     {
         _userAgent = new SIPUserAgent(_transport, null);
-
-        // NAT fix: inject STUN-discovered public IP into SDP so the provider
-        // sees our real address instead of 192.168.x.x in Contact/SDP headers.
-        if (_publicIp != null)
-        {
-            Log($"🌐 Injecting public IP {_publicIp} into SDP media address");
-            _userAgent.SdpMediaAddressOverride = _publicIp;
-        }
-
         _userAgent.OnIncomingCall += OnIncomingCallAsync;
     }
 
@@ -365,6 +356,10 @@ public sealed class SipServer : IAsyncDisposable
         var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
         var rtpSession = new VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
+
+        // NAT: AcceptRtpFromAny handles inbound RTP from any source IP.
+        // For outbound SDP, SIPSorcery auto-mangles the connection address
+        // when it detects the remote endpoint is on a different subnet.
 
         // Track negotiated codec (matches G711CallHandler)
         rtpSession.OnAudioFormatsNegotiated += formats =>
