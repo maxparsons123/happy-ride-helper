@@ -236,8 +236,8 @@ public sealed class CallSession : ICallSession
                 }
                 else
                 {
-                    _logger.LogWarning("[{SessionId}] ⏱️ Auto-quote AI extraction timed out, using fallback", SessionId);
-                    result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
+                    _logger.LogWarning("[{SessionId}] ⏱️ Auto-quote AI extraction timed out — skipping (book_taxi will handle)", SessionId);
+                    return; // Don't fallback to geocoding here — it gives wrong results for partial addresses
                 }
                 
                 // Guard: if book_taxi already set the fare while we were calculating, skip
