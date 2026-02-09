@@ -246,7 +246,7 @@ public sealed class CallSession : ICallSession
                 fare = _booking.Fare,
                 fare_spoken = spokenFare,
                 eta = _booking.Eta,
-                message = $"ANNOUNCE THE FARE AND ASK FOR CONFIRMATION. The fare is {spokenFare} and ETA is {_booking.Eta}."
+                message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is {spokenFare} with an estimated arrival in {_booking.Eta}. Would you like to proceed or edit any of the details?'"
             };
         }
         catch (Exception ex)
@@ -262,7 +262,7 @@ public sealed class CallSession : ICallSession
                 fare = "€12.50",
                 fare_spoken = "12 euros 50",
                 eta = "6 minutes",
-                message = "ANNOUNCE THE FARE AND ASK FOR CONFIRMATION."
+                message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is 12 euros 50 with an estimated arrival in 6 minutes. Would you like to proceed or edit any of the details?'"
             };
         }
     }
@@ -330,7 +330,7 @@ public sealed class CallSession : ICallSession
                     fare = _booking.Fare,
                     fare_spoken = spokenFare,
                     eta = _booking.Eta,
-                    message = $"The fare is {spokenFare}, and the driver will arrive in {_booking.Eta}. Ask if they want to confirm."
+                    message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is {spokenFare} with an estimated arrival in {_booking.Eta}. Would you like to proceed or edit any of the details?'"
                 };
             }
             catch (Exception ex)
@@ -346,7 +346,7 @@ public sealed class CallSession : ICallSession
                     fare = _booking.Fare,
                     fare_spoken = "12 euros 50",
                     eta = _booking.Eta,
-                    message = $"The fare is approximately 12 euros 50, driver arrives in 6 minutes."
+                    message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is approximately 12 euros 50 with an estimated arrival in 6 minutes. Would you like to proceed or edit any of the details?'"
                 };
             }
         }
