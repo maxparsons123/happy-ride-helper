@@ -404,6 +404,10 @@ public sealed class SipServer : IAsyncDisposable
         // Create ALawRtpPlayout FIRST (v7.4 rebuffer engine) — needed for RTP wiring below
         var playout = new ALawRtpPlayout(rtpSession);
         playout.OnLog += msg => Log(msg);
+        
+        // Wire playout queue depth query for drain-aware goodbye shutdown
+        if (session.AiClient is OpenAiG711Client g711Wire)
+            g711Wire.GetQueuedFrames = () => playout.QueuedFrames;
 
         // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler)
         const int FLUSH_PACKETS = 20;
