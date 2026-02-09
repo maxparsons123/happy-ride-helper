@@ -291,11 +291,33 @@ public sealed class CallSession : ICallSession
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
                 return new { success = false, error = "Missing pickup or destination" };
             
+            // ── REUSE existing auto-quote if fare already calculated by sync_booking_data ──
+            if (!string.IsNullOrWhiteSpace(_booking.Fare) && !string.IsNullOrWhiteSpace(_booking.Eta))
+            {
+                _logger.LogInformation("[{SessionId}] 💰 Reusing existing auto-quote: {Fare}, ETA: {Eta}",
+                    SessionId, _booking.Fare, _booking.Eta);
+                
+                if (_aiClient is OpenAiG711Client g711q)
+                    g711q.SetAwaitingConfirmation(true);
+                
+                var spokenFare = FormatFareForSpeech(_booking.Fare);
+                return new
+                {
+                    success = true,
+                    fare = _booking.Fare,
+                    fare_spoken = spokenFare,
+                    eta = _booking.Eta,
+                    pickup_address = _booking.Pickup,
+                    destination_address = _booking.Destination,
+                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
+                };
+            }
+            
             try
             {
                 _logger.LogInformation("[{SessionId}] 💰 Starting AI address extraction for quote...", SessionId);
                 
-                // Use AI-powered extraction with 2s timeout
+                // Use AI-powered extraction with 10s timeout
                 var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
                 var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
                 
@@ -327,23 +349,23 @@ public sealed class CallSession : ICallSession
                 // Store results using helper
                 ApplyFareResult(result);
                 
-                if (_aiClient is OpenAiG711Client g711q)
-                    g711q.SetAwaitingConfirmation(true);
+                if (_aiClient is OpenAiG711Client g711r)
+                    g711r.SetAwaitingConfirmation(true);
                 
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 _logger.LogInformation("[{SessionId}] 💰 Quote: {Fare} (pickup: {PickupCity}, dest: {DestCity})",
                     SessionId, result.Fare, result.PickupCity, result.DestCity);
                 
-                var spokenFare = FormatFareForSpeech(_booking.Fare);
+                var spokenFareNew = FormatFareForSpeech(_booking.Fare);
                 return new
                 {
                     success = true,
                     fare = _booking.Fare,
-                    fare_spoken = spokenFare,
+                    fare_spoken = spokenFareNew,
                     eta = _booking.Eta,
                     pickup_address = _booking.Pickup,
                     destination_address = _booking.Destination,
-                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
+                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFareNew}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
                 };
             }
             catch (Exception ex)
