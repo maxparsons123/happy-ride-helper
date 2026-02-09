@@ -240,6 +240,13 @@ public sealed class CallSession : ICallSession
                     result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
                 }
                 
+                // Guard: if book_taxi already set the fare while we were calculating, skip
+                if (!string.IsNullOrWhiteSpace(_booking.Fare))
+                {
+                    _logger.LogInformation("[{SessionId}] 💰 Auto-quote skipped — fare already set by book_taxi: {Fare}", SessionId, _booking.Fare);
+                    return;
+                }
+                
                 // Store all geocoded results
                 ApplyFareResult(result);
                 
