@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using AdaMain.Ai;
@@ -36,6 +37,10 @@ public sealed class SipServer : IAsyncDisposable
     private readonly object _callLock = new();
     private volatile bool _isRunning;
     private volatile bool _disposed;
+
+    // ── Non-blocking async log queue (prevents I/O from blocking RTP thread) ──
+    private readonly ConcurrentQueue<string> _logQueue = new();
+    private int _logDraining;
 
     // ── Audio quality diagnostics (thread-safe via Interlocked) ──
     private int _dqFrameCount;
@@ -791,12 +796,41 @@ public sealed class SipServer : IAsyncDisposable
         while (value < current && Interlocked.CompareExchange(ref location, value, current) != current);
     }
 
+    /// <summary>Non-blocking log: enqueues message and drains on ThreadPool.
+    /// Safe to call from RTP/playout threads without blocking audio.</summary>
     private void Log(string msg)
     {
         if (_disposed) return;
-        var line = $"{DateTime.Now:HH:mm:ss.fff} {msg}";
-        _logger.LogDebug("{Msg}", line);
-        OnLog?.Invoke(line);
+        _logQueue.Enqueue($"{DateTime.Now:HH:mm:ss.fff} {msg}");
+
+        // Only one drain loop at a time
+        if (Interlocked.CompareExchange(ref _logDraining, 1, 0) == 0)
+        {
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    while (_logQueue.TryDequeue(out var line))
+                    {
+                        _logger.LogDebug("{Msg}", line);
+                        OnLog?.Invoke(line);
+                    }
+                }
+                catch { /* logging must never crash */ }
+                finally
+                {
+                    Volatile.Write(ref _logDraining, 0);
+                    // Re-check in case items were enqueued during finally
+                    if (!_logQueue.IsEmpty && Interlocked.CompareExchange(ref _logDraining, 1, 0) == 0)
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            try { while (_logQueue.TryDequeue(out var l)) { _logger.LogDebug("{Msg}", l); OnLog?.Invoke(l); } }
+                            catch { }
+                            finally { Volatile.Write(ref _logDraining, 0); }
+                        });
+                }
+            });
+        }
     }
 
     public async ValueTask DisposeAsync()
