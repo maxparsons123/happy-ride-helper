@@ -25,6 +25,7 @@ public sealed class CallSession : ICallSession
     
     private int _disposed;
     private int _active;
+    private int _autoQuoteInProgress; // Prevents safety net from racing with background fare calc
     private long _lastAdaFinishedAt;
     
     public string SessionId { get; }
@@ -68,6 +69,7 @@ public sealed class CallSession : ICallSession
             {
                 OnBargeIn?.Invoke();
             };
+            g711Client.IsAutoQuoteInProgress = () => Volatile.Read(ref _autoQuoteInProgress) == 1;
         }
     }
     
@@ -207,6 +209,7 @@ public sealed class CallSession : ICallSession
         _logger.LogInformation("[{SessionId}] 💰 All travel fields filled — starting async fare calculation...", SessionId);
         
         // Fire-and-forget: calculate fare in background, then inject result
+        Interlocked.Exchange(ref _autoQuoteInProgress, 1);
         _ = Task.Run(async () =>
         {
             try
@@ -258,14 +261,18 @@ public sealed class CallSession : ICallSession
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[{SessionId}] Auto-quote failed, using fallback", SessionId);
-                _booking.Fare = "€12.50";
-                _booking.Eta = "6 minutes";
+                _booking.Fare = "£8.00";
+                _booking.Eta = "8 minutes";
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 
                 var fareMsg = $"[FARE RESULT] For the booking from {_booking.Pickup} to {_booking.Destination}, " +
-                    "the fare is approximately 12 euros 50, estimated arrival 6 minutes. " +
+                    "the fare is approximately 8 pounds, estimated arrival 8 minutes. " +
                     "Tell the caller this fare and ask if they want to proceed or edit any details.";
                 await _aiClient.InjectMessageAndRespondAsync(fareMsg);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _autoQuoteInProgress, 0);
             }
         });
         
@@ -371,27 +378,28 @@ public sealed class CallSession : ICallSession
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[{SessionId}] Fare calculation failed", SessionId);
-                _booking.Fare = "€12.50";
-                _booking.Eta = "6 minutes";
+                _booking.Fare = "£8.00";
+                _booking.Eta = "8 minutes";
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 
                 return new
                 {
                     success = true,
                     fare = _booking.Fare,
-                    fare_spoken = "12 euros 50",
+                    fare_spoken = "8 pounds",
                     eta = _booking.Eta,
                     pickup_address = _booking.Pickup,
                     destination_address = _booking.Destination,
-                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is approximately 12 euros 50, estimated arrival 6 minutes. Ask if they want to proceed or edit any details."
+                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is approximately 8 pounds, estimated arrival 8 minutes. Ask if they want to proceed or edit any details."
                 };
             }
         }
         
-        if (action == "confirmed")
+        if (action == "confirmed" || action == null)
         {
-            // Ensure we have geocoded components before dispatch
-            if ((string.IsNullOrWhiteSpace(_booking.PickupStreet) || string.IsNullOrWhiteSpace(_booking.DestStreet)) &&
+            // Ensure we have geocoded components and fare before dispatch
+            if (((string.IsNullOrWhiteSpace(_booking.PickupStreet) || string.IsNullOrWhiteSpace(_booking.DestStreet)) ||
+                 string.IsNullOrWhiteSpace(_booking.Fare)) &&
                 !string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(_booking.Destination))
             {
                 try
@@ -572,13 +580,16 @@ public sealed class CallSession : ICallSession
     {
         if (string.IsNullOrEmpty(fare)) return "unknown";
         
+        // Detect currency from the fare string
+        var currencyWord = fare.Contains("£") ? "pounds" : "euros";
+        
         var clean = fare.Replace("€", "").Replace("£", "").Replace("$", "").Trim();
         if (decimal.TryParse(clean, System.Globalization.NumberStyles.Any, 
             System.Globalization.CultureInfo.InvariantCulture, out var amount))
         {
-            var euros = (int)amount;
-            var cents = (int)((amount - euros) * 100);
-            return cents > 0 ? $"{euros} euros {cents}" : $"{euros} euros";
+            var whole = (int)amount;
+            var pence = (int)((amount - whole) * 100);
+            return pence > 0 ? $"{whole} {currencyWord} {pence}" : $"{whole} {currencyWord}";
         }
         return fare;
     }
