@@ -22,10 +22,6 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include="VaxServerVoAI.dll" CopyToOutputDirectory="Always" />
-    <None Include="VaxServerVoAI.sxs.manifest" CopyToOutputDirectory="Always" />
-    <None Include="VaxServerFileSIP.bin" CopyToOutputDirectory="Always" />
-  </ItemGroup>
+  <!-- These files are already present in bin\Debug output from the SDK; no copy needed -->
 
 </Project>
