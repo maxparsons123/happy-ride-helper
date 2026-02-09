@@ -460,7 +460,9 @@ public sealed class G711CallFeatures : IDisposable
                 fare = _booking.Fare,
                 fare_spoken = spokenFare,
                 eta = _booking.Eta,
-                message = $"Say: 'For your booking from {_booking.Pickup} going to {_booking.Destination}, the fare is {spokenFare} with an estimated arrival in {_booking.Eta}. Would you like to proceed or edit any of the details?'"
+                pickup_address = _booking.Pickup,
+                destination_address = _booking.Destination,
+                message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
             };
         }
 
