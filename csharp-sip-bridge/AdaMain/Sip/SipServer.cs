@@ -503,18 +503,19 @@ public sealed class SipServer : IAsyncDisposable
                 }
             }
 
-            // ── Soft gate: suppress echo during bot speech ──
+            // ── Hard mute during bot speech (prevent echo feedback) ──
             if (isBotSpeaking)
             {
-                // Allow barge-in only if caller audio is loud enough
-                if (rms < BARGE_IN_RMS_THRESHOLD) return;
+                // Only allow genuine barge-in: require 3x normal threshold to cut through
+                float bargeInCutThrough = BARGE_IN_RMS_THRESHOLD * 3f;
+                if (rms < bargeInCutThrough) return; // fully muted — no audio forwarded
                 // Genuine barge-in detected — apply cooldown to prevent flood
                 var now = DateTime.UtcNow;
                 if ((now - lastBargeInAt).TotalMilliseconds < BARGE_IN_COOLDOWN_MS) return;
                 lastBargeInAt = now;
                 isBotSpeaking = false;
                 botStoppedSpeakingAt = now;
-                Log($"🎤 Barge-in detected (RMS={rms:F0})");
+                Log($"🎤 Barge-in detected (RMS={rms:F0}, threshold={bargeInCutThrough:F0})");
             }
 
             // ── Echo guard: brief mute after bot stops speaking ──
