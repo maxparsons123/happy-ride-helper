@@ -1,5 +1,7 @@
 using System.Text.Json;
 using AdaMain.Ai;
+using AdaMain.Audio;
+using AdaMain.Avatar;
 using AdaMain.Config;
 using AdaMain.Core;
 using AdaMain.Services;
@@ -30,11 +32,15 @@ public partial class MainForm : Form
     private WaveInEvent? _micInput;
     private readonly object _micLock = new();
 
+    // Simli avatar
+    private SimliAvatar? _simliAvatar;
+
     public MainForm()
     {
         InitializeComponent();
         _settings = LoadSettings();
         ApplySettingsToUi();
+        InitSimliAvatar();
         Log("AdaMain v1.0 started. Configure SIP and click Connect.");
     }
 
@@ -184,6 +190,7 @@ public partial class MainForm : Form
             {
                 OnIncomingCall(callerId);
                 SetInCall(true);
+                _ = ConnectSimliAsync();
             });
 
             _sipServer.OnCallEnded += reason => Invoke(() =>
@@ -193,6 +200,7 @@ public partial class MainForm : Form
                 statusCallId.Text = "";
                 _currentSession = null;
                 StopAudioMonitor();
+                _ = DisconnectSimliAsync();
             });
 
             // Wire caller audio monitor — hear raw SIP audio through local speakers
@@ -247,6 +255,12 @@ public partial class MainForm : Form
         {
             Log($"💬 {role}: {text}");
         });
+        
+        // Wire Ada's audio output → Simli avatar (A-law → PCM16@16kHz)
+        session.OnAudioOut += alawFrame => FeedSimliAudio(alawFrame);
+        
+        // Wire barge-in → clear Simli buffer
+        session.OnBargeIn += () => ClearSimliBuffer();
         
         session.OnBookingUpdated += booking => Invoke(() =>
         {
@@ -488,7 +502,56 @@ public partial class MainForm : Form
         if (!string.IsNullOrEmpty(text)) Clipboard.SetText(text);
     }
 
-    // ── Avatar helpers ──
+    // ── Simli avatar ──
+
+    private void InitSimliAvatar()
+    {
+        if (string.IsNullOrWhiteSpace(_settings.Simli.ApiKey) || string.IsNullOrWhiteSpace(_settings.Simli.FaceId))
+        {
+            lblAvatarStatus.Text = "Not configured";
+            return;
+        }
+
+        var factory = GetLoggerFactory();
+        _simliAvatar = new SimliAvatar(factory.CreateLogger<SimliAvatar>());
+        _simliAvatar.Configure(_settings.Simli.ApiKey, _settings.Simli.FaceId);
+        _simliAvatar.Dock = DockStyle.Fill;
+        pnlAvatarHost.Controls.Clear();
+        pnlAvatarHost.Controls.Add(_simliAvatar);
+        lblAvatarStatus.Text = "Ready";
+    }
+
+    /// <summary>Connect Simli when a call starts, disconnect when it ends.</summary>
+    private async Task ConnectSimliAsync()
+    {
+        if (_simliAvatar == null) return;
+        try { await _simliAvatar.ConnectAsync(); }
+        catch (Exception ex) { Log($"🎭 Simli connect error: {ex.Message}"); }
+    }
+
+    private async Task DisconnectSimliAsync()
+    {
+        if (_simliAvatar == null) return;
+        try { await _simliAvatar.DisconnectAsync(); }
+        catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
+    }
+
+    /// <summary>Feed A-law audio from Ada's TTS output to Simli (decode + upsample).</summary>
+    private void FeedSimliAudio(byte[] alawFrame)
+    {
+        if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
+            return;
+
+        var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
+        _ = _simliAvatar.SendAudioAsync(pcm16at16k);
+    }
+
+    /// <summary>Clear Simli buffer on barge-in.</summary>
+    private void ClearSimliBuffer()
+    {
+        if (_simliAvatar == null || !_simliAvatar.IsConnected) return;
+        _ = _simliAvatar.ClearBufferAsync();
+    }
 
     public void SetAvatarStatus(string status)
     {
