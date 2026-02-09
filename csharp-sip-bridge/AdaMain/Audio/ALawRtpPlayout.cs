@@ -36,10 +36,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5;      // ITU-T G.711 A-law silence
     private const byte PAYLOAD_TYPE_PCMA = 8;    // RTP payload type for A-law
 
-    // FIXED 100ms buffer (5 frames) - absorbs OpenAI burst delivery
-    private const int JITTER_BUFFER_FRAMES = 5;
+    // FIXED 200ms buffer (10 frames) - absorbs OpenAI burst delivery + network jitter towards end of responses
+    private const int JITTER_BUFFER_FRAMES = 10;
     private const int REBUFFER_THRESHOLD = 0;    // Disable mid-stream rebuffering — only buffer on initial fill
-    private const int MAX_QUEUE_FRAMES = 1500;   // ~30s safety cap
+    private const int MAX_QUEUE_FRAMES = 2000;   // ~40s safety cap (matches G711CallHandler)
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
