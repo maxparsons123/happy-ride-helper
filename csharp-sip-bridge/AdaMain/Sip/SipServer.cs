@@ -538,7 +538,17 @@ public sealed class SipServer : IAsyncDisposable
 
         try
         {
-            rtp.SendAudioFrame(0, (int)SDPMediaFormatsEnum.PCMA, alawData);
+            // SIPSorcery 10.x: Use SendRtpRaw on the audio stream with PCMA payload type (8)
+            var audioStream = rtp.AudioStream;
+            if (audioStream != null)
+            {
+                audioStream.SendRtpRaw(
+                    SDPMediaTypesEnum.audio,
+                    alawData,
+                    (uint)(alawData.Length),  // timestamp increment = sample count
+                    0,  // marker bit
+                    8); // PCMA payload type
+            }
         }
         catch { /* ignore send errors during teardown */ }
     }
