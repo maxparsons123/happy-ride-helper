@@ -211,7 +211,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                Volatile.Read(ref _callEnded) == 0 &&
                Volatile.Read(ref _disposed) == 0 &&
                IsConnected &&
-               (bypassTranscriptGuard || NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 300);
+               (bypassTranscriptGuard || NowMs() - Volatile.Read(ref _lastUserSpeechAt) > 200);
     }
 
     private async Task QueueResponseCreateAsync(int delayMs = 40, bool waitForCurrentResponse = true, int maxWaitMs = 1000, bool bypassTranscriptGuard = false)
@@ -906,7 +906,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 turn_detection = new
                 {
                     type = "semantic_vad",
-                    eagerness = "low"
+                    eagerness = "medium"
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
