@@ -423,7 +423,6 @@ public sealed class SipServer : IAsyncDisposable
         const int FLUSH_PACKETS = 20;
         const int EARLY_PROTECTION_MS = 500;
         const int ECHO_GUARD_MS = 300;
-        float BARGE_IN_RMS_THRESHOLD = _audioSettings.BargeInRmsThreshold;
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
         var callStartedAt = DateTime.UtcNow;
@@ -431,9 +430,7 @@ public sealed class SipServer : IAsyncDisposable
         bool adaHasStartedSpeaking = false;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
         DateTime lastAudioEnqueuedAt = DateTime.MinValue; // track when last TTS frame arrived
-        DateTime lastBargeInAt = DateTime.MinValue;
-        const int BARGE_IN_COOLDOWN_MS = 500;
-        const int BOT_SPEAKING_GRACE_MS = 500; // after last enqueued frame, stop treating user speech as barge-in
+        const int BOT_SPEAKING_GRACE_MS = 500; // after last enqueued frame, auto-clear bot speaking flag
         bool watchdogPending = false;
 
         // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
