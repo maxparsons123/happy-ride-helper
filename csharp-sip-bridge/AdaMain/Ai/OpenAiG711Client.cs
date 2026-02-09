@@ -872,15 +872,24 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private static bool HasBookingIntent(string transcript)
     {
         var lower = transcript.ToLowerInvariant();
-        return (lower.Contains("finalize") || lower.Contains("finalise") ||
-                lower.Contains("book") || lower.Contains("booking") ||
-                lower.Contains("moment while") || lower.Contains("one moment") ||
-                lower.Contains("let me") || lower.Contains("i'll get") ||
-                lower.Contains("price") || lower.Contains("fare") ||
-                lower.Contains("just a moment")) &&
-               !lower.Contains("would you like") &&
-               !lower.Contains("shall i") &&
-               !lower.Contains("do you want");
+        
+        // Exclude greetings, questions, and offers — these are NOT booking promises
+        if (lower.Contains("how can i help") || lower.Contains("what can i") ||
+            lower.Contains("would you like") || lower.Contains("shall i") ||
+            lower.Contains("do you want") || lower.Contains("welcome") ||
+            lower.Contains("good morning") || lower.Contains("good afternoon") ||
+            lower.Contains("good evening") || lower.Contains("my name is"))
+            return false;
+        
+        // Only match clear action-oriented statements
+        return lower.Contains("finalize") || lower.Contains("finalise") ||
+               lower.Contains("i'll book") || lower.Contains("i will book") ||
+               lower.Contains("booking your") || lower.Contains("booking that") ||
+               lower.Contains("moment while") || lower.Contains("one moment") ||
+               lower.Contains("let me get") || lower.Contains("i'll get") ||
+               lower.Contains("let me calculate") || lower.Contains("let me check") ||
+               lower.Contains("getting the price") || lower.Contains("getting the fare") ||
+               lower.Contains("just a moment");
     }
 
     /// <summary>
