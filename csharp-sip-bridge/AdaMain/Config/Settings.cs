@@ -10,6 +10,7 @@ public sealed class AppSettings
     public AudioSettings Audio { get; set; } = new();
     public DispatchSettings Dispatch { get; set; } = new();
     public GoogleMapsSettings GoogleMaps { get; set; } = new();
+    public SupabaseSettings Supabase { get; set; } = new();
     public SimliSettings Simli { get; set; } = new();
     public SttSettings Stt { get; set; } = new();
 }
@@ -58,6 +59,12 @@ public sealed class DispatchSettings
 public sealed class GoogleMapsSettings
 {
     public string ApiKey { get; set; } = "";
+}
+
+public sealed class SupabaseSettings
+{
+    public string Url { get; set; } = "https://oerketnvlmptpfvttysy.supabase.co";
+    public string AnonKey { get; set; } = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
 }
 
 public sealed class SimliSettings

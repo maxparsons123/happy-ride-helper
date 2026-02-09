@@ -224,7 +224,8 @@ public partial class MainForm : Form
         // Create fare calculator
         var fareCalculator = new FareCalculator(
             factory.CreateLogger<FareCalculator>(),
-            _settings.GoogleMaps);
+            _settings.GoogleMaps,
+            _settings.Supabase);
         
         // Create dispatcher
         var dispatcher = new BsqdDispatcher(
