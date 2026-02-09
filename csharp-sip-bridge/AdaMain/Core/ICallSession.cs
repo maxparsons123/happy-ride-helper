@@ -1,3 +1,5 @@
+using AdaMain.Ai;
+
 namespace AdaMain.Core;
 
 /// <summary>
@@ -16,6 +18,9 @@ public interface ICallSession : IAsyncDisposable
     
     /// <summary>Whether the session is currently active.</summary>
     bool IsActive { get; }
+    
+    /// <summary>Expose AI client for wiring (e.g., playout queue depth).</summary>
+    IOpenAiClient AiClient { get; }
     
     /// <summary>Start the AI session and begin processing.</summary>
     Task StartAsync(CancellationToken ct = default);
