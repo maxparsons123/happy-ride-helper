@@ -64,7 +64,7 @@ public sealed class FareCalculator : IFareCalculator
             };
             request.Headers.Add("apikey", _supabaseSettings.AnonKey);
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             var response = await _httpClient.SendAsync(request, cts.Token);
             var responseJson = await response.Content.ReadAsStringAsync();
 
@@ -210,7 +210,7 @@ public sealed class FareCalculator : IFareCalculator
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("⏱️ Edge function timeout (2s), falling back to geocoding");
+            _logger.LogWarning("⏱️ Edge function timeout (8s), falling back to geocoding");
             return await CalculateAsync(pickup, destination, phoneNumber);
         }
         catch (Exception ex)

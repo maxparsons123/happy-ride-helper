@@ -172,7 +172,7 @@ public sealed class CallSession : ICallSession
         try
         {
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
-            var completed = await Task.WhenAny(aiTask, Task.Delay(2500));
+            var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
             
             FareResult result;
             if (completed == aiTask)
@@ -257,7 +257,7 @@ public sealed class CallSession : ICallSession
                 
                 // Use AI-powered extraction with 2s timeout
                 var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
-                var completed = await Task.WhenAny(aiTask, Task.Delay(2500));
+                var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
                 
                 FareResult result;
                 if (completed == aiTask)
@@ -412,7 +412,7 @@ public sealed class CallSession : ICallSession
         {
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
                 _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId);
-            var completed = await Task.WhenAny(aiTask, Task.Delay(2000));
+            var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
             
             FareResult result;
             if (completed == aiTask)
