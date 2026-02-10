@@ -585,7 +585,8 @@ public sealed class SipServer : IAsyncDisposable
                 }
                 float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
 
-                if (rms >= 1500)
+                var bargeInThreshold = _audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200;
+                if (rms >= bargeInThreshold)
                 {
                     // Barge-in detected — let audio through (throttle log to 1/sec)
                     var now = DateTime.UtcNow;
