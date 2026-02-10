@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  ada-server:
+    build:
+      context: ..
+      dockerfile: AdaMain.Server/Dockerfile
+    container_name: ada-server
+    restart: unless-stopped
+    network_mode: host  # Required for SIP/RTP — needs direct UDP access
+    environment:
+      - ADA_SIP__SERVER=your-sip-server.com
+      - ADA_SIP__PORT=5060
+      - ADA_SIP__USERNAME=1000
+      - ADA_SIP__PASSWORD=changeme
+      - ADA_OPENAI__APIKEY=sk-...
+      - ADA_DISPATCH__BSQDWEBHOOKURL=https://your-dispatch.com/webhook
+      - ADA_DISPATCH__BSQDAPIKEY=your-api-key
+    volumes:
+      # Mount config file for full settings (alternative to env vars)
+      # - ./appsettings.production.json:/app/appsettings.json:ro
+      - ada-logs:/var/log/ada
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  ada-logs:
