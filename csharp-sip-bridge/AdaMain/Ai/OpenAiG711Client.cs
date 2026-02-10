@@ -570,6 +570,16 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     if (responseId != null && _activeResponseId == responseId)
                         break; // Ignore duplicate
 
+                    // v4.2: If transcript hasn't arrived yet, this is a premature server_vad response.
+                    // Cancel it — the transcript safety mechanism will queue a proper response
+                    // once the transcript is grounded.
+                    if (Volatile.Read(ref _transcriptPending) == 1)
+                    {
+                        Log($"⏳ Cancelling premature server_vad response (transcript pending)");
+                        _ = SendJsonAsync(new { type = "response.cancel" });
+                        break;
+                    }
+
                     _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
                     Interlocked.Exchange(ref _toolCalledInResponse, 0); // Reset per-response
@@ -578,8 +588,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _lastAdaTranscript = null; // Reset per-response
                     Volatile.Write(ref _responseCreatedAt, NowMs());
 
-                    // Clear audio buffer on response start
-                    _ = SendJsonAsync(new { type = "input_audio_buffer.clear" });
+                    // v4.2: Do NOT clear input_audio_buffer here — per AUDIO_TIMING_RULES,
+                    // buffer persistence prevents clipping user speech starts.
                     break;
                 }
 
