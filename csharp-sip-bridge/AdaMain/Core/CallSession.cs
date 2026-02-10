@@ -262,26 +262,24 @@ public sealed class CallSession : ICallSession
                 // Inject fare result with VERIFIED addresses into conversation
                 var verifiedPickup = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
                 var verifiedDest = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
-                var fareMsg = $"[FARE RESULT] The addresses have been VERIFIED by our system.\n" +
-                    $"VERIFIED Pickup: {verifiedPickup}\n" +
-                    $"VERIFIED Destination: {verifiedDest}\n" +
-                    $"Fare: {spokenFare}, ETA: {_booking.Eta}.\n" +
-                    "You MUST read back these VERIFIED addresses (not the original user input) along with the fare, then ask if they want to confirm or change anything.";
+                var fareMsg = $"[FARE RESULT] Addresses VERIFIED. Say this EXACTLY:\n" +
+                    $"\"Your pickup is {verifiedPickup}, going to {verifiedDest}. The fare is {spokenFare}, with an estimated arrival in {_booking.Eta}. Would you like to confirm this booking or change anything?\"\n" +
+                    "You MUST include the VERIFIED addresses with postcodes — do NOT use the caller's original words.";
                 await _aiClient.InjectMessageAndRespondAsync(fareMsg);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[{SessionId}] Auto-quote failed, using fallback", SessionId);
-                _booking.Fare = "£8.00";
+                _booking.Fare = "£8.00";  // UK default
                 _booking.Eta = "8 minutes";
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 
                 var fallbackPickup = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
                 var fallbackDest = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
-                var fareMsg = $"[FARE RESULT] Pickup: {fallbackPickup}\nDestination: {fallbackDest}\n" +
-                    "Fare: approximately 8 pounds, ETA: 8 minutes.\n" +
-                    "Read back these addresses and fare, then ask if they want to confirm or change anything.";
-                await _aiClient.InjectMessageAndRespondAsync(fareMsg);
+                var fareMsg2 = $"[FARE RESULT] Addresses VERIFIED. Say this EXACTLY:\n" +
+                    $"\"Your pickup is {fallbackPickup}, going to {fallbackDest}. The fare is approximately 8 pounds, with an estimated arrival in 8 minutes. Would you like to confirm this booking or change anything?\"\n" +
+                    "You MUST include the addresses with postcodes — do NOT use the caller's original words.";
+                await _aiClient.InjectMessageAndRespondAsync(fareMsg2);
             }
             finally
             {
@@ -340,15 +338,17 @@ public sealed class CallSession : ICallSession
                     g711q.SetAwaitingConfirmation(true);
                 
                 var spokenFare = FormatFareForSpeech(_booking.Fare);
+                var vpReuse = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                var vdReuse = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
                 return new
                 {
                     success = true,
                     fare = _booking.Fare,
                     fare_spoken = spokenFare,
                     eta = _booking.Eta,
-                    pickup_address = _booking.Pickup,
-                    destination_address = _booking.Destination,
-                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
+                    verified_pickup = vpReuse,
+                    verified_destination = vdReuse,
+                    message = $"Read back the VERIFIED addresses to the caller: pickup is '{vpReuse}' going to '{vdReuse}'. The fare is {spokenFare}, estimated arrival {_booking.Eta}. Ask if they want to confirm or change anything."
                 };
             }
             
@@ -396,15 +396,17 @@ public sealed class CallSession : ICallSession
                     SessionId, result.Fare, result.PickupCity, result.DestCity);
                 
                 var spokenFareNew = FormatFareForSpeech(_booking.Fare);
+                var vpNew = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                var vdNew = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
                 return new
                 {
                     success = true,
                     fare = _booking.Fare,
                     fare_spoken = spokenFareNew,
                     eta = _booking.Eta,
-                    pickup_address = _booking.Pickup,
-                    destination_address = _booking.Destination,
-                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is {spokenFareNew}, estimated arrival {_booking.Eta}. Ask if they want to proceed or edit any details."
+                    verified_pickup = vpNew,
+                    verified_destination = vdNew,
+                    message = $"Read back the VERIFIED addresses to the caller: pickup is '{vpNew}' going to '{vdNew}'. The fare is {spokenFareNew}, estimated arrival {_booking.Eta}. Ask if they want to confirm or change anything."
                 };
             }
             catch (Exception ex)
@@ -420,9 +422,9 @@ public sealed class CallSession : ICallSession
                     fare = _booking.Fare,
                     fare_spoken = "8 pounds",
                     eta = _booking.Eta,
-                    pickup_address = _booking.Pickup,
-                    destination_address = _booking.Destination,
-                    message = $"Tell the caller: for their booking from {_booking.Pickup} to {_booking.Destination}, the fare is approximately 8 pounds, estimated arrival 8 minutes. Ask if they want to proceed or edit any details."
+                    verified_pickup = _booking.Pickup,
+                    verified_destination = _booking.Destination,
+                    message = $"Read back to the caller: pickup is '{_booking.Pickup}' going to '{_booking.Destination}'. The fare is approximately 8 pounds, estimated arrival 8 minutes. Ask if they want to confirm or change anything."
                 };
             }
         }
@@ -565,7 +567,7 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[{SessionId}] Fare error, using fallback", SessionId);
-            _booking.Fare = "€12.50";
+            _booking.Fare = "£12.50";
             _booking.Eta = "6 minutes";
         }
         

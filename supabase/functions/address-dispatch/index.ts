@@ -23,18 +23,24 @@ function haversineDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: 
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function calculateFare(distanceMiles: number): { fare: string; fare_spoken: string; eta: string; distance_miles: number } {
+function calculateFare(distanceMiles: number, detectedCountry?: string): { fare: string; fare_spoken: string; eta: string; distance_miles: number } {
   const rawFare = Math.max(MIN_FARE, BASE_FARE + distanceMiles * PER_MILE);
   // Round to nearest 0.50
   const fare = Math.round(rawFare * 2) / 2;
   const etaMinutes = Math.ceil(distanceMiles / AVG_SPEED_MPH * 60) + BUFFER_MINUTES;
 
-  const fareStr = `£${fare.toFixed(2)}`;
+  // Currency based on detected country
+  const isNL = detectedCountry === "NL";
+  const currencySymbol = isNL ? "€" : "£";
+  const currencyWord = isNL ? "euros" : "pounds";
+  const subunitWord = isNL ? "cents" : "pence";
 
-  // Generate spoken fare (e.g., "12 euros 50" or "25 euros")
-  const euros = Math.floor(fare);
-  const cents = Math.round((fare - euros) * 100);
-  const fareSpoken = cents > 0 ? `${euros} euros ${cents}` : `${euros} euros`;
+  const fareStr = `${currencySymbol}${fare.toFixed(2)}`;
+
+  // Generate spoken fare (e.g., "12 pounds 50" or "25 pounds")
+  const whole = Math.floor(fare);
+  const subunit = Math.round((fare - whole) * 100);
+  const fareSpoken = subunit > 0 ? `${whole} ${currencyWord} ${subunit} ${subunitWord}` : `${whole} ${currencyWord}`;
 
   return {
     fare: fareStr,
@@ -309,11 +315,14 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
     const dLat = parsed.dropoff?.lat;
     const dLon = parsed.dropoff?.lon;
 
+    // Detect country for currency
+    const detectedCountry = parsed.phone_analysis?.detected_country || "UK";
+
     if (typeof pLat === "number" && typeof pLon === "number" &&
         typeof dLat === "number" && typeof dLon === "number" &&
         pLat !== 0 && dLat !== 0) {
       const distMiles = haversineDistanceMiles(pLat, pLon, dLat, dLon);
-      const fareCalc = calculateFare(distMiles);
+      const fareCalc = calculateFare(distMiles, detectedCountry);
       parsed.fare = fareCalc;
       console.log(`💰 Fare calculated: ${fareCalc.fare} (${fareCalc.distance_miles} miles, ETA ${fareCalc.eta})`);
     } else {
