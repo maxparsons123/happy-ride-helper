@@ -15,9 +15,12 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaMain.Sip;
 
 /// <summary>
-/// Full-featured SIP registration and call management server.
-/// Ported from TaxiSipBridge.SipLoginManager with DNS resolution,
-/// Auth ID support, STUN/NAT, SIP tracing, and proper transport handling.
+/// Multi-call SIP server. Handles unlimited concurrent calls.
+/// Each incoming call gets its own SIPUserAgent, VoIPMediaSession,
+/// ALawRtpPlayout, and CallSession — fully isolated.
+/// 
+/// v2.0: Refactored from single-call (_currentSession + lock) to
+/// ConcurrentDictionary&lt;ActiveCall&gt; for headless server deployment.
 /// </summary>
 public sealed class SipServer : IAsyncDisposable
 {
@@ -28,43 +31,42 @@ public sealed class SipServer : IAsyncDisposable
 
     private SIPTransport? _transport;
     private SIPRegistrationUserAgent? _regAgent;
-    private SIPUserAgent? _userAgent;
-    private ICallSession? _currentSession;
-    private VoIPMediaSession? _activeRtpSession;
+
+    /// <summary>
+    /// Listener agent — only used to receive OnIncomingCall events.
+    /// A NEW SIPUserAgent is created per call for answer + dialog management.
+    /// </summary>
+    private SIPUserAgent? _listenerAgent;
+
     private IPAddress? _localIp;
     private IPAddress? _publicIp;
 
-    private readonly object _callLock = new();
     private volatile bool _isRunning;
     private volatile bool _disposed;
 
-    // ── Non-blocking async log queue (prevents I/O from blocking RTP thread) ──
+    // ── Per-call tracking (replaces single-call _currentSession + _callLock) ──
+    private readonly ConcurrentDictionary<string, ActiveCall> _activeCalls = new();
+
+    // ── Non-blocking async log queue ──
     private readonly ConcurrentQueue<string> _logQueue = new();
     private int _logDraining;
-
-    // ── Audio quality diagnostics (thread-safe via Interlocked) ──
-    private int _dqFrameCount;
-    private long _dqRmsSum;  // stored as fixed-point (x1000) for Interlocked
-    private int _dqPeakRms;  // stored as int (x1000) for Interlocked
-    private int _dqMinRms = int.MaxValue;  // stored as int (x1000)
-    private int _dqSilentFrames;
-    private int _dqClippedFrames;
-    private const int DQ_LOG_INTERVAL_FRAMES = 100; // ~2 seconds at 20ms/frame
-
-    // ── Operator RTP timestamp (cumulative for multi-frame sends) ──
-    private uint _operatorTimestamp;
+    private const int MAX_LOG_QUEUE_SIZE = 1000;
 
     public bool IsRegistered { get; private set; }
     public bool IsConnected => _transport != null && IsRegistered;
+    public int ActiveCallCount => _activeCalls.Count;
 
+    // ── Events ──
     public event Action<string>? OnLog;
     public event Action<string>? OnRegistered;
     public event Action<string>? OnRegistrationFailed;
-    public event Action<string>? OnCallStarted;
-    public event Action<string>? OnCallEnded;
+    /// <summary>Fires with (sessionId, callerId).</summary>
+    public event Action<string, string>? OnCallStarted;
+    /// <summary>Fires with (sessionId, reason).</summary>
+    public event Action<string, string>? OnCallEnded;
     public event Action<string>? OnServerResolved;
-    /// <summary>Fires with raw A-law RTP payload for local audio monitoring.</summary>
-    public event Action<byte[]>? OnCallerAudioMonitor;
+    /// <summary>Fires when active call count changes.</summary>
+    public event Action<int>? OnActiveCallCountChanged;
 
     public SipServer(
         ILogger<SipServer> logger,
@@ -82,11 +84,10 @@ public sealed class SipServer : IAsyncDisposable
     {
         if (_isRunning) return;
 
-        Log("🚀 SipServer starting...");
+        Log("🚀 SipServer starting (multi-call mode)...");
         Log($"➡ SIP Server: {_settings.Server}:{_settings.Port} ({_settings.Transport})");
         Log($"➡ User: {_settings.Username}");
 
-        // Resolve server hostname → IP and notify UI so it shows the resolved address
         var resolvedIp = ResolveDns(_settings.Server);
         if (resolvedIp != _settings.Server)
             OnServerResolved?.Invoke(resolvedIp);
@@ -94,7 +95,6 @@ public sealed class SipServer : IAsyncDisposable
         _localIp = GetLocalIp();
         Log($"➡ Local IP: {_localIp}");
 
-        // STUN discovery
         if (_settings.EnableStun)
         {
             _publicIp = await DiscoverPublicIpAsync();
@@ -106,7 +106,7 @@ public sealed class SipServer : IAsyncDisposable
 
         InitializeSipTransport();
         InitializeRegistration();
-        InitializeUserAgent();
+        InitializeCallListener();
 
         _regAgent!.Start();
         _isRunning = true;
@@ -121,7 +121,6 @@ public sealed class SipServer : IAsyncDisposable
 
         if (_regAgent != null)
         {
-            // Unsubscribe BEFORE Stop() to prevent callbacks during shutdown
             var agent = _regAgent;
             _regAgent = null;
             agent.RegistrationSuccessful -= OnRegistrationSuccess;
@@ -129,13 +128,14 @@ public sealed class SipServer : IAsyncDisposable
             try { agent.Stop(); } catch { }
         }
 
-        if (_userAgent != null)
+        if (_listenerAgent != null)
         {
-            _userAgent.OnIncomingCall -= OnIncomingCallAsync;
-            _userAgent = null;
+            _listenerAgent.OnIncomingCall -= OnIncomingCallAsync;
+            _listenerAgent = null;
         }
 
-        await HangupAsync();
+        // End all active calls
+        await HangupAllAsync("server_shutdown");
 
         try { _transport?.Shutdown(); } catch { }
         _transport = null;
@@ -145,21 +145,29 @@ public sealed class SipServer : IAsyncDisposable
         Log("🛑 SipServer stopped");
     }
 
-    /// <summary>Hang up any active call.</summary>
-    public async Task HangupAsync()
+    /// <summary>Hang up a specific call by session ID.</summary>
+    public async Task HangupAsync(string sessionId, string reason = "admin_hangup")
     {
-        ICallSession? session;
-        lock (_callLock)
+        if (_activeCalls.TryRemove(sessionId, out var call))
         {
-            session = _currentSession;
-            _currentSession = null;
+            await CleanupCallAsync(call, reason);
         }
+    }
 
-        if (session != null)
-        {
-            await session.EndAsync("user_hangup");
-            OnCallEnded?.Invoke("user_hangup");
-        }
+    /// <summary>Hang up all active calls.</summary>
+    public async Task HangupAllAsync(string reason = "server_shutdown")
+    {
+        var sessionIds = _activeCalls.Keys.ToList();
+        var tasks = sessionIds.Select(id => HangupAsync(id, reason));
+        await Task.WhenAll(tasks);
+    }
+
+    /// <summary>Get all active session IDs and their caller info.</summary>
+    public IReadOnlyList<(string SessionId, string CallerId, DateTime StartedAt)> GetActiveCalls()
+    {
+        return _activeCalls.Values
+            .Select(c => (c.SessionId, c.Session.CallerId, c.Session.StartedAt))
+            .ToList();
     }
 
     #region Initialization
@@ -168,7 +176,6 @@ public sealed class SipServer : IAsyncDisposable
     {
         _transport = new SIPTransport();
 
-        // SIP trace logging for debugging
         _transport.SIPRequestOutTraceEvent += (ep, dst, req) =>
             Log($"📤 SIP OUT → {dst}: {req.Method} {req.URI}");
         _transport.SIPResponseInTraceEvent += (ep, src, resp) =>
@@ -203,8 +210,6 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeRegistration()
     {
         var authUser = string.IsNullOrWhiteSpace(_settings.AuthId) ? _settings.Username : _settings.AuthId;
-
-        // Resolve DNS first - use resolved IP in registrar host (matches SipLoginManager behavior)
         var resolvedHost = ResolveDns(_settings.Server);
         var registrarHostWithPort = _settings.Port == 5060
             ? resolvedHost
@@ -212,7 +217,6 @@ public sealed class SipServer : IAsyncDisposable
 
         if (authUser != _settings.Username)
         {
-            // Advanced registration: Auth ID differs from extension (e.g. 3CX)
             if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
             {
                 try
@@ -237,8 +241,6 @@ public sealed class SipServer : IAsyncDisposable
 
             var protocol = SipConfigHelper.ParseTransport(_settings.Transport);
             var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _settings.Port));
-
-            // Use HOSTNAME in AOR and registrar (not IP) - critical for digest auth realm matching
             var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
             var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
 
@@ -250,8 +252,8 @@ public sealed class SipServer : IAsyncDisposable
                 sipAccountAOR: sipAccountAor,
                 authUsername: authUser,
                 password: _settings.Password,
-                realm: null,  // Let SIPSorcery pick up realm from WWW-Authenticate
-                registrarHost: registrarHostWithPort,  // HOSTNAME, not IP
+                realm: null,
+                registrarHost: registrarHostWithPort,
                 contactURI: contactUri,
                 expiry: 120,
                 customHeaders: null);
@@ -260,7 +262,6 @@ public sealed class SipServer : IAsyncDisposable
         }
         else
         {
-            // Standard registration: extension and auth username are the same
             _regAgent = new SIPRegistrationUserAgent(
                 _transport,
                 _settings.Username,
@@ -273,10 +274,10 @@ public sealed class SipServer : IAsyncDisposable
         _regAgent.RegistrationFailed += OnRegistrationFailure;
     }
 
-    private void InitializeUserAgent()
+    private void InitializeCallListener()
     {
-        _userAgent = new SIPUserAgent(_transport, null);
-        _userAgent.OnIncomingCall += OnIncomingCallAsync;
+        _listenerAgent = new SIPUserAgent(_transport, null);
+        _listenerAgent.OnIncomingCall += OnIncomingCallAsync;
     }
 
     #endregion
@@ -301,34 +302,19 @@ public sealed class SipServer : IAsyncDisposable
 
     #region Call Handling
 
-    /// <summary>
-    /// SIPSorcery requires a sync delegate, so we use a fire-and-forget wrapper
-    /// with top-level exception handling to prevent unobserved task crashes.
-    /// </summary>
     private void OnIncomingCallAsync(SIPUserAgent ua, SIPRequest req)
     {
-        _ = HandleIncomingCallSafeAsync(ua, req).ContinueWith(t =>
+        _ = HandleIncomingCallSafeAsync(req).ContinueWith(t =>
         {
             if (t.IsFaulted)
                 Log($"💥 Unhandled call exception: {t.Exception?.InnerException?.Message}");
         }, TaskScheduler.Default);
     }
 
-    private async Task HandleIncomingCallSafeAsync(SIPUserAgent ua, SIPRequest req)
+    private async Task HandleIncomingCallSafeAsync(SIPRequest req)
     {
         var caller = CallerIdExtractor.Extract(req);
-        Log($"📞 Incoming call from {caller}");
-
-        lock (_callLock)
-        {
-            if (_currentSession != null)
-            {
-                Log("📞 Rejecting call - busy");
-                var busy = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.BusyHere, null);
-                _ = _transport!.SendResponseAsync(busy);
-                return;
-            }
-        }
+        Log($"📞 Incoming call from {caller} (active: {_activeCalls.Count})");
 
         try
         {
@@ -337,48 +323,39 @@ public sealed class SipServer : IAsyncDisposable
             await _transport!.SendResponseAsync(ringing);
             Log("🔔 Sent 180 Ringing");
 
-            // Auto-answer path
             if (_settings.AutoAnswer)
             {
-                await AnswerCallAsync(ua, req, caller);
+                await AnswerCallAsync(req, caller);
             }
             else
             {
                 Log("⏳ Waiting for manual answer (auto-answer disabled)...");
-                OnCallStarted?.Invoke(caller);
             }
         }
         catch (Exception ex)
         {
-            Log($"🔥 Error handling incoming call: {ex.Message}");
+            Log($"🔥 Error handling incoming call from {caller}: {ex.Message}");
             _logger.LogError(ex, "Error handling call from {Caller}", caller);
-            // Ghost call catch: ensure cleanup if session init failed
-            await CleanupCallAsync("call_init_failed");
         }
     }
 
-    private async Task AnswerCallAsync(SIPUserAgent ua, SIPRequest req, string caller)
+    private async Task AnswerCallAsync(SIPRequest req, string caller)
     {
-        // Reset cleanup guard for new call
-        Interlocked.Exchange(ref _cleanupDone, 0);
+        // Create a NEW SIPUserAgent per call — each manages its own dialog independently
+        var callAgent = new SIPUserAgent(_transport, null);
 
-        // Match proven G711CallHandler v7.5 pattern: AudioSourcesEnum.None + codec preference ordering
         var audioEncoder = new AudioEncoder();
-
         var audioSource = new AudioExtrasSource(
             audioEncoder,
             new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
 
-        // Prefer PCMA (A-law) but also allow PCMU (μ-law) for broader carrier compatibility
-        // G711CallHandler orders: PCMA first, then PCMU, then everything else
-        audioSource.RestrictFormats(fmt => 
+        audioSource.RestrictFormats(fmt =>
             fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
 
         var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
         var rtpSession = new VoIPMediaSession(mediaEndPoints);
         rtpSession.AcceptRtpFromAny = true;
 
-        // Track negotiated codec for transcoding decisions (matches G711CallHandler)
         AudioCodecsEnum negotiatedCodec = AudioCodecsEnum.PCMA;
         rtpSession.OnAudioFormatsNegotiated += formats =>
         {
@@ -387,30 +364,22 @@ public sealed class SipServer : IAsyncDisposable
             Log($"🎵 Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
         };
 
-        var serverUa = ua.AcceptCall(req);
+        var serverUa = callAgent.AcceptCall(req);
 
-        // v7.6: 200ms pre-answer delay (matches G711CallHandler) — lets SIP signaling settle
+        // v7.6: 200ms pre-answer delay — lets SIP signaling settle
         await Task.Delay(200);
 
-        var result = await ua.Answer(serverUa, rtpSession);
-
+        var result = await callAgent.Answer(serverUa, rtpSession);
         if (!result)
         {
             Log("❌ Failed to answer call");
             return;
         }
 
-        // CRITICAL: Start RTP session (missing in previous version → degraded audio)
         await rtpSession.Start();
         Log("✅ Call answered and RTP started");
 
-        ua.OnCallHungup += async (dialog) =>
-        {
-            Log("📴 Remote party hung up");
-            await CleanupCallAsync("remote_hangup");
-        };
-
-        // Create AI session (wrapped in try-catch to prevent ghost calls on API outage)
+        // Create AI session
         ICallSession session;
         try
         {
@@ -419,43 +388,96 @@ public sealed class SipServer : IAsyncDisposable
         catch (Exception ex)
         {
             Log($"❌ AI Session Init Failed: {ex.Message}. Ending call.");
-            try { ua.Hangup(); } catch { }
+            try { callAgent.Hangup(); } catch { }
             rtpSession.Close("ai_init_failed");
             return;
         }
 
-        session.OnEnded += async (s, reason) => await CleanupCallAsync(reason);
-
-        lock (_callLock)
+        // Build per-call tracking
+        var activeCall = new ActiveCall
         {
-            _currentSession = session;
-            _activeRtpSession = rtpSession;
+            SessionId = session.SessionId,
+            Session = session,
+            RtpSession = rtpSession,
+            CallAgent = callAgent
+        };
+
+        if (!_activeCalls.TryAdd(session.SessionId, activeCall))
+        {
+            Log($"⚠️ Duplicate session ID {session.SessionId} — ending");
+            await session.EndAsync("duplicate_session");
+            callAgent.Hangup();
+            rtpSession.Close("duplicate_session");
+            return;
         }
 
-        // Create ALawRtpPlayout FIRST (v7.4 rebuffer engine) — needed for RTP wiring below
+        NotifyCallCountChanged();
+        Log($"📞 Call {session.SessionId} active for {caller} (total: {_activeCalls.Count})");
+
+        // Create ALawRtpPlayout
         var playout = new ALawRtpPlayout(rtpSession);
-        playout.OnLog += msg => Log(msg);
-        
-        // Wire playout queue depth query for drain-aware goodbye shutdown
+        playout.OnLog += msg => Log($"[{session.SessionId}] {msg}");
+        activeCall.Playout = playout;
+
+        // Wire playout queue depth for drain-aware goodbye
         if (session.AiClient is OpenAiG711Client g711Wire)
             g711Wire.GetQueuedFrames = () => playout.QueuedFrames;
         else
-            Log("⚠️ AI client is not G.711 client — drain detection disabled");
+            Log($"[{session.SessionId}] ⚠️ AI client is not G.711 — drain detection disabled");
 
-        // Wire up audio: SIP → AI (with flush + early protection + soft gate — matches G711CallHandler v7.5)
+        // ── Wire audio: Session → Playout ──
+        WireAudioPipeline(activeCall, negotiatedCodec);
+
+        playout.Start();
+
+        // Wire hangup events
+        callAgent.OnCallHungup += async (dialog) =>
+        {
+            Log($"[{session.SessionId}] 📴 Remote party hung up");
+            await RemoveAndCleanupAsync(session.SessionId, "remote_hangup");
+        };
+
+        session.OnEnded += async (s, reason) =>
+        {
+            await RemoveAndCleanupAsync(s.SessionId, reason);
+        };
+
+        OnCallStarted?.Invoke(session.SessionId, caller);
+    }
+
+    /// <summary>
+    /// Wire the full-duplex audio pipeline for a single call.
+    /// Mirrors the proven v7.5 pattern from single-call SipServer.
+    /// </summary>
+    private void WireAudioPipeline(ActiveCall call, AudioCodecsEnum negotiatedCodec)
+    {
+        var session = call.Session;
+        var playout = call.Playout!;
+        var rtpSession = call.RtpSession;
+        var sid = call.SessionId;
+
         const int FLUSH_PACKETS = 20;
         const int EARLY_PROTECTION_MS = 500;
-        const int ECHO_GUARD_MS = 120; // v7.5: 120ms reduced echo guard (was 300ms — caused delays)
+        const int ECHO_GUARD_MS = 120;
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
-        DateTime lastBargeInLogAt = DateTime.MinValue; // Throttle barge-in logs to 1/sec
+        DateTime lastBargeInLogAt = DateTime.MinValue;
         var callStartedAt = DateTime.UtcNow;
-        int isBotSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
-        int adaHasStartedSpeaking = 0; // 0=false, 1=true (use Volatile.Read/Interlocked — was non-atomic bool)
+        int isBotSpeaking = 0;
+        int adaHasStartedSpeaking = 0;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
-        int watchdogPending = 0; // 0=false, 1=true (use Volatile.Read/Interlocked)
+        int watchdogPending = 0;
 
-        // Single OnAudioOut subscription: track bot speaking state AND buffer to playout
+        // ── Per-call audio quality diagnostics ──
+        int dqFrameCount = 0;
+        long dqRmsSum = 0;
+        int dqPeakRms = 0;
+        int dqMinRms = int.MaxValue;
+        int dqSilentFrames = 0;
+        int dqClippedFrames = 0;
+        const int DQ_LOG_INTERVAL_FRAMES = 100;
+
+        // AI audio out → playout buffer
         session.OnAudioOut += frame =>
         {
             Interlocked.Exchange(ref isBotSpeaking, 1);
@@ -463,31 +485,29 @@ public sealed class SipServer : IAsyncDisposable
             playout.BufferALaw(frame);
         };
 
-        // Wire barge-in → playout clear (only if bot is actually speaking)
+        // Barge-in → clear playout
         session.OnBargeIn += () =>
         {
             if (Volatile.Read(ref isBotSpeaking) == 0 && playout.QueuedFrames == 0)
-                return; // Normal turn start, not a barge-in
-            
+                return;
+
             playout.Clear();
             Interlocked.Exchange(ref isBotSpeaking, 0);
             Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
-            Log($"✂️ Barge-in (VAD): cleared playout queue");
+            Log($"[{sid}] ✂️ Barge-in (VAD): cleared playout queue");
         };
 
-        // Wire AI response completed → precise bot speaking tracking (matches G711CallHandler v7.4)
-        // Listen to the AI client's OnPlayoutComplete which fires on response.done
+        // Response completed → track bot speaking state
         if (session.AiClient is OpenAiG711Client g711Client)
         {
             g711Client.OnResponseCompleted += () =>
             {
                 Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
-                
-                // If queue is already empty, notify immediately; otherwise set pending flag
+
                 if (playout.QueuedFrames == 0)
                 {
-                    Log($"🔔 Queue already empty - starting watchdog now");
+                    Log($"[{sid}] 🔔 Queue already empty - starting watchdog now");
                     g711Client.NotifyPlayoutComplete();
                 }
                 else
@@ -497,28 +517,25 @@ public sealed class SipServer : IAsyncDisposable
             };
         }
 
-        // Wire playout queue empty → reset bot speaking state (matches G711CallHandler v7.4)
+        // Playout queue empty → reset bot state
         playout.OnQueueEmpty += () =>
         {
             if (Volatile.Read(ref adaHasStartedSpeaking) == 1 && Volatile.Read(ref isBotSpeaking) == 1)
             {
                 Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
-                Log($"🔇 Playout queue empty - echo guard started");
+                Log($"[{sid}] 🔇 Playout queue empty - echo guard started");
                 session.NotifyPlayoutComplete();
             }
             else if (Volatile.Read(ref watchdogPending) == 1)
             {
                 Interlocked.Exchange(ref watchdogPending, 0);
-                Log($"🔇 Playout drained post-response - starting watchdog");
+                Log($"[{sid}] 🔇 Playout drained post-response - starting watchdog");
                 session.NotifyPlayoutComplete();
             }
         };
 
-        // Start the playout engine
-        playout.Start();
-
-        // ── Wire SIP RTP → AI session (v7.5 pure passthrough with PCMU transcoding) ──
+        // ── SIP RTP → AI session (ingress) ──
         int framesForwarded = 0;
         rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
         {
@@ -527,37 +544,27 @@ public sealed class SipServer : IAsyncDisposable
             var payload = rtpPacket.Payload;
             if (payload == null || payload.Length == 0) return;
 
-            // Fire monitor event for local speaker playback
-            OnCallerAudioMonitor?.Invoke(payload);
-
-            // ── Flush: discard first N packets (line noise / codec warm-up) ──
+            // Flush first N packets (line noise / codec warm-up)
             if (!inboundFlushComplete)
             {
                 inboundPacketCount++;
                 if (inboundPacketCount < FLUSH_PACKETS) return;
                 inboundFlushComplete = true;
-                Log($"🔇 Inbound flush complete ({FLUSH_PACKETS} packets discarded)");
+                Log($"[{sid}] 🔇 Inbound flush complete ({FLUSH_PACKETS} packets discarded)");
             }
 
-            // ── Early protection: ignore audio for first Nms after answer ──
+            // Early protection
             if ((DateTime.UtcNow - callStartedAt).TotalMilliseconds < EARLY_PROTECTION_MS)
                 return;
 
-            // ── v5.2: TRUE passthrough — no decode/DSP/re-encode (eliminates quantization noise) ──
-            // Transcode μ-law → A-law if needed (OpenAI expects A-law)
+            // Transcode μ-law → A-law if needed
             byte[] g711ToSend;
             if (negotiatedCodec == AudioCodecsEnum.PCMU)
-            {
-                // Direct μ-law → A-law transcode (no PCM intermediate)
                 g711ToSend = Audio.G711.Transcode.MuLawToALaw(payload);
-            }
             else
-            {
-                // Pure A-law passthrough — zero processing
                 g711ToSend = payload;
-            }
 
-            // ── Soft gate: during bot speaking or echo guard, send silence unless barge-in ──
+            // Soft gate: during bot speech or echo guard, send silence unless barge-in
             bool applySoftGate = false;
 
             if (Volatile.Read(ref isBotSpeaking) == 1)
@@ -568,14 +575,12 @@ public sealed class SipServer : IAsyncDisposable
             {
                 var msSinceBotStopped = (DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds;
                 if (msSinceBotStopped < ECHO_GUARD_MS)
-                {
                     applySoftGate = true;
-                }
             }
 
             if (applySoftGate)
             {
-                // Check RMS for barge-in detection (decode only for RMS check, then discard)
+                // Barge-in detection via RMS
                 var pcmCheck = new short[g711ToSend.Length];
                 double sumSq = 0;
                 for (int i = 0; i < g711ToSend.Length; i++)
@@ -588,71 +593,65 @@ public sealed class SipServer : IAsyncDisposable
                 var bargeInThreshold = _audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200;
                 if (rms >= bargeInThreshold)
                 {
-                    // Barge-in detected — let audio through (throttle log to 1/sec)
                     var now = DateTime.UtcNow;
                     if ((now - lastBargeInLogAt).TotalMilliseconds >= 1000)
                     {
                         lastBargeInLogAt = now;
-                        Log($"✂️ Barge-in detected (RMS={rms:F0})");
+                        Log($"[{sid}] ✂️ Barge-in detected (RMS={rms:F0})");
                     }
                 }
                 else
                 {
-                    // Not a barge-in — send silence to prevent echo
                     g711ToSend = new byte[payload.Length];
                     Array.Fill(g711ToSend, (byte)0xD5); // A-law silence
                 }
             }
-            else
+            else if (_audioSettings.EnableDiagnostics)
             {
-                // ── Audio quality diagnostics (only when not gated, gated by setting) ──
-                if (_audioSettings.EnableDiagnostics)
+                // Audio quality diagnostics (per-call)
+                double sumSq = 0;
+                for (int i = 0; i < g711ToSend.Length; i++)
                 {
-                    double sumSq = 0;
-                    for (int i = 0; i < g711ToSend.Length; i++)
+                    short pcm = ALawDecode(g711ToSend[i]);
+                    sumSq += pcm * (double)pcm;
+                }
+                float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+
+                int rmsFixed = (int)(rms * 1000);
+                var frameCount = Interlocked.Increment(ref dqFrameCount);
+                Interlocked.Add(ref dqRmsSum, rmsFixed);
+                InterlockedMax(ref dqPeakRms, rmsFixed);
+                InterlockedMin(ref dqMinRms, rmsFixed);
+                if (rms < 50) Interlocked.Increment(ref dqSilentFrames);
+                if (rms > 28000) Interlocked.Increment(ref dqClippedFrames);
+
+                if (frameCount >= DQ_LOG_INTERVAL_FRAMES)
+                {
+                    var totalRms = Interlocked.Exchange(ref dqRmsSum, 0);
+                    var fc = Interlocked.Exchange(ref dqFrameCount, 0);
+                    var peak = Interlocked.Exchange(ref dqPeakRms, 0);
+                    var min = Interlocked.Exchange(ref dqMinRms, int.MaxValue);
+                    var silent = Interlocked.Exchange(ref dqSilentFrames, 0);
+                    var clipped = Interlocked.Exchange(ref dqClippedFrames, 0);
+
+                    if (fc > 0)
                     {
-                        short pcm = ALawDecode(g711ToSend[i]);
-                        sumSq += pcm * (double)pcm;
-                    }
-                    float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
-
-                    int rmsFixed = (int)(rms * 1000);
-                    var frameCount = Interlocked.Increment(ref _dqFrameCount);
-                    Interlocked.Add(ref _dqRmsSum, rmsFixed);
-                    InterlockedMax(ref _dqPeakRms, rmsFixed);
-                    InterlockedMin(ref _dqMinRms, rmsFixed);
-                    if (rms < 50) Interlocked.Increment(ref _dqSilentFrames);
-                    if (rms > 28000) Interlocked.Increment(ref _dqClippedFrames);
-
-                    if (frameCount >= DQ_LOG_INTERVAL_FRAMES)
-                    {
-                        var totalRms = Interlocked.Exchange(ref _dqRmsSum, 0);
-                        var fc = Interlocked.Exchange(ref _dqFrameCount, 0);
-                        var peak = Interlocked.Exchange(ref _dqPeakRms, 0);
-                        var min = Interlocked.Exchange(ref _dqMinRms, int.MaxValue);
-                        var silent = Interlocked.Exchange(ref _dqSilentFrames, 0);
-                        var clipped = Interlocked.Exchange(ref _dqClippedFrames, 0);
-
-                        if (fc > 0)
+                        var avgRms = (totalRms / 1000.0) / fc;
+                        if (avgRms >= 500)
                         {
-                            var avgRms = (totalRms / 1000.0) / fc;
-                            if (avgRms >= 500)
-                            {
-                                var peakRms = peak / 1000.0;
-                                var minRms = min == int.MaxValue ? 0 : min / 1000.0;
-                                var silPct = silent * 100.0 / fc;
-                                var clipPct = clipped * 100.0 / fc;
-                                var quality = clipPct > 5 ? "⚠️ CLIPPING" : "✅ GOOD";
-
-                                Log($"📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
-                                    $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
-                            }
+                            var peakRms = peak / 1000.0;
+                            var minRms = min == int.MaxValue ? 0 : min / 1000.0;
+                            var silPct = silent * 100.0 / fc;
+                            var clipPct = clipped * 100.0 / fc;
+                            var quality = clipPct > 5 ? "⚠️ CLIPPING" : "✅ GOOD";
+                            Log($"[{sid}] 📊 Audio: avg={avgRms:F0} peak={peakRms:F0} min={minRms:F0} " +
+                                $"silent={silPct:F0}% clipped={clipPct:F0}% → {quality}");
                         }
                     }
                 }
             }
 
-            // ── Ingress volume boost (caller audio often quiet on SIP trunks) ──
+            // Ingress volume boost
             var ingressGain = (float)_audioSettings.IngressVolumeBoost;
             if (ingressGain > 1.01f)
             {
@@ -668,86 +667,58 @@ public sealed class SipServer : IAsyncDisposable
 
             framesForwarded++;
             if (framesForwarded % 250 == 0)
-                Log($"🎙️ Ingress: {framesForwarded} frames (passthrough 8kHz)");
+                Log($"[{sid}] 🎙️ Ingress: {framesForwarded} frames (passthrough 8kHz)");
         };
 
-        // Cleanup: dispose playout when session ends (safe even if called multiple times)
+        // Cleanup playout when session ends
         session.OnEnded += (s, reason) =>
         {
             try { playout.Dispose(); } catch { }
         };
-
-        OnCallStarted?.Invoke(caller);
     }
 
     #endregion
 
     #region Cleanup
 
-    private int _cleanupDone; // 0=pending, 1=done (atomic guard against re-entrant cleanup)
-
-    private async Task CleanupCallAsync(string reason)
+    /// <summary>Remove from tracking and clean up a call.</summary>
+    private async Task RemoveAndCleanupAsync(string sessionId, string reason)
     {
-        // Atomic guard: only the FIRST caller executes cleanup
-        if (Interlocked.Exchange(ref _cleanupDone, 1) == 1)
-            return;
-
-        ICallSession? session;
-        VoIPMediaSession? rtp;
-
-        lock (_callLock)
+        if (_activeCalls.TryRemove(sessionId, out var call))
         {
-            session = _currentSession;
-            rtp = _activeRtpSession;
-            _currentSession = null;
-            _activeRtpSession = null;
+            await CleanupCallAsync(call, reason);
+            NotifyCallCountChanged();
         }
-
-        if (session != null)
-        {
-            await session.EndAsync(reason);
-        }
-
-        // Send SIP BYE to hang up the call
-        try { _userAgent?.Hangup(); }
-        catch (Exception ex) { Log($"⚠ SIP hangup error: {ex.Message}"); }
-
-        // Close the RTP session
-        try { rtp?.Close(reason); }
-        catch (Exception ex) { Log($"⚠ RTP close error: {ex.Message}"); }
-
-        OnCallEnded?.Invoke(reason);
-        Log($"📴 Call cleaned up: {reason}");
     }
 
-    /// <summary>
-    /// Send operator microphone audio directly into the SIP RTP stream (A-law encoded).
-    /// Used in Operator Mode with Push-to-Talk.
-    /// Uses cumulative timestamp to handle concatenated/variable-length frames correctly.
-    /// </summary>
-    public void SendOperatorAudio(byte[] alawData)
+    /// <summary>Clean up a single call — end session, hangup SIP, close RTP.</summary>
+    private async Task CleanupCallAsync(ActiveCall call, string reason)
     {
-        VoIPMediaSession? rtp;
-        lock (_callLock)
-        {
-            rtp = _activeRtpSession;
-        }
+        // Atomic guard: only first caller cleans up
+        if (Interlocked.Exchange(ref call.CleanupDone, 1) == 1)
+            return;
 
-        if (rtp == null || alawData.Length == 0) return;
+        var sid = call.SessionId;
 
-        try
-        {
-            rtp.SendRtpRaw(
-                SDPMediaTypesEnum.audio,
-                alawData,
-                _operatorTimestamp,
-                0,  // marker bit
-                8); // PCMA payload type
-            // PCMA at 8kHz: each byte = 1 sample, so byte count == sample count.
-            // This is valid ONLY for 8-bit codecs (A-law/μ-law) at 8kHz.
-            _operatorTimestamp += (uint)alawData.Length;
-        }
-        catch { /* ignore send errors during teardown */ }
+        try { await call.Session.EndAsync(reason); }
+        catch (Exception ex) { Log($"[{sid}] ⚠ Session end error: {ex.Message}"); }
+
+        try { call.CallAgent.Hangup(); }
+        catch (Exception ex) { Log($"[{sid}] ⚠ SIP hangup error: {ex.Message}"); }
+
+        try { call.RtpSession.Close(reason); }
+        catch (Exception ex) { Log($"[{sid}] ⚠ RTP close error: {ex.Message}"); }
+
+        try { call.Playout?.Dispose(); }
+        catch { }
+
+        OnCallEnded?.Invoke(sid, reason);
+        Log($"[{sid}] 📴 Call cleaned up: {reason} (remaining: {_activeCalls.Count})");
+    }
+
+    private void NotifyCallCountChanged()
+    {
+        OnActiveCallCountChanged?.Invoke(_activeCalls.Count);
     }
 
     #endregion
@@ -810,7 +781,6 @@ public sealed class SipServer : IAsyncDisposable
 
             Log($"🌐 Querying STUN: {stunServer}:{stunPort}...");
 
-            // Simple STUN binding request
             using var udp = new UdpClient();
             var stunAddr = (await Dns.GetHostAddressesAsync(stunServer))
                 .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
@@ -821,13 +791,10 @@ public sealed class SipServer : IAsyncDisposable
                 return null;
             }
 
-            // STUN Binding Request (RFC 5389)
             var request = new byte[20];
-            request[0] = 0x00; request[1] = 0x01; // Binding Request
-            request[2] = 0x00; request[3] = 0x00; // Message Length = 0
-            // Magic Cookie
+            request[0] = 0x00; request[1] = 0x01;
+            request[2] = 0x00; request[3] = 0x00;
             request[4] = 0x21; request[5] = 0x12; request[6] = 0xA4; request[7] = 0x42;
-            // Transaction ID (12 bytes random)
             Random.Shared.NextBytes(request.AsSpan(8, 12));
 
             await udp.SendAsync(request, request.Length, new IPEndPoint(stunAddr, stunPort));
@@ -836,7 +803,6 @@ public sealed class SipServer : IAsyncDisposable
             var ep = new IPEndPoint(IPAddress.Any, 0);
             var response = udp.Receive(ref ep);
 
-            // Parse XOR-MAPPED-ADDRESS or MAPPED-ADDRESS
             return ParseStunResponse(response);
         }
         catch (Exception ex)
@@ -859,16 +825,14 @@ public sealed class SipServer : IAsyncDisposable
             var attrLen = (response[offset + 2] << 8) | response[offset + 3];
             offset += 4;
 
-            // XOR-MAPPED-ADDRESS (0x0020) or MAPPED-ADDRESS (0x0001)
             if ((attrType == 0x0020 || attrType == 0x0001) && attrLen >= 8)
             {
                 var family = response[offset + 1];
-                if (family == 0x01) // IPv4
+                if (family == 0x01)
                 {
                     byte[] ip = new byte[4];
                     if (attrType == 0x0020)
                     {
-                        // XOR with magic cookie
                         ip[0] = (byte)(response[offset + 4] ^ 0x21);
                         ip[1] = (byte)(response[offset + 5] ^ 0x12);
                         ip[2] = (byte)(response[offset + 6] ^ 0xA4);
@@ -882,7 +846,6 @@ public sealed class SipServer : IAsyncDisposable
                 }
             }
 
-            // Align to 4-byte boundary
             offset += attrLen;
             if (attrLen % 4 != 0) offset += 4 - (attrLen % 4);
         }
@@ -892,8 +855,8 @@ public sealed class SipServer : IAsyncDisposable
 
     #endregion
 
-    /// <summary>Quick inline A-law decode for RMS check (ITU-T G.711).
-    /// Uses a pre-built lookup table to avoid repeated decode on hot path.</summary>
+    #region Audio Utilities
+
     private static readonly short[] ALawDecodeTable = BuildALawTable();
 
     private static short[] BuildALawTable()
@@ -913,7 +876,6 @@ public sealed class SipServer : IAsyncDisposable
 
     private static short ALawDecode(byte alaw) => ALawDecodeTable[alaw];
 
-    /// <summary>Thread-safe max update using Interlocked compare-and-swap.</summary>
     private static void InterlockedMax(ref int location, int value)
     {
         int current;
@@ -921,7 +883,6 @@ public sealed class SipServer : IAsyncDisposable
         while (value > current && Interlocked.CompareExchange(ref location, value, current) != current);
     }
 
-    /// <summary>Thread-safe min update using Interlocked compare-and-swap.</summary>
     private static void InterlockedMin(ref int location, int value)
     {
         int current;
@@ -929,23 +890,19 @@ public sealed class SipServer : IAsyncDisposable
         while (value < current && Interlocked.CompareExchange(ref location, value, current) != current);
     }
 
-    /// <summary>Non-blocking log: enqueues message and drains on ThreadPool.
-    /// Safe to call from RTP/playout threads without blocking audio.</summary>
-    private const int MAX_LOG_QUEUE_SIZE = 1000;
+    #endregion
+
+    #region Logging
 
     private void Log(string msg)
     {
         if (_disposed) return;
 
-        // Drop oldest if queue grows unbounded (prevents OOM under high RTP traffic)
         while (_logQueue.Count >= MAX_LOG_QUEUE_SIZE)
-        {
             _logQueue.TryDequeue(out _);
-        }
 
         _logQueue.Enqueue($"{DateTime.Now:HH:mm:ss.fff} {msg}");
 
-        // Only one drain loop at a time
         if (Interlocked.CompareExchange(ref _logDraining, 1, 0) == 0)
         {
             ThreadPool.QueueUserWorkItem(_ =>
@@ -958,11 +915,10 @@ public sealed class SipServer : IAsyncDisposable
                         OnLog?.Invoke(line);
                     }
                 }
-                catch { /* logging must never crash */ }
+                catch { }
                 finally
                 {
                     Volatile.Write(ref _logDraining, 0);
-                    // Re-check in case items were enqueued during finally
                     if (!_logQueue.IsEmpty && Interlocked.CompareExchange(ref _logDraining, 1, 0) == 0)
                         ThreadPool.QueueUserWorkItem(_ =>
                         {
@@ -975,10 +931,28 @@ public sealed class SipServer : IAsyncDisposable
         }
     }
 
+    #endregion
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
         _disposed = true;
         await StopAsync();
+    }
+
+    /// <summary>
+    /// Tracks all resources for a single active call.
+    /// Fully isolated — no shared mutable state between calls.
+    /// </summary>
+    private sealed class ActiveCall
+    {
+        public required string SessionId { get; init; }
+        public required ICallSession Session { get; init; }
+        public required VoIPMediaSession RtpSession { get; init; }
+        public required SIPUserAgent CallAgent { get; init; }
+        public ALawRtpPlayout? Playout { get; set; }
+
+        /// <summary>Atomic cleanup guard: 0=pending, 1=done.</summary>
+        public int CleanupDone;
     }
 }

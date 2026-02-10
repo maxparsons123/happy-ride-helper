@@ -29,8 +29,9 @@ public sealed class SipServerWorker : BackgroundService
         _sipServer.OnLog += msg => _logger.LogDebug("{SipLog}", msg);
         _sipServer.OnRegistered += uri => _logger.LogInformation("✅ SIP Registered: {Uri}", uri);
         _sipServer.OnRegistrationFailed += err => _logger.LogError("❌ SIP Registration failed: {Error}", err);
-        _sipServer.OnCallStarted += caller => _logger.LogInformation("📞 Call started: {Caller}", caller);
-        _sipServer.OnCallEnded += reason => _logger.LogInformation("📴 Call ended: {Reason}", reason);
+        _sipServer.OnCallStarted += (sessionId, caller) => _logger.LogInformation("📞 Call {SessionId} started: {Caller} (active: {Count})", sessionId, caller, _sipServer.ActiveCallCount);
+        _sipServer.OnCallEnded += (sessionId, reason) => _logger.LogInformation("📴 Call {SessionId} ended: {Reason} (active: {Count})", sessionId, reason, _sipServer.ActiveCallCount);
+        _sipServer.OnActiveCallCountChanged += count => _logger.LogInformation("📊 Active calls: {Count}", count);
 
         try
         {

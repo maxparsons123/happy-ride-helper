@@ -225,28 +225,32 @@ public partial class MainForm : Form
                 statusLabel.Text = "Registration Failed";
             });
 
-            _sipServer.OnCallStarted += callerId => Invoke(() =>
+            _sipServer.OnCallStarted += (sessionId, callerId) => Invoke(() =>
             {
                 OnIncomingCall(callerId);
                 SetInCall(true);
+                statusCallId.Text = $"{callerId} [{sessionId}]";
                 _ = ConnectSimliAsync();
             });
 
-            _sipServer.OnCallEnded += reason => Invoke(() =>
+            _sipServer.OnCallEnded += (sessionId, reason) => Invoke(() =>
             {
-                Log($"📴 Call ended: {reason}");
-                SetInCall(false);
-                statusCallId.Text = "";
-                _currentSession = null;
-                StopAudioMonitor();
-                _ = DisconnectSimliAsync();
+                Log($"📴 Call {sessionId} ended: {reason}");
+                // Only clear UI if no more active calls
+                if (_sipServer?.ActiveCallCount == 0)
+                {
+                    SetInCall(false);
+                    statusCallId.Text = "";
+                    _currentSession = null;
+                    StopAudioMonitor();
+                    _ = DisconnectSimliAsync();
+                }
             });
 
-            // Wire caller audio monitor — hear raw SIP audio through local speakers
-            _sipServer.OnCallerAudioMonitor += alawPayload =>
+            _sipServer.OnActiveCallCountChanged += count => Invoke(() =>
             {
-                _monitorBuffer?.AddSamples(alawPayload, 0, alawPayload.Length);
-            };
+                Log($"📊 Active calls: {count}");
+            });
 
             await _sipServer.StartAsync();
         }
@@ -373,10 +377,10 @@ public partial class MainForm : Form
 
     private async void btnHangUp_Click(object? sender, EventArgs e)
     {
-        Log("📴 Hanging up call.");
+        Log("📴 Hanging up all calls.");
         if (_sipServer != null)
         {
-            try { await _sipServer.HangupAsync(); }
+            try { await _sipServer.HangupAllAsync("operator_hangup"); }
             catch (Exception ex) { Log($"⚠ Hangup error: {ex.Message}"); }
         }
         SetInCall(false);
