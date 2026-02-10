@@ -787,6 +787,25 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                 Log($"📝 Transcript arrived {msSinceSpeechStopped}ms after speech stopped: {text}");
 
                             OnTranscript?.Invoke("User", text);
+
+                            // v4.0: TRANSCRIPT GROUNDING — inject the text transcript into the conversation
+                            // so the model can cross-reference what it heard vs what was actually said.
+                            // This fixes mishearing issues (e.g. "Dovey" heard as "Dollby") because the
+                            // model can see the correct text and self-correct on its next response.
+                            if (IsConnected)
+                            {
+                                await SendJsonAsync(new
+                                {
+                                    type = "conversation.item.create",
+                                    item = new
+                                    {
+                                        type = "message",
+                                        role = "user",
+                                        content = new[] { new { type = "input_text", text = $"[TRANSCRIPT] The caller just said: \"{text}\"" } }
+                                    }
+                                });
+                                Log($"📋 Transcript grounding injected: {text}");
+                            }
                         }
                     }
 
