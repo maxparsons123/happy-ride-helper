@@ -11,22 +11,16 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaMain.Audio;
 
 /// <summary>
-/// PURE A-LAW PASSTHROUGH playout engine v7.5.
+/// PURE A-LAW PASSTHROUGH playout engine v8.3 — Hysteresis anti-grumble.
 /// 
-/// v7.5 improvements over v7.4:
-/// ✅ ArrayPool&lt;byte&gt; for frame allocation (eliminates GC stutter from thousands of 160-byte arrays)
-/// ✅ Win32 Waitable Timer for precise 20ms sleep (replaces Thread.Sleep spin-wait hybrid)
+/// v8.3 fixes over v7.5:
+/// ✅ HYSTERESIS buffering: 200ms (10 frames) to START, only re-buffer when queue hits 0
+///    Eliminates "grumble" caused by rapid Play→Silence→Play toggling at 50Hz
+/// ✅ Reduced SpinWait intensity (prevents starving network thread on desktop CPUs)
+/// ✅ Win32 Waitable Timer for precise 20ms sleep
 /// ✅ Accumulator safety cap (prevents unbounded growth from OpenAI audio bursts)
-/// 
-/// Retained from v7.4:
-/// ✅ Fixed 200ms jitter buffer (absorbs OpenAI burst delivery)
-/// ✅ Re-buffering on underrun with threshold=2
-/// ✅ Simple wall-clock timing (no aggressive drift correction)
 /// ✅ Instant silence transitions (NO fade-out = no G.711 warbling)
-/// ✅ NAT keepalives
-/// ✅ OnFault event for circuit breaker
-/// ✅ Lightweight queue statistics
-/// ✅ Minimal logging (zero hot-path overhead)
+/// ✅ NAT keepalives, OnFault circuit breaker, lightweight queue statistics
 /// 
 /// Architecture: Pure passthrough — NO DSP, NO resampling, NO conversions.
 /// </summary>
@@ -70,11 +64,12 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5;      // ITU-T G.711 A-law silence
     private const byte PAYLOAD_TYPE_PCMA = 8;    // RTP payload type for A-law
 
-    // FIXED 200ms buffer (10 frames)
-    private const int JITTER_BUFFER_FRAMES = 10;
-    private const int RESUME_BUFFER_FRAMES = 2;  // After initial fill, only need 40ms to resume
-    private const int REBUFFER_THRESHOLD = 2;    // Mid-stream rebuffer at 2 frames
-    private const int MAX_QUEUE_FRAMES = 2000;   // ~40s safety cap
+    // HYSTERESIS CALIBRATION (v8.3):
+    // Start threshold: require 200ms (10 frames) before first playout
+    // Stop threshold: only re-buffer when queue actually hits 0 (not 2)
+    // This prevents the "grumble" from rapid Play→Silence→Play toggling
+    private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms to start/resume
+    private const int MAX_QUEUE_FRAMES = 2000;            // ~40s safety cap
 
     // Accumulator safety: cap at 64KB to prevent unbounded growth from burst audio
     private const int MAX_ACCUMULATOR_SIZE = 65536;
@@ -88,7 +83,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // Pre-allocated accumulator
     private byte[] _accumulator = new byte[8192];
     private int _accCount;
-    private bool _initialFillDone;
+    // _initialFillDone removed — v8.3 uses uniform hysteresis (always 200ms)
     private readonly object _accLock = new();
 
     // RTP session reference for sending
@@ -253,7 +248,6 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _running = true;
         _isBuffering = true;
-        _initialFillDone = false;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
         _totalUnderruns = 0;
@@ -295,12 +289,11 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v7.5"
+            Name = "ALawPlayout-v8.3"
         };
         _playoutThread.Start();
 
-        SafeLog($"[RTP] Started (pure A-law v7.5, {JITTER_BUFFER_FRAMES * 20}ms fixed buffer, " +
-                $"rebuffer={REBUFFER_THRESHOLD}, pool=ArrayPool, " +
+        SafeLog($"[RTP] Started (pure A-law v8.3, {JITTER_BUFFER_START_THRESHOLD * 20}ms hysteresis buffer, " +
                 $"timer={(_useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait")})");
     }
 
@@ -325,7 +318,7 @@ public sealed class ALawRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// SMOOTH TIMING LOOP v7.5: Uses Win32 Waitable Timer for precise 20ms sleep
+    /// SMOOTH TIMING LOOP v8.3: Uses Win32 Waitable Timer for precise 20ms sleep
     /// when available, falls back to Thread.Sleep + SpinWait hybrid.
     /// </summary>
     private void PlayoutLoop()
@@ -349,9 +342,9 @@ public sealed class ALawRtpPlayout : IDisposable
                 {
                     Thread.Sleep((int)(waitNs / 1_000_000) - 1);
                 }
-                else if (waitNs > 100_000) // >0.1ms — spin
+                else if (waitNs > 100_000) // >0.1ms — gentle spin (v8.3: reduced from 50 to avoid starving network thread)
                 {
-                    Thread.SpinWait(50);
+                    Thread.SpinWait(20);
                 }
                 continue;
             }
@@ -395,40 +388,47 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Add(ref _statsQueueSizeSum, queueCount);
         Interlocked.Increment(ref _statsQueueSizeSamples);
 
-        // Re-buffer if queue gets too low
-        if (!_isBuffering && queueCount <= REBUFFER_THRESHOLD && queueCount > 0)
+        // ── HYSTERESIS LOGIC (v8.3) ──
+        // If buffering, wait for a full 200ms pillow before starting playout.
+        // This prevents the "grumble" from toggling Play→Silence→Play at 50Hz.
+        if (_isBuffering)
         {
-            _isBuffering = true;
+            if (queueCount < JITTER_BUFFER_START_THRESHOLD)
+            {
+                SendRtpFrame(_silenceFrame, false);
+                return;
+            }
+            _isBuffering = false; // We have enough audio — start playing
+            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
         }
 
-        // Fixed jitter buffer: wait until enough frames buffered
-        int requiredFrames = _initialFillDone ? RESUME_BUFFER_FRAMES : JITTER_BUFFER_FRAMES;
-        if (_isBuffering && queueCount < requiredFrames)
-        {
-            SendRtpFrame(_silenceFrame, false);
-            return;
-        }
-
-        _isBuffering = false;
-        _initialFillDone = true;
-
-        // Get frame or send instant silence (NO fade-out → prevents G.711 warbling)
+        // Try to get a real frame
         if (_frameQueue.TryDequeue(out var frame))
         {
             Interlocked.Decrement(ref _queueCount);
             SendRtpFrame(frame, false);
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
+
+            // If we just played the last frame, immediately re-enter buffering mode
+            // to prevent the "grumble" of playing 1 frame then silence then 1 frame
+            if (Volatile.Read(ref _queueCount) == 0)
+            {
+                _isBuffering = true;
+                Interlocked.Increment(ref _totalUnderruns);
+                try { OnQueueEmpty?.Invoke(); } catch { }
+            }
         }
         else
         {
+            // Emergency fallback — queue was empty despite not being in buffering mode
+            _isBuffering = true;
             SendRtpFrame(_silenceFrame, false);
             Interlocked.Increment(ref _totalUnderruns);
 
             if (_wasPlaying)
             {
                 _wasPlaying = false;
-                _isBuffering = true;
                 try { OnQueueEmpty?.Invoke(); } catch { }
             }
         }
@@ -503,7 +503,6 @@ public sealed class ALawRtpPlayout : IDisposable
         }
 
         _isBuffering = true;
-        _initialFillDone = false;
         _wasPlaying = false;
     }
 
