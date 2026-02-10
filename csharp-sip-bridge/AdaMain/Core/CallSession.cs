@@ -259,10 +259,14 @@ public sealed class CallSession : ICallSession
                 _logger.LogInformation("[{SessionId}] 💰 Auto-quote: {Fare} ({Spoken}), ETA: {Eta}",
                     SessionId, _booking.Fare, spokenFare, _booking.Eta);
                 
-                // Inject fare result into conversation so Ada announces it
-                var fareMsg = $"[FARE RESULT] For the booking from {_booking.Pickup} to {_booking.Destination}, " +
-                    $"the fare is {spokenFare}, estimated arrival {_booking.Eta}. " +
-                    "Tell the caller this fare and ask if they want to proceed or edit any details.";
+                // Inject fare result with VERIFIED addresses into conversation
+                var verifiedPickup = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                var verifiedDest = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
+                var fareMsg = $"[FARE RESULT] The addresses have been VERIFIED by our system.\n" +
+                    $"VERIFIED Pickup: {verifiedPickup}\n" +
+                    $"VERIFIED Destination: {verifiedDest}\n" +
+                    $"Fare: {spokenFare}, ETA: {_booking.Eta}.\n" +
+                    "You MUST read back these VERIFIED addresses (not the original user input) along with the fare, then ask if they want to confirm or change anything.";
                 await _aiClient.InjectMessageAndRespondAsync(fareMsg);
             }
             catch (Exception ex)
@@ -272,9 +276,11 @@ public sealed class CallSession : ICallSession
                 _booking.Eta = "8 minutes";
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 
-                var fareMsg = $"[FARE RESULT] For the booking from {_booking.Pickup} to {_booking.Destination}, " +
-                    "the fare is approximately 8 pounds, estimated arrival 8 minutes. " +
-                    "Tell the caller this fare and ask if they want to proceed or edit any details.";
+                var fallbackPickup = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                var fallbackDest = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
+                var fareMsg = $"[FARE RESULT] Pickup: {fallbackPickup}\nDestination: {fallbackDest}\n" +
+                    "Fare: approximately 8 pounds, ETA: 8 minutes.\n" +
+                    "Read back these addresses and fare, then ask if they want to confirm or change anything.";
                 await _aiClient.InjectMessageAndRespondAsync(fareMsg);
             }
             finally
