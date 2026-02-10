@@ -83,10 +83,17 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - Then check if a city name is explicitly mentioned in the address text
    - Check if a unique landmark is mentioned (e.g., "Heathrow Airport" → London)
    - If the street name exists in MULTIPLE UK cities and NO city/landmark/area is mentioned AND no history match:
-     → Set is_ambiguous=true, status="clarification_needed", and provide top 3 city alternatives
-   - Common streets like "High Street", "Church Road", "Station Road", "Russell Street", "Park Road" 
-     are ALWAYS ambiguous without a city name OR a caller history match
-   - NEVER default to London just because a street exists there
+     → You MUST set is_ambiguous=true, status="clarification_needed", and provide top 3 city alternatives
+     → You MUST set clarification_message to a human-readable question like "Which city is David Road in? I found it in Coventry, Birmingham, and London."
+   - IMPORTANT: Most common UK street names exist in MANY cities. You MUST check this.
+     These are ALWAYS ambiguous from a mobile caller without a city/postcode/landmark:
+     "High Street", "Church Road", "Station Road", "Russell Street", "Park Road",
+     "David Road", "Victoria Road", "Albert Road", "King Street", "Queen Street",
+     "School Road", "Mill Lane", "Green Lane", "New Road", "London Road",
+     and ANY other street name that exists in 2+ UK cities.
+   - NEVER assume a city just because the street exists there — you MUST ask
+   - NEVER default to London, Coventry, Birmingham or any other city without evidence
+   - When in doubt, flag as ambiguous — it is MUCH better to ask than to guess wrong
 
 3. Netherlands:
    - +31 or 0031 → Netherlands
@@ -175,7 +182,8 @@ OUTPUT FORMAT (STRICT JSON):
     "alternatives": [],
     "matched_from_history": boolean
   },
-  "status": "ready" | "clarification_needed"
+  "status": "ready" | "clarification_needed",
+  "clarification_message": "Human-readable question for the caller when ANY address is ambiguous, e.g. 'Which city is David Road in? I found it in Coventry, Birmingham, and London.' MUST be provided when status is clarification_needed."
 }`;
 
 serve(async (req) => {
