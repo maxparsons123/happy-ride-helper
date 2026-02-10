@@ -1173,7 +1173,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         {
             type = "function",
             name = "book_taxi",
-            description = "Two-step booking: first call with action='request_quote' to get fare+ETA, then call with action='confirmed' after user agrees. NEVER announce fare before receiving tool result.",
+            description = "ONLY call this AFTER the user has HEARD the fare and EXPLICITLY said yes/confirm/go ahead. action='confirmed' is the ONLY valid action. NEVER call this during fare calculation or before the user confirms. If you call this before user confirmation, the booking is INVALID.",
             parameters = new
             {
                 type = "object",
@@ -1263,16 +1263,21 @@ Greet
 After EVERY field, call sync_booking_data with ALL known fields.
 
 When sync_booking_data is called with all 5 fields filled, the system will
-AUTOMATICALLY calculate the fare and return it in the tool result
-(fare, fare_spoken, eta). You do NOT need to call book_taxi to get the quote.
+AUTOMATICALLY calculate the fare in the background. You will receive the fare
+as a [FARE RESULT] message injected into the conversation.
 
-→ Confirm details ONCE  
-→ If changes: update via sync_booking_data and confirm ONCE more  
-→ If correct: announce the fare using the fare_spoken value from the tool result
-→ Ask ""Would you like to confirm this booking?""  
-→ Call book_taxi(action=""confirmed"")  
-→ Give reference ID ONLY  
-→ Ask ""Anything else?""
+STEP-BY-STEP (DO NOT SKIP ANY STEP):
+
+1. After all fields collected, say ONLY the interjection (""Let me get you a price on that journey."")
+2. WAIT for the [FARE RESULT] message — DO NOT call book_taxi yet
+3. When you receive [FARE RESULT], announce the fare and ask: ""Would you like to confirm?""
+4. WAIT for the user to say YES (""yes"", ""confirm"", ""go ahead"", etc.)
+5. ONLY THEN call book_taxi(action=""confirmed"")
+6. Give reference ID from the tool result
+7. Ask ""Anything else?""
+
+⚠️ CRITICAL: NEVER call book_taxi BEFORE step 4. The user MUST hear the fare AND say yes FIRST.
+If you call book_taxi before the user confirms, the booking is INVALID and harmful.
 
 If the user says NO to ""anything else"":
 You MUST perform the FINAL CLOSING and then call end_call.
@@ -1517,11 +1522,12 @@ ABSOLUTE RULES – VIOLATION FORBIDDEN
 ==============================
 
 1. You MUST call sync_booking_data after every booking-related user message
-2. You MUST call book_taxi(action=""confirmed"") BEFORE confirming a booking
-3. NEVER announce booking success before the tool succeeds
-4. NEVER invent a booking reference or fare
-5. If booking fails, explain clearly and ask to retry
-6. NEVER call end_call except after the FINAL CLOSING
+2. You MUST NOT call book_taxi until the user has HEARD the fare AND EXPLICITLY confirmed
+3. NEVER call book_taxi in the same turn as the fare interjection — the fare hasn't been calculated yet
+4. NEVER call book_taxi in the same turn as announcing the fare — wait for user response
+5. The booking reference comes ONLY from the book_taxi tool result - NEVER invent one
+6. If booking fails, tell the user and ask if they want to try again
+7. NEVER call end_call except after the FINAL CLOSING
 
 ==============================
 CONFIRMATION DETECTION
