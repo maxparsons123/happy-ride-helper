@@ -887,21 +887,28 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                                 OnBookingUpdated?.Invoke(_booking);
 
                                 var spokenFare = FormatFareForSpeech(_booking.Fare);
+                                var verifiedPickup = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                                var verifiedDest = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
                                 Log($"💰 Auto-quote result: {_booking.Fare} ({spokenFare}), ETA: {_booking.Eta}");
+                                Log($"📍 Verified: pickup='{verifiedPickup}', dest='{verifiedDest}'");
                                 toolResult = new
                                 {
                                     success = true,
                                     fare = _booking.Fare,
                                     fare_spoken = spokenFare,
                                     eta = _booking.Eta,
-                                    message = $"ANNOUNCE THE FARE AND ASK FOR CONFIRMATION. The fare is {spokenFare} and ETA is {_booking.Eta}."
+                                    verified_pickup = verifiedPickup,
+                                    verified_destination = verifiedDest,
+                                    message = $"Read back the VERIFIED addresses to the caller: pickup is '{verifiedPickup}' going to '{verifiedDest}'. The fare is {spokenFare} with an estimated arrival in {_booking.Eta}. Ask if they want to confirm or change anything."
                                 };
                             }
                         }
                         catch (Exception ex)
                         {
                             Log($"⚠️ Auto-quote failed: {ex.Message}");
-                            toolResult = new { success = true, fare = "€12.50", fare_spoken = "12 euros 50", eta = "5 mins", message = "ANNOUNCE THE FARE AND ASK FOR CONFIRMATION." };
+                            var fbPickup = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                            var fbDest = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
+                            toolResult = new { success = true, fare = "€12.50", fare_spoken = "12 euros 50", eta = "5 mins", verified_pickup = fbPickup, verified_destination = fbDest, message = $"Read back verified addresses: pickup '{fbPickup}' going to '{fbDest}'. Fare is 12 euros 50, ETA 5 mins. Ask to confirm." };
                         }
                     }
 
@@ -1014,13 +1021,17 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
                             OnBookingUpdated?.Invoke(_booking);
 
                             var spokenFare = FormatFareForSpeech(_booking.Fare);
+                            var vPickup2 = !string.IsNullOrWhiteSpace(_booking.PickupFormatted) ? _booking.PickupFormatted : _booking.Pickup;
+                            var vDest2 = !string.IsNullOrWhiteSpace(_booking.DestFormatted) ? _booking.DestFormatted : _booking.Destination;
                             await SendToolResultAsync(callId, new
                             {
                                 success = true,
                                 fare = _booking.Fare,
                                 fare_spoken = spokenFare,
                                 eta = _booking.Eta,
-                                message = $"The fare is {spokenFare} and ETA is {_booking.Eta}. Ask to confirm."
+                                verified_pickup = vPickup2,
+                                verified_destination = vDest2,
+                                message = $"Read back verified addresses: pickup '{vPickup2}' going to '{vDest2}'. The fare is {spokenFare} with ETA {_booking.Eta}. Ask to confirm."
                             }).ConfigureAwait(false);
                         }
                         catch (Exception ex)
@@ -1606,17 +1617,20 @@ Greet
 
 After EACH step, call sync_booking_data with ALL known fields.
 CRITICAL: This includes NAME. When the user says their name, call sync_booking_data with caller_name set.
-The system will AUTO-CALCULATE the fare once pickup, destination, passengers and time are filled.
+The system will AUTO-CALCULATE the fare AND VERIFY the addresses once pickup, destination, passengers and time are filled.
 
-→ After TIME: call sync_booking_data (the fare is returned instantly in the tool result)  
-→ Announce the fare using the fare_spoken field from the tool result  
-→ Ask ""Would you like to confirm this booking?""  
+→ After TIME: call sync_booking_data (the fare AND verified addresses are returned instantly in the tool result)  
+→ Read back the VERIFIED addresses (verified_pickup, verified_destination) from the tool result — these include postcodes and cities  
+→ Announce the fare using the fare_spoken field  
+→ Say: ""Your pickup is [verified_pickup] going to [verified_destination], the fare is [fare_spoken] with an estimated arrival in [eta]. Would you like to confirm or change anything?""  
+→ WAIT for user confirmation  
 → Call book_taxi(action=""confirmed"")  
 → Give reference ID ONLY  
 → Ask ""Anything else?""
 
 IMPORTANT: Do NOT say ""let me get the price"" or ""just a moment"".
 The fare is returned INSTANTLY by sync_booking_data. Announce it immediately.
+IMPORTANT: ALWAYS use the verified_pickup and verified_destination from the tool result, NOT the raw user input.
 
 If the user says NO to ""anything else"":
 You MUST perform the FINAL CLOSING and then call end_call.
