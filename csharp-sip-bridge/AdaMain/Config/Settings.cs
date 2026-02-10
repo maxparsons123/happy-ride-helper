@@ -47,7 +47,7 @@ public sealed class AudioSettings
     public string PreferredCodec { get; set; } = "PCMA";
     public double VolumeBoost { get; set; } = 1.0;
     /// <summary>Ingress (caller→AI) volume boost. Separate from egress to avoid echo loops.</summary>
-    public double IngressVolumeBoost { get; set; } = 2.5;
+    public double IngressVolumeBoost { get; set; } = 4.0;
     public int EchoGuardMs { get; set; } = 200;
 
     /// <summary>
