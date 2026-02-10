@@ -1,0 +1,38 @@
+[Unit]
+Description=Ada Taxi AI — Multi-Call SIP Server
+Documentation=https://github.com/your-org/ada-taxi
+After=network.target
+
+[Service]
+Type=notify
+User=ada
+Group=ada
+WorkingDirectory=/opt/ada-server
+ExecStart=/opt/ada-server/AdaMain.Server
+Restart=always
+RestartSec=5
+
+# Environment overrides (uncomment to override appsettings.json)
+# Environment=ADA_SIP__SERVER=sip.example.com
+# Environment=ADA_SIP__USERNAME=1000
+# Environment=ADA_SIP__PASSWORD=secret
+# Environment=ADA_OPENAI__APIKEY=sk-...
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ada-server
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ada-server
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
