@@ -99,6 +99,16 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - +31 or 0031 → Netherlands
    - 020 → Amsterdam, 010 → Rotterdam, 070 → The Hague, 030 → Utrecht
 
+CHAIN BUSINESSES & LANDMARKS WITH MULTIPLE LOCATIONS (CRITICAL):
+Many businesses are chains with locations in multiple cities (e.g., "The Cosy Club", "Nando's", "Wetherspoons", "Tesco", "Costa Coffee", "Premier Inn").
+- For a MOBILE caller with NO city context, NO caller history match, and NO area/postcode mentioned:
+  → You MUST set is_ambiguous=true, status="clarification_needed"
+  → Provide the top 3 city locations as alternatives (e.g., ["The Cosy Club, Birmingham", "The Cosy Club, Manchester", "The Cosy Club, Coventry"])
+  → Set clarification_message to ask which location (e.g., "The Cosy Club has locations in several cities. Which one do you mean? Birmingham, Manchester, or Coventry?")
+- If a LANDLINE caller mentions a chain, bias to their landline city's branch
+- If the destination provides city context (e.g., going to "Manchester Airport"), you may use that to infer the pickup city ONLY if it's highly logical (same-city trip), but if ambiguous, still ask
+- NEVER assume a specific branch without evidence
+
 ABBREVIATED / PARTIAL STREET NAME MATCHING (CRITICAL):
 Users frequently shorten or abbreviate street names. You MUST resolve partial names to real streets:
 - "Fargo" → "Fargosford Street" (partial prefix match in Coventry — do NOT invent "Fargo Street")
