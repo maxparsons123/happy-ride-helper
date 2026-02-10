@@ -987,13 +987,13 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.5,
-                    prefix_padding_ms = 300,
-                    silence_duration_ms = 500
+                    threshold = 0.4,        // Was 0.5 — more sensitive like Realtime client
+                    prefix_padding_ms = 450, // Was 300 — capture more pre-speech audio
+                    silence_duration_ms = 900 // Was 500 — wait longer before end-of-turn
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
-                temperature = 0.8
+                temperature = 0.6  // Was 0.8 — more focused responses like Realtime client
             }
         });
     }
