@@ -1561,6 +1561,13 @@ ABSOLUTE RULES – VIOLATION FORBIDDEN
 5. The booking reference comes ONLY from the book_taxi tool result - NEVER invent one
 6. If booking fails, tell the user and ask if they want to try again
 7. NEVER call end_call except after the FINAL CLOSING
+8. ADDRESS CORRECTION = NEW CONFIRMATION CYCLE: If the user CORRECTS any address (pickup or destination) after a fare was already quoted, you MUST:
+   a) Call sync_booking_data with the corrected address
+   b) Wait for a NEW [FARE RESULT] with the corrected addresses
+   c) Read back the NEW verified addresses and fare to the user
+   d) Wait for the user to EXPLICITLY confirm the NEW fare
+   e) ONLY THEN call book_taxi
+   The words ""yeah"", ""yes"" etc. spoken WHILE correcting an address are part of the correction, NOT a booking confirmation.
 
 ==============================
 CONFIRMATION DETECTION
