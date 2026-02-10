@@ -2,14 +2,43 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using AdaMain.Config;
 using AdaMain.Core;
 using Microsoft.Extensions.Logging;
 
 namespace AdaMain.Services;
 
+// =========================
+// BSQD API DTOs (matching WinForms format)
+// =========================
+
+public class AddressDto
+{
+    public double lat { get; set; }
+    public double lon { get; set; }
+    public string street_name { get; set; } = "";
+    public string street_number { get; set; } = "";
+    public string postal_code { get; set; } = "";
+    public string city { get; set; } = "";
+    public string? formatted_depa_address { get; set; }   // for departure
+    public string? formatted_dest_address { get; set; }   // for destination
+}
+
+public class BsqdTaxiBotRequest
+{
+    public AddressDto departure_address { get; set; } = new();
+    public AddressDto destination_address { get; set; } = new();
+    public DateTimeOffset departure_time { get; set; }
+    public string first_name { get; set; } = "";
+    public string total_price { get; set; } = "";
+    public string phoneNumber { get; set; } = "";
+    public string passengers { get; set; } = "1";
+}
+
 /// <summary>
 /// BSQD dispatch and WhatsApp notification service.
+/// Uses nested AddressDto format matching the WinForms dispatcher.
 /// </summary>
 public sealed class BsqdDispatcher : IDispatcher
 {
@@ -19,8 +48,7 @@ public sealed class BsqdDispatcher : IDispatcher
     
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
     
     public BsqdDispatcher(ILogger<BsqdDispatcher> logger, DispatchSettings settings)
@@ -40,53 +68,108 @@ public sealed class BsqdDispatcher : IDispatcher
         
         try
         {
-            var payload = new TaxiBotRequest
-            {
-                PhoneNumber = FormatPhone(phoneNumber),
-                Name = booking.Name,
-                Pickup = booking.PickupFormatted ?? booking.Pickup,
-                PickupStraat = booking.PickupStreet,
-                PickupHuisnr = ParseInt(booking.PickupNumber),
-                PickupPlaats = booking.PickupCity,
-                PickupLat = booking.PickupLat,
-                PickupLon = booking.PickupLon,
-                Destination = booking.DestFormatted ?? booking.Destination,
-                DestStraat = booking.DestStreet,
-                DestHuisnr = ParseInt(booking.DestNumber),
-                DestPlaats = booking.DestCity,
-                DestLat = booking.DestLat,
-                DestLon = booking.DestLon,
-                Passengers = booking.Passengers ?? 1,
-                PickupTime = booking.PickupTime,
-                Fare = booking.Fare,
-                Eta = booking.Eta,
-                BookingRef = booking.BookingRef
-            };
+            var payload = BuildRequest(booking, phoneNumber);
+            var json = JsonSerializer.Serialize(payload, JsonOptions);
+            
+            _logger.LogInformation("🚕 BSQD Dispatch → {Phone}", payload.phoneNumber);
+            _logger.LogInformation("📦 Payload: {Json}", json);
             
             var request = new HttpRequestMessage(HttpMethod.Post, _settings.BsqdWebhookUrl);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.BsqdApiKey);
-            request.Content = new StringContent(
-                JsonSerializer.Serialize(payload, JsonOptions),
-                Encoding.UTF8,
-                "application/json");
+            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
             
             var response = await _httpClient.SendAsync(request);
             
             if (response.IsSuccessStatusCode)
             {
-                _logger.LogInformation("Dispatch sent: {BookingRef}", booking.BookingRef);
+                _logger.LogInformation("✅ BSQD Dispatch OK: {Status}", (int)response.StatusCode);
                 return true;
             }
             
             var error = await response.Content.ReadAsStringAsync();
-            _logger.LogWarning("Dispatch failed: {Status} - {Error}", (int)response.StatusCode, error);
+            _logger.LogWarning("❌ BSQD Dispatch FAIL: {Status} - {Error}", (int)response.StatusCode, error);
             return false;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Dispatch error");
+            _logger.LogError(ex, "❌ BSQD Dispatch ERROR");
             return false;
         }
+    }
+    
+    /// <summary>
+    /// Build nested TaxiBotRequest from BookingState (matching WinForms format).
+    /// Uses geocoded components when available, falls back to string parsing.
+    /// </summary>
+    private static BsqdTaxiBotRequest BuildRequest(BookingState booking, string callerId)
+    {
+        // Parse departure time
+        var departureTime = DateTimeOffset.Now.AddMinutes(5);
+        if (!string.IsNullOrWhiteSpace(booking.PickupTime))
+        {
+            var normalized = booking.PickupTime.Trim().ToLowerInvariant();
+            if (normalized is "now" or "asap" or "nu" or "direct")
+            {
+                departureTime = DateTimeOffset.Now.AddMinutes(2);
+            }
+            else if (DateTimeOffset.TryParse(booking.PickupTime, out var parsed))
+            {
+                departureTime = parsed;
+            }
+        }
+
+        return new BsqdTaxiBotRequest
+        {
+            departure_address = new AddressDto
+            {
+                lat = booking.PickupLat ?? 0,
+                lon = booking.PickupLon ?? 0,
+                street_name = booking.PickupStreet ?? ParseStreetName(booking.Pickup),
+                street_number = ResolveHouseNumber(booking.PickupNumber, booking.Pickup),
+                postal_code = booking.PickupPostalCode ?? "",
+                city = booking.PickupCity ?? ParseCity(booking.Pickup),
+                formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "Unknown"
+            },
+            destination_address = new AddressDto
+            {
+                lat = booking.DestLat ?? 0,
+                lon = booking.DestLon ?? 0,
+                street_name = booking.DestStreet ?? ParseStreetName(booking.Destination),
+                street_number = ResolveHouseNumber(booking.DestNumber, booking.Destination),
+                postal_code = booking.DestPostalCode ?? "",
+                city = booking.DestCity ?? ParseCity(booking.Destination),
+                formatted_dest_address = booking.DestFormatted ?? booking.Destination ?? "Unknown"
+            },
+            departure_time = departureTime,
+            first_name = booking.Name ?? "Customer",
+            total_price = ParseFare(booking.Fare),
+            phoneNumber = FormatE164(callerId),
+            passengers = (booking.Passengers ?? 1).ToString()
+        };
+    }
+    
+    /// <summary>
+    /// Resolve house number as string, preserving alphanumeric values like "52A".
+    /// </summary>
+    private static string ResolveHouseNumber(string? stateValue, string? rawAddress)
+    {
+        if (!string.IsNullOrWhiteSpace(stateValue))
+            return stateValue;
+
+        if (!string.IsNullOrWhiteSpace(rawAddress))
+        {
+            var parts = rawAddress.Split(',');
+            if (parts.Length > 0)
+            {
+                var match = Regex.Match(parts[0].Trim(), @"^(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)\s");
+                if (match.Success) return match.Groups[1].Value;
+                
+                match = Regex.Match(parts[0].Trim(), @"\s(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)$");
+                if (match.Success) return match.Groups[1].Value;
+            }
+        }
+
+        return "";
     }
     
     public async Task<bool> SendWhatsAppAsync(string phoneNumber)
@@ -100,7 +183,7 @@ public sealed class BsqdDispatcher : IDispatcher
         
         try
         {
-            var formatted = FormatPhone(phoneNumber);
+            var formatted = FormatE164(phoneNumber);
             
             var request = new HttpRequestMessage(HttpMethod.Post, _settings.WhatsAppWebhookUrl);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.BsqdApiKey);
@@ -128,50 +211,79 @@ public sealed class BsqdDispatcher : IDispatcher
         }
     }
     
-    private static string FormatPhone(string phone)
+    /// <summary>
+    /// Format phone to E.164 (+447539025332 or +31612345678).
+    /// </summary>
+    private static string FormatE164(string? phone)
     {
+        if (string.IsNullOrWhiteSpace(phone)) return "+31000000000";
+
         var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
-        
-        if (clean.StartsWith("+")) clean = "00" + clean[1..];
-        if (!clean.StartsWith("00"))
+
+        // Convert 00 prefix to +
+        if (clean.StartsWith("00"))
+            clean = "+" + clean[2..];
+
+        if (clean.StartsWith("+"))
         {
-            if (clean.StartsWith("06") || clean.StartsWith("0"))
-                clean = "0031" + clean[1..];
-            else
-                clean = "00" + clean;
+            // Dutch mobile: remove extra 0 after +31
+            if (clean.StartsWith("+310") && clean.Length > 11)
+                clean = "+31" + clean[4..];
+            return clean;
         }
-        if (clean.StartsWith("00310")) clean = "0031" + clean[5..];
-        
-        return new string(clean.Where(char.IsDigit).ToArray());
+
+        // Detect existing country code
+        if (clean.StartsWith("44") && clean.Length >= 11) return "+" + clean;
+        if (clean.StartsWith("31") && clean.Length >= 10) return "+" + clean;
+        if (clean.StartsWith("49") && clean.Length >= 10) return "+" + clean;
+        if (clean.StartsWith("33") && clean.Length >= 10) return "+" + clean;
+        if (clean.StartsWith("32") && clean.Length >= 9) return "+" + clean;
+        if (clean.StartsWith("1") && clean.Length == 11) return "+" + clean;
+
+        // Local Dutch number
+        if (clean.StartsWith("0"))
+            return "+31" + clean[1..];
+
+        return "+31" + clean;
     }
     
-    private static int? ParseInt(string? value)
+    /// <summary>Parse fare string to decimal format "15.50".</summary>
+    private static string ParseFare(string? fare)
     {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        var digits = new string(value.Where(char.IsDigit).ToArray());
-        return int.TryParse(digits, out var n) ? n : null;
+        if (string.IsNullOrWhiteSpace(fare)) return "0.00";
+        var clean = new string(fare.Where(c => char.IsDigit(c) || c == '.' || c == ',').ToArray());
+        clean = clean.Replace(',', '.');
+        if (decimal.TryParse(clean, System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out var amount))
+            return amount.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        return "0.00";
     }
     
-    private sealed class TaxiBotRequest
+    /// <summary>Extract street name from address string (fallback).</summary>
+    private static string ParseStreetName(string? address)
     {
-        public string? PhoneNumber { get; set; }
-        public string? Name { get; set; }
-        public string? Pickup { get; set; }
-        public string? PickupStraat { get; set; }
-        public int? PickupHuisnr { get; set; }
-        public string? PickupPlaats { get; set; }
-        public double? PickupLat { get; set; }
-        public double? PickupLon { get; set; }
-        public string? Destination { get; set; }
-        public string? DestStraat { get; set; }
-        public int? DestHuisnr { get; set; }
-        public string? DestPlaats { get; set; }
-        public double? DestLat { get; set; }
-        public double? DestLon { get; set; }
-        public int? Passengers { get; set; }
-        public string? PickupTime { get; set; }
-        public string? Fare { get; set; }
-        public string? Eta { get; set; }
-        public string? BookingRef { get; set; }
+        if (string.IsNullOrWhiteSpace(address)) return "Unknown";
+        var parts = address.Split(',');
+        if (parts.Length > 0)
+        {
+            var streetPart = parts[0].Trim();
+            var match = Regex.Match(streetPart, @"^(.+?)\s+\d+[A-Za-z\-]*$");
+            if (match.Success) return match.Groups[1].Value;
+            return streetPart;
+        }
+        return address;
+    }
+    
+    /// <summary>Extract city (last non-postal-code part).</summary>
+    private static string ParseCity(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "";
+        var parts = address.Split(',').Select(p => p.Trim()).ToArray();
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            if (!Regex.IsMatch(parts[i], @"\d{4}\s*[A-Z]{2}", RegexOptions.IgnoreCase))
+                return parts[i];
+        }
+        return "";
     }
 }

@@ -431,30 +431,42 @@ public sealed class CallSession : ICallSession
         
         if (action == "confirmed" || action == null)
         {
-            // Ensure we have geocoded components and fare before dispatch
-            if (((string.IsNullOrWhiteSpace(_booking.PickupStreet) || string.IsNullOrWhiteSpace(_booking.DestStreet)) ||
-                 string.IsNullOrWhiteSpace(_booking.Fare)) &&
+            // Ensure we have geocoded components before dispatch
+            bool needsGeocode = string.IsNullOrWhiteSpace(_booking.PickupStreet)
+                || (_booking.PickupLat == 0 && _booking.PickupLon == 0)
+                || (_booking.DestLat == 0 && _booking.DestLon == 0);
+            
+            if (needsGeocode &&
                 !string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(_booking.Destination))
             {
                 try
                 {
+                    _logger.LogInformation("[{SessionId}] 🔄 Confirmed path: resolving addresses via Gemini...", SessionId);
                     var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
-                    _booking.PickupLat = result.PickupLat;
-                    _booking.PickupLon = result.PickupLon;
-                    _booking.PickupStreet = result.PickupStreet;
-                    _booking.PickupNumber = result.PickupNumber;
-                    _booking.PickupPostalCode = result.PickupPostalCode;
-                    _booking.PickupCity = result.PickupCity;
-                    _booking.PickupFormatted = result.PickupFormatted;
-                    _booking.DestLat = result.DestLat;
-                    _booking.DestLon = result.DestLon;
-                    _booking.DestStreet = result.DestStreet;
-                    _booking.DestNumber = result.DestNumber;
-                    _booking.DestPostalCode = result.DestPostalCode;
-                    _booking.DestCity = result.DestCity;
-                    _booking.DestFormatted = result.DestFormatted;
+                    
+                    // Map geocoded data — use ??= to preserve existing values
+                    _booking.PickupLat ??= result.PickupLat;
+                    _booking.PickupLon ??= result.PickupLon;
+                    _booking.PickupStreet ??= result.PickupStreet;
+                    _booking.PickupNumber ??= result.PickupNumber;
+                    _booking.PickupPostalCode ??= result.PickupPostalCode;
+                    _booking.PickupCity ??= result.PickupCity;
+                    _booking.PickupFormatted ??= result.PickupFormatted;
+                    _booking.DestLat ??= result.DestLat;
+                    _booking.DestLon ??= result.DestLon;
+                    _booking.DestStreet ??= result.DestStreet;
+                    _booking.DestNumber ??= result.DestNumber;
+                    _booking.DestPostalCode ??= result.DestPostalCode;
+                    _booking.DestCity ??= result.DestCity;
+                    _booking.DestFormatted ??= result.DestFormatted;
                     _booking.Fare ??= result.Fare;
                     _booking.Eta ??= result.Eta;
+                    
+                    // Override zero coords if Gemini returned valid ones
+                    if (_booking.PickupLat == 0 && result.PickupLat != 0) _booking.PickupLat = result.PickupLat;
+                    if (_booking.PickupLon == 0 && result.PickupLon != 0) _booking.PickupLon = result.PickupLon;
+                    if (_booking.DestLat == 0 && result.DestLat != 0) _booking.DestLat = result.DestLat;
+                    if (_booking.DestLon == 0 && result.DestLon != 0) _booking.DestLon = result.DestLon;
                 }
                 catch (Exception ex)
                 {
@@ -465,33 +477,31 @@ public sealed class CallSession : ICallSession
             _booking.Confirmed = true;
             _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
             
+            if (_aiClient is OpenAiG711Client g711Conf)
+                g711Conf.SetAwaitingConfirmation(false);
+            
             OnBookingUpdated?.Invoke(_booking.Clone());
             _logger.LogInformation("[{SessionId}] ✅ Booked: {Ref}", SessionId, _booking.BookingRef);
             
-            // Dispatch and notify (fire-and-forget)
-            _ = _dispatcher.DispatchAsync(_booking, CallerId);
-            _ = _dispatcher.SendWhatsAppAsync(CallerId);
-            
-            // Post-booking timeout: force farewell after 15s if user doesn't respond
+            // Fire off BSQD Dispatch + WhatsApp (wait for response to finish first, like WinForms)
             _ = Task.Run(async () =>
             {
-                await Task.Delay(15000);
-                if (!IsActive) return;
-                if (_aiClient is OpenAiG711Client g711)
+                // Wait for Ada to finish speaking before dispatching
+                if (_aiClient is OpenAiG711Client g711Wait)
                 {
-                    if (!g711.IsConnected) return;
-                    g711.CancelDeferredResponse();
-                    _logger.LogInformation("[{SessionId}] ⏰ Post-booking timeout - requesting farewell", SessionId);
+                    for (int i = 0; i < 50 && g711Wait.IsResponseActive; i++)
+                        await Task.Delay(100);
                 }
+                
+                await _dispatcher.DispatchAsync(_booking, CallerId);
+                await _dispatcher.SendWhatsAppAsync(CallerId);
             });
             
             return new
             {
                 success = true,
                 booking_ref = _booking.BookingRef,
-                message = string.IsNullOrWhiteSpace(_booking.Name)
-                    ? "Your taxi is booked!"
-                    : $"Thanks {_booking.Name.Trim()}, your taxi is booked!"
+                message = $"Booking confirmed. Reference: {_booking.BookingRef}. Now tell the caller their reference number and ask 'Is there anything else I can help with?'. When the user says no or declines, you MUST say EXACTLY: 'Thank you for using the TaxiBot system. You will shortly receive your booking confirmation over WhatsApp. Goodbye.' — then call end_call. Do NOT call end_call until AFTER you have spoken the goodbye message."
             };
         }
         
