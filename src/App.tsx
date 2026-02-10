@@ -16,6 +16,7 @@ import TtsTest from "./pages/TtsTest";
 import DualBrainTest from "./pages/DualBrainTest";
 import CallFlowDebugger from "./pages/CallFlowDebugger";
 import VaxVoIPTest from "./pages/VaxVoIPTest";
+import Diagnostics from "./pages/Diagnostics";
 
 const queryClient = new QueryClient();
 
@@ -38,6 +39,7 @@ const App = () => (
           <Route path="/tts-test" element={<TtsTest />} />
           <Route path="/dual-brain" element={<DualBrainTest />} />
           <Route path="/call-flow" element={<CallFlowDebugger />} />
+          <Route path="/diagnostics" element={<Diagnostics />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
