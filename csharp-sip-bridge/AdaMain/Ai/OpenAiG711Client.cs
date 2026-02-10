@@ -630,10 +630,31 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                             }
                         });
                     }
+                    // FALLBACK WATCHDOG: If NotifyPlayoutComplete doesn't fire within 10s
+                    // of response.done, arm the no-reply watchdog ourselves.
+                    // This prevents calls from hanging when the playout engine's OnQueueEmpty
+                    // doesn't trigger (race between response.done and queue drain).
+                    if (Volatile.Read(ref _toolCalledInResponse) == 0 && !wasToolTriggered)
+                    {
+                        var fallbackWatchdogId = Volatile.Read(ref _noReplyWatchdogId);
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(10000).ConfigureAwait(false); // 10s covers max playout + margin
+                            if (Volatile.Read(ref _noReplyWatchdogId) == fallbackWatchdogId &&
+                                Volatile.Read(ref _callEnded) == 0 &&
+                                Volatile.Read(ref _disposed) == 0 &&
+                                IsConnected)
+                            {
+                                Log("⏰ Response.done fallback: playout didn't fire watchdog — starting no-reply timer");
+                                StartNoReplyWatchdog();
+                            }
+                        });
+                    }
+
                     // PRICE-PROMISE SAFETY NET (ported from WinForms):
                     // If Ada promised to finalize/book but no tool was called, force create_booking
                     // CRITICAL: Skip if booking already confirmed — prevents infinite loop
-                    else if (Volatile.Read(ref _bookingConfirmed) == 0 &&
+                    if (Volatile.Read(ref _bookingConfirmed) == 0 &&
                              Volatile.Read(ref _toolCalledInResponse) == 0 &&
                              // Removed _syncCallCount > 0 guard: if Ada promises a price but NEVER called
                              // sync_booking_data at all, the safety net MUST still fire to force tool usage.
@@ -1287,7 +1308,16 @@ Greet
 → PASSENGERS  
 → TIME  
 
-After EVERY field, call sync_booking_data with ALL known fields.
+⚠️⚠️⚠️ CRITICAL TOOL CALL RULE ⚠️⚠️⚠️
+After the user answers EACH question, you MUST call sync_booking_data BEFORE speaking your next question.
+Your response to EVERY user message MUST include a sync_booking_data tool call.
+If you respond WITHOUT calling sync_booking_data, the data is LOST and the booking WILL FAIL.
+This is NOT optional. EVERY turn where the user provides info = sync_booking_data call.
+Example flow:
+  User: ""My name is Max"" → call sync_booking_data(caller_name=""Max"") → THEN ask pickup
+  User: ""52A David Road"" → call sync_booking_data(caller_name=""Max"", pickup=""52A David Road"") → THEN ask destination
+  User: ""7 Russell Street"" → call sync_booking_data(..., destination=""7 Russell Street"") → THEN ask passengers
+NEVER collect multiple fields without calling sync_booking_data between each.
 
 When sync_booking_data is called with all 5 fields filled, the system will
 AUTOMATICALLY validate the addresses via our address verification system and
@@ -1350,10 +1380,15 @@ DATA COLLECTION (MANDATORY)
 ==============================
 
 After EVERY user message that provides OR corrects booking data:
-- Call sync_booking_data immediately
-- Include ALL known fields every time
+- Call sync_booking_data IMMEDIATELY — before generating ANY text response
+- Include ALL known fields every time (name, pickup, destination, passengers, time)
 - If the user repeats an address differently, THIS IS A CORRECTION
 - Store addresses EXACTLY as spoken (verbatim)
+
+⚠️ ZERO-TOLERANCE RULE: If you speak your next question WITHOUT having called
+sync_booking_data first, the booking data is permanently lost. The bridge has
+NO access to your conversation memory. sync_booking_data is your ONLY way to
+persist data. Skipping it even once causes a broken booking.
 
 CRITICAL — OUT-OF-ORDER / BATCHED DATA:
 Callers often give multiple fields in one turn (e.g. ""52A David Road, going to Leicester"").
@@ -1554,7 +1589,7 @@ NEVER change the currency. NEVER invent a fare.
 ABSOLUTE RULES – VIOLATION FORBIDDEN
 ==============================
 
-1. You MUST call sync_booking_data after every booking-related user message
+1. You MUST call sync_booking_data after EVERY user message that contains booking data — BEFORE generating your text response. NO EXCEPTIONS. If you answer without calling sync, the data is LOST.
 2. You MUST NOT call book_taxi until the user has HEARD the fare AND EXPLICITLY confirmed
 3. NEVER call book_taxi in the same turn as the fare interjection — the fare hasn't been calculated yet
 4. NEVER call book_taxi in the same turn as announcing the fare — wait for user response
