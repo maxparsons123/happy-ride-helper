@@ -335,8 +335,8 @@ public sealed class OpenAiRealtimeClient : IOpenAiClient, IAsyncDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,
-                    prefix_padding_ms = 450,
+                    threshold = 0.3,        // v2.1: lower threshold for short quiet words
+                    prefix_padding_ms = 600, // v2.1: 600ms captures more pre-speech
                     silence_duration_ms = 900
                 },
                 tools = GetTools(),

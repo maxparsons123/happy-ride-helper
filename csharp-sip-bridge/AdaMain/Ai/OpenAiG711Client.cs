@@ -987,9 +987,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.4,        // Was 0.5 — more sensitive like Realtime client
-                    prefix_padding_ms = 450, // Was 300 — capture more pre-speech audio
-                    silence_duration_ms = 900 // Was 500 — wait longer before end-of-turn
+                    threshold = 0.3,        // v2.1: lower threshold for short quiet words like "three"
+                    prefix_padding_ms = 600, // v2.1: 600ms captures more pre-speech (was 450)
+                    silence_duration_ms = 900
                 },
                 tools = GetTools(),
                 tool_choice = "auto",
