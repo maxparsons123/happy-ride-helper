@@ -56,6 +56,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private int _toolCalledInResponse;    // Track if tool was called during current response
     private int _responseTriggeredByTool;  // Set when response.create is sent after a tool result
     private int _hasEnqueuedAudio;         // FIX #2: Set when playout queue has received audio this response
+    private int _vadRespondedThisTurn;    // v4.3: Set when server_vad auto-created a response this speech turn
     private long _lastAdaFinishedAt;      // RTP playout completion time (echo guard source of truth)
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -197,6 +198,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _responseTriggeredByTool, 0);
         Interlocked.Exchange(ref _bookingConfirmed, 0);
         Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
+        Interlocked.Exchange(ref _vadRespondedThisTurn, 0);
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -570,25 +572,19 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     if (responseId != null && _activeResponseId == responseId)
                         break; // Ignore duplicate
 
-                    // v4.2: If transcript hasn't arrived yet, this is a premature server_vad response.
-                    // Cancel it — the transcript safety mechanism will queue a proper response
-                    // once the transcript is grounded.
-                    if (Volatile.Read(ref _transcriptPending) == 1)
-                    {
-                        Log($"⏳ Cancelling premature server_vad response (transcript pending)");
-                        _ = SendJsonAsync(new { type = "response.cancel" });
-                        break;
-                    }
-
                     _activeResponseId = responseId;
                     Interlocked.Exchange(ref _responseActive, 1);
                     Interlocked.Exchange(ref _toolCalledInResponse, 0); // Reset per-response
                     Interlocked.Exchange(ref _hasEnqueuedAudio, 0);     // FIX #2: Reset per-response
-                    Interlocked.Increment(ref _noReplyWatchdogId);      // Cancel stale watchdog (e.g. fare interjection arriving after tool response)
+                    Interlocked.Increment(ref _noReplyWatchdogId);      // Cancel stale watchdog
                     _lastAdaTranscript = null; // Reset per-response
                     Volatile.Write(ref _responseCreatedAt, NowMs());
+                    
+                    // v4.3: Mark that a response has been created for this speech turn.
+                    // This prevents the transcript safety mechanism from firing a duplicate.
+                    Interlocked.Exchange(ref _vadRespondedThisTurn, 1);
 
-                    // v4.2: Do NOT clear input_audio_buffer here — per AUDIO_TIMING_RULES,
+                    // Do NOT clear input_audio_buffer — per AUDIO_TIMING_RULES,
                     // buffer persistence prevents clipping user speech starts.
                     break;
                 }
@@ -833,7 +829,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(800).ConfigureAwait(false); // Give server_vad time to auto-respond
-                        if (Volatile.Read(ref _responseActive) == 0 &&
+                        // v4.3: Only fire if server_vad did NOT already create a response for this turn
+                        if (Volatile.Read(ref _vadRespondedThisTurn) == 0 &&
+                            Volatile.Read(ref _responseActive) == 0 &&
                             Volatile.Read(ref _callEnded) == 0 &&
                             Volatile.Read(ref _disposed) == 0 &&
                             IsConnected)
@@ -848,6 +846,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 case "input_audio_buffer.speech_started":
                     Volatile.Write(ref _lastUserSpeechAt, NowMs());
                     Interlocked.Increment(ref _noReplyWatchdogId); // Cancel pending watchdog
+                    Interlocked.Exchange(ref _vadRespondedThisTurn, 0); // v4.3: Reset per speech turn
                     Interlocked.Exchange(ref _noReplyCount, 0);    // Reset no-reply count
                     Interlocked.Exchange(ref _transcriptPending, 1);
                     
