@@ -816,11 +816,22 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                         }
                     }
 
-                    // DO NOT auto-queue response.create here.
-                    // With server_vad, OpenAI will auto-respond after speech_stopped + commit.
-                    // The tool handler already queues its own response.create after processing.
-                    // Auto-queuing here caused deferred responses that made OpenAI hallucinate
-                    // answers the user never spoke (e.g., fabricating addresses).
+                    // v4.1: Safety response — if OpenAI's server_vad didn't auto-create a response
+                    // after speech_stopped + commit, queue one ourselves. This matches V2Client behavior
+                    // and prevents the call from hanging when VAD gets stuck after tool-call turns.
+                    // Use a delay to give server_vad time to fire first; only queue if still idle.
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(800).ConfigureAwait(false); // Give server_vad time to auto-respond
+                        if (Volatile.Read(ref _responseActive) == 0 &&
+                            Volatile.Read(ref _callEnded) == 0 &&
+                            Volatile.Read(ref _disposed) == 0 &&
+                            IsConnected)
+                        {
+                            Log("🔄 Transcript safety: server_vad didn't auto-respond, queuing response.create");
+                            await QueueResponseCreateAsync(delayMs: 10, bypassTranscriptGuard: true).ConfigureAwait(false);
+                        }
+                    });
                     break;
                 }
 
