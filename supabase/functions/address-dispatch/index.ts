@@ -54,20 +54,11 @@ const SYSTEM_PROMPT = `Role: Professional Taxi Dispatch Logic System for UK & Ne
 
 Objective: Extract, validate, and GEOCODE pickup and drop-off addresses from user messages, using phone number patterns to determine geographic bias.
 
-CRITICAL — SPEECH-TO-TEXT (STT) MISHEARING AWARENESS:
-All inputs come from real-time speech recognition and are frequently garbled or phonetically distorted.
-You MUST apply phonetic reasoning to reconstruct the user's likely intent:
-- "Colesie Grove" or "Cozy enough" → likely "Cosy Club" (a UK restaurant chain)
-- "Davies Road" → likely "David Road" (common STT swap)
-- "Fargo" → likely "Fargosford Street" (partial/truncated)
-- "transport museum" or "transport" → likely "Transport Museum" (local landmark)
-- Names that sound like real places but don't exist as streets/venues should be interpreted as mishearings of phonetically similar REAL places, streets, or businesses.
-- When an input doesn't match any known street or venue, consider:
-  1. Is it a phonetic distortion of a well-known chain/business? (e.g., "Colesie" → "Cosy", "Nandos" → "Nando's")
-  2. Is it a truncation/abbreviation? (e.g., "Stoney" → "Stoney Stanton Road")
-  3. Is it a homophone swap? (e.g., "Grove" → "Club", "Road" → "Row")
-- If you detect a likely mishearing of a CHAIN BUSINESS or LANDMARK with multiple locations, you MUST still apply the chain disambiguation rules below.
-- NEVER resolve a garbled input to an obscure or unlikely location when a well-known venue/street is a phonetic match.
+SPEECH-TO-TEXT MISHEARING AWARENESS (CRITICAL):
+Inputs come from live speech recognition and are often phonetically garbled. Apply phonetic reasoning:
+- If an input doesn't match a real street/venue, check if it's a mishearing of a well-known place (e.g., "Colesie Grove"→"Cosy Club", "The Globe"→"The Cosy Club", "Davies Road"→"David Road").
+- Chain/landmark mishearings MUST still trigger chain disambiguation rules below.
+- Prefer well-known venues over obscure matches. Never resolve garbled input to an unlikely location.
 
 CALLER HISTORY MATCHING (HIGHEST PRIORITY):
 When CALLER_HISTORY is provided, it contains addresses this specific caller has used before.

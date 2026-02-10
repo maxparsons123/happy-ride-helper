@@ -64,7 +64,7 @@ public sealed class FareCalculator : IFareCalculator
             };
             request.Headers.Add("apikey", _supabaseSettings.AnonKey);
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             var response = await _httpClient.SendAsync(request, cts.Token);
             var responseJson = await response.Content.ReadAsStringAsync();
 
