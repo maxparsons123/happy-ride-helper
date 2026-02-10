@@ -1221,7 +1221,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         {
             type = "function",
             name = "book_taxi",
-            description = "ONLY call this AFTER the user has HEARD the fare and EXPLICITLY said yes/confirm/go ahead. action='confirmed' is the ONLY valid action. NEVER call this during fare calculation or before the user confirms. If you call this before user confirmation, the booking is INVALID.",
+            description = "ONLY call AFTER the user has HEARD the fare and EXPLICITLY said yes/confirm/go ahead in a SEPARATE turn. NEVER call in the same turn as a fare announcement or address change. If an address was just corrected, you MUST wait for the NEW [FARE RESULT], read it back, and get explicit confirmation FIRST. Calling this prematurely produces an INVALID booking.",
             parameters = new
             {
                 type = "object",
