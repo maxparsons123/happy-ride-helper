@@ -629,16 +629,23 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     // CRITICAL: Skip if booking already confirmed — prevents infinite loop
                     else if (Volatile.Read(ref _bookingConfirmed) == 0 &&
                              Volatile.Read(ref _toolCalledInResponse) == 0 &&
-                             Volatile.Read(ref _syncCallCount) > 0 &&  // GUARD: only trigger if booking data exists
+                             // Removed _syncCallCount > 0 guard: if Ada promises a price but NEVER called
+                             // sync_booking_data at all, the safety net MUST still fire to force tool usage.
                              !(IsAutoQuoteInProgress?.Invoke() ?? false) && // GUARD: don't race with background fare calc
                              !string.IsNullOrEmpty(_lastAdaTranscript) &&
                              HasBookingIntent(_lastAdaTranscript))
                     {
-                        Log("⚠️ Price-promise safety net triggered: Ada promised booking but no tool called");
+                        var hasSyncData = Volatile.Read(ref _syncCallCount) > 0;
+                        Log($"⚠️ Price-promise safety net triggered: Ada promised booking but no tool called (syncCount={_syncCallCount})");
                         _ = Task.Run(async () =>
                         {
                             await Task.Delay(40).ConfigureAwait(false);
                             if (Volatile.Read(ref _callEnded) != 0 || !IsConnected) return;
+
+                            // If sync was never called, force sync first; otherwise force book_taxi
+                            var overrideText = hasSyncData
+                                ? "[SYSTEM OVERRIDE] You just told the customer you would get the price or finalize their booking but FAILED to call book_taxi. Call book_taxi(action=\"request_quote\") NOW if you haven't quoted yet, or book_taxi(action=\"confirmed\") if the user already agreed to the fare. Do NOT ask any more questions."
+                                : "[SYSTEM OVERRIDE] You have been collecting booking data but NEVER called sync_booking_data. You MUST call sync_booking_data NOW with ALL the details you have collected (caller_name, pickup, destination, passengers, pickup_time). Do NOT speak — just call the tool immediately.";
 
                             await SendJsonAsync(new
                             {
@@ -652,7 +659,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                                         new
                                         {
                                             type = "input_text",
-                                            text = "[SYSTEM OVERRIDE] You just told the customer you would get the price or finalize their booking but FAILED to call book_taxi. Call book_taxi(action=\"request_quote\") NOW if you haven't quoted yet, or book_taxi(action=\"confirmed\") if the user already agreed to the fare. Do NOT ask any more questions."
+                                            text = overrideText
                                         }
                                     }
                                 }
@@ -660,7 +667,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
                             await Task.Delay(20).ConfigureAwait(false);
                             await SendJsonAsync(new { type = "response.create" }).ConfigureAwait(false);
-                            Log("🔄 Safety net: forced book_taxi response");
+                            Log($"🔄 Safety net: forced {(hasSyncData ? "book_taxi" : "sync_booking_data")} response");
                         });
                     }
                     break;
