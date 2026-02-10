@@ -692,10 +692,12 @@ public sealed class SipServer : IAsyncDisposable
             return;
 
         ICallSession? session;
+        VoIPMediaSession? rtp;
 
         lock (_callLock)
         {
             session = _currentSession;
+            rtp = _activeRtpSession;
             _currentSession = null;
             _activeRtpSession = null;
         }
@@ -704,6 +706,14 @@ public sealed class SipServer : IAsyncDisposable
         {
             await session.EndAsync(reason);
         }
+
+        // Send SIP BYE to hang up the call
+        try { _userAgent?.Hangup(); }
+        catch (Exception ex) { Log($"⚠ SIP hangup error: {ex.Message}"); }
+
+        // Close the RTP session
+        try { rtp?.Close(reason); }
+        catch (Exception ex) { Log($"⚠ RTP close error: {ex.Message}"); }
 
         OnCallEnded?.Invoke(reason);
         Log($"📴 Call cleaned up: {reason}");
