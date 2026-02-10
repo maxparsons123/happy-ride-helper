@@ -12,19 +12,23 @@ namespace AdaMain.Audio;
 /// <summary>
 /// PURE A-LAW PASSTHROUGH playout engine — ported from TaxiSipBridge ALawRtpPlayout v7.4.
 /// 
-/// ✅ Fixed 100ms jitter buffer (absorbs OpenAI burst delivery)
-/// ✅ Re-buffering on underrun (prevents fast→slow pacing artifacts)
+/// ✅ Fixed 200ms jitter buffer (absorbs OpenAI burst delivery)
+/// ✅ Re-buffering on underrun with threshold=2 (prevents fast→slow pacing artifacts)
 /// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
 /// ✅ Instant silence transitions (NO fade-out = no G.711 warbling)
 /// ✅ NAT keepalives (reliability without audio impact)
-/// ✅ Windows multimedia timer for 1ms precision
+/// ✅ Cross-platform multimedia timer (Windows-only graceful fallback)
+/// ✅ OnFault event for circuit breaker notification
+/// ✅ Lightweight queue statistics for observability
 /// ✅ Minimal logging (zero hot-path overhead)
 /// 
 /// Architecture: Pure passthrough - NO DSP, NO resampling, NO conversions.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
-    // Windows multimedia timer for 1ms precision
+    // Windows multimedia timer for 1ms precision (cross-platform safe)
+    private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
     [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
     private static extern uint TimeBeginPeriod(uint uPeriod);
 
@@ -39,7 +43,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // FIXED 200ms buffer (10 frames) - absorbs OpenAI burst delivery + network jitter towards end of responses
     private const int JITTER_BUFFER_FRAMES = 10;
     private const int RESUME_BUFFER_FRAMES = 2;  // After initial fill, only need 40ms to resume (prevents mid-speech gaps)
-    private const int REBUFFER_THRESHOLD = 0;    // Disable mid-stream rebuffering — only buffer on initial fill
+    private const int REBUFFER_THRESHOLD = 2;    // Mid-stream rebuffer at 2 frames to smooth long AI-to-SIP transfers
     private const int MAX_QUEUE_FRAMES = 2000;   // ~40s safety cap (matches G711CallHandler)
 
     // Stopwatch tick→nanosecond conversion (hardware-independent)
@@ -74,11 +78,26 @@ public sealed class ALawRtpPlayout : IDisposable
     private IPEndPoint? _lastRemoteEndpoint;
     private volatile bool _natBindingEstablished;
 
+    // ── Queue statistics / monitoring ──
+    private long _totalUnderruns;
+    private long _totalFramesEnqueued;
+    private long _statsQueueSizeSum;
+    private long _statsQueueSizeSamples;
+    private DateTime _lastStatsLog = DateTime.UtcNow;
+    private const int STATS_LOG_INTERVAL_SEC = 30;
+
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
 
+    /// <summary>
+    /// Raised when the circuit breaker triggers after sustained send failures.
+    /// Upper layers should use this to tear down or restart the session cleanly.
+    /// </summary>
+    public event Action<string>? OnFault;
+
     public int QueuedFrames => Volatile.Read(ref _queueCount);
     public int FramesSent => _framesSent;
+    public long TotalUnderruns => Interlocked.Read(ref _totalUnderruns);
 
     public ALawRtpPlayout(SIPSorcery.Media.VoIPMediaSession mediaSession)
     {
@@ -152,6 +171,7 @@ public sealed class ALawRtpPlayout : IDisposable
                 Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
                 _frameQueue.Enqueue(frame);
                 Interlocked.Increment(ref _queueCount);
+                Interlocked.Increment(ref _totalFramesEnqueued);
 
                 // Shift remaining bytes down
                 _accCount -= FRAME_SIZE;
@@ -170,9 +190,17 @@ public sealed class ALawRtpPlayout : IDisposable
         _initialFillDone = false;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
+        _totalUnderruns = 0;
+        _totalFramesEnqueued = 0;
+        _statsQueueSizeSum = 0;
+        _statsQueueSizeSamples = 0;
+        _lastStatsLog = DateTime.UtcNow;
 
-        // Enable 1ms multimedia timer (smooth timing baseline)
-        try { TimeBeginPeriod(1); } catch { }
+        // Enable 1ms multimedia timer (Windows only — graceful no-op on other platforms)
+        if (IsWindows)
+        {
+            try { TimeBeginPeriod(1); } catch { }
+        }
 
         _playoutThread = new Thread(PlayoutLoop)
         {
@@ -182,7 +210,7 @@ public sealed class ALawRtpPlayout : IDisposable
         };
         _playoutThread.Start();
 
-        SafeLog($"[RTP] Started (pure A-law, {JITTER_BUFFER_FRAMES * 20}ms fixed buffer)");
+        SafeLog($"[RTP] Started (pure A-law, {JITTER_BUFFER_FRAMES * 20}ms fixed buffer, rebuffer={REBUFFER_THRESHOLD})");
     }
 
     public void Stop()
@@ -190,7 +218,10 @@ public sealed class ALawRtpPlayout : IDisposable
         _running = false;
         _playoutThread?.Join(500);
         _playoutThread = null;
-        try { TimeEndPeriod(1); } catch { }
+        if (IsWindows)
+        {
+            try { TimeEndPeriod(1); } catch { }
+        }
         while (_frameQueue.TryDequeue(out _)) { }
     }
 
@@ -236,8 +267,12 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         int queueCount = Volatile.Read(ref _queueCount);
 
+        // Track queue size for statistics (lightweight — just integer adds)
+        Interlocked.Add(ref _statsQueueSizeSum, queueCount);
+        Interlocked.Increment(ref _statsQueueSizeSamples);
+
         // Re-buffer if queue gets too low (prevents burst→slow pacing)
-        if (!_isBuffering && queueCount < REBUFFER_THRESHOLD && queueCount > 0)
+        if (!_isBuffering && queueCount <= REBUFFER_THRESHOLD && queueCount > 0)
         {
             _isBuffering = true;
         }
@@ -265,6 +300,7 @@ public sealed class ALawRtpPlayout : IDisposable
         else
         {
             SendRtpFrame(_silenceFrame, false);
+            Interlocked.Increment(ref _totalUnderruns);
 
             if (_wasPlaying)
             {
@@ -272,6 +308,28 @@ public sealed class ALawRtpPlayout : IDisposable
                 _isBuffering = true;
                 try { OnQueueEmpty?.Invoke(); } catch { }
             }
+        }
+
+        // Periodic stats logging (every 30s, off hot path via timestamp check)
+        if ((DateTime.UtcNow - _lastStatsLog).TotalSeconds >= STATS_LOG_INTERVAL_SEC)
+        {
+            LogStats();
+            _lastStatsLog = DateTime.UtcNow;
+        }
+    }
+
+    private void LogStats()
+    {
+        var samples = Interlocked.Exchange(ref _statsQueueSizeSamples, 0);
+        var sizeSum = Interlocked.Exchange(ref _statsQueueSizeSum, 0);
+        var underruns = Interlocked.Read(ref _totalUnderruns);
+        var enqueued = Interlocked.Read(ref _totalFramesEnqueued);
+
+        if (samples > 0)
+        {
+            var avgQueue = (double)sizeSum / samples;
+            SafeLog($"[RTP] 📈 Stats: sent={_framesSent} enqueued={enqueued} " +
+                    $"avgQueue={avgQueue:F1} underruns={underruns}");
         }
     }
 
@@ -301,7 +359,9 @@ public sealed class ALawRtpPlayout : IDisposable
             if (_consecutiveSendErrors > 100)
             {
                 _running = false;
-                SafeLog("[RTP] ❌ Circuit breaker — stopping playout after 100 consecutive send failures");
+                var faultMsg = "[RTP] ❌ Circuit breaker — stopping playout after 100 consecutive send failures";
+                SafeLog(faultMsg);
+                try { OnFault?.Invoke(faultMsg); } catch { }
             }
         }
     }
