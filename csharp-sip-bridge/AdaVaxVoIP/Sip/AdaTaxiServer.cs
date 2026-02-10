@@ -39,12 +39,14 @@ public class AdaTaxiServer : cVaxServerCOM
         var localIp = GetLocalIp();
         Log($"➡ Local IP: {localIp}");
 
-        if (!OpenNetworkUDP(localIp, _settings.Sip.Port))
+        var listenPort = _settings.VaxVoIP.ListenPort;
+        if (!OpenNetworkUDP(localIp, listenPort))
         {
-            _logger.LogError("VaxVoIP OpenNetworkUDP failed on port {Port}: {Error}", _settings.Sip.Port, GetVaxErrorText());
+            _logger.LogError("VaxVoIP OpenNetworkUDP failed on port {Port}: {Error}", listenPort, GetVaxErrorText());
             UnInitialize();
             return false;
         }
+        Log($"📡 Listening on {localIp}:{listenPort}");
 
         SetListenPortRangeRTP(_settings.VaxVoIP.RtpPortMin, _settings.VaxVoIP.RtpPortMax);
         AudioSessionLost(true, 30);
@@ -72,7 +74,7 @@ public class AdaTaxiServer : cVaxServerCOM
         // Register with external SIP trunk if configured
         RegisterSipTrunkInternal();
 
-        Log($"✅ VaxVoIP Server started on UDP port {_settings.Sip.Port} (RTP {_settings.VaxVoIP.RtpPortMin}-{_settings.VaxVoIP.RtpPortMax})");
+        Log($"✅ VaxVoIP Server started on UDP port {listenPort} (RTP {_settings.VaxVoIP.RtpPortMin}-{_settings.VaxVoIP.RtpPortMax})");
         return true;
     }
 

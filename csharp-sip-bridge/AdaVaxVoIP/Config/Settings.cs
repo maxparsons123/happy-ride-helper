@@ -85,6 +85,7 @@ public sealed class VaxVoIPSettings
 {
     public string LicenseKey { get; set; } = "";
     public string DomainRealm { get; set; } = "taxi.local";
+    public int ListenPort { get; set; } = 8060;
     public int RtpPortMin { get; set; } = 10000;
     public int RtpPortMax { get; set; } = 20000;
     public bool EnableRecording { get; set; } = true;
