@@ -1,5 +1,5 @@
 using System;
-using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -81,9 +81,6 @@ public sealed class ALawRtpPlayout : IDisposable
 
     // Stopwatch tick→nanosecond conversion (hardware-independent)
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
-
-    // ── ArrayPool for frame allocation (eliminates GC stutter) ──
-    private static readonly ArrayPool<byte> FramePool = ArrayPool<byte>.Shared;
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
@@ -232,15 +229,12 @@ public sealed class ALawRtpPlayout : IDisposable
             // Overflow protection
             while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
             {
-                if (_frameQueue.TryDequeue(out var dropped))
-                {
+                if (_frameQueue.TryDequeue(out _))
                     Interlocked.Decrement(ref _queueCount);
-                    FramePool.Return(dropped);
-                }
             }
 
-            // Rent from pool instead of new byte[] (eliminates GC pressure)
-            var frame = FramePool.Rent(FRAME_SIZE);
+            // Exact-size allocation (160 bytes @ 50fps = 8KB/s — negligible GC)
+            var frame = new byte[FRAME_SIZE];
             Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
             _frameQueue.Enqueue(frame);
             Interlocked.Increment(ref _queueCount);
@@ -326,11 +320,7 @@ public sealed class ALawRtpPlayout : IDisposable
             _useWaitableTimer = false;
         }
 
-        // Return all pooled frames
-        while (_frameQueue.TryDequeue(out var frame))
-        {
-            FramePool.Return(frame);
-        }
+        while (_frameQueue.TryDequeue(out _)) { }
         Volatile.Write(ref _queueCount, 0);
     }
 
@@ -429,9 +419,6 @@ public sealed class ALawRtpPlayout : IDisposable
             SendRtpFrame(frame, false);
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
-
-            // Return frame to pool after sending
-            FramePool.Return(frame);
         }
         else
         {
@@ -504,10 +491,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Clear()
     {
-        // Return all pooled frames
-        while (_frameQueue.TryDequeue(out var frame))
+        while (_frameQueue.TryDequeue(out _))
         {
-            FramePool.Return(frame);
             Interlocked.Decrement(ref _queueCount);
         }
 
