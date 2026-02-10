@@ -304,6 +304,17 @@ public sealed class CallSession : ICallSession
     {
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
         
+        // GUARD: Reject book_taxi if fare recalculation is in progress (address was just corrected)
+        if (Volatile.Read(ref _autoQuoteInProgress) == 1 && string.IsNullOrWhiteSpace(_booking.Fare))
+        {
+            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — fare recalculation in progress after address correction", SessionId);
+            return new
+            {
+                success = false,
+                error = "STOP. A fare recalculation is in progress because the address was just changed. You MUST wait for the [FARE RESULT] message, read back the new verified addresses and fare, and get the user's explicit confirmation BEFORE calling book_taxi again."
+            };
+        }
+        
         if (action == "request_quote")
         {
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
