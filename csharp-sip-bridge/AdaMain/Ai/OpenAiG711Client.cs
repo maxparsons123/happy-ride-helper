@@ -1378,9 +1378,9 @@ Your response to EVERY user message MUST include a sync_booking_data tool call.
 If you respond WITHOUT calling sync_booking_data, the data is LOST and the booking WILL FAIL.
 This is NOT optional. EVERY turn where the user provides info = sync_booking_data call.
 Example flow:
-  User: ""My name is Max"" → call sync_booking_data(caller_name=""Max"") → THEN ask pickup
-  User: ""52A David Road"" → call sync_booking_data(caller_name=""Max"", pickup=""52A David Road"") → THEN ask destination
-  User: ""7 Russell Street"" → call sync_booking_data(..., destination=""7 Russell Street"") → THEN ask passengers
+  User: ""My name is John"" → call sync_booking_data(caller_name=""John"") → THEN ask pickup
+  User: ""10 High Street"" → call sync_booking_data(caller_name=""John"", pickup=""10 High Street"") → THEN ask destination
+  User: ""The train station"" → call sync_booking_data(..., destination=""The train station"") → THEN ask passengers
 NEVER collect multiple fields without calling sync_booking_data between each.
 
 When sync_booking_data is called with all 5 fields filled, the system will
@@ -1455,7 +1455,7 @@ NO access to your conversation memory. sync_booking_data is your ONLY way to
 persist data. Skipping it even once causes a broken booking.
 
 CRITICAL — OUT-OF-ORDER / BATCHED DATA:
-Callers often give multiple fields in one turn (e.g. ""52A David Road, going to Leicester"").
+Callers often give multiple fields in one turn (e.g. ""10 High Street, going to the airport"").
 Even if these fields are ahead of the strict sequence:
 1. Call sync_booking_data IMMEDIATELY with ALL data the user just provided
 2. THEN ask for the next missing field in the flow order
@@ -1471,13 +1471,13 @@ IMPLICIT CORRECTIONS (VERY IMPORTANT)
 Users often correct information without saying ""no"" or ""wrong"".
 
 Examples:
-Stored: ""Russell Street, Coltree""
-User: ""Russell Street in Coventry""
-→ UPDATE to ""Russell Street, Coventry""
+Stored: ""Park Lane, Eastwick""
+User: ""Park Lane in Westbury""
+→ UPDATE to ""Park Lane, Westbury""
 
-Stored: ""David Road""
-User: ""52A David Road""
-→ UPDATE to ""52A David Road""
+Stored: ""High Street""
+User: ""10 High Street""
+→ UPDATE to ""10 High Street""
 
 ALWAYS trust the user's latest wording.
 
