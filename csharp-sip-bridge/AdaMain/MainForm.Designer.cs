@@ -43,11 +43,14 @@ partial class MainForm
         mnuFile.DropDownItems.AddRange(new ToolStripItem[] { mnuSettings, mnuSep1, mnuExit });
 
         var mnuTools = new ToolStripMenuItem("&Tools");
+        mnuNewBooking = new ToolStripMenuItem("📋 New &Booking…");
+        mnuNewBooking.ShortcutKeys = Keys.Control | Keys.B;
+        mnuNewBooking.Click += mnuNewBooking_Click;
         mnuAudioTest = new ToolStripMenuItem("🎤 Audio Test");
         mnuAudioTest.Click += mnuAudioTest_Click;
         mnuViewConfig = new ToolStripMenuItem("📄 View Config File");
         mnuViewConfig.Click += mnuViewConfig_Click;
-        mnuTools.DropDownItems.AddRange(new ToolStripItem[] { mnuAudioTest, mnuViewConfig });
+        mnuTools.DropDownItems.AddRange(new ToolStripItem[] { mnuNewBooking, new ToolStripSeparator(), mnuAudioTest, mnuViewConfig });
 
         var mnuHelp = new ToolStripMenuItem("&Help");
         var mnuAbout = new ToolStripMenuItem("About");
@@ -324,6 +327,7 @@ partial class MainForm
     private MenuStrip menuStrip;
     private ToolStripMenuItem mnuSettings;
     private ToolStripMenuItem mnuExit;
+    private ToolStripMenuItem mnuNewBooking;
     private ToolStripMenuItem mnuAudioTest;
     private ToolStripMenuItem mnuViewConfig;
 
