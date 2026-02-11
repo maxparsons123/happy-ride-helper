@@ -199,6 +199,7 @@ public partial class MainForm : Form
             var sessionManager = new SessionManager(smLogger, CreateCallSession);
 
             _sipServer = new SipServer(sipLogger, _settings.Sip, _settings.Audio, sessionManager);
+            _sipServer.OperatorMode = _operatorMode; // Sync operator mode at startup
 
             // Wire SipServer events → MainForm
             _sipServer.OnLog += msg => Invoke(() => Log(msg));
