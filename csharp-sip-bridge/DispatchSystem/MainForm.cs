@@ -131,9 +131,9 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 820,
-            Panel1MinSize = 400,
-            Panel2MinSize = 250
+            SplitterDistance = 700,
+            Panel1MinSize = 300,
+            Panel2MinSize = 200
         };
 
         // Left side: map on top, job tabs below
