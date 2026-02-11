@@ -20,6 +20,7 @@ public sealed class MqttDispatchClient : IDisposable
     public event Action<string, double, double, string?>? OnDriverGps;      // driverId, lat, lng, status
     public event Action<Job>? OnBookingReceived;
     public event Action<string, string, string>? OnJobStatusUpdate;          // jobId, driverId, status
+    public event Action<string, string, bool>? OnDriverJobResponse;          // jobId, driverId, accepted
 
     public bool IsConnected => _client?.IsConnected ?? false;
 
@@ -63,6 +64,7 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.SubscribeAsync("taxi/bookings");
         await _client.SubscribeAsync("jobs/+/status");
         await _client.SubscribeAsync("jobs/+/bidding");
+        await _client.SubscribeAsync("jobs/+/response");
         OnLog?.Invoke("📡 Subscribed to dispatch topics");
     }
 
@@ -108,6 +110,14 @@ public sealed class MqttDispatchClient : IDisposable
                 var statusMsg = JsonSerializer.Deserialize<JobStatusMsg>(json);
                 if (statusMsg != null)
                     OnJobStatusUpdate?.Invoke(jobId, statusMsg.driver ?? "", statusMsg.status ?? "");
+            }
+            else if (topic.StartsWith("jobs/") && topic.EndsWith("/response"))
+            {
+                var parts = topic.Split('/');
+                var jobId = parts[1];
+                var resp = JsonSerializer.Deserialize<DriverResponseMsg>(json);
+                if (resp != null)
+                    OnDriverJobResponse?.Invoke(jobId, resp.driver ?? "", resp.accepted);
             }
         }
         catch (Exception ex)
@@ -182,5 +192,11 @@ public sealed class MqttDispatchClient : IDisposable
     {
         public string? driver { get; set; }
         public string? status { get; set; }
+    }
+
+    private class DriverResponseMsg
+    {
+        public string? driver { get; set; }
+        public bool accepted { get; set; }
     }
 }

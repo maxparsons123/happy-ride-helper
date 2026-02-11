@@ -47,6 +47,7 @@ public sealed class DispatchDb : IDisposable
                 estimated_fare REAL,
                 caller_phone TEXT,
                 caller_name TEXT,
+                booking_ref TEXT,
                 status TEXT NOT NULL DEFAULT 'Pending',
                 allocated_driver_id TEXT,
                 created_at TEXT NOT NULL,
@@ -157,10 +158,10 @@ public sealed class DispatchDb : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             INSERT INTO jobs (id, pickup, dropoff, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-                passengers, vehicle_required, special_requirements, estimated_fare, caller_phone, caller_name,
+                passengers, vehicle_required, special_requirements, estimated_fare, caller_phone, caller_name, booking_ref,
                 status, allocated_driver_id, created_at, allocated_at, completed_at, driver_distance_km, driver_eta_minutes)
             VALUES ($id, $pu, $do, $plat, $plng, $dlat, $dlng,
-                $pax, $vr, $sr, $fare, $phone, $name,
+                $pax, $vr, $sr, $fare, $phone, $name, $ref,
                 $status, $did, $cat, $aat, $coat, $dkm, $eta)
         """;
         cmd.Parameters.AddWithValue("$id", j.Id);
@@ -176,6 +177,7 @@ public sealed class DispatchDb : IDisposable
         cmd.Parameters.AddWithValue("$fare", (object?)j.EstimatedFare ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$phone", (object?)j.CallerPhone ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$name", (object?)j.CallerName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$ref", (object?)j.BookingRef ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$status", j.Status.ToString());
         cmd.Parameters.AddWithValue("$did", (object?)j.AllocatedDriverId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$cat", j.CreatedAt.ToString("o"));
@@ -225,6 +227,47 @@ public sealed class DispatchDb : IDisposable
         return ReadJobs(cmd);
     }
 
+    public List<Job> GetJobHistory(DateTime? from = null, DateTime? to = null, int limit = 500)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM jobs WHERE status IN ('Completed','Cancelled')";
+        if (from.HasValue)
+        {
+            cmd.CommandText += " AND created_at >= $from";
+            cmd.Parameters.AddWithValue("$from", from.Value.ToString("o"));
+        }
+        if (to.HasValue)
+        {
+            cmd.CommandText += " AND created_at <= $to";
+            cmd.Parameters.AddWithValue("$to", to.Value.ToString("o"));
+        }
+        cmd.CommandText += $" ORDER BY created_at DESC LIMIT {limit}";
+        return ReadJobs(cmd);
+    }
+
+    public (int totalToday, int completedToday, int cancelledToday, double avgWaitMins) GetTodayStats()
+    {
+        var todayStart = DateTime.UtcNow.Date.ToString("o");
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END) as cancelled
+            FROM jobs WHERE created_at >= $today
+        """;
+        cmd.Parameters.AddWithValue("$today", todayStart);
+        using var r = cmd.ExecuteReader();
+        if (r.Read())
+        {
+            var total = r.GetInt32(0);
+            var completed = r.GetInt32(1);
+            var cancelled = r.GetInt32(2);
+            return (total, completed, cancelled, 0);
+        }
+        return (0, 0, 0, 0);
+    }
+
     private List<Job> GetJobsByStatus(string status)
     {
         using var cmd = _conn.CreateCommand();
@@ -254,13 +297,14 @@ public sealed class DispatchDb : IDisposable
                 EstimatedFare = r.IsDBNull(10) ? null : (decimal)r.GetDouble(10),
                 CallerPhone = r.IsDBNull(11) ? null : r.GetString(11),
                 CallerName = r.IsDBNull(12) ? null : r.GetString(12),
-                Status = Enum.TryParse<JobStatus>(r.GetString(13), out var js) ? js : JobStatus.Pending,
-                AllocatedDriverId = r.IsDBNull(14) ? null : r.GetString(14),
-                CreatedAt = DateTime.TryParse(r.GetString(15), out var ca) ? ca : DateTime.UtcNow,
-                AllocatedAt = !r.IsDBNull(16) && DateTime.TryParse(r.GetString(16), out var aa) ? aa : null,
-                CompletedAt = !r.IsDBNull(17) && DateTime.TryParse(r.GetString(17), out var co) ? co : null,
-                DriverDistanceKm = r.IsDBNull(18) ? null : r.GetDouble(18),
-                DriverEtaMinutes = r.IsDBNull(19) ? null : r.GetInt32(19)
+                BookingRef = r.IsDBNull(13) ? null : r.GetString(13),
+                Status = Enum.TryParse<JobStatus>(r.GetString(14), out var js) ? js : JobStatus.Pending,
+                AllocatedDriverId = r.IsDBNull(15) ? null : r.GetString(15),
+                CreatedAt = DateTime.TryParse(r.GetString(16), out var ca) ? ca : DateTime.UtcNow,
+                AllocatedAt = !r.IsDBNull(17) && DateTime.TryParse(r.GetString(17), out var aa) ? aa : null,
+                CompletedAt = !r.IsDBNull(18) && DateTime.TryParse(r.GetString(18), out var co) ? co : null,
+                DriverDistanceKm = r.IsDBNull(19) ? null : r.GetDouble(19),
+                DriverEtaMinutes = r.IsDBNull(20) ? null : r.GetInt32(20)
             });
         }
         return list;
