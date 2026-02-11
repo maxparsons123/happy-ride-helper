@@ -1,18 +1,21 @@
 namespace DispatchSystem.UI;
 
 /// <summary>
-/// Settings dialog for webhook port and auto-dispatch interval.
+/// Settings dialog for webhook port, auto-dispatch interval, bidding config, and sound.
 /// </summary>
 public sealed class DispatchSettingsDialog : Form
 {
     public int WebhookPort { get; private set; }
     public int AutoDispatchIntervalSec { get; private set; }
     public bool SoundEnabled { get; private set; }
+    public int BiddingWindowSec { get; private set; }
+    public double BidRadiusKm { get; private set; }
 
-    public DispatchSettingsDialog(int currentPort, int currentIntervalSec, bool soundEnabled)
+    public DispatchSettingsDialog(int currentPort, int currentIntervalSec, bool soundEnabled,
+        int biddingWindowSec = 20, double bidRadiusKm = 10.0)
     {
         Text = "⚙ Dispatch Settings";
-        Size = new Size(360, 280);
+        Size = new Size(360, 400);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -24,6 +27,8 @@ public sealed class DispatchSettingsDialog : Form
         WebhookPort = currentPort;
         AutoDispatchIntervalSec = currentIntervalSec;
         SoundEnabled = soundEnabled;
+        BiddingWindowSec = biddingWindowSec;
+        BidRadiusKm = bidRadiusKm;
 
         var y = 20;
 
@@ -53,6 +58,44 @@ public sealed class DispatchSettingsDialog : Form
         Controls.Add(txtInterval);
         y += 40;
 
+        // ── Bidding Settings ──
+        var lblBidHeader = new Label
+        {
+            Text = "── Bidding Mode ──",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.Gold,
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+        };
+        Controls.Add(lblBidHeader);
+        y += 30;
+
+        AddLabel("Bid Window (sec):", 20, y);
+        var txtBidWindow = new TextBox
+        {
+            Text = biddingWindowSec.ToString(),
+            Location = new Point(180, y),
+            Width = 100,
+            BackColor = Color.FromArgb(50, 50, 55),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        Controls.Add(txtBidWindow);
+        y += 40;
+
+        AddLabel("Bid Radius (km):", 20, y);
+        var txtBidRadius = new TextBox
+        {
+            Text = bidRadiusKm.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
+            Location = new Point(180, y),
+            Width = 100,
+            BackColor = Color.FromArgb(50, 50, 55),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        Controls.Add(txtBidRadius);
+        y += 40;
+
         var chkSound = new CheckBox
         {
             Text = "🔔 Play sound on new job",
@@ -78,6 +121,9 @@ public sealed class DispatchSettingsDialog : Form
         {
             if (int.TryParse(txtPort.Text, out var p) && p > 0) WebhookPort = p;
             if (int.TryParse(txtInterval.Text, out var i) && i >= 5) AutoDispatchIntervalSec = i;
+            if (int.TryParse(txtBidWindow.Text, out var bw) && bw >= 5) BiddingWindowSec = bw;
+            if (double.TryParse(txtBidRadius.Text, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var br) && br > 0) BidRadiusKm = br;
             SoundEnabled = chkSound.Checked;
         };
 

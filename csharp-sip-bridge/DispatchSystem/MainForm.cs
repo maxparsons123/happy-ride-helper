@@ -25,6 +25,7 @@ public class MainForm : Form
     private readonly Button _btnRunDispatch;
     private readonly Button _btnSettings;
     private readonly CheckBox _chkAutoDispatch;
+    private readonly CheckBox _chkBiddingMode;
     private readonly Label _lblStatus;
     private readonly Label _lblStats;
 
@@ -32,12 +33,15 @@ public class MainForm : Form
     private DispatchDb? _db;
     private MqttDispatchClient? _mqtt;
     private AutoDispatcher? _dispatcher;
+    private BiddingDispatcher? _bidding;
     private WebhookListener? _webhook;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
     // ── Settings ──
     private int _webhookPort = 5080;
     private int _autoDispatchSec = 60;
+    private int _biddingWindowSec = 20;
+    private double _bidRadiusKm = 10.0;
     private bool _soundEnabled = true;
 
     public MainForm()
@@ -92,6 +96,20 @@ public class MainForm : Form
             if (_dispatcher != null) _dispatcher.Enabled = _chkAutoDispatch.Checked;
         };
 
+        _chkBiddingMode = new CheckBox
+        {
+            Text = "🔔 Bidding",
+            ForeColor = Color.White,
+            Checked = false,
+            AutoSize = true,
+            Padding = new Padding(6, 8, 0, 0)
+        };
+        _chkBiddingMode.CheckedChanged += (_, _) =>
+        {
+            if (_bidding != null) _bidding.Enabled = _chkBiddingMode.Checked;
+            _logPanel.AppendLog($"🔔 Bidding mode {(_chkBiddingMode.Checked ? "ENABLED" : "DISABLED")}", Color.Gold);
+        };
+
         _lblStatus = new Label
         {
             Text = "● Disconnected",
@@ -113,7 +131,7 @@ public class MainForm : Form
         toolbar.Controls.AddRange(new Control[]
         {
             _btnConnect, _btnDisconnect, _btnAddDriver, _btnManualDispatch,
-            _btnRunDispatch, _btnSettings, _chkAutoDispatch, _lblStatus, _lblStats
+            _btnRunDispatch, _btnSettings, _chkAutoDispatch, _chkBiddingMode, _lblStatus, _lblStats
         });
 
         // ── Layout ──
@@ -257,6 +275,33 @@ public class MainForm : Form
             _dispatcher.OnLog += msg => _logPanel.AppendLog(msg);
             _dispatcher.OnJobAllocated += OnJobAllocated;
 
+            _bidding = new BiddingDispatcher(_db, _biddingWindowSec * 1000, _bidRadiusKm);
+            _bidding.Enabled = _chkBiddingMode.Checked;
+            _bidding.OnLog += msg =>
+            {
+                if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog(msg, Color.Gold));
+                else _logPanel.AppendLog(msg, Color.Gold);
+            };
+            _bidding.OnBidRequestSent += (job, drivers) =>
+            {
+                if (_mqtt == null) return;
+                var ids = drivers.Select(d => d.Id).ToList();
+                _ = _mqtt.PublishBidRequest(job, ids);
+            };
+            _bidding.OnJobAllocated += (job, driver) =>
+            {
+                if (InvokeRequired) BeginInvoke(() => OnJobAllocated(job, driver));
+                else OnJobAllocated(job, driver);
+            };
+            _bidding.OnNoBids += job =>
+            {
+                if (InvokeRequired) BeginInvoke(() =>
+                {
+                    _logPanel.AppendLog($"⚠ No bids for {job.Id} — falling back to auto-dispatch", Color.Orange);
+                    RefreshUI();
+                });
+            };
+
             _webhook = new WebhookListener(_webhookPort);
             _webhook.OnLog += msg => BeginInvoke(() => _logPanel.AppendLog(msg, Color.MediumPurple));
             _webhook.OnJobReceived += job => BeginInvoke(() =>
@@ -303,6 +348,10 @@ public class MainForm : Form
             };
             _mqtt.OnJobStatusUpdate += OnJobStatusUpdate;
             _mqtt.OnDriverJobResponse += OnDriverJobResponse;
+            _mqtt.OnDriverBidReceived += (jobId, driverId, lat, lng) =>
+            {
+                _bidding?.RecordBid(jobId, driverId, lat, lng);
+            };
 
             await _mqtt.ConnectAsync();
             await _map.InitializeAsync();
@@ -380,6 +429,19 @@ public class MainForm : Form
 
         if (job.PickupLat != 0 && job.PickupLng != 0)
             _ = _map.AddJobMarker(job.Id, job.PickupLat, job.PickupLng, job.Pickup, job.CreatedAt);
+
+        // Try bidding first if enabled
+        if (_bidding != null && _bidding.Enabled)
+        {
+            var started = _bidding.StartBidding(job);
+            if (started)
+            {
+                _logPanel.AppendLog($"🔔 Job {job.Id} entered bidding mode ({_biddingWindowSec}s)", Color.Gold);
+                RefreshUI();
+                return;
+            }
+            _logPanel.AppendLog($"⚠ No nearby drivers for bidding — job stays pending for auto-dispatch", Color.Orange);
+        }
 
         RefreshUI();
     }
@@ -490,7 +552,7 @@ public class MainForm : Form
 
     private void BtnSettings_Click(object? sender, EventArgs e)
     {
-        using var dlg = new DispatchSettingsDialog(_webhookPort, _autoDispatchSec, _soundEnabled);
+        using var dlg = new DispatchSettingsDialog(_webhookPort, _autoDispatchSec, _soundEnabled, _biddingWindowSec, _bidRadiusKm);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         _soundEnabled = dlg.SoundEnabled;
@@ -513,12 +575,40 @@ public class MainForm : Form
         {
             _autoDispatchSec = dlg.AutoDispatchIntervalSec;
             _logPanel.AppendLog($"⚙ Auto-dispatch interval: {_autoDispatchSec}s", Color.LightBlue);
-            // Recreate dispatcher with new interval
             _dispatcher?.Dispose();
             _dispatcher = new AutoDispatcher(_db!, _autoDispatchSec * 1000);
             _dispatcher.OnLog += msg => _logPanel.AppendLog(msg);
             _dispatcher.OnJobAllocated += OnJobAllocated;
             _dispatcher.Enabled = _chkAutoDispatch.Checked;
+        }
+
+        if (dlg.BiddingWindowSec != _biddingWindowSec || dlg.BidRadiusKm != _bidRadiusKm)
+        {
+            _biddingWindowSec = dlg.BiddingWindowSec;
+            _bidRadiusKm = dlg.BidRadiusKm;
+            _bidding?.Dispose();
+            _bidding = new BiddingDispatcher(_db!, _biddingWindowSec * 1000, _bidRadiusKm);
+            _bidding.Enabled = _chkBiddingMode.Checked;
+            _bidding.OnLog += msg =>
+            {
+                if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog(msg, Color.Gold));
+                else _logPanel.AppendLog(msg, Color.Gold);
+            };
+            _bidding.OnBidRequestSent += (job, drivers) =>
+            {
+                if (_mqtt == null) return;
+                _ = _mqtt.PublishBidRequest(job, drivers.Select(d => d.Id).ToList());
+            };
+            _bidding.OnJobAllocated += (job, driver) =>
+            {
+                if (InvokeRequired) BeginInvoke(() => OnJobAllocated(job, driver));
+                else OnJobAllocated(job, driver);
+            };
+            _bidding.OnNoBids += job =>
+            {
+                if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog($"⚠ No bids for {job.Id}", Color.Orange));
+            };
+            _logPanel.AppendLog($"⚙ Bidding: {_biddingWindowSec}s window, {_bidRadiusKm}km radius", Color.LightBlue);
         }
 
         _logPanel.AppendLog("⚙ Settings updated", Color.LightBlue);
@@ -540,14 +630,16 @@ public class MainForm : Form
         var online = drivers.Count(d => d.Status == DriverStatus.Online);
         var onJob = drivers.Count(d => d.Status == DriverStatus.OnJob);
         var pending = jobs.Count(j => j.Status == JobStatus.Pending);
+        var bidding = jobs.Count(j => j.Status == JobStatus.Bidding);
 
         var (totalToday, completedToday, cancelledToday, _) = _db.GetTodayStats();
-        var avgWait = jobs.Where(j => j.Status == JobStatus.Pending)
+        var avgWait = jobs.Where(j => j.Status == JobStatus.Pending || j.Status == JobStatus.Bidding)
             .Select(j => (DateTime.UtcNow - j.CreatedAt).TotalMinutes)
             .DefaultIfEmpty(0)
             .Average();
 
-        _lblStats.Text = $"Drivers: {online}↑ {onJob}🚕 | Pending: {pending} | Today: {totalToday} ({completedToday}✅ {cancelledToday}❌) | Avg wait: {avgWait:F0}m";
+        var biddingText = bidding > 0 ? $" Bidding: {bidding}🔔 |" : "";
+        _lblStats.Text = $"Drivers: {online}↑ {onJob}🚕 | Pending: {pending} |{biddingText} Today: {totalToday} ({completedToday}✅ {cancelledToday}❌) | Avg wait: {avgWait:F0}m";
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -555,6 +647,7 @@ public class MainForm : Form
         _refreshTimer.Stop();
         _webhook?.Dispose();
         _dispatcher?.Dispose();
+        _bidding?.Dispose();
         _mqtt?.Dispose();
         _db?.Dispose();
         base.OnFormClosing(e);

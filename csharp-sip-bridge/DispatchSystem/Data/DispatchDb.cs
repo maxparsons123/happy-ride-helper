@@ -31,7 +31,8 @@ public sealed class DispatchDb : IDisposable
                 lng REAL DEFAULT 0,
                 last_gps_update TEXT,
                 last_job_completed_at TEXT,
-                status_changed_at TEXT
+                status_changed_at TEXT,
+                total_jobs_completed INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
@@ -62,6 +63,16 @@ public sealed class DispatchDb : IDisposable
             CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status);
         """;
         cmd.ExecuteNonQuery();
+
+        // Add total_jobs_completed column if missing (migration for existing DBs)
+        try
+        {
+            using var alter = _conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE drivers ADD COLUMN total_jobs_completed INTEGER DEFAULT 0";
+            alter.ExecuteNonQuery();
+        }
+        catch { /* column already exists */ }
+        cmd.ExecuteNonQuery();
     }
 
     // ── Drivers ──
@@ -70,8 +81,8 @@ public sealed class DispatchDb : IDisposable
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO drivers (id, name, phone, registration, vehicle_type, status, lat, lng, last_gps_update, last_job_completed_at, status_changed_at)
-            VALUES ($id, $name, $phone, $reg, $vt, $status, $lat, $lng, $gps, $ljc, $sc)
+            INSERT INTO drivers (id, name, phone, registration, vehicle_type, status, lat, lng, last_gps_update, last_job_completed_at, status_changed_at, total_jobs_completed)
+            VALUES ($id, $name, $phone, $reg, $vt, $status, $lat, $lng, $gps, $ljc, $sc, $tjc)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 phone = excluded.phone,
@@ -82,7 +93,8 @@ public sealed class DispatchDb : IDisposable
                 lng = excluded.lng,
                 last_gps_update = excluded.last_gps_update,
                 last_job_completed_at = excluded.last_job_completed_at,
-                status_changed_at = excluded.status_changed_at
+                status_changed_at = excluded.status_changed_at,
+                total_jobs_completed = excluded.total_jobs_completed
         """;
         cmd.Parameters.AddWithValue("$id", d.Id);
         cmd.Parameters.AddWithValue("$name", d.Name);
@@ -95,6 +107,7 @@ public sealed class DispatchDb : IDisposable
         cmd.Parameters.AddWithValue("$gps", d.LastGpsUpdate.ToString("o"));
         cmd.Parameters.AddWithValue("$ljc", (object?)d.LastJobCompletedAt?.ToString("o") ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$sc", d.StatusChangedAt.ToString("o"));
+        cmd.Parameters.AddWithValue("$tjc", d.TotalJobsCompleted);
         cmd.ExecuteNonQuery();
     }
 
@@ -141,7 +154,8 @@ public sealed class DispatchDb : IDisposable
                 Lng = r.GetDouble(7),
                 LastGpsUpdate = DateTime.TryParse(r.IsDBNull(8) ? null : r.GetString(8), out var gps) ? gps : DateTime.MinValue,
                 LastJobCompletedAt = !r.IsDBNull(9) && DateTime.TryParse(r.GetString(9), out var ljc) ? ljc : null,
-                StatusChangedAt = DateTime.TryParse(r.IsDBNull(10) ? null : r.GetString(10), out var sc) ? sc : DateTime.UtcNow
+                StatusChangedAt = DateTime.TryParse(r.IsDBNull(10) ? null : r.GetString(10), out var sc) ? sc : DateTime.UtcNow,
+                TotalJobsCompleted = !r.IsDBNull(11) ? r.GetInt32(11) : 0
             });
         }
         return list;
@@ -312,6 +326,25 @@ public sealed class DispatchDb : IDisposable
             });
         }
         return list;
+    }
+
+    /// <summary>Count completed jobs for a specific driver.</summary>
+    public int GetCompletedJobCountForDriver(string driverId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM jobs WHERE allocated_driver_id = $did AND status = 'Completed'";
+        cmd.Parameters.AddWithValue("$did", driverId);
+        var result = cmd.ExecuteScalar();
+        return result != null ? Convert.ToInt32(result) : 0;
+    }
+
+    /// <summary>Increment the total_jobs_completed counter for a driver.</summary>
+    public void IncrementDriverJobCount(string driverId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE drivers SET total_jobs_completed = total_jobs_completed + 1 WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", driverId);
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose() => _conn?.Dispose();

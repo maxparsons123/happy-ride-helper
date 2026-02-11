@@ -128,6 +128,7 @@ public sealed class JobListPanel : Panel
             var statusColor = j.Status switch
             {
                 JobStatus.Pending => Color.Yellow,
+                JobStatus.Bidding => Color.Gold,
                 JobStatus.Allocated => Color.Cyan,
                 JobStatus.Accepted => Color.LimeGreen,
                 JobStatus.PickedUp => Color.DodgerBlue,
@@ -138,7 +139,7 @@ public sealed class JobListPanel : Panel
             row.Cells["ColStatus"].Style.ForeColor = statusColor;
 
             // Wait time color (green < 10, amber < 20, red 20+)
-            if (j.Status == JobStatus.Pending || j.Status == JobStatus.Allocated)
+            if (j.Status == JobStatus.Pending || j.Status == JobStatus.Allocated || j.Status == JobStatus.Bidding)
             {
                 var waitColor = waitMins < 10 ? Color.LimeGreen
                     : waitMins < 20 ? Color.Orange

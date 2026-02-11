@@ -20,6 +20,7 @@ public enum VehicleType
 public enum JobStatus
 {
     Pending,
+    Bidding,
     Allocated,
     Accepted,
     PickedUp,
@@ -41,6 +42,7 @@ public class Driver
     public DateTime LastGpsUpdate { get; set; }
     public DateTime? LastJobCompletedAt { get; set; }
     public DateTime StatusChangedAt { get; set; } = DateTime.UtcNow;
+    public int TotalJobsCompleted { get; set; }
 }
 
 public class Job
