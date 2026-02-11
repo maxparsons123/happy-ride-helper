@@ -62,12 +62,13 @@ public sealed class MqttDispatchClient : IDisposable
     private async Task Subscribe()
     {
         await _client.SubscribeAsync("drivers/+/location");
+        await _client.SubscribeAsync("drivers/+/status");
         await _client.SubscribeAsync("taxi/bookings");
         await _client.SubscribeAsync("jobs/+/status");
         await _client.SubscribeAsync("jobs/+/bidding");
         await _client.SubscribeAsync("jobs/+/response");
         await _client.SubscribeAsync("jobs/+/bid");
-        OnLog?.Invoke("📡 Subscribed to dispatch topics");
+        OnLog?.Invoke("📡 Subscribed to dispatch topics (incl. drivers/+/status)");
     }
 
     private Task HandleMessage(MqttApplicationMessageReceivedEventArgs e)
@@ -77,12 +78,25 @@ public sealed class MqttDispatchClient : IDisposable
             var topic = e.ApplicationMessage.Topic;
             var json = Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment);
 
+            // Log ALL incoming MQTT messages for debugging
+            OnLog?.Invoke($"📨 MQTT [{topic}]: {json[..Math.Min(json.Length, 200)]}");
+
             if (topic.StartsWith("drivers/") && topic.EndsWith("/location"))
             {
                 var driverId = topic.Split('/')[1];
                 var loc = JsonSerializer.Deserialize<DriverLocationMsg>(json);
                 if (loc != null)
                     OnDriverGps?.Invoke(driverId, loc.lat, loc.lng, loc.status);
+            }
+            else if (topic.StartsWith("drivers/") && topic.EndsWith("/status"))
+            {
+                var driverId = topic.Split('/')[1];
+                var statusMsg = JsonSerializer.Deserialize<DriverStatusMsg>(json);
+                if (statusMsg != null)
+                {
+                    OnLog?.Invoke($"🔄 Driver {driverId} status → {statusMsg.status}");
+                    OnDriverGps?.Invoke(driverId, statusMsg.lat, statusMsg.lng, statusMsg.status);
+                }
             }
             else if (topic == "taxi/bookings")
             {
@@ -227,6 +241,15 @@ public sealed class MqttDispatchClient : IDisposable
         public double lat { get; set; }
         public double lng { get; set; }
         public string? status { get; set; }
+    }
+
+    private class DriverStatusMsg
+    {
+        public string? status { get; set; }
+        public double lat { get; set; }
+        public double lng { get; set; }
+        public string? name { get; set; }
+        public string? vehicle { get; set; }
     }
 
     private class BookingMsg
