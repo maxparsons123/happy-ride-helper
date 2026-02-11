@@ -731,7 +731,7 @@ public sealed class SipServer : IAsyncDisposable
         var call = _activeCalls.Values.FirstOrDefault();
         if (call?.Playout == null) return;
 
-        call.Playout.Enqueue(alawData);
+        call.Playout.BufferALaw(alawData);
     }
 
     /// <summary>
@@ -740,7 +740,7 @@ public sealed class SipServer : IAsyncDisposable
     public void SendOperatorAudio(string sessionId, byte[] alawData)
     {
         if (!_activeCalls.TryGetValue(sessionId, out var call)) return;
-        call.Playout?.Enqueue(alawData);
+        call.Playout?.BufferALaw(alawData);
     }
 
     #endregion
