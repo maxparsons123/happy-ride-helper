@@ -33,6 +33,7 @@ public class Driver
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string Phone { get; set; } = "";
+    public string Registration { get; set; } = "";
     public VehicleType Vehicle { get; set; } = VehicleType.Saloon;
     public DriverStatus Status { get; set; } = DriverStatus.Offline;
     public double Lat { get; set; }

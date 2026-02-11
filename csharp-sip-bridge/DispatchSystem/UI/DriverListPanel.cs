@@ -40,11 +40,12 @@ public sealed class DriverListPanel : Panel
 
         _list.Columns.AddRange(new[]
         {
-            new ColumnHeader { Text = "ID", Width = 70 },
-            new ColumnHeader { Text = "Name", Width = 100 },
-            new ColumnHeader { Text = "Status", Width = 70 },
-            new ColumnHeader { Text = "Vehicle", Width = 70 },
-            new ColumnHeader { Text = "GPS", Width = 60 }
+            new ColumnHeader { Text = "ID", Width = 60 },
+            new ColumnHeader { Text = "Name", Width = 90 },
+            new ColumnHeader { Text = "Reg", Width = 70 },
+            new ColumnHeader { Text = "Status", Width = 65 },
+            new ColumnHeader { Text = "Vehicle", Width = 65 },
+            new ColumnHeader { Text = "GPS", Width = 50 }
         });
 
         _list.SelectedIndexChanged += (_, _) =>
@@ -70,6 +71,7 @@ public sealed class DriverListPanel : Panel
 
             var item = new ListViewItem(d.Id) { Tag = d.Id };
             item.SubItems.Add(d.Name);
+            item.SubItems.Add(d.Registration);
             item.SubItems.Add(d.Status.ToString());
             item.SubItems.Add(d.Vehicle.ToString());
             item.SubItems.Add(gpsAge);

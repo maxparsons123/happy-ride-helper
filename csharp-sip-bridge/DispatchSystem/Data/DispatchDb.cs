@@ -24,6 +24,7 @@ public sealed class DispatchDb : IDisposable
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 phone TEXT,
+                registration TEXT DEFAULT '',
                 vehicle_type TEXT NOT NULL DEFAULT 'Saloon',
                 status TEXT NOT NULL DEFAULT 'Offline',
                 lat REAL DEFAULT 0,
@@ -69,11 +70,12 @@ public sealed class DispatchDb : IDisposable
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO drivers (id, name, phone, vehicle_type, status, lat, lng, last_gps_update, last_job_completed_at, status_changed_at)
-            VALUES ($id, $name, $phone, $vt, $status, $lat, $lng, $gps, $ljc, $sc)
+            INSERT INTO drivers (id, name, phone, registration, vehicle_type, status, lat, lng, last_gps_update, last_job_completed_at, status_changed_at)
+            VALUES ($id, $name, $phone, $reg, $vt, $status, $lat, $lng, $gps, $ljc, $sc)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 phone = excluded.phone,
+                registration = excluded.registration,
                 vehicle_type = excluded.vehicle_type,
                 status = excluded.status,
                 lat = excluded.lat,
@@ -85,6 +87,7 @@ public sealed class DispatchDb : IDisposable
         cmd.Parameters.AddWithValue("$id", d.Id);
         cmd.Parameters.AddWithValue("$name", d.Name);
         cmd.Parameters.AddWithValue("$phone", d.Phone ?? "");
+        cmd.Parameters.AddWithValue("$reg", d.Registration ?? "");
         cmd.Parameters.AddWithValue("$vt", d.Vehicle.ToString());
         cmd.Parameters.AddWithValue("$status", d.Status.ToString());
         cmd.Parameters.AddWithValue("$lat", d.Lat);
@@ -131,13 +134,14 @@ public sealed class DispatchDb : IDisposable
                 Id = r.GetString(0),
                 Name = r.GetString(1),
                 Phone = r.IsDBNull(2) ? "" : r.GetString(2),
-                Vehicle = Enum.TryParse<VehicleType>(r.GetString(3), out var vt) ? vt : VehicleType.Saloon,
-                Status = Enum.TryParse<DriverStatus>(r.GetString(4), out var ds) ? ds : DriverStatus.Offline,
-                Lat = r.GetDouble(5),
-                Lng = r.GetDouble(6),
-                LastGpsUpdate = DateTime.TryParse(r.IsDBNull(7) ? null : r.GetString(7), out var gps) ? gps : DateTime.MinValue,
-                LastJobCompletedAt = !r.IsDBNull(8) && DateTime.TryParse(r.GetString(8), out var ljc) ? ljc : null,
-                StatusChangedAt = DateTime.TryParse(r.IsDBNull(9) ? null : r.GetString(9), out var sc) ? sc : DateTime.UtcNow
+                Registration = r.IsDBNull(3) ? "" : r.GetString(3),
+                Vehicle = Enum.TryParse<VehicleType>(r.GetString(4), out var vt) ? vt : VehicleType.Saloon,
+                Status = Enum.TryParse<DriverStatus>(r.GetString(5), out var ds) ? ds : DriverStatus.Offline,
+                Lat = r.GetDouble(6),
+                Lng = r.GetDouble(7),
+                LastGpsUpdate = DateTime.TryParse(r.IsDBNull(8) ? null : r.GetString(8), out var gps) ? gps : DateTime.MinValue,
+                LastJobCompletedAt = !r.IsDBNull(9) && DateTime.TryParse(r.GetString(9), out var ljc) ? ljc : null,
+                StatusChangedAt = DateTime.TryParse(r.IsDBNull(10) ? null : r.GetString(10), out var sc) ? sc : DateTime.UtcNow
             });
         }
         return list;

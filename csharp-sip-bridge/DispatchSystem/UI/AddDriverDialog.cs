@@ -12,12 +12,13 @@ public sealed class AddDriverDialog : Form
     private readonly TextBox _txtId;
     private readonly TextBox _txtName;
     private readonly TextBox _txtPhone;
+    private readonly TextBox _txtReg;
     private readonly ComboBox _cboVehicle;
 
     public AddDriverDialog()
     {
         Text = "Add Driver";
-        Size = new Size(380, 300);
+        Size = new Size(380, 350);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -30,6 +31,7 @@ public sealed class AddDriverDialog : Form
         AddLabel("Driver ID:", y); _txtId = AddTextBox(y); y += 45;
         AddLabel("Name:", y); _txtName = AddTextBox(y); y += 45;
         AddLabel("Phone:", y); _txtPhone = AddTextBox(y); y += 45;
+        AddLabel("Car Reg:", y); _txtReg = AddTextBox(y); y += 45;
         AddLabel("Vehicle:", y);
 
         _cboVehicle = new ComboBox
@@ -68,6 +70,7 @@ public sealed class AddDriverDialog : Form
                 Id = _txtId.Text.Trim(),
                 Name = _txtName.Text.Trim(),
                 Phone = _txtPhone.Text.Trim(),
+                Registration = _txtReg.Text.Trim().ToUpperInvariant(),
                 Vehicle = Enum.Parse<VehicleType>(_cboVehicle.SelectedItem?.ToString() ?? "Saloon"),
                 Status = DriverStatus.Offline
             };
