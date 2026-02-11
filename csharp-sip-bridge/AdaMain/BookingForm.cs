@@ -52,6 +52,8 @@ public sealed class BookingForm : Form
     private bool _addressesVerified;
     private string[]? _callerPickupHistory;
     private string[]? _callerDropoffHistory;
+    private string? _lastPickup;
+    private string? _lastDestination;
 
     // Autocomplete
     private System.Windows.Forms.Timer _pickupDebounce;
@@ -128,6 +130,25 @@ public sealed class BookingForm : Form
 
         // ── Journey Details ──
         AddSectionLabel("🚕 Journey Details", 15, ref y);
+
+        // Repeat Last Journey button (shown when history is available)
+        var btnRepeat = new Button
+        {
+            Text = "🔁 Repeat Last Journey",
+            Location = new Point(300, y - 20),
+            Size = new Size(185, 24),
+            BackColor = Color.FromArgb(60, 60, 65),
+            ForeColor = Color.FromArgb(180, 200, 255),
+            FlatStyle = FlatStyle.Flat,
+            Cursor = Cursors.Hand,
+            Font = new Font("Segoe UI", 8F),
+            Visible = false,
+            Tag = "btnRepeat"
+        };
+        btnRepeat.FlatAppearance.BorderSize = 1;
+        btnRepeat.FlatAppearance.BorderColor = Color.FromArgb(80, 100, 160);
+        btnRepeat.Click += (s, e) => RepeatLastJourney();
+        Controls.Add(btnRepeat);
         y += 5;
 
         AddLabel("Pickup:", 15, y + 3);
@@ -424,10 +445,31 @@ public sealed class BookingForm : Form
                     cmbDropoff.Items.Add(addr);
             }
 
-            // Show last booking info
+            // Show last booking info & enable repeat button
             var totalBookings = 0;
             if (caller.TryGetProperty("total_bookings", out var tb))
                 totalBookings = tb.GetInt32();
+
+            // Show repeat button if we have both last pickup and destination
+            var hasLastPickup = caller.TryGetProperty("last_pickup", out var lp) && lp.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(lp.GetString());
+            var hasLastDest = caller.TryGetProperty("last_destination", out var ld) && ld.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(ld.GetString());
+
+            if (hasLastPickup && hasLastDest)
+            {
+                _lastPickup = lp.GetString()!;
+                _lastDestination = ld.GetString()!;
+
+                // Show the repeat button
+                foreach (Control c in Controls)
+                {
+                    if (c is Button b && b.Tag?.ToString() == "btnRepeat")
+                    {
+                        b.Visible = true;
+                        b.Text = $"🔁 Repeat: {Truncate(_lastPickup, 15)} → {Truncate(_lastDestination, 15)}";
+                        break;
+                    }
+                }
+            }
 
             SetStatus($"Returning caller — {totalBookings} previous booking{(totalBookings != 1 ? "s" : "")}");
         }
@@ -609,6 +651,25 @@ public sealed class BookingForm : Form
             btnBook.Text = "✅ Confirm & Dispatch";
         }
     }
+
+    // ══════════════════════════════════════════
+    //  REPEAT LAST JOURNEY
+    // ══════════════════════════════════════════
+
+    private void RepeatLastJourney()
+    {
+        if (string.IsNullOrEmpty(_lastPickup) || string.IsNullOrEmpty(_lastDestination)) return;
+
+        _suppressTextChanged = true;
+        cmbPickup.Text = _lastPickup;
+        cmbDropoff.Text = _lastDestination;
+        _suppressTextChanged = false;
+
+        SetStatus("🔁 Last journey loaded — click Verify to get quote");
+    }
+
+    private static string Truncate(string s, int max) =>
+        s.Length <= max ? s : s[..max] + "…";
 
     // ══════════════════════════════════════════
     //  ADDRESS AUTOCOMPLETE
