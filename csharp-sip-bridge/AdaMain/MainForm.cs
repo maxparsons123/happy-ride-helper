@@ -393,6 +393,12 @@ public partial class MainForm : Form
     {
         if (_operatorMode && _sipServer != null)
         {
+            // Capture caller info before answering (from pending call)
+            var callerPhone = statusCallId.Text;
+            // Extract just the phone from "📞 +447539025332 (ringing)"
+            var phoneMatch = System.Text.RegularExpressions.Regex.Match(callerPhone, @"[\+\d]{6,}");
+            var phone = phoneMatch.Success ? phoneMatch.Value : null;
+
             Log("✅ Answering call in operator mode…");
             var answered = await _sipServer.AnswerOperatorCallAsync();
             if (answered)
@@ -401,6 +407,9 @@ public partial class MainForm : Form
                 StartAudioMonitor();
                 StartMicrophone(); // Always-hot mic for operator
                 Log("🎤 Operator mic active — speak normally");
+
+                // Auto-open booking form for this caller
+                _ = Task.Run(() => Invoke(() => OpenBookingForm(phone, null)));
             }
         }
         else
@@ -540,6 +549,27 @@ public partial class MainForm : Form
     {
         Log("🎤 Audio test – not yet implemented.");
         MessageBox.Show("Audio test coming soon.", "Audio Test", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void mnuNewBooking_Click(object? sender, EventArgs e)
+    {
+        OpenBookingForm(null, null);
+    }
+
+    private void OpenBookingForm(string? callerPhone, string? callerName)
+    {
+        var factory = GetLoggerFactory();
+        var fareCalc = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
+        var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
+
+        using var dlg = new BookingForm(fareCalc, dispatcher, factory.CreateLogger<BookingForm>(), _settings.Supabase, callerPhone, callerName);
+        var result = dlg.ShowDialog(this);
+
+        if (result == DialogResult.OK && dlg.CompletedBooking != null)
+        {
+            var b = dlg.CompletedBooking;
+            Log($"📋 Booking confirmed: {b.BookingRef} — {b.Pickup} → {b.Destination} ({b.Passengers} pax, {b.Fare})");
+        }
     }
 
     private void mnuViewConfig_Click(object? sender, EventArgs e)
