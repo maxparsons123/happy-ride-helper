@@ -418,6 +418,9 @@ public class MainForm : Form
         var finalName = existing?.Name ?? driverId;
         var finalReg = existing?.Registration ?? "";
         _ = _map.UpdateDriverMarker(driverId, lat, lng, finalStatus, finalName, finalReg);
+
+        // Refresh driver list immediately so status changes are visible
+        _driverList.RefreshDrivers(_db.GetAllDrivers());
     }
 
     private void OnBookingReceived(Job job)
