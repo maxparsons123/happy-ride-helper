@@ -130,9 +130,7 @@ public class MainForm : Form
         var splitTop = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Vertical,
-            Panel1MinSize = 300,
-            Panel2MinSize = 200
+            Orientation = Orientation.Vertical
         };
 
         // Left side: map on top, job tabs below
@@ -197,7 +195,9 @@ public class MainForm : Form
 
         Load += (_, _) =>
         {
-            splitTop.SplitterDistance = Math.Min(700, splitTop.Width - splitTop.Panel2MinSize - 1);
+            splitTop.Panel1MinSize = 300;
+            splitTop.Panel2MinSize = 200;
+            splitTop.SplitterDistance = Math.Max(splitTop.Panel1MinSize, Math.Min(700, splitTop.Width - splitTop.Panel2MinSize - 1));
         };
 
         InitDatabase();
