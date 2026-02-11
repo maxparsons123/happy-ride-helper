@@ -34,8 +34,10 @@ public sealed class MapPanel : Panel
             "Break" => "orange",
             _ => "gray"
         };
+        var latStr = lat.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var lngStr = lng.ToString(System.Globalization.CultureInfo.InvariantCulture);
         await _webView.ExecuteScriptAsync(
-            $"updateDriver('{Esc(driverId)}', {lat}, {lng}, '{color}', '{Esc(name)} ({status})')");
+            $"updateDriver('{Esc(driverId)}', {latStr}, {lngStr}, '{color}', '{Esc(name)} ({status})')");
     }
 
     public async Task AddJobMarker(string jobId, double lat, double lng, string pickup, DateTime createdAt)
@@ -43,8 +45,10 @@ public sealed class MapPanel : Panel
         if (!_mapReady) return;
         var epochMs = new DateTimeOffset(createdAt.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(createdAt, DateTimeKind.Utc) : createdAt).ToUnixTimeMilliseconds();
+        var latStr = lat.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var lngStr = lng.ToString(System.Globalization.CultureInfo.InvariantCulture);
         await _webView.ExecuteScriptAsync(
-            $"addJob('{Esc(jobId)}', {lat}, {lng}, '{Esc(pickup)}', {epochMs})");
+            $"addJob('{Esc(jobId)}', {latStr}, {lngStr}, '{Esc(pickup)}', {epochMs})");
     }
 
     public async Task RemoveJobMarker(string jobId)
@@ -56,8 +60,9 @@ public sealed class MapPanel : Panel
     public async Task DrawAllocationLine(string jobId, double dLat, double dLng, double pLat, double pLng)
     {
         if (!_mapReady) return;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
         await _webView.ExecuteScriptAsync(
-            $"drawAllocation('{Esc(jobId)}', {dLat}, {dLng}, {pLat}, {pLng})");
+            $"drawAllocation('{Esc(jobId)}', {dLat.ToString(inv)}, {dLng.ToString(inv)}, {pLat.ToString(inv)}, {pLng.ToString(inv)})");
     }
 
     private static string Esc(string s) => s.Replace("'", "\\'").Replace("\n", " ");
@@ -87,8 +92,8 @@ public sealed class MapPanel : Panel
         function driverIcon(color) {
             return L.divIcon({
                 className: '',
-                html: `<div style="background:${color};width:14px;height:14px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.5)"></div>`,
-                iconSize: [18, 18], iconAnchor: [9, 9]
+                html: `<div style="background:${color};width:20px;height:20px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 6px rgba(0,0,0,0.6)"></div>`,
+                iconSize: [26, 26], iconAnchor: [13, 13]
             });
         }
 
