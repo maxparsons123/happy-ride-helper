@@ -105,6 +105,17 @@ PHONE NUMBER BIASING LOGIC (CRITICAL):
    - +31 or 0031 → Netherlands
    - 020 → Amsterdam, 010 → Rotterdam, 070 → The Hague, 030 → Utrecht
 
+4. EXPLICIT CITY NAME OVERRIDES PHONE PREFIX (CRITICAL):
+   - If the user SAYS a city name in their address text (e.g., "in Gent", "Coventry", "Amsterdam"),
+     that ALWAYS takes priority over any phone-prefix-based geographic bias.
+   - Example: Caller with +31 (Netherlands) prefix says "vliegtuiglaan nummer 5 in Gent" 
+     → Resolve to Gent/Ghent, BELGIUM — NOT to any Netherlands location.
+   - Example: Caller with +44 (UK) prefix says "Rue de la Loi, Brussels"
+     → Resolve to Brussels, Belgium — NOT to any UK location.
+   - The phone prefix is a HINT for disambiguation when NO city is mentioned. 
+     It must NEVER override an explicitly stated city name.
+   - Set region_source to "text_mention" when the city was explicitly stated by the caller.
+
 CHAIN BUSINESSES & LANDMARKS WITH MULTIPLE LOCATIONS (CRITICAL):
 Many businesses are chains with locations in multiple cities (e.g., "The Cosy Club", "Nando's", "Wetherspoons", "Tesco", "Costa Coffee", "Premier Inn").
 - For a MOBILE caller with NO city context, NO caller history match, and NO area/postcode mentioned:

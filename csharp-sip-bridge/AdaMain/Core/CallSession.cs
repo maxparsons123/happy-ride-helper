@@ -26,6 +26,7 @@ public sealed class CallSession : ICallSession
     private int _disposed;
     private int _active;
     private int _autoQuoteInProgress; // Prevents safety net from racing with background fare calc
+    private int _bookTaxiCompleted;   // Guard: prevent duplicate book_taxi confirmed calls
     private long _lastAdaFinishedAt;
     
     public string SessionId { get; }
@@ -303,6 +304,18 @@ public sealed class CallSession : ICallSession
     private async Task<object> HandleBookTaxiAsync(Dictionary<string, object?> args)
     {
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
+        
+        // GUARD: Prevent duplicate book_taxi confirmed calls (was firing twice in logs)
+        if ((action == "confirmed" || action == null) && Interlocked.CompareExchange(ref _bookTaxiCompleted, 1, 0) == 1)
+        {
+            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — already confirmed (ref: {Ref})", SessionId, _booking.BookingRef);
+            return new
+            {
+                success = true,
+                booking_ref = _booking.BookingRef ?? "already-booked",
+                message = "The booking has already been confirmed. Tell the caller their reference number and ask if there's anything else."
+            };
+        }
         
         // GUARD: Reject book_taxi if fare recalculation is in progress (address was just corrected)
         if (Volatile.Read(ref _autoQuoteInProgress) == 1 && string.IsNullOrWhiteSpace(_booking.Fare))
@@ -776,6 +789,8 @@ public sealed class CallSession : ICallSession
         
         // Reset booking state fully
         _booking.Reset();
+        Interlocked.Exchange(ref _autoQuoteInProgress, 0);
+        Interlocked.Exchange(ref _bookTaxiCompleted, 0);
         
         // Dispose AI client (closes WebSocket, stops log thread, disposes CTS)
         if (_aiClient is IAsyncDisposable disposableAi)

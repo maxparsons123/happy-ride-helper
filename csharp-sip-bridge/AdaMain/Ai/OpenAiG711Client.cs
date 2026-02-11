@@ -203,6 +203,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _bookingConfirmed, 0);
         Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
         Interlocked.Exchange(ref _vadRespondedThisTurn, 0);
+        Interlocked.Exchange(ref _syncCallCount, 0);   // FIX: Reset sync counter between calls
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
