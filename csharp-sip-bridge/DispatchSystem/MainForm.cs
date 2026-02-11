@@ -391,8 +391,8 @@ public class MainForm : Form
         }
 
         DriverStatus? ds = null;
-        if (!string.IsNullOrEmpty(status) && Enum.TryParse<DriverStatus>(status, true, out var parsed))
-            ds = parsed;
+        if (!string.IsNullOrEmpty(status))
+            ds = MapMqttStatus(status);
 
         var drivers = _db.GetAllDrivers();
         var existing = drivers.FirstOrDefault(d => d.Id == driverId);
@@ -673,4 +673,18 @@ public class MainForm : Form
         Font = new Font("Segoe UI", 9F, FontStyle.Bold),
         Margin = new Padding(0, 0, 4, 0)
     };
+    };
+
+    /// <summary>
+    /// Maps MQTT driver status strings (available, busy, offline, break) to the internal enum.
+    /// </summary>
+    private static DriverStatus? MapMqttStatus(string mqttStatus) =>
+        mqttStatus.ToLowerInvariant() switch
+        {
+            "available" or "online" or "free" => DriverStatus.Online,
+            "busy" or "onjob" or "on_job" => DriverStatus.OnJob,
+            "break" or "on_break" => DriverStatus.Break,
+            "offline" or "off" => DriverStatus.Offline,
+            _ => Enum.TryParse<DriverStatus>(mqttStatus, true, out var p) ? p : null
+        };
 }
