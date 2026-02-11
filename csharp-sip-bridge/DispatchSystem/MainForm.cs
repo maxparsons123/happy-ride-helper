@@ -253,7 +253,7 @@ public class MainForm : Form
         _logPanel.AppendLog($"📥 New booking: {job.Pickup} → {job.Dropoff}", Color.Yellow);
 
         if (job.PickupLat != 0 && job.PickupLng != 0)
-            _ = _map.AddJobMarker(job.Id, job.PickupLat, job.PickupLng, job.Pickup);
+            _ = _map.AddJobMarker(job.Id, job.PickupLat, job.PickupLng, job.Pickup, job.CreatedAt);
 
         RefreshUI();
     }
