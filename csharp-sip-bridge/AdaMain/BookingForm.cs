@@ -53,6 +53,13 @@ public sealed class BookingForm : Form
     private string[]? _callerPickupHistory;
     private string[]? _callerDropoffHistory;
 
+    // Autocomplete
+    private System.Windows.Forms.Timer _pickupDebounce;
+    private System.Windows.Forms.Timer _dropoffDebounce;
+    private CancellationTokenSource? _pickupCts;
+    private CancellationTokenSource? _dropoffCts;
+    private bool _suppressTextChanged;
+
     /// <summary>The completed booking state (set when confirmed).</summary>
     public BookingState? CompletedBooking { get; private set; }
 
@@ -311,6 +318,33 @@ public sealed class BookingForm : Form
             if (pax <= 4) cmbVehicle.SelectedIndex = 0;       // Saloon
             else if (pax <= 6) cmbVehicle.SelectedIndex = 2;   // MPV
             else cmbVehicle.SelectedIndex = 3;                  // Minibus
+        };
+
+        // ── Address autocomplete setup ──
+        _pickupDebounce = new System.Windows.Forms.Timer { Interval = 350 };
+        _pickupDebounce.Tick += async (s, e) =>
+        {
+            _pickupDebounce.Stop();
+            await FetchAutocompleteSuggestionsAsync(cmbPickup);
+        };
+        cmbPickup.TextChanged += (s, e) =>
+        {
+            if (_suppressTextChanged) return;
+            _pickupDebounce.Stop();
+            _pickupDebounce.Start();
+        };
+
+        _dropoffDebounce = new System.Windows.Forms.Timer { Interval = 350 };
+        _dropoffDebounce.Tick += async (s, e) =>
+        {
+            _dropoffDebounce.Stop();
+            await FetchAutocompleteSuggestionsAsync(cmbDropoff);
+        };
+        cmbDropoff.TextChanged += (s, e) =>
+        {
+            if (_suppressTextChanged) return;
+            _dropoffDebounce.Stop();
+            _dropoffDebounce.Start();
         };
     }
 
@@ -573,6 +607,93 @@ public sealed class BookingForm : Form
             SetStatus($"Error: {ex.Message}");
             btnBook.Enabled = true;
             btnBook.Text = "✅ Confirm & Dispatch";
+        }
+    }
+
+    // ══════════════════════════════════════════
+    //  ADDRESS AUTOCOMPLETE
+    // ══════════════════════════════════════════
+
+    private async Task FetchAutocompleteSuggestionsAsync(ComboBox cmb)
+    {
+        var input = cmb.Text.Trim();
+        if (input.Length < 3) return;
+
+        // Cancel any previous request for this box
+        var isPickup = cmb == cmbPickup;
+        if (isPickup) { _pickupCts?.Cancel(); _pickupCts = new CancellationTokenSource(); }
+        else { _dropoffCts?.Cancel(); _dropoffCts = new CancellationTokenSource(); }
+        var ct = isPickup ? _pickupCts!.Token : _dropoffCts!.Token;
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var phone = txtPhone.Text.Trim();
+
+            var payload = JsonSerializer.Serialize(new { input, phone });
+            var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+
+            var request = new HttpRequestMessage(HttpMethod.Post,
+                $"{_supabaseSettings.Url}/functions/v1/address-autocomplete")
+            {
+                Content = content
+            };
+            request.Headers.Add("apikey", _supabaseSettings.AnonKey);
+            request.Headers.Add("Authorization", $"Bearer {_supabaseSettings.AnonKey}");
+
+            var response = await http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode || ct.IsCancellationRequested) return;
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("predictions", out var predictions)) return;
+
+            var suggestions = predictions.EnumerateArray()
+                .Select(p => p.GetProperty("description").GetString() ?? "")
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
+
+            if (ct.IsCancellationRequested || suggestions.Count == 0) return;
+
+            // Merge with caller history (history first, then autocomplete)
+            var history = isPickup ? _callerPickupHistory : _callerDropoffHistory;
+            var merged = new List<string>();
+            if (history != null)
+            {
+                var matchingHistory = history
+                    .Where(h => h.Contains(input, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                merged.AddRange(matchingHistory);
+            }
+            foreach (var s in suggestions)
+            {
+                if (!merged.Contains(s, StringComparer.OrdinalIgnoreCase))
+                    merged.Add(s);
+            }
+
+            // Update ComboBox dropdown without losing current text
+            _suppressTextChanged = true;
+            var cursorPos = cmb.SelectionStart;
+            var currentText = cmb.Text;
+
+            cmb.Items.Clear();
+            foreach (var item in merged.Take(8))
+                cmb.Items.Add(item);
+
+            cmb.Text = currentText;
+            cmb.SelectionStart = cursorPos;
+            cmb.SelectionLength = 0;
+            _suppressTextChanged = false;
+
+            // Show the dropdown
+            if (merged.Count > 0 && cmb.Focused)
+                cmb.DroppedDown = true;
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Autocomplete request failed");
         }
     }
 
