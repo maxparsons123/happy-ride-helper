@@ -6,6 +6,11 @@ using System.Text.RegularExpressions;
 using AdaMain.Config;
 using AdaMain.Core;
 using Microsoft.Extensions.Logging;
+using MQTTnet;
+using MQTTnet.Client;
+using MQTTnet.Protocol;
+using AdaMain.Core;
+using Microsoft.Extensions.Logging;
 
 namespace AdaMain.Services;
 
@@ -45,6 +50,8 @@ public sealed class BsqdDispatcher : IDispatcher
     private readonly ILogger<BsqdDispatcher> _logger;
     private readonly DispatchSettings _settings;
     private readonly HttpClient _httpClient;
+    private IMqttClient? _mqttClient;
+    private readonly SemaphoreSlim _mqttLock = new(1, 1);
     
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -59,6 +66,16 @@ public sealed class BsqdDispatcher : IDispatcher
     }
     
     public async Task<bool> DispatchAsync(BookingState booking, string phoneNumber)
+    {
+        // Fire both BSQD webhook and MQTT in parallel — keep both paths
+        var bsqdTask = DispatchBsqdAsync(booking, phoneNumber);
+        var mqttTask = PublishBookingMqttAsync(booking, phoneNumber);
+        
+        await Task.WhenAll(bsqdTask, mqttTask);
+        return await bsqdTask || await mqttTask; // success if either worked
+    }
+    
+    private async Task<bool> DispatchBsqdAsync(BookingState booking, string phoneNumber)
     {
         if (string.IsNullOrEmpty(_settings.BsqdWebhookUrl))
         {
@@ -94,6 +111,93 @@ public sealed class BsqdDispatcher : IDispatcher
         {
             _logger.LogError(ex, "❌ BSQD Dispatch ERROR");
             return false;
+        }
+    }
+    
+    /// <summary>
+    /// Publish confirmed booking to MQTT topic 'taxi/bookings' for the DispatchSystem.
+    /// Uses the same JSON format that MqttDispatchClient expects.
+    /// </summary>
+    private async Task<bool> PublishBookingMqttAsync(BookingState booking, string phoneNumber)
+    {
+        if (string.IsNullOrEmpty(_settings.MqttBrokerUrl))
+            return false;
+        
+        try
+        {
+            var client = await GetOrCreateMqttClientAsync();
+            if (client == null || !client.IsConnected)
+            {
+                _logger.LogWarning("⚠ MQTT not connected, skipping booking publish");
+                return false;
+            }
+            
+            var payload = JsonSerializer.Serialize(new
+            {
+                pickup = booking.PickupFormatted ?? booking.Pickup ?? "",
+                dropoff = booking.DestFormatted ?? booking.Destination ?? "",
+                passengers = booking.Passengers ?? 1,
+                vehicleType = (booking.Passengers ?? 1) > 4 ? "MPV" : "Saloon",
+                estimatedPrice = decimal.TryParse(ParseFare(booking.Fare),
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var fare) ? fare : 0m,
+                pickupLat = booking.PickupLat ?? 0,
+                pickupLng = booking.PickupLon ?? 0,
+                dropoffLat = booking.DestLat ?? 0,
+                dropoffLng = booking.DestLon ?? 0,
+                callerPhone = FormatE164(phoneNumber),
+                callerName = booking.Name ?? "Customer",
+                bookingRef = booking.BookingRef ?? ""
+            });
+            
+            var msg = new MqttApplicationMessageBuilder()
+                .WithTopic("taxi/bookings")
+                .WithPayload(payload)
+                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                .Build();
+            
+            await client.PublishAsync(msg);
+            _logger.LogInformation("📡 MQTT booking published to taxi/bookings");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ MQTT booking publish failed");
+            return false;
+        }
+    }
+    
+    private async Task<IMqttClient?> GetOrCreateMqttClientAsync()
+    {
+        await _mqttLock.WaitAsync();
+        try
+        {
+            if (_mqttClient is { IsConnected: true })
+                return _mqttClient;
+            
+            _mqttClient?.Dispose();
+            
+            var factory = new MqttFactory();
+            _mqttClient = factory.CreateMqttClient();
+            
+            var options = new MqttClientOptionsBuilder()
+                .WithClientId("ada-dispatch-" + Guid.NewGuid().ToString("N")[..8])
+                .WithWebSocketServer(o => o.WithUri(_settings.MqttBrokerUrl))
+                .WithCleanSession()
+                .Build();
+            
+            await _mqttClient.ConnectAsync(options);
+            _logger.LogInformation("✅ MQTT dispatch client connected");
+            return _mqttClient;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ MQTT dispatch connect failed");
+            return null;
+        }
+        finally
+        {
+            _mqttLock.Release();
         }
     }
     
