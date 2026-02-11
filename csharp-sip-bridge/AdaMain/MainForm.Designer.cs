@@ -158,9 +158,30 @@ partial class MainForm
         btnPtt.MouseDown += btnPtt_MouseDown;
         btnPtt.MouseUp += btnPtt_MouseUp;
 
-        lblCallInfo = new Label { Text = "No active call", Location = new Point(310, 65), Size = new Size(240, 15), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F) };
+        // Operator mic volume slider
+        lblOpVolume = new Label { Text = "🔊 Mic Vol:", Location = new Point(310, 62), Size = new Size(70, 20), ForeColor = fgLight, Font = new Font("Segoe UI", 8F) };
+        trkOpVolume = new TrackBar
+        {
+            Location = new Point(380, 58),
+            Size = new Size(120, 30),
+            Minimum = 10,    // 1.0x
+            Maximum = 60,    // 6.0x
+            Value = 20,      // 2.0x default
+            TickFrequency = 10,
+            SmallChange = 5,
+            LargeChange = 10,
+            BackColor = bgPanel
+        };
+        trkOpVolume.ValueChanged += (s, e) =>
+        {
+            _operatorMicGain = trkOpVolume.Value / 10f;
+            lblOpVolumeVal.Text = $"{_operatorMicGain:F1}x";
+        };
+        lblOpVolumeVal = new Label { Text = "2.0x", Location = new Point(500, 62), Size = new Size(40, 20), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
 
-        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, btnPtt, lblCallInfo });
+        lblCallInfo = new Label { Text = "No active call", Location = new Point(310, 82), Size = new Size(240, 15), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F) };
+
+        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, btnPtt, lblOpVolume, trkOpVolume, lblOpVolumeVal, lblCallInfo });
 
         // ══════════════════════════════════════════
         //  SIMLI AVATAR GROUP (right side)
@@ -329,6 +350,9 @@ partial class MainForm
     private CheckBox chkManualMode;
     private Button btnPtt;
     private Label lblCallInfo;
+    private Label lblOpVolume;
+    private TrackBar trkOpVolume;
+    private Label lblOpVolumeVal;
 
     // Avatar
     private GroupBox grpAvatar;
