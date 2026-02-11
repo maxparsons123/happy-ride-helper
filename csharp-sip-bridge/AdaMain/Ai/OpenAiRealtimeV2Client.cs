@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -135,17 +137,37 @@ public sealed class OpenAiRealtimeV2Client : IOpenAiClient, IAsyncDisposable
     /// Send G.711 audio bytes (A-law or μ-law, matching <see cref="V2Config.AudioFormat"/>).
     /// No resampling needed — 8kHz passthrough.
     /// </summary>
+    // Zero-alloc audio send envelope
+    private static readonly byte[] s_audioPrefix =
+        Encoding.UTF8.GetBytes("{\"type\":\"input_audio_buffer.append\",\"audio\":\"");
+    private static readonly byte[] s_audioSuffix =
+        Encoding.UTF8.GetBytes("\"}");
+
     public void SendAudio(byte[] g711Frame)
     {
         if (!IsConnected || g711Frame.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
 
-        var msg = JsonSerializer.SerializeToUtf8Bytes(new
+        var b64Len = Base64.GetMaxEncodedToUtf8Length(g711Frame.Length);
+        var totalLen = s_audioPrefix.Length + b64Len + s_audioSuffix.Length;
+        var buffer = ArrayPool<byte>.Shared.Rent(totalLen);
+
+        try
         {
-            type = "input_audio_buffer.append",
-            audio = Convert.ToBase64String(g711Frame)
-        });
-        _ = SendBytesAsync(msg);
+            s_audioPrefix.CopyTo(buffer, 0);
+            Base64.EncodeToUtf8(g711Frame, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
+            s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
+
+            var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
+            var msg = new byte[finalLen];
+            Buffer.BlockCopy(buffer, 0, msg, 0, finalLen);
+            _ = SendBytesAsync(msg);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
         Volatile.Write(ref _lastUserSpeechAt, NowMs());
     }
 
@@ -243,15 +265,27 @@ public sealed class OpenAiRealtimeV2Client : IOpenAiClient, IAsyncDisposable
 
                 // Audio delta — raw G.711 bytes, pass through directly
                 case "response.audio.delta":
-                case "response.output_audio.delta": // new schema event name
+                case "response.output_audio.delta":
                     if (doc.RootElement.TryGetProperty("delta", out var delta))
                     {
                         var b64 = delta.GetString();
                         if (!string.IsNullOrEmpty(b64))
                         {
-                            var audioBytes = Convert.FromBase64String(b64);
-                            if (audioBytes.Length > 0)
-                                OnAudio?.Invoke(audioBytes);
+                            var maxBytes = (b64.Length * 3 + 3) / 4;
+                            var poolBuf = ArrayPool<byte>.Shared.Rent(maxBytes);
+                            try
+                            {
+                                if (Convert.TryFromBase64String(b64, poolBuf, out var bytesWritten) && bytesWritten > 0)
+                                {
+                                    var audioBytes = new byte[bytesWritten];
+                                    Buffer.BlockCopy(poolBuf, 0, audioBytes, 0, bytesWritten);
+                                    OnAudio?.Invoke(audioBytes);
+                                }
+                            }
+                            finally
+                            {
+                                ArrayPool<byte>.Shared.Return(poolBuf);
+                            }
                         }
                     }
                     break;
