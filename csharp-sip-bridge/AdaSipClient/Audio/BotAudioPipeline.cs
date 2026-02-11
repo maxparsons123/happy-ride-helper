@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -72,6 +74,11 @@ public sealed class BotAudioPipeline : IAudioPipeline
         }
     }
 
+    private static readonly byte[] s_audioPrefix =
+        Encoding.UTF8.GetBytes("{\"type\":\"input_audio_buffer.append\",\"audio\":\"");
+    private static readonly byte[] s_audioSuffix =
+        Encoding.UTF8.GetBytes("\"}");
+
     public void IngestCallerAudio(byte[] alawFrame)
     {
         if (_disposed || _ws?.State != WebSocketState.Open || !_sessionReady) return;
@@ -80,15 +87,24 @@ public sealed class BotAudioPipeline : IAudioPipeline
         var frame = (byte[])alawFrame.Clone();
         _inputGain.ApplyInPlace(frame);
 
-        // Send as base64-encoded A-law
-        var b64 = Convert.ToBase64String(frame);
-        var msg = JsonSerializer.Serialize(new
-        {
-            type = "input_audio_buffer.append",
-            audio = b64
-        });
+        // Zero-alloc JSON: manually write envelope with pooled buffer
+        var b64Len = Base64.GetMaxEncodedToUtf8Length(frame.Length);
+        var totalLen = s_audioPrefix.Length + b64Len + s_audioSuffix.Length;
+        var buffer = ArrayPool<byte>.Shared.Rent(totalLen);
 
-        _ = SendAsync(msg);
+        try
+        {
+            s_audioPrefix.CopyTo(buffer, 0);
+            Base64.EncodeToUtf8(frame, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
+            s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
+
+            var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
+            _ = SendBytesAsync(buffer.AsSpan(0, finalLen).ToArray());
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     public void Stop()
@@ -214,6 +230,12 @@ public sealed class BotAudioPipeline : IAudioPipeline
     {
         if (_ws?.State != WebSocketState.Open) return;
         var bytes = Encoding.UTF8.GetBytes(message);
+        await SendBytesAsync(bytes);
+    }
+
+    private async Task SendBytesAsync(byte[] bytes)
+    {
+        if (_ws?.State != WebSocketState.Open) return;
         try
         {
             await _ws.SendAsync(bytes, WebSocketMessageType.Text, true,
