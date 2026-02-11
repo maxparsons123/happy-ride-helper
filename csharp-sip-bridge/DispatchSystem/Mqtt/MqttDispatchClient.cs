@@ -21,6 +21,7 @@ public sealed class MqttDispatchClient : IDisposable
     public event Action<Job>? OnBookingReceived;
     public event Action<string, string, string>? OnJobStatusUpdate;          // jobId, driverId, status
     public event Action<string, string, bool>? OnDriverJobResponse;          // jobId, driverId, accepted
+    public event Action<string, string, double, double>? OnDriverBidReceived; // jobId, driverId, lat, lng
 
     public bool IsConnected => _client?.IsConnected ?? false;
 
@@ -65,6 +66,7 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.SubscribeAsync("jobs/+/status");
         await _client.SubscribeAsync("jobs/+/bidding");
         await _client.SubscribeAsync("jobs/+/response");
+        await _client.SubscribeAsync("jobs/+/bid");
         OnLog?.Invoke("📡 Subscribed to dispatch topics");
     }
 
@@ -119,6 +121,14 @@ public sealed class MqttDispatchClient : IDisposable
                 if (resp != null)
                     OnDriverJobResponse?.Invoke(jobId, resp.driver ?? "", resp.accepted);
             }
+            else if (topic.StartsWith("jobs/") && topic.EndsWith("/bid"))
+            {
+                var parts = topic.Split('/');
+                var jobId = parts[1];
+                var bid = JsonSerializer.Deserialize<DriverBidMsg>(json);
+                if (bid != null)
+                    OnDriverBidReceived?.Invoke(jobId, bid.driver ?? "", bid.lat, bid.lng);
+            }
         }
         catch (Exception ex)
         {
@@ -144,6 +154,43 @@ public sealed class MqttDispatchClient : IDisposable
         await PublishAsync($"drivers/{driverId}/jobs", payload);
         await PublishAsync($"jobs/{jobId}/allocated", payload);
         OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId}");
+    }
+
+    /// <summary>Publish bid request to specific drivers for a job.</summary>
+    public async Task PublishBidRequest(Job job, List<string> driverIds)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            jobId = job.Id,
+            pickup = job.Pickup,
+            dropoff = job.Dropoff,
+            pickupLat = job.PickupLat,
+            pickupLng = job.PickupLng,
+            passengers = job.Passengers,
+            fare = job.EstimatedFare,
+            biddingWindowSec = 20
+        });
+
+        foreach (var driverId in driverIds)
+            await PublishAsync($"drivers/{driverId}/bid-request", payload);
+
+        await PublishAsync($"jobs/{job.Id}/bid-request", payload);
+        OnLog?.Invoke($"📤 Bid request for {job.Id} sent to {driverIds.Count} drivers");
+    }
+
+    /// <summary>Publish bid result (winner/loser) to drivers.</summary>
+    public async Task PublishBidResult(string jobId, string driverId, string result)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            job = jobId,
+            driver = driverId,
+            result,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        });
+
+        await PublishAsync($"jobs/{jobId}/result/{driverId}", payload);
+        await PublishAsync($"jobs/{jobId}/status", payload);
     }
 
     public async Task PublishAsync(string topic, string payload)
@@ -198,5 +245,12 @@ public sealed class MqttDispatchClient : IDisposable
     {
         public string? driver { get; set; }
         public bool accepted { get; set; }
+    }
+
+    private class DriverBidMsg
+    {
+        public string? driver { get; set; }
+        public double lat { get; set; }
+        public double lng { get; set; }
     }
 }
