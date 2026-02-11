@@ -64,11 +64,12 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.SubscribeAsync("drivers/+/location");
         await _client.SubscribeAsync("drivers/+/status");
         await _client.SubscribeAsync("taxi/bookings");
+        await _client.SubscribeAsync("pubs/requests/+");  // Receive pub app job submissions
         await _client.SubscribeAsync("jobs/+/status");
         await _client.SubscribeAsync("jobs/+/bidding");
         await _client.SubscribeAsync("jobs/+/response");
         await _client.SubscribeAsync("jobs/+/bid");
-        OnLog?.Invoke("📡 Subscribed to dispatch topics (incl. drivers/+/status)");
+        OnLog?.Invoke("📡 Subscribed to dispatch topics (incl. pubs/requests/+)");
     }
 
     private Task HandleMessage(MqttApplicationMessageReceivedEventArgs e)
@@ -98,7 +99,7 @@ public sealed class MqttDispatchClient : IDisposable
                     OnDriverGps?.Invoke(driverId, statusMsg.lat, statusMsg.lng, statusMsg.status);
                 }
             }
-            else if (topic == "taxi/bookings")
+            else if (topic == "taxi/bookings" || topic.StartsWith("pubs/requests/"))
             {
                 OnLog?.Invoke($"📥 MQTT booking received: {json[..Math.Min(json.Length, 120)]}");
                 var booking = JsonSerializer.Deserialize<BookingMsg>(json);
@@ -175,6 +176,16 @@ public sealed class MqttDispatchClient : IDisposable
 
         await PublishAsync($"drivers/{driverId}/jobs", payload);
         await PublishAsync($"jobs/{jobId}/allocated", payload);
+        
+        // Notify pub app of allocation via jobs/{jobId}/status topic
+        var statusPayload = JsonSerializer.Serialize(new
+        {
+            status = "allocated",
+            driver = driverId,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        });
+        await PublishAsync($"jobs/{jobId}/status", statusPayload);
+        
         OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId}");
     }
 
