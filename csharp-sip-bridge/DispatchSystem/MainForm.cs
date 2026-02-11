@@ -495,6 +495,18 @@ public class MainForm : Form
         if (_mqtt != null)
             await _mqtt.PublishJobAllocation(job.Id, driver.Id, job);
 
+        // Marshal to UI thread — this handler fires from background dispatch threads
+        if (InvokeRequired)
+        {
+            BeginInvoke(async () =>
+            {
+                if (job.PickupLat != 0)
+                    await _map.DrawAllocationLine(job.Id, driver.Lat, driver.Lng, job.PickupLat, job.PickupLng);
+                RefreshUI();
+            });
+            return;
+        }
+
         if (job.PickupLat != 0)
             await _map.DrawAllocationLine(job.Id, driver.Lat, driver.Lng, job.PickupLat, job.PickupLng);
 
