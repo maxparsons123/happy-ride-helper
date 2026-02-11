@@ -27,6 +27,11 @@ public sealed class MapPanel : Panel
     public async Task UpdateDriverMarker(string driverId, double lat, double lng, string status, string name, string registration = "")
     {
         if (!_mapReady) return;
+        if (InvokeRequired)
+        {
+            await InvokeAsync(() => UpdateDriverMarker(driverId, lat, lng, status, name, registration));
+            return;
+        }
         var color = status switch
         {
             "Online" => "green",
@@ -46,6 +51,11 @@ public sealed class MapPanel : Panel
     public async Task AddJobMarker(string jobId, double lat, double lng, string pickup, DateTime createdAt)
     {
         if (!_mapReady) return;
+        if (InvokeRequired)
+        {
+            await InvokeAsync(() => AddJobMarker(jobId, lat, lng, pickup, createdAt));
+            return;
+        }
         var epochMs = new DateTimeOffset(createdAt.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(createdAt, DateTimeKind.Utc) : createdAt).ToUnixTimeMilliseconds();
         var latStr = lat.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -57,15 +67,46 @@ public sealed class MapPanel : Panel
     public async Task RemoveJobMarker(string jobId)
     {
         if (!_mapReady) return;
+        if (InvokeRequired)
+        {
+            await InvokeAsync(() => RemoveJobMarker(jobId));
+            return;
+        }
         await _webView.ExecuteScriptAsync($"removeJob('{Esc(jobId)}')");
     }
 
     public async Task DrawAllocationLine(string jobId, double dLat, double dLng, double pLat, double pLng)
     {
         if (!_mapReady) return;
+        if (InvokeRequired)
+        {
+            await InvokeAsync(() => DrawAllocationLine(jobId, dLat, dLng, pLat, pLng));
+            return;
+        }
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         await _webView.ExecuteScriptAsync(
             $"drawAllocation('{Esc(jobId)}', {dLat.ToString(inv)}, {dLng.ToString(inv)}, {pLat.ToString(inv)}, {pLng.ToString(inv)})");
+    }
+
+    /// <summary>
+    /// Marshal an async Task back to the UI thread and await it.
+    /// </summary>
+    private Task InvokeAsync(Func<Task> action)
+    {
+        var tcs = new TaskCompletionSource();
+        BeginInvoke(async () =>
+        {
+            try
+            {
+                await action();
+                tcs.SetResult();
+            }
+            catch (Exception ex)
+            {
+                tcs.SetException(ex);
+            }
+        });
+        return tcs.Task;
     }
 
     private static string Esc(string s) => s.Replace("'", "\\'").Replace("\n", " ");
