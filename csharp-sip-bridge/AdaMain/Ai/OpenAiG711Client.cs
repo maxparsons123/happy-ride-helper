@@ -1273,8 +1273,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 properties = new Dictionary<string, object>
                 {
                     ["caller_name"] = new { type = "string", description = "Customer name" },
-                    ["pickup"] = new { type = "string", description = "Pickup address (verbatim as spoken)" },
-                    ["destination"] = new { type = "string", description = "Destination address (verbatim as spoken)" },
+                    ["pickup"] = new { type = "string", description = "Pickup address — COPY the EXACT words from the transcript. Do NOT correct spelling, do NOT substitute similar street names. 'David Road' stays 'David Road', never becomes 'Dovey Road'." },
+                    ["destination"] = new { type = "string", description = "Destination address — COPY the EXACT words from the transcript. Do NOT correct spelling, do NOT substitute similar street names." },
                     ["passengers"] = new { type = "integer", description = "Number of passengers (1-8)" },
                     ["pickup_time"] = new { type = "string", description = "Pickup time (e.g. 'now', 'in 10 minutes', '14:30')" }
                 },
@@ -1451,7 +1451,7 @@ After EVERY user message that provides OR corrects booking data:
 - Call sync_booking_data IMMEDIATELY — before generating ANY text response
 - Include ALL known fields every time (name, pickup, destination, passengers, time)
 - If the user repeats an address differently, THIS IS A CORRECTION
-- Store addresses EXACTLY as spoken (verbatim)
+- Store addresses EXACTLY as spoken (verbatim) — NEVER substitute similar-sounding street names (e.g. 'David Road' must NOT become 'Dovey Road')
 
 ⚠️ ZERO-TOLERANCE RULE: If you speak your next question WITHOUT having called
 sync_booking_data first, the booking data is permanently lost. The bridge has
@@ -1521,6 +1521,8 @@ YOU MUST:
 - NEVER remove numbers the user did say
 - NEVER guess missing parts
 - NEVER ""improve"", ""normalize"", or ""correct"" addresses
+- NEVER substitute similar-sounding street names (e.g. David→Dovey, Broad→Board, Park→Bark)
+- COPY the transcript string character-for-character into tool call arguments
 - Read back EXACTLY what was stored
 
 If unsure, ASK the user.
