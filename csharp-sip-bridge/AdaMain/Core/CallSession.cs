@@ -761,6 +761,29 @@ public sealed class CallSession : ICallSession
         
         await EndAsync("disposed");
         
+        // ── Unwire ALL event handlers to prevent stale references ──
         _aiClient.OnAudio -= HandleAiAudio;
+        _aiClient.OnToolCall -= HandleToolCallAsync;
+        _aiClient.OnTranscript -= null; // Lambda — clear via field below
+        _aiClient.OnEnded -= null;      // Lambda — cleared via DisposeAsync on AI client
+        
+        // Clear events on this session so MainForm/SipServer closures don't hold references
+        OnEnded = null;
+        OnBookingUpdated = null;
+        OnTranscript = null;
+        OnAudioOut = null;
+        OnBargeIn = null;
+        
+        // Reset booking state fully
+        _booking.Reset();
+        
+        // Dispose AI client (closes WebSocket, stops log thread, disposes CTS)
+        if (_aiClient is IAsyncDisposable disposableAi)
+        {
+            try { await disposableAi.DisposeAsync(); }
+            catch { /* swallow — best effort cleanup */ }
+        }
+        
+        _logger.LogInformation("[{SessionId}] 🧹 CallSession fully disposed — all state cleared", SessionId);
     }
 }

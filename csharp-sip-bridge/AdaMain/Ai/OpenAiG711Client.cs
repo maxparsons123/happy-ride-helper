@@ -318,8 +318,35 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
         _ws?.Dispose();
         _ws = null;
+        
+        // ── Stop logger thread and wait for it to drain ──
         _loggerRunning = false;
         _logSignal.Set();
+        try { _logThread?.Join(2000); } catch { }
+        _logThread = null;
+        
+        // ── Dispose CTS ──
+        try { _cts?.Dispose(); } catch { }
+        _cts = null;
+        
+        // ── Clear all event delegates to break reference chains ──
+        OnAudio = null;
+        OnToolCall = null;
+        OnEnded = null;
+        OnPlayoutComplete = null;
+        OnTranscript = null;
+        OnBargeIn = null;
+        OnResponseCompleted = null;
+        GetQueuedFrames = null;
+        IsAutoQuoteInProgress = null;
+        
+        // ── Clear log queue ──
+        while (_logQueue.TryDequeue(out _)) { }
+        
+        // ── Reset all per-call state (belt-and-suspenders — object shouldn't be reused) ──
+        ResetCallState(null);
+        
+        _logger.LogInformation("OpenAiG711Client fully disposed — all state cleared");
     }
 
     // =========================
@@ -1685,12 +1712,15 @@ RESPONSE STYLE
     // =========================
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 1)
-            return;
-
+        // DisconnectAsync has its own _disposed guard — call it first
         await DisconnectAsync();
-        _sendMutex.Dispose();
+        
+        // Dispose semaphore (only safe after all send operations stop)
+        try { _sendMutex.Dispose(); } catch { }
+        
+        // Belt-and-suspenders: ensure logger is stopped
         _loggerRunning = false;
         _logSignal.Set();
+        try { _logSignal.Dispose(); } catch { }
     }
 }
