@@ -203,13 +203,24 @@ public sealed class MqttDispatchClient : IDisposable
         await PublishAsync($"drivers/{driverId}/jobs", payload);
         await PublishAsync($"jobs/{jobId}/allocated", payload);
         
-        // Notify pub app of allocation via jobs/{jobId}/status topic
+        // Notify driver app and pub app via jobs/{jobId}/status topic
+        // Driver app subscribes to jobs/+/status — include full job details
         var statusPayload = JsonSerializer.Serialize(new
         {
+            job = jobId,
             status = "allocated",
             driver = driverId,
+            pubName = job.Pickup,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
+            customerName = job.CallerName,
+            customerPhone = job.CallerPhone,
+            lat = job.PickupLat,
+            lng = job.PickupLng,
+            dropoffLat = job.DropoffLat,
+            dropoffLng = job.DropoffLng,
+            passengers = job.Passengers,
+            fare = job.EstimatedFare,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
         await PublishAsync($"jobs/{jobId}/status", statusPayload);
