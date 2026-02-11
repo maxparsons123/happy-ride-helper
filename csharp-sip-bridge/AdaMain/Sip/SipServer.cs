@@ -56,6 +56,12 @@ public sealed class SipServer : IAsyncDisposable
     public bool IsConnected => _transport != null && IsRegistered;
     public int ActiveCallCount => _activeCalls.Count;
 
+    /// <summary>When true, calls ring and wait for manual answer with no AI pipeline.</summary>
+    public bool OperatorMode { get; set; }
+
+    // ── Pending (unanswered) calls for operator mode ──
+    private readonly ConcurrentDictionary<string, PendingCall> _pendingCalls = new();
+
     // ── Events ──
     public event Action<string>? OnLog;
     public event Action<string>? OnRegistered;
@@ -67,6 +73,10 @@ public sealed class SipServer : IAsyncDisposable
     public event Action<string>? OnServerResolved;
     /// <summary>Fires when active call count changes.</summary>
     public event Action<int>? OnActiveCallCountChanged;
+    /// <summary>Fires with (pendingId, callerId) when a call is ringing in operator mode.</summary>
+    public event Action<string, string>? OnCallRinging;
+    /// <summary>Fires with caller A-law audio during operator calls (for speaker output).</summary>
+    public event Action<byte[]>? OnOperatorCallerAudio;
 
     public SipServer(
         ILogger<SipServer> logger,
@@ -323,7 +333,27 @@ public sealed class SipServer : IAsyncDisposable
             await _transport!.SendResponseAsync(ringing);
             Log("🔔 Sent 180 Ringing");
 
-            if (_settings.AutoAnswer)
+            if (OperatorMode)
+            {
+                // Operator mode: store pending call and wait for manual answer
+                var pendingId = Guid.NewGuid().ToString("N")[..8];
+                var callAgent = new SIPUserAgent(_transport, null);
+                var pendingUas = callAgent.AcceptCall(req);
+
+                var pending = new PendingCall
+                {
+                    PendingId = pendingId,
+                    Caller = caller,
+                    Request = req,
+                    CallAgent = callAgent,
+                    ServerUa = pendingUas
+                };
+
+                _pendingCalls[pendingId] = pending;
+                Log($"📞 [{pendingId}] Call from {caller} ringing — waiting for operator answer");
+                OnCallRinging?.Invoke(pendingId, caller);
+            }
+            else if (_settings.AutoAnswer)
             {
                 await AnswerCallAsync(req, caller);
             }
@@ -679,7 +709,141 @@ public sealed class SipServer : IAsyncDisposable
 
     #endregion
 
-    #region Cleanup
+    #region Operator Call Handling
+
+    /// <summary>
+    /// Answer a pending operator call — sets up RTP with no AI, just 2-way audio.
+    /// Caller audio fires OnOperatorCallerAudio; operator mic goes via SendOperatorAudio.
+    /// </summary>
+    public async Task<bool> AnswerOperatorCallAsync(string? pendingId = null)
+    {
+        PendingCall? pending;
+
+        if (pendingId != null)
+        {
+            _pendingCalls.TryRemove(pendingId, out pending);
+        }
+        else
+        {
+            // Take the first pending call
+            var key = _pendingCalls.Keys.FirstOrDefault();
+            if (key == null) { Log("⚠️ No pending calls to answer"); return false; }
+            _pendingCalls.TryRemove(key, out pending);
+        }
+
+        if (pending == null) { Log("⚠️ Pending call not found"); return false; }
+
+        var caller = pending.Caller;
+        var callAgent = pending.CallAgent;
+        var sid = pending.PendingId;
+
+        try
+        {
+            var audioEncoder = new AudioEncoder();
+            var audioSource = new AudioExtrasSource(
+                audioEncoder,
+                new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
+
+            audioSource.RestrictFormats(fmt =>
+                fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
+
+            var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
+            var rtpSession = new VoIPMediaSession(mediaEndPoints);
+            rtpSession.AcceptRtpFromAny = true;
+
+            AudioCodecsEnum negotiatedCodec = AudioCodecsEnum.PCMA;
+            rtpSession.OnAudioFormatsNegotiated += formats =>
+            {
+                var fmt = formats.FirstOrDefault();
+                negotiatedCodec = fmt.Codec;
+                Log($"🎵 [{sid}] Operator call negotiated: {fmt.Codec} (PT{fmt.FormatID})");
+            };
+
+            await Task.Delay(200); // pre-answer settle
+
+            var result = await callAgent.Answer(pending.ServerUa, rtpSession);
+            if (!result)
+            {
+                Log($"❌ [{sid}] Failed to answer operator call");
+                return false;
+            }
+
+            await rtpSession.Start();
+            Log($"✅ [{sid}] Operator call answered — 2-way audio active for {caller}");
+
+            // Create playout for operator mic → caller
+            var playout = new ALawRtpPlayout(rtpSession);
+            playout.OnLog += msg => Log($"[{sid}] {msg}");
+            playout.Start();
+
+            // Track as active call (with a dummy session placeholder)
+            var activeCall = new ActiveCall
+            {
+                SessionId = sid,
+                Session = new OperatorCallStub(sid, caller),
+                RtpSession = rtpSession,
+                CallAgent = callAgent,
+                Playout = playout,
+                IsOperatorCall = true
+            };
+
+            _activeCalls[sid] = activeCall;
+            NotifyCallCountChanged();
+
+            // Wire caller RTP → OnOperatorCallerAudio (for speakers)
+            rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
+            {
+                if (mediaType != SDPMediaTypesEnum.audio) return;
+                var payload = rtpPacket.Payload;
+                if (payload == null || payload.Length == 0) return;
+
+                // Transcode μ-law → A-law if needed
+                byte[] alawData;
+                if (negotiatedCodec == AudioCodecsEnum.PCMU)
+                    alawData = Audio.G711.Transcode.MuLawToALaw(payload);
+                else
+                    alawData = payload;
+
+                OnOperatorCallerAudio?.Invoke(alawData);
+            };
+
+            // Wire hangup
+            callAgent.OnCallHungup += async (dialog) =>
+            {
+                Log($"[{sid}] 📴 Caller hung up (operator call)");
+                await RemoveAndCleanupAsync(sid, "remote_hangup");
+            };
+
+            OnCallStarted?.Invoke(sid, caller);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ [{sid}] Operator answer error: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Reject a pending (ringing) call.</summary>
+    public void RejectPendingCall(string? pendingId = null)
+    {
+        PendingCall? pending;
+        if (pendingId != null)
+            _pendingCalls.TryRemove(pendingId, out pending);
+        else
+        {
+            var key = _pendingCalls.Keys.FirstOrDefault();
+            if (key != null) _pendingCalls.TryRemove(key, out pending);
+            else pending = null;
+        }
+
+        if (pending == null) return;
+        Log($"📴 [{pending.PendingId}] Operator rejected call from {pending.Caller}");
+        try { pending.CallAgent.Hangup(); } catch { }
+    }
+
+    #endregion
+
 
     /// <summary>Remove from tracking and clean up a call.</summary>
     private async Task RemoveAndCleanupAsync(string sessionId, string reason)
@@ -973,8 +1137,61 @@ public sealed class SipServer : IAsyncDisposable
         public required VoIPMediaSession RtpSession { get; init; }
         public required SIPUserAgent CallAgent { get; init; }
         public ALawRtpPlayout? Playout { get; set; }
+        public bool IsOperatorCall { get; init; }
 
         /// <summary>Atomic cleanup guard: 0=pending, 1=done.</summary>
         public int CleanupDone;
+    }
+
+    /// <summary>Tracks a ringing call waiting for operator answer.</summary>
+    private sealed class PendingCall
+    {
+        public required string PendingId { get; init; }
+        public required string Caller { get; init; }
+        public required SIPRequest Request { get; init; }
+        public required SIPUserAgent CallAgent { get; init; }
+        public required SIPServerUserAgent ServerUa { get; init; }
+    }
+
+    /// <summary>
+    /// Stub ICallSession for operator calls (no AI). 
+    /// Satisfies the ActiveCall.Session requirement without creating an AI pipeline.
+    /// </summary>
+    private sealed class OperatorCallStub : ICallSession
+    {
+        public string SessionId { get; }
+        public string CallerId { get; }
+        public DateTime StartedAt { get; } = DateTime.UtcNow;
+        public bool IsActive { get; private set; } = true;
+        public IOpenAiClient AiClient => null!; // No AI in operator mode
+
+        public event Action<byte[]>? OnAudioOut;
+        public event Action? OnBargeIn;
+        public event Action<BookingState>? OnBookingUpdated;
+        public event Action<ICallSession, string>? OnEnded;
+
+        public OperatorCallStub(string sessionId, string callerId)
+        {
+            SessionId = sessionId;
+            CallerId = callerId;
+        }
+
+        public Task StartAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public void ProcessInboundAudio(byte[] alawFrame) { }
+        public byte[]? GetOutboundFrame() => null;
+        public void NotifyPlayoutComplete() { }
+
+        public Task EndAsync(string reason)
+        {
+            IsActive = false;
+            OnEnded?.Invoke(this, reason);
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            IsActive = false;
+            return ValueTask.CompletedTask;
+        }
     }
 }
