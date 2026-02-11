@@ -530,6 +530,13 @@ public class MainForm : Form
         _driverList.RefreshDrivers(drivers);
         _jobList.RefreshJobs(jobs);
 
+        // Sync all known drivers to the map so icons appear even without live MQTT GPS
+        foreach (var d in drivers)
+        {
+            if (d.Lat != 0 || d.Lng != 0)
+                _ = _map.UpdateDriverMarker(d.Id, d.Lat, d.Lng, d.Status.ToString(), d.Name);
+        }
+
         var online = drivers.Count(d => d.Status == DriverStatus.Online);
         var onJob = drivers.Count(d => d.Status == DriverStatus.OnJob);
         var pending = jobs.Count(j => j.Status == JobStatus.Pending);
