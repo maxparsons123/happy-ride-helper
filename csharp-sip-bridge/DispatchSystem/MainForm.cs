@@ -335,6 +335,13 @@ public class MainForm : Form
     {
         if (_db == null) return;
 
+        // Marshal to UI thread — MQTT fires on background thread
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => OnDriverGps(driverId, lat, lng, status));
+            return;
+        }
+
         DriverStatus? ds = null;
         if (!string.IsNullOrEmpty(status) && Enum.TryParse<DriverStatus>(status, true, out var parsed))
             ds = parsed;
@@ -359,9 +366,9 @@ public class MainForm : Form
             _db.UpdateDriverLocation(driverId, lat, lng, ds);
         }
 
-        _ = _map.UpdateDriverMarker(driverId, lat, lng,
-            (ds ?? existing?.Status ?? DriverStatus.Online).ToString(),
-            existing?.Name ?? driverId);
+        var finalStatus = (ds ?? existing?.Status ?? DriverStatus.Online).ToString();
+        var finalName = existing?.Name ?? driverId;
+        _ = _map.UpdateDriverMarker(driverId, lat, lng, finalStatus, finalName);
     }
 
     private void OnBookingReceived(Job job)
@@ -529,13 +536,6 @@ public class MainForm : Form
 
         _driverList.RefreshDrivers(drivers);
         _jobList.RefreshJobs(jobs);
-
-        // Sync all known drivers to the map so icons appear even without live MQTT GPS
-        foreach (var d in drivers)
-        {
-            if (d.Lat != 0 || d.Lng != 0)
-                _ = _map.UpdateDriverMarker(d.Id, d.Lat, d.Lng, d.Status.ToString(), d.Name);
-        }
 
         var online = drivers.Count(d => d.Status == DriverStatus.Online);
         var onJob = drivers.Count(d => d.Status == DriverStatus.OnJob);
