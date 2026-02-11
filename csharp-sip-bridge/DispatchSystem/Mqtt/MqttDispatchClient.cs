@@ -86,6 +86,7 @@ public sealed class MqttDispatchClient : IDisposable
             }
             else if (topic == "taxi/bookings")
             {
+                OnLog?.Invoke($"📥 MQTT booking received: {json[..Math.Min(json.Length, 120)]}");
                 var booking = JsonSerializer.Deserialize<BookingMsg>(json);
                 if (booking != null)
                 {
@@ -101,8 +102,15 @@ public sealed class MqttDispatchClient : IDisposable
                         PickupLng = booking.pickupLng,
                         DropoffLat = booking.dropoffLat,
                         DropoffLng = booking.dropoffLng,
+                        CallerPhone = booking.callerPhone ?? "",
+                        CallerName = booking.callerName ?? "Customer",
                     };
+                    OnLog?.Invoke($"✅ Booking parsed: {job.Pickup} → {job.Dropoff}, {job.Passengers} pax");
                     OnBookingReceived?.Invoke(job);
+                }
+                else
+                {
+                    OnLog?.Invoke("⚠ Failed to deserialize booking JSON");
                 }
             }
             else if (topic.StartsWith("jobs/") && (topic.EndsWith("/status") || topic.EndsWith("/bidding")))
@@ -233,6 +241,9 @@ public sealed class MqttDispatchClient : IDisposable
         public double pickupLng { get; set; }
         public double dropoffLat { get; set; }
         public double dropoffLng { get; set; }
+        public string? callerPhone { get; set; }
+        public string? callerName { get; set; }
+        public string? bookingRef { get; set; }
     }
 
     private class JobStatusMsg
