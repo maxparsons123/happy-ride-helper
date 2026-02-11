@@ -77,12 +77,15 @@ public sealed class SessionManager : IAsyncDisposable
     {
         _sessions.TryRemove(session.SessionId, out _);
         
+        // Unwire our handler to prevent reference retention
+        session.OnEnded -= HandleSessionEnded;
+        
         _logger.LogInformation("Session {SessionId} ended: {Reason} (active: {Count})", 
             session.SessionId, reason, _sessions.Count);
         
         OnSessionEnded?.Invoke(session, reason);
         
-        // Fire-and-forget cleanup
+        // Dispose session (which clears all its internal state and events)
         _ = session.DisposeAsync();
     }
     

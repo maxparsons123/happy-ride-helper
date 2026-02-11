@@ -236,12 +236,21 @@ public partial class MainForm : Form
             _sipServer.OnCallEnded += (sessionId, reason) => Invoke(() =>
             {
                 Log($"📴 Call {sessionId} ended: {reason}");
-                // Only clear UI if no more active calls
+                
+                // Always clear reference if the ended session matches current
+                if (_currentSession?.SessionId == sessionId)
+                {
+                    _currentSession = null;
+                    Log($"🧹 Cleared _currentSession reference for {sessionId}");
+                }
+                
+                // Clear UI if no more active calls
                 if (_sipServer?.ActiveCallCount == 0)
                 {
                     SetInCall(false);
                     statusCallId.Text = "";
-                    _currentSession = null;
+                    lblCallInfo.Text = "No active call";
+                    lblCallInfo.ForeColor = Color.Gray;
                     StopAudioMonitor();
                     _ = DisconnectSimliAsync();
                 }
