@@ -260,9 +260,9 @@ public sealed class DispatchDb : IDisposable
         using var r = cmd.ExecuteReader();
         if (r.Read())
         {
-            var total = r.GetInt32(0);
-            var completed = r.GetInt32(1);
-            var cancelled = r.GetInt32(2);
+            var total = r.IsDBNull(0) ? 0 : r.GetInt32(0);
+            var completed = r.IsDBNull(1) ? 0 : r.GetInt32(1);
+            var cancelled = r.IsDBNull(2) ? 0 : r.GetInt32(2);
             return (total, completed, cancelled, 0);
         }
         return (0, 0, 0, 0);
