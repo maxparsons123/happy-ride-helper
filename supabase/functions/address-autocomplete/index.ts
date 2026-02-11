@@ -13,33 +13,32 @@ serve(async (req) => {
   try {
     const { input, phone } = await req.json();
 
-    if (!input || input.trim().length < 3) {
+    if (!input || input.trim().length < 2) {
       return new Response(JSON.stringify({ predictions: [] }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Detect country from phone prefix
+    // Detect country from phone prefix for location biasing
     const normalizedPhone = (phone || "").replace(/\s/g, "");
-    let countryCode = "gb";
+    let lat = 52.4862, lon = -1.8904, lang = "en"; // Default: central UK
+    let countryFilter = "";
+
     if (normalizedPhone.startsWith("+31") || normalizedPhone.startsWith("06")) {
-      countryCode = "nl";
+      lat = 52.1326; lon = 5.2913; lang = "nl";
     }
 
     const query = encodeURIComponent(input.trim());
-    const url = `https://nominatim.openstreetmap.org/search?q=${query}&format=json&addressdetails=1&limit=6&countrycodes=${countryCode}`;
+    const url = `https://photon.komoot.io/api/?q=${query}&lat=${lat}&lon=${lon}&limit=8&lang=${lang}`;
 
-    console.log(`Autocomplete query: "${input.trim()}" country=${countryCode}`);
+    console.log(`Photon autocomplete: "${input.trim()}" bias=${lat},${lon}`);
 
     const response = await fetch(url, {
-      headers: {
-        "User-Agent": "AdaTaxiBooking/1.0",
-        "Accept": "application/json",
-      },
+      headers: { "Accept": "application/json" },
     });
 
     if (!response.ok) {
-      console.error("Nominatim error:", response.status);
+      console.error("Photon error:", response.status);
       return new Response(JSON.stringify({ predictions: [] }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -47,22 +46,23 @@ serve(async (req) => {
 
     const data = await response.json();
 
-    const predictions = (data || []).map((place: any) => ({
-      description: place.display_name,
-      lat: place.lat,
-      lon: place.lon,
-      main_text: [
-        place.address?.house_number,
-        place.address?.road,
-      ].filter(Boolean).join(" ") || place.display_name.split(",")[0],
-      secondary_text: [
-        place.address?.suburb,
-        place.address?.city || place.address?.town || place.address?.village,
-        place.address?.postcode,
-      ].filter(Boolean).join(", "),
-    }));
+    const predictions = (data.features || []).map((f: any) => {
+      const p = f.properties || {};
+      const coords = f.geometry?.coordinates || [];
+      const parts = [p.housenumber, p.street].filter(Boolean);
+      const mainText = parts.length > 0 ? parts.join(" ") : (p.name || "");
+      const secondaryParts = [p.district, p.city || p.town || p.village, p.postcode, p.state].filter(Boolean);
 
-    console.log(`Returning ${predictions.length} predictions`);
+      return {
+        description: [mainText, ...secondaryParts].filter(Boolean).join(", "),
+        lat: coords[1]?.toString() || "",
+        lon: coords[0]?.toString() || "",
+        main_text: mainText,
+        secondary_text: secondaryParts.join(", "),
+      };
+    }).filter((p: any) => p.description.length > 0);
+
+    console.log(`Returning ${predictions.length} Photon predictions`);
 
     return new Response(JSON.stringify({ predictions }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
