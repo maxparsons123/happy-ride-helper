@@ -79,6 +79,8 @@ public sealed class BotAudioPipeline : IAudioPipeline
     private static readonly byte[] s_audioSuffix =
         Encoding.UTF8.GetBytes("\"}");
 
+    private readonly SemaphoreSlim _sendMutex = new(1, 1);
+
     public void IngestCallerAudio(byte[] alawFrame)
     {
         if (_disposed || _ws?.State != WebSocketState.Open || !_sessionReady) return;
@@ -92,18 +94,23 @@ public sealed class BotAudioPipeline : IAudioPipeline
         var totalLen = s_audioPrefix.Length + b64Len + s_audioSuffix.Length;
         var buffer = ArrayPool<byte>.Shared.Rent(totalLen);
 
+        s_audioPrefix.CopyTo(buffer, 0);
+        Base64.EncodeToUtf8(frame, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
+        s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
+
+        var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
+        _ = SendPooledAsync(buffer, finalLen);
+    }
+
+    private async Task SendPooledAsync(byte[] pooledBuffer, int length)
+    {
         try
         {
-            s_audioPrefix.CopyTo(buffer, 0);
-            Base64.EncodeToUtf8(frame, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
-            s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
-
-            var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
-            _ = SendBytesAsync(buffer.AsSpan(0, finalLen).ToArray());
+            await SendBytesAsync(pooledBuffer.AsMemory(0, length));
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(pooledBuffer);
         }
     }
 
@@ -122,6 +129,7 @@ public sealed class BotAudioPipeline : IAudioPipeline
         Stop();
         _ws?.Dispose();
         _cts?.Dispose();
+        _sendMutex.Dispose();
     }
 
     // ── Private ──
@@ -229,18 +237,27 @@ public sealed class BotAudioPipeline : IAudioPipeline
     private async Task SendAsync(string message)
     {
         if (_ws?.State != WebSocketState.Open) return;
-        var bytes = Encoding.UTF8.GetBytes(message);
-        await SendBytesAsync(bytes);
+        await SendBytesAsync(Encoding.UTF8.GetBytes(message));
     }
 
-    private async Task SendBytesAsync(byte[] bytes)
+    private async Task SendBytesAsync(ReadOnlyMemory<byte> bytes)
     {
         if (_ws?.State != WebSocketState.Open) return;
+        await _sendMutex.WaitAsync().ConfigureAwait(false);
         try
         {
-            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true,
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(
                 _cts?.Token ?? CancellationToken.None);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, cts.Token).ConfigureAwait(false);
         }
-        catch { /* connection closed */ }
+        catch (OperationCanceledException)
+        {
+            _log.LogError("[Bot] WebSocket send timed out (5s)");
+        }
+        finally
+        {
+            _sendMutex.Release();
+        }
     }
 }

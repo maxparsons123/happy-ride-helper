@@ -152,21 +152,12 @@ public sealed class OpenAiRealtimeV2Client : IOpenAiClient, IAsyncDisposable
         var totalLen = s_audioPrefix.Length + b64Len + s_audioSuffix.Length;
         var buffer = ArrayPool<byte>.Shared.Rent(totalLen);
 
-        try
-        {
-            s_audioPrefix.CopyTo(buffer, 0);
-            Base64.EncodeToUtf8(g711Frame, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
-            s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
+        s_audioPrefix.CopyTo(buffer, 0);
+        Base64.EncodeToUtf8(g711Frame, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
+        s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
 
-            var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
-            var msg = new byte[finalLen];
-            Buffer.BlockCopy(buffer, 0, msg, 0, finalLen);
-            _ = SendBytesAsync(msg);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
+        _ = SendPooledAsync(buffer, finalLen);
 
         Volatile.Write(ref _lastUserSpeechAt, NowMs());
     }
@@ -645,15 +636,40 @@ public sealed class OpenAiRealtimeV2Client : IOpenAiClient, IAsyncDisposable
         => root.TryGetProperty("response", out var r) && r.TryGetProperty("id", out var id)
             ? id.GetString() : null;
 
+    private async Task SendPooledAsync(byte[] pooledBuffer, int length)
+    {
+        try
+        {
+            await SendBytesAsync(pooledBuffer.AsMemory(0, length));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(pooledBuffer);
+        }
+    }
+
     private async Task SendJsonAsync(object obj)
         => await SendBytesAsync(JsonSerializer.SerializeToUtf8Bytes(obj, JsonOpts));
 
-    private async Task SendBytesAsync(byte[] bytes)
+    private async Task SendBytesAsync(ReadOnlyMemory<byte> bytes)
     {
         if (_ws?.State != WebSocketState.Open) return;
-        await _sendMutex.WaitAsync();
-        try { await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, _cts?.Token ?? CancellationToken.None); }
-        finally { _sendMutex.Release(); }
+        await _sendMutex.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(
+                _cts?.Token ?? CancellationToken.None);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("⚠️ WebSocket send timed out (5s)");
+        }
+        finally
+        {
+            _sendMutex.Release();
+        }
     }
 
     // ── Dispose ──

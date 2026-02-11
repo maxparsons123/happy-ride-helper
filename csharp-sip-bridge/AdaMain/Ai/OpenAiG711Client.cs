@@ -385,24 +385,31 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         var totalLen = s_audioPrefix.Length + b64Len + s_audioSuffix.Length;
         var buffer = ArrayPool<byte>.Shared.Rent(totalLen);
 
+        s_audioPrefix.CopyTo(buffer, 0);
+        Base64.EncodeToUtf8(alawRtp, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
+        s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
+
+        var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
+        // Fire-and-forget: SendPooledAsync owns buffer lifetime (returns to pool after send)
+        _ = SendPooledAsync(buffer, finalLen);
+
+        Volatile.Write(ref _lastUserSpeechAt, NowMs());
+    }
+
+    /// <summary>
+    /// Sends a pooled buffer slice and returns it to the pool after the WebSocket send completes.
+    /// This eliminates the per-frame byte[] copy that was previously needed for fire-and-forget safety.
+    /// </summary>
+    private async Task SendPooledAsync(byte[] pooledBuffer, int length)
+    {
         try
         {
-            s_audioPrefix.CopyTo(buffer, 0);
-            Base64.EncodeToUtf8(alawRtp, buffer.AsSpan(s_audioPrefix.Length), out _, out var written);
-            s_audioSuffix.CopyTo(buffer, s_audioPrefix.Length + written);
-
-            var finalLen = s_audioPrefix.Length + written + s_audioSuffix.Length;
-            // Must copy to exact-size array for WebSocket send (rented buffer is oversized)
-            var msg = new byte[finalLen];
-            Buffer.BlockCopy(buffer, 0, msg, 0, finalLen);
-            _ = SendBytesAsync(msg);
+            await SendBytesAsync(pooledBuffer.AsMemory(0, length));
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(pooledBuffer);
         }
-
-        Volatile.Write(ref _lastUserSpeechAt, NowMs());
     }
 
     public async Task CancelResponseAsync()
@@ -1225,19 +1232,15 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     }
 
     private async Task SendJsonAsync(object obj)
-    {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(obj);
-        await SendBytesAsync(bytes);
-    }
+        => await SendBytesAsync(JsonSerializer.SerializeToUtf8Bytes(obj));
 
-    private async Task SendBytesAsync(byte[] bytes)
+    private async Task SendBytesAsync(ReadOnlyMemory<byte> bytes)
     {
         if (_ws?.State != WebSocketState.Open) return;
 
         await _sendMutex.WaitAsync().ConfigureAwait(false);
         try
         {
-            // FIX: Add 5s timeout to prevent WebSocket send from hanging indefinitely
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(
                 _cts?.Token ?? CancellationToken.None);
             cts.CancelAfter(TimeSpan.FromSeconds(5));
