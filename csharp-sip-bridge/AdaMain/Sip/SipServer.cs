@@ -721,6 +721,28 @@ public sealed class SipServer : IAsyncDisposable
         OnActiveCallCountChanged?.Invoke(_activeCalls.Count);
     }
 
+    /// <summary>
+    /// Sends operator audio to the first active call's RTP stream.
+    /// Used by desktop PTT (Push-to-Talk) mode.
+    /// </summary>
+    public void SendOperatorAudio(byte[] alawData)
+    {
+        // Pick the first active call (desktop typically has one)
+        var call = _activeCalls.Values.FirstOrDefault();
+        if (call?.Playout == null) return;
+
+        call.Playout.Enqueue(alawData);
+    }
+
+    /// <summary>
+    /// Sends operator audio to a specific active call by session ID.
+    /// </summary>
+    public void SendOperatorAudio(string sessionId, byte[] alawData)
+    {
+        if (!_activeCalls.TryGetValue(sessionId, out var call)) return;
+        call.Playout?.Enqueue(alawData);
+    }
+
     #endregion
 
     #region DNS & Network
