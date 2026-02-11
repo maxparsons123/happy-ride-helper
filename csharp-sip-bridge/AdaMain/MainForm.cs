@@ -143,16 +143,113 @@ public partial class MainForm : Form
 
     private void ApplySettingsToUi()
     {
-        txtSipServer.Text = _settings.Sip.Server;
-        txtSipPort.Text = _settings.Sip.Port.ToString();
-        txtSipUser.Text = _settings.Sip.Username;
-        txtAuthId.Text = _settings.Sip.AuthId ?? "";
-        txtSipPassword.Text = _settings.Sip.Password;
-        txtDomain.Text = _settings.Sip.Domain ?? "";
-        chkAutoAnswer.Checked = _settings.Sip.AutoAnswer;
+        // Populate account dropdown
+        RefreshAccountDropdown();
+        
+        // Apply current SIP settings to fields
+        ApplySipSettingsToFields(_settings.Sip);
+    }
+    
+    private void ApplySipSettingsToFields(SipSettings sip)
+    {
+        txtSipServer.Text = sip.Server;
+        txtSipPort.Text = sip.Port.ToString();
+        txtSipUser.Text = sip.Username;
+        txtAuthId.Text = sip.AuthId ?? "";
+        txtSipPassword.Text = sip.Password;
+        txtDomain.Text = sip.Domain ?? "";
+        chkAutoAnswer.Checked = sip.AutoAnswer;
 
-        var idx = cmbTransport.Items.IndexOf(_settings.Sip.Transport.ToUpperInvariant());
+        var idx = cmbTransport.Items.IndexOf(sip.Transport.ToUpperInvariant());
         cmbTransport.SelectedIndex = idx >= 0 ? idx : 0;
+    }
+    
+    private void RefreshAccountDropdown()
+    {
+        cmbSipAccount.SelectedIndexChanged -= cmbSipAccount_SelectedIndexChanged;
+        cmbSipAccount.Items.Clear();
+        
+        foreach (var acct in _settings.SipAccounts)
+            cmbSipAccount.Items.Add(acct.ToString());
+        
+        if (_settings.SipAccounts.Count > 0 && _settings.SelectedSipAccountIndex >= 0 
+            && _settings.SelectedSipAccountIndex < _settings.SipAccounts.Count)
+        {
+            cmbSipAccount.SelectedIndex = _settings.SelectedSipAccountIndex;
+        }
+        
+        cmbSipAccount.SelectedIndexChanged += cmbSipAccount_SelectedIndexChanged;
+    }
+    
+    private void cmbSipAccount_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        var idx = cmbSipAccount.SelectedIndex;
+        if (idx < 0 || idx >= _settings.SipAccounts.Count) return;
+        
+        var acct = _settings.SipAccounts[idx];
+        _settings.Sip = acct.ToSipSettings();
+        _settings.SelectedSipAccountIndex = idx;
+        ApplySipSettingsToFields(_settings.Sip);
+        SaveSettings();
+        Log($"📞 Switched to account: {acct.Label}");
+    }
+    
+    private void btnSaveAccount_Click(object? sender, EventArgs e)
+    {
+        ReadSipFromUi();
+        
+        var idx = cmbSipAccount.SelectedIndex;
+        string label;
+        
+        if (idx >= 0 && idx < _settings.SipAccounts.Count)
+        {
+            // Update existing
+            label = _settings.SipAccounts[idx].Label;
+            _settings.SipAccounts[idx].FromSipSettings(_settings.Sip, label);
+            Log($"💾 Updated account: {label}");
+        }
+        else
+        {
+            // Create new from current fields
+            label = $"{_settings.Sip.Username}@{_settings.Sip.Server}";
+            var newAcct = new SipAccount();
+            newAcct.FromSipSettings(_settings.Sip, label);
+            _settings.SipAccounts.Add(newAcct);
+            _settings.SelectedSipAccountIndex = _settings.SipAccounts.Count - 1;
+            Log($"💾 Saved new account: {label}");
+        }
+        
+        SaveSettings();
+        RefreshAccountDropdown();
+    }
+    
+    private void btnDeleteAccount_Click(object? sender, EventArgs e)
+    {
+        var idx = cmbSipAccount.SelectedIndex;
+        if (idx < 0 || idx >= _settings.SipAccounts.Count)
+        {
+            MessageBox.Show("Select an account to delete.", "Delete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        
+        var acct = _settings.SipAccounts[idx];
+        if (MessageBox.Show($"Delete account '{acct.Label}'?", "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+        
+        _settings.SipAccounts.RemoveAt(idx);
+        _settings.SelectedSipAccountIndex = Math.Min(idx, _settings.SipAccounts.Count - 1);
+        SaveSettings();
+        RefreshAccountDropdown();
+        Log($"🗑 Deleted account: {acct.Label}");
+    }
+    
+    private void btnNewAccount_Click(object? sender, EventArgs e)
+    {
+        // Clear fields for a new account
+        var blank = new SipSettings();
+        ApplySipSettingsToFields(blank);
+        cmbSipAccount.SelectedIndex = -1;
+        Log("📞 New account — fill in details and click Save");
     }
 
     private void ReadSipFromUi()
@@ -378,6 +475,10 @@ public partial class MainForm : Form
 
     private void SetSipFieldsEnabled(bool enabled)
     {
+        cmbSipAccount.Enabled = enabled;
+        btnSaveAccount.Enabled = enabled;
+        btnDeleteAccount.Enabled = enabled;
+        btnNewAccount.Enabled = enabled;
         txtSipServer.Enabled = enabled;
         txtSipPort.Enabled = enabled;
         txtSipUser.Enabled = enabled;
