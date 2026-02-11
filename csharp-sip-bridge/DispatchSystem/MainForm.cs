@@ -2,6 +2,7 @@ using DispatchSystem.Data;
 using DispatchSystem.Dispatch;
 using DispatchSystem.Mqtt;
 using DispatchSystem.UI;
+using DispatchSystem.Webhook;
 
 namespace DispatchSystem;
 
@@ -27,6 +28,7 @@ public class MainForm : Form
     private DispatchDb? _db;
     private MqttDispatchClient? _mqtt;
     private AutoDispatcher? _dispatcher;
+    private WebhookListener? _webhook;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
     public MainForm()
@@ -165,6 +167,13 @@ public class MainForm : Form
             _dispatcher = new AutoDispatcher(_db);
             _dispatcher.OnLog += msg => _logPanel.AppendLog(msg);
             _dispatcher.OnJobAllocated += OnJobAllocated;
+
+            // Start webhook listener on port 5080
+            _webhook = new WebhookListener(5080);
+            _webhook.OnLog += msg => BeginInvoke(() => _logPanel.AppendLog(msg, Color.MediumPurple));
+            _webhook.OnJobReceived += job => BeginInvoke(() => OnBookingReceived(job));
+            _webhook.Start();
+
             _logPanel.AppendLog("💾 SQLite database ready", Color.Cyan);
             RefreshUI();
         }
@@ -360,6 +369,7 @@ public class MainForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         _refreshTimer.Stop();
+        _webhook?.Dispose();
         _dispatcher?.Dispose();
         _mqtt?.Dispose();
         _db?.Dispose();

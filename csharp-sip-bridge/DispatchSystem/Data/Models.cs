@@ -57,6 +57,7 @@ public class Job
     public decimal? EstimatedFare { get; set; }
     public string? CallerPhone { get; set; }
     public string? CallerName { get; set; }
+    public string? BookingRef { get; set; }
     public JobStatus Status { get; set; } = JobStatus.Pending;
     public string? AllocatedDriverId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
