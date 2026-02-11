@@ -131,7 +131,6 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 700,
             Panel1MinSize = 300,
             Panel2MinSize = 200
         };
@@ -195,6 +194,11 @@ public class MainForm : Form
         // ── Refresh timer ──
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 3000 };
         _refreshTimer.Tick += (_, _) => RefreshUI();
+
+        Load += (_, _) =>
+        {
+            splitTop.SplitterDistance = Math.Min(700, splitTop.Width - splitTop.Panel2MinSize - 1);
+        };
 
         InitDatabase();
     }
