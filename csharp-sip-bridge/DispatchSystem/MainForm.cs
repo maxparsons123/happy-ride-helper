@@ -417,7 +417,8 @@ public class MainForm : Form
 
         var finalStatus = (ds ?? existing?.Status ?? DriverStatus.Online).ToString();
         var finalName = existing?.Name ?? driverId;
-        _ = _map.UpdateDriverMarker(driverId, lat, lng, finalStatus, finalName);
+        var finalReg = existing?.Registration ?? "";
+        _ = _map.UpdateDriverMarker(driverId, lat, lng, finalStatus, finalName, finalReg);
     }
 
     private void OnBookingReceived(Job job)

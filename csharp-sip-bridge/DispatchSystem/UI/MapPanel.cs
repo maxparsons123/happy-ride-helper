@@ -24,7 +24,7 @@ public sealed class MapPanel : Panel
         _webView.NavigationCompleted += (_, _) => _mapReady = true;
     }
 
-    public async Task UpdateDriverMarker(string driverId, double lat, double lng, string status, string name)
+    public async Task UpdateDriverMarker(string driverId, double lat, double lng, string status, string name, string registration = "")
     {
         if (!_mapReady) return;
         var color = status switch
@@ -36,8 +36,11 @@ public sealed class MapPanel : Panel
         };
         var latStr = lat.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var lngStr = lng.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var label = string.IsNullOrWhiteSpace(registration)
+            ? $"{Esc(name)} ({status})"
+            : $"{Esc(name)} [{Esc(registration)}] ({status})";
         await _webView.ExecuteScriptAsync(
-            $"updateDriver('{Esc(driverId)}', {latStr}, {lngStr}, '{color}', '{Esc(name)} ({status})')");
+            $"updateDriver('{Esc(driverId)}', {latStr}, {lngStr}, '{color}', '{label}')");
     }
 
     public async Task AddJobMarker(string jobId, double lat, double lng, string pickup, DateTime createdAt)
