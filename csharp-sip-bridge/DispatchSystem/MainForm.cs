@@ -216,9 +216,8 @@ public class MainForm : Form
             splitTop.Panel1MinSize = 300;
             splitTop.Panel2MinSize = 200;
             splitTop.SplitterDistance = Math.Max(splitTop.Panel1MinSize, Math.Min(700, splitTop.Width - splitTop.Panel2MinSize - 1));
+            InitDatabase();
         };
-
-        InitDatabase();
     }
 
     // ── Context Menu ──
