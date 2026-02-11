@@ -1,0 +1,270 @@
+using Microsoft.Data.Sqlite;
+
+namespace DispatchSystem.Data;
+
+/// <summary>
+/// SQLite database for drivers, jobs, and allocation history.
+/// </summary>
+public sealed class DispatchDb : IDisposable
+{
+    private readonly SqliteConnection _conn;
+
+    public DispatchDb(string dbPath = "dispatch.db")
+    {
+        _conn = new SqliteConnection($"Data Source={dbPath}");
+        _conn.Open();
+        InitSchema();
+    }
+
+    private void InitSchema()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS drivers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                phone TEXT,
+                vehicle_type TEXT NOT NULL DEFAULT 'Saloon',
+                status TEXT NOT NULL DEFAULT 'Offline',
+                lat REAL DEFAULT 0,
+                lng REAL DEFAULT 0,
+                last_gps_update TEXT,
+                last_job_completed_at TEXT,
+                status_changed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                pickup TEXT NOT NULL,
+                dropoff TEXT NOT NULL,
+                pickup_lat REAL DEFAULT 0,
+                pickup_lng REAL DEFAULT 0,
+                dropoff_lat REAL DEFAULT 0,
+                dropoff_lng REAL DEFAULT 0,
+                passengers INTEGER DEFAULT 1,
+                vehicle_required TEXT DEFAULT 'Saloon',
+                special_requirements TEXT,
+                estimated_fare REAL,
+                caller_phone TEXT,
+                caller_name TEXT,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                allocated_driver_id TEXT,
+                created_at TEXT NOT NULL,
+                allocated_at TEXT,
+                completed_at TEXT,
+                driver_distance_km REAL,
+                driver_eta_minutes INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status);
+        """;
+        cmd.ExecuteNonQuery();
+    }
+
+    // ── Drivers ──
+
+    public void UpsertDriver(Driver d)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO drivers (id, name, phone, vehicle_type, status, lat, lng, last_gps_update, last_job_completed_at, status_changed_at)
+            VALUES ($id, $name, $phone, $vt, $status, $lat, $lng, $gps, $ljc, $sc)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                phone = excluded.phone,
+                vehicle_type = excluded.vehicle_type,
+                status = excluded.status,
+                lat = excluded.lat,
+                lng = excluded.lng,
+                last_gps_update = excluded.last_gps_update,
+                last_job_completed_at = excluded.last_job_completed_at,
+                status_changed_at = excluded.status_changed_at
+        """;
+        cmd.Parameters.AddWithValue("$id", d.Id);
+        cmd.Parameters.AddWithValue("$name", d.Name);
+        cmd.Parameters.AddWithValue("$phone", d.Phone ?? "");
+        cmd.Parameters.AddWithValue("$vt", d.Vehicle.ToString());
+        cmd.Parameters.AddWithValue("$status", d.Status.ToString());
+        cmd.Parameters.AddWithValue("$lat", d.Lat);
+        cmd.Parameters.AddWithValue("$lng", d.Lng);
+        cmd.Parameters.AddWithValue("$gps", d.LastGpsUpdate.ToString("o"));
+        cmd.Parameters.AddWithValue("$ljc", (object?)d.LastJobCompletedAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sc", d.StatusChangedAt.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public void UpdateDriverLocation(string driverId, double lat, double lng, DriverStatus? status = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        if (status.HasValue)
+        {
+            cmd.CommandText = """
+                UPDATE drivers SET lat = $lat, lng = $lng, last_gps_update = $gps, status = $status, status_changed_at = $sc
+                WHERE id = $id
+            """;
+            cmd.Parameters.AddWithValue("$status", status.Value.ToString());
+            cmd.Parameters.AddWithValue("$sc", DateTime.UtcNow.ToString("o"));
+        }
+        else
+        {
+            cmd.CommandText = "UPDATE drivers SET lat = $lat, lng = $lng, last_gps_update = $gps WHERE id = $id";
+        }
+        cmd.Parameters.AddWithValue("$id", driverId);
+        cmd.Parameters.AddWithValue("$lat", lat);
+        cmd.Parameters.AddWithValue("$lng", lng);
+        cmd.Parameters.AddWithValue("$gps", DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public List<Driver> GetAllDrivers()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM drivers ORDER BY name";
+        using var r = cmd.ExecuteReader();
+        var list = new List<Driver>();
+        while (r.Read())
+        {
+            list.Add(new Driver
+            {
+                Id = r.GetString(0),
+                Name = r.GetString(1),
+                Phone = r.IsDBNull(2) ? "" : r.GetString(2),
+                Vehicle = Enum.TryParse<VehicleType>(r.GetString(3), out var vt) ? vt : VehicleType.Saloon,
+                Status = Enum.TryParse<DriverStatus>(r.GetString(4), out var ds) ? ds : DriverStatus.Offline,
+                Lat = r.GetDouble(5),
+                Lng = r.GetDouble(6),
+                LastGpsUpdate = DateTime.TryParse(r.IsDBNull(7) ? null : r.GetString(7), out var gps) ? gps : DateTime.MinValue,
+                LastJobCompletedAt = !r.IsDBNull(8) && DateTime.TryParse(r.GetString(8), out var ljc) ? ljc : null,
+                StatusChangedAt = DateTime.TryParse(r.IsDBNull(9) ? null : r.GetString(9), out var sc) ? sc : DateTime.UtcNow
+            });
+        }
+        return list;
+    }
+
+    public List<Driver> GetAvailableDrivers(VehicleType? vehicleFilter = null)
+    {
+        return GetAllDrivers()
+            .Where(d => d.Status == DriverStatus.Online)
+            .Where(d => vehicleFilter == null || d.Vehicle == vehicleFilter)
+            .ToList();
+    }
+
+    // ── Jobs ──
+
+    public void InsertJob(Job j)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO jobs (id, pickup, dropoff, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                passengers, vehicle_required, special_requirements, estimated_fare, caller_phone, caller_name,
+                status, allocated_driver_id, created_at, allocated_at, completed_at, driver_distance_km, driver_eta_minutes)
+            VALUES ($id, $pu, $do, $plat, $plng, $dlat, $dlng,
+                $pax, $vr, $sr, $fare, $phone, $name,
+                $status, $did, $cat, $aat, $coat, $dkm, $eta)
+        """;
+        cmd.Parameters.AddWithValue("$id", j.Id);
+        cmd.Parameters.AddWithValue("$pu", j.Pickup);
+        cmd.Parameters.AddWithValue("$do", j.Dropoff);
+        cmd.Parameters.AddWithValue("$plat", j.PickupLat);
+        cmd.Parameters.AddWithValue("$plng", j.PickupLng);
+        cmd.Parameters.AddWithValue("$dlat", j.DropoffLat);
+        cmd.Parameters.AddWithValue("$dlng", j.DropoffLng);
+        cmd.Parameters.AddWithValue("$pax", j.Passengers);
+        cmd.Parameters.AddWithValue("$vr", j.VehicleRequired.ToString());
+        cmd.Parameters.AddWithValue("$sr", (object?)j.SpecialRequirements ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$fare", (object?)j.EstimatedFare ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$phone", (object?)j.CallerPhone ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$name", (object?)j.CallerName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$status", j.Status.ToString());
+        cmd.Parameters.AddWithValue("$did", (object?)j.AllocatedDriverId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$cat", j.CreatedAt.ToString("o"));
+        cmd.Parameters.AddWithValue("$aat", (object?)j.AllocatedAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$coat", (object?)j.CompletedAt?.ToString("o") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$dkm", (object?)j.DriverDistanceKm ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$eta", (object?)j.DriverEtaMinutes ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public void UpdateJobStatus(string jobId, JobStatus status, string? driverId = null, double? distKm = null, int? etaMins = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE jobs SET status = $status, allocated_driver_id = COALESCE($did, allocated_driver_id),
+                allocated_at = CASE WHEN $status = 'Allocated' THEN $now ELSE allocated_at END,
+                completed_at = CASE WHEN $status IN ('Completed','Cancelled') THEN $now ELSE completed_at END,
+                driver_distance_km = COALESCE($dkm, driver_distance_km),
+                driver_eta_minutes = COALESCE($eta, driver_eta_minutes)
+            WHERE id = $id
+        """;
+        cmd.Parameters.AddWithValue("$id", jobId);
+        cmd.Parameters.AddWithValue("$status", status.ToString());
+        cmd.Parameters.AddWithValue("$did", (object?)driverId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o"));
+        cmd.Parameters.AddWithValue("$dkm", (object?)distKm ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$eta", (object?)etaMins ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    public List<Job> GetPendingJobs()
+    {
+        return GetJobsByStatus("Pending");
+    }
+
+    public List<Job> GetActiveJobs()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM jobs WHERE status NOT IN ('Completed','Cancelled') ORDER BY created_at DESC";
+        return ReadJobs(cmd);
+    }
+
+    public List<Job> GetAllJobs(int limit = 200)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"SELECT * FROM jobs ORDER BY created_at DESC LIMIT {limit}";
+        return ReadJobs(cmd);
+    }
+
+    private List<Job> GetJobsByStatus(string status)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM jobs WHERE status = $s ORDER BY created_at ASC";
+        cmd.Parameters.AddWithValue("$s", status);
+        return ReadJobs(cmd);
+    }
+
+    private List<Job> ReadJobs(SqliteCommand cmd)
+    {
+        using var r = cmd.ExecuteReader();
+        var list = new List<Job>();
+        while (r.Read())
+        {
+            list.Add(new Job
+            {
+                Id = r.GetString(0),
+                Pickup = r.GetString(1),
+                Dropoff = r.GetString(2),
+                PickupLat = r.GetDouble(3),
+                PickupLng = r.GetDouble(4),
+                DropoffLat = r.GetDouble(5),
+                DropoffLng = r.GetDouble(6),
+                Passengers = r.GetInt32(7),
+                VehicleRequired = Enum.TryParse<VehicleType>(r.GetString(8), out var vr) ? vr : VehicleType.Saloon,
+                SpecialRequirements = r.IsDBNull(9) ? null : r.GetString(9),
+                EstimatedFare = r.IsDBNull(10) ? null : (decimal)r.GetDouble(10),
+                CallerPhone = r.IsDBNull(11) ? null : r.GetString(11),
+                CallerName = r.IsDBNull(12) ? null : r.GetString(12),
+                Status = Enum.TryParse<JobStatus>(r.GetString(13), out var js) ? js : JobStatus.Pending,
+                AllocatedDriverId = r.IsDBNull(14) ? null : r.GetString(14),
+                CreatedAt = DateTime.TryParse(r.GetString(15), out var ca) ? ca : DateTime.UtcNow,
+                AllocatedAt = !r.IsDBNull(16) && DateTime.TryParse(r.GetString(16), out var aa) ? aa : null,
+                CompletedAt = !r.IsDBNull(17) && DateTime.TryParse(r.GetString(17), out var co) ? co : null,
+                DriverDistanceKm = r.IsDBNull(18) ? null : r.GetDouble(18),
+                DriverEtaMinutes = r.IsDBNull(19) ? null : r.GetInt32(19)
+            });
+        }
+        return list;
+    }
+
+    public void Dispose() => _conn?.Dispose();
+}
