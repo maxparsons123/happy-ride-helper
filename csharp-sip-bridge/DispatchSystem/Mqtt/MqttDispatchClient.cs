@@ -194,6 +194,8 @@ public sealed class MqttDispatchClient : IDisposable
             dropoff = job.Dropoff,
             pickupLat = job.PickupLat,
             pickupLng = job.PickupLng,
+            dropoffLat = job.DropoffLat,
+            dropoffLng = job.DropoffLng,
             passengers = job.Passengers,
             fare = job.EstimatedFare
         });
@@ -206,11 +208,13 @@ public sealed class MqttDispatchClient : IDisposable
         {
             status = "allocated",
             driver = driverId,
+            pickup = job.Pickup,
+            dropoff = job.Dropoff,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
         await PublishAsync($"jobs/{jobId}/status", statusPayload);
         
-        OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId}");
+        OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId} | {job.Pickup} → {job.Dropoff}");
     }
 
     /// <summary>Publish bid request to specific drivers for a job.</summary>
