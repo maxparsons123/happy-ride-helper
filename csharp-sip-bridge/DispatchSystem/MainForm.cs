@@ -673,7 +673,6 @@ public class MainForm : Form
         Font = new Font("Segoe UI", 9F, FontStyle.Bold),
         Margin = new Padding(0, 0, 4, 0)
     };
-    };
 
     /// <summary>
     /// Maps MQTT driver status strings (available, busy, offline, break) to the internal enum.
