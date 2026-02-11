@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using DispatchSystem.Data;
@@ -20,6 +22,22 @@ public sealed class WebhookListener : IDisposable
     public event Action<Job>? OnJobReceived;
     public event Action<string>? OnLog;
 
+    public static bool IsRunAsAdmin()
+    {
+        var wi = WindowsIdentity.GetCurrent();
+        var wp = new WindowsPrincipal(wi);
+        return wp.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    public static void RestartAsAdmin()
+    {
+        if (IsRunAsAdmin()) return;
+        var exe = Process.GetCurrentProcess().MainModule?.FileName;
+        if (exe == null) return;
+        Process.Start(new ProcessStartInfo(exe) { Verb = "runas", UseShellExecute = true });
+        Environment.Exit(0);
+    }
+
     public bool IsRunning { get; private set; }
 
     public WebhookListener(int port = 5080)
@@ -31,8 +49,25 @@ public sealed class WebhookListener : IDisposable
     public void Start()
     {
         if (IsRunning) return;
+
+        // Ensure URL ACL is registered (requires admin once)
+        if (!IsRunAsAdmin())
+        {
+            OnLog?.Invoke("⚠ Not running as admin — attempting URL ACL reservation...");
+            AddUrlAcl();
+        }
+
         _cts = new CancellationTokenSource();
-        _listener.Start();
+        try
+        {
+            _listener.Start();
+        }
+        catch (HttpListenerException ex)
+        {
+            OnLog?.Invoke($"❌ Cannot start webhook: {ex.Message}. Try running as Administrator.");
+            return;
+        }
+
         IsRunning = true;
         _listenTask = Task.Run(() => ListenLoop(_cts.Token));
         OnLog?.Invoke($"🌐 Webhook listening on port {_port}");
@@ -45,6 +80,28 @@ public sealed class WebhookListener : IDisposable
         _listener.Stop();
         IsRunning = false;
         OnLog?.Invoke("🌐 Webhook stopped");
+    }
+
+    private void AddUrlAcl()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "netsh",
+                Arguments = $"http add urlacl url=http://+:{_port}/ user=Everyone",
+                Verb = "runas",
+                UseShellExecute = true,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            p?.WaitForExit(5000);
+            OnLog?.Invoke("✅ URL ACL reservation complete");
+        }
+        catch (Exception ex)
+        {
+            OnLog?.Invoke($"⚠ URL ACL failed: {ex.Message}");
+        }
     }
 
     private async Task ListenLoop(CancellationToken ct)
