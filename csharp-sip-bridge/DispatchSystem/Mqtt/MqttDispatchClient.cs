@@ -101,31 +101,55 @@ public sealed class MqttDispatchClient : IDisposable
             }
             else if (topic == "taxi/bookings" || topic.StartsWith("pubs/requests/"))
             {
-                OnLog?.Invoke($"📥 MQTT booking received: {json[..Math.Min(json.Length, 120)]}");
+                OnLog?.Invoke($"📥 MQTT booking received [{topic}]: {json[..Math.Min(json.Length, 200)]}");
+
                 var booking = JsonSerializer.Deserialize<BookingMsg>(json);
-                if (booking != null)
+                if (booking == null)
                 {
-                    var job = new Job
-                    {
-                        Pickup = booking.pickup ?? "",
-                        Dropoff = booking.dropoff ?? "",
-                        Passengers = booking.passengers > 0 ? booking.passengers : 1,
-                        VehicleRequired = Enum.TryParse<VehicleType>(booking.vehicleType, true, out var vt) ? vt : VehicleType.Saloon,
-                        SpecialRequirements = booking.specialRequirements,
-                        EstimatedFare = booking.estimatedPrice,
-                        PickupLat = booking.pickupLat,
-                        PickupLng = booking.pickupLng,
-                        DropoffLat = booking.dropoffLat,
-                        DropoffLng = booking.dropoffLng,
-                        CallerPhone = booking.callerPhone ?? "",
-                        CallerName = booking.callerName ?? "Customer",
-                    };
-                    OnLog?.Invoke($"✅ Booking parsed: {job.Pickup} → {job.Dropoff}, {job.Passengers} pax");
-                    OnBookingReceived?.Invoke(job);
+                    OnLog?.Invoke("⚠ Failed to deserialize booking JSON");
                 }
                 else
                 {
-                    OnLog?.Invoke("⚠ Failed to deserialize booking JSON");
+                    // Pub app uses "pubName" as the pickup location name
+                    var pickupText = booking.pickup ?? booking.pubName ?? "";
+                    var dropoffText = booking.dropoff ?? booking.destination ?? "";
+
+                    // Pub app sends pickup coords as "lat"/"lng"
+                    var pLat = booking.pickupLat != 0 ? booking.pickupLat : booking.lat;
+                    var pLng = booking.pickupLng != 0 ? booking.pickupLng : booking.lng;
+
+                    // Pub app sends dropoff coords as "destinationLat"/"destinationLng"
+                    var dLat = booking.dropoffLat != 0 ? booking.dropoffLat : booking.destinationLat;
+                    var dLng = booking.dropoffLng != 0 ? booking.dropoffLng : booking.destinationLng;
+
+                    // Pub app sends fare as string "£12.50", dispatch uses decimal
+                    decimal? fare = booking.estimatedPrice;
+                    if (fare == null && !string.IsNullOrEmpty(booking.fare))
+                    {
+                        var cleaned = booking.fare.Replace("£", "").Replace("$", "").Trim();
+                        if (decimal.TryParse(cleaned, System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+                            fare = parsed;
+                    }
+
+                    var job = new Job
+                    {
+                        Id = booking.job ?? booking.bookingRef ?? Guid.NewGuid().ToString("N")[..12],
+                        Pickup = pickupText,
+                        Dropoff = dropoffText,
+                        Passengers = booking.passengers > 0 ? booking.passengers : 1,
+                        VehicleRequired = Enum.TryParse<VehicleType>(booking.vehicleType, true, out var vt) ? vt : VehicleType.Saloon,
+                        SpecialRequirements = booking.specialRequirements,
+                        EstimatedFare = fare,
+                        PickupLat = pLat,
+                        PickupLng = pLng,
+                        DropoffLat = dLat,
+                        DropoffLng = dLng,
+                        CallerPhone = booking.callerPhone ?? booking.customerPhone ?? "",
+                        CallerName = booking.callerName ?? booking.customerName ?? "Customer",
+                    };
+                    OnLog?.Invoke($"✅ Booking parsed: {job.Pickup} → {job.Dropoff}, {job.Passengers} pax, fare={fare?.ToString("F2") ?? "n/a"}");
+                    OnBookingReceived?.Invoke(job);
                 }
             }
             else if (topic.StartsWith("jobs/") && (topic.EndsWith("/status") || topic.EndsWith("/bidding")))
@@ -265,6 +289,7 @@ public sealed class MqttDispatchClient : IDisposable
 
     private class BookingMsg
     {
+        // ── Dispatch/AdaMain format ──
         public string? pickup { get; set; }
         public string? dropoff { get; set; }
         public int passengers { get; set; }
@@ -278,6 +303,18 @@ public sealed class MqttDispatchClient : IDisposable
         public string? callerPhone { get; set; }
         public string? callerName { get; set; }
         public string? bookingRef { get; set; }
+
+        // ── Pub app format (pubs/requests/+) ──
+        public string? job { get; set; }            // job ID
+        public string? pubName { get; set; }         // used as pickup name
+        public string? customerName { get; set; }    // maps to CallerName
+        public string? customerPhone { get; set; }   // maps to CallerPhone
+        public string? destination { get; set; }     // maps to Dropoff
+        public double destinationLat { get; set; }   // maps to DropoffLat
+        public double destinationLng { get; set; }   // maps to DropoffLng
+        public double lat { get; set; }              // pickup lat
+        public double lng { get; set; }              // pickup lng
+        public string? fare { get; set; }            // string like "£12.50"
     }
 
     private class JobStatusMsg
