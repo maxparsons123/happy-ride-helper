@@ -227,11 +227,27 @@ public partial class MainForm : Form
 
             _sipServer.OnCallStarted += (sessionId, callerId) => Invoke(() =>
             {
-                OnIncomingCall(callerId);
+                OnCallAnswered(callerId, sessionId);
                 SetInCall(true);
                 statusCallId.Text = $"{callerId} [{sessionId}]";
                 _ = ConnectSimliAsync();
             });
+
+            _sipServer.OnCallRinging += (pendingId, callerId) => Invoke(() =>
+            {
+                Log($"📲 [{pendingId}] Call from {callerId} — RINGING (click Answer)");
+                statusCallId.Text = $"📞 {callerId} (ringing)";
+                lblCallInfo.Text = $"Ringing: {callerId}";
+                lblCallInfo.ForeColor = Color.Orange;
+                btnAnswer.Enabled = true;
+                btnReject.Enabled = true;
+            });
+
+            _sipServer.OnOperatorCallerAudio += alawFrame =>
+            {
+                // Feed caller audio to local speakers
+                _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+            };
 
             _sipServer.OnCallEnded += (sessionId, reason) => Invoke(() =>
             {
@@ -371,17 +387,37 @@ public partial class MainForm : Form
 
     // ── Call controls ──
 
-    private void btnAnswer_Click(object? sender, EventArgs e)
+    private async void btnAnswer_Click(object? sender, EventArgs e)
     {
-        Log("✅ Answering incoming call…");
-        // In auto-answer mode, SipServer handles this automatically
-        SetInCall(true);
+        if (_operatorMode && _sipServer != null)
+        {
+            Log("✅ Answering call in operator mode…");
+            var answered = await _sipServer.AnswerOperatorCallAsync();
+            if (answered)
+            {
+                SetInCall(true);
+                StartAudioMonitor();
+                StartMicrophone(); // Always-hot mic for operator
+                Log("🎤 Operator mic active — speak normally");
+            }
+        }
+        else
+        {
+            Log("✅ Answering incoming call…");
+            SetInCall(true);
+        }
     }
 
     private void btnReject_Click(object? sender, EventArgs e)
     {
+        if (_operatorMode && _sipServer != null)
+        {
+            _sipServer.RejectPendingCall();
+        }
         Log("❌ Rejecting incoming call.");
         SetInCall(false);
+        lblCallInfo.Text = "No active call";
+        lblCallInfo.ForeColor = Color.Gray;
     }
 
     private async void btnHangUp_Click(object? sender, EventArgs e)
@@ -398,12 +434,19 @@ public partial class MainForm : Form
     private void chkManualMode_CheckedChanged(object? sender, EventArgs e)
     {
         _operatorMode = chkManualMode.Checked;
-        btnPtt.Visible = _operatorMode;
-        btnPtt.Enabled = _operatorMode && _inCall;
+
+        // Sync to SipServer
+        if (_sipServer != null)
+            _sipServer.OperatorMode = _operatorMode;
+
+        // In operator mode, PTT is not needed — mic is always hot when call is active
+        btnPtt.Visible = !_operatorMode && false; // Hide PTT entirely in operator mode
+        btnPtt.Enabled = false;
 
         if (_operatorMode)
         {
-            Log("🎤 Operator mode ON – use Push-to-Talk to speak directly to caller");
+            Log("🎤 Operator mode ON – calls will ring and wait for you to answer");
+            Log("    Mic will be always active during calls (no PTT needed)");
         }
         else
         {
@@ -469,24 +512,13 @@ public partial class MainForm : Form
         }
     }
 
-    public void OnIncomingCall(string callerId)
+    public void OnCallAnswered(string callerId, string sessionId)
     {
-        if (InvokeRequired) { Invoke(() => OnIncomingCall(callerId)); return; }
+        if (InvokeRequired) { Invoke(() => OnCallAnswered(callerId, sessionId)); return; }
 
-        Log($"📲 Incoming call from {callerId}");
-        statusCallId.Text = callerId;
+        Log($"📞 Call active: {callerId} [{sessionId}]");
+        statusCallId.Text = $"{callerId} [{sessionId}]";
         StartAudioMonitor();
-
-        if (chkAutoAnswer.Checked && !chkManualMode.Checked)
-        {
-            Log("🤖 Auto-answering…");
-            btnAnswer_Click(null, EventArgs.Empty);
-        }
-        else
-        {
-            btnAnswer.Enabled = true;
-            btnReject.Enabled = true;
-        }
     }
 
     // ── Menu handlers ──
@@ -710,9 +742,17 @@ public partial class MainForm : Form
 
                 _micInput.DataAvailable += (s, e) =>
                 {
-                    if (!_pttActive || _currentSession == null) return;
+                    // In operator mode: always send. In PTT mode: only when PTT active.
+                    if (_operatorMode)
+                    {
+                        if (!_inCall) return;
+                    }
+                    else
+                    {
+                        if (!_pttActive || _currentSession == null) return;
+                    }
 
-                    // Convert PCM16 → A-law and feed into session as if it were SIP audio
+                    // Convert PCM16 → A-law and send to SIP RTP stream
                     var alawData = new byte[e.BytesRecorded / 2];
                     for (int i = 0; i < alawData.Length; i++)
                     {
@@ -720,7 +760,6 @@ public partial class MainForm : Form
                         alawData[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(sample);
                     }
 
-                    // Send directly to the SIP RTP stream via SipServer
                     _sipServer?.SendOperatorAudio(alawData);
                 };
 
