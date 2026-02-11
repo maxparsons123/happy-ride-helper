@@ -38,11 +38,13 @@ public sealed class MapPanel : Panel
             $"updateDriver('{Esc(driverId)}', {lat}, {lng}, '{color}', '{Esc(name)} ({status})')");
     }
 
-    public async Task AddJobMarker(string jobId, double lat, double lng, string pickup)
+    public async Task AddJobMarker(string jobId, double lat, double lng, string pickup, DateTime createdAt)
     {
         if (!_mapReady) return;
+        var epochMs = new DateTimeOffset(createdAt.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(createdAt, DateTimeKind.Utc) : createdAt).ToUnixTimeMilliseconds();
         await _webView.ExecuteScriptAsync(
-            $"addJob('{Esc(jobId)}', {lat}, {lng}, '{Esc(pickup)}')");
+            $"addJob('{Esc(jobId)}', {lat}, {lng}, '{Esc(pickup)}', {epochMs})");
     }
 
     public async Task RemoveJobMarker(string jobId)
@@ -79,6 +81,7 @@ public sealed class MapPanel : Panel
 
         const drivers = {};
         const jobs = {};
+        const jobTimes = {};
         const lines = {};
 
         function driverIcon(color) {
@@ -89,11 +92,27 @@ public sealed class MapPanel : Panel
             });
         }
 
-        const jobIcon = L.icon({
-            iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
-            shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-            iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34]
-        });
+        function passengerColor(createdMs) {
+            const mins = (Date.now() - createdMs) / 60000;
+            if (mins < 10) return '#4CAF50';   // green — fresh
+            if (mins < 20) return '#FF9800';   // amber — 10-20 min
+            return '#F44336';                   // red — 20+ min
+        }
+
+        function passengerIcon(color) {
+            return L.divIcon({
+                className: '',
+                html: `<div style="position:relative">
+                    <svg width="28" height="40" viewBox="0 0 28 40">
+                        <path d="M14 0C6.3 0 0 6.3 0 14c0 10.5 14 26 14 26s14-15.5 14-26C28 6.3 21.7 0 14 0z" fill="${color}" stroke="#fff" stroke-width="1.5"/>
+                        <circle cx="14" cy="13" r="6" fill="#fff"/>
+                        <circle cx="14" cy="11" r="3" fill="${color}"/>
+                        <path d="M9 16c0-2.8 2.2-3 5-3s5 .2 5 3" fill="${color}"/>
+                    </svg>
+                </div>`,
+                iconSize: [28, 40], iconAnchor: [14, 40], popupAnchor: [0, -36]
+            });
+        }
 
         function updateDriver(id, lat, lng, color, label) {
             if (drivers[id]) {
@@ -107,15 +126,18 @@ public sealed class MapPanel : Panel
             }
         }
 
-        function addJob(id, lat, lng, label) {
+        function addJob(id, lat, lng, label, createdMs) {
             if (jobs[id]) map.removeLayer(jobs[id]);
-            jobs[id] = L.marker([lat, lng], { icon: jobIcon })
-                .bindPopup('<b>Job ' + id + '</b><br>' + label)
+            jobTimes[id] = createdMs || Date.now();
+            const color = passengerColor(jobTimes[id]);
+            const mins = Math.floor((Date.now() - jobTimes[id]) / 60000);
+            jobs[id] = L.marker([lat, lng], { icon: passengerIcon(color) })
+                .bindPopup(`<b>Job ${id}</b><br>${label}<br>Waiting: ${mins} min`)
                 .addTo(map);
         }
 
         function removeJob(id) {
-            if (jobs[id]) { map.removeLayer(jobs[id]); delete jobs[id]; }
+            if (jobs[id]) { map.removeLayer(jobs[id]); delete jobs[id]; delete jobTimes[id]; }
             if (lines[id]) { map.removeLayer(lines[id]); delete lines[id]; }
         }
 
@@ -125,6 +147,17 @@ public sealed class MapPanel : Panel
                 color: '#2196F3', weight: 3, dashArray: '8,8'
             }).addTo(map);
         }
+
+        // Refresh passenger icon colors every 30 seconds
+        setInterval(() => {
+            for (const id in jobs) {
+                if (!jobTimes[id]) continue;
+                const color = passengerColor(jobTimes[id]);
+                const mins = Math.floor((Date.now() - jobTimes[id]) / 60000);
+                const ll = jobs[id].getLatLng();
+                jobs[id].setIcon(passengerIcon(color));
+            }
+        }, 30000);
     </script>
     </body></html>
     """;
