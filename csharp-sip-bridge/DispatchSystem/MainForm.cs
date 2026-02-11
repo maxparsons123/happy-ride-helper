@@ -534,6 +534,13 @@ public class MainForm : Form
         var driver = drivers.FirstOrDefault(d => d.Id == driverId);
         if (driver == null) return;
 
+        if (driver.Status != DriverStatus.Online)
+        {
+            MessageBox.Show($"Driver {driver.Name} is {driver.Status} — only Online drivers can be dispatched.",
+                "Driver Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         var jobs = _db.GetActiveJobs();
         var job = jobs.FirstOrDefault(j => j.Id == jobId);
         if (job == null) return;
