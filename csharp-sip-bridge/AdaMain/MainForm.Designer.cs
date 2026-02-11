@@ -66,57 +66,82 @@ partial class MainForm
         {
             Text = "📞 SIP Registration",
             Location = new Point(12, 30),
-            Size = new Size(560, 165),
+            Size = new Size(560, 195),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
         };
 
+        // Row 0: Account selector
+        var lblAccount = MakeLabel("Account:", 15, 25);
+        cmbSipAccount = new ComboBox
+        {
+            Location = new Point(85, 22),
+            Size = new Size(250, 23),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            BackColor = bgInput,
+            ForeColor = fgLight
+        };
+        cmbSipAccount.SelectedIndexChanged += cmbSipAccount_SelectedIndexChanged;
+
+        btnSaveAccount = MakeButton("💾 Save", 345, 20, 65, 26, accent);
+        btnSaveAccount.Click += btnSaveAccount_Click;
+        btnSaveAccount.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+
+        btnDeleteAccount = MakeButton("🗑", 415, 20, 35, 26, red);
+        btnDeleteAccount.Click += btnDeleteAccount_Click;
+        btnDeleteAccount.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+
+        btnNewAccount = MakeButton("+ New", 455, 20, 60, 26, Color.FromArgb(80, 80, 85));
+        btnNewAccount.Click += btnNewAccount_Click;
+        btnNewAccount.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+
         // Row 1: Server / Port / Transport
-        var lblServer = MakeLabel("Server:", 15, 25);
-        txtSipServer = MakeTextBox(85, 22, 190, bgInput, fgLight);
+        var lblServer = MakeLabel("Server:", 15, 55);
+        txtSipServer = MakeTextBox(85, 52, 190, bgInput, fgLight);
         txtSipServer.PlaceholderText = "sip.example.com";
 
-        var lblPort = MakeLabel("Port:", 290, 25);
-        txtSipPort = MakeTextBox(330, 22, 60, bgInput, fgLight);
+        var lblPort = MakeLabel("Port:", 290, 55);
+        txtSipPort = MakeTextBox(330, 52, 60, bgInput, fgLight);
         txtSipPort.Text = "5060";
 
-        var lblTransport = MakeLabel("Transport:", 405, 25);
-        cmbTransport = new ComboBox { Location = new Point(475, 22), Size = new Size(70, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
+        var lblTransport = MakeLabel("Transport:", 405, 55);
+        cmbTransport = new ComboBox { Location = new Point(475, 52), Size = new Size(70, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
         cmbTransport.Items.AddRange(new object[] { "UDP", "TCP", "TLS" });
         cmbTransport.SelectedIndex = 0;
 
         // Row 2: Extension / Auth ID / Password
-        var lblUser = MakeLabel("Extension:", 15, 58);
-        txtSipUser = MakeTextBox(85, 55, 80, bgInput, fgLight);
+        var lblUser = MakeLabel("Extension:", 15, 88);
+        txtSipUser = MakeTextBox(85, 85, 80, bgInput, fgLight);
         txtSipUser.PlaceholderText = "e.g. 300";
 
-        var lblAuthId = MakeLabel("Auth ID:", 180, 58);
-        txtAuthId = MakeTextBox(240, 55, 100, bgInput, fgLight);
+        var lblAuthId = MakeLabel("Auth ID:", 180, 88);
+        txtAuthId = MakeTextBox(240, 85, 100, bgInput, fgLight);
         txtAuthId.PlaceholderText = "(optional)";
 
-        var lblPassword = MakeLabel("Password:", 355, 58);
-        txtSipPassword = MakeTextBox(425, 55, 120, bgInput, fgLight);
+        var lblPassword = MakeLabel("Password:", 355, 88);
+        txtSipPassword = MakeTextBox(425, 85, 120, bgInput, fgLight);
         txtSipPassword.UseSystemPasswordChar = true;
 
         // Row 3: Domain / Auto-Answer
-        var lblDomain = MakeLabel("Domain:", 15, 91);
-        txtDomain = MakeTextBox(85, 88, 190, bgInput, fgLight);
+        var lblDomain = MakeLabel("Domain:", 15, 121);
+        txtDomain = MakeTextBox(85, 118, 190, bgInput, fgLight);
         txtDomain.PlaceholderText = "(optional override)";
 
-        chkAutoAnswer = new CheckBox { Text = "Auto-Answer", Location = new Point(290, 90), Size = new Size(110, 23), ForeColor = fgLight, Checked = true };
+        chkAutoAnswer = new CheckBox { Text = "Auto-Answer", Location = new Point(290, 120), Size = new Size(110, 23), ForeColor = fgLight, Checked = true };
 
         // Row 4: Connect button
-        btnConnect = MakeButton("▶ Connect", 15, 122, 120, 32, green);
+        btnConnect = MakeButton("▶ Connect", 15, 152, 120, 32, green);
         btnConnect.Click += btnConnect_Click;
 
-        btnDisconnect = MakeButton("■ Disconnect", 145, 122, 120, 32, red);
+        btnDisconnect = MakeButton("■ Disconnect", 145, 152, 120, 32, red);
         btnDisconnect.Enabled = false;
         btnDisconnect.Click += btnDisconnect_Click;
 
-        lblSipStatus = new Label { Text = "● Disconnected", Location = new Point(280, 128), Size = new Size(260, 20), ForeColor = Color.Gray, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
+        lblSipStatus = new Label { Text = "● Disconnected", Location = new Point(280, 158), Size = new Size(260, 20), ForeColor = Color.Gray, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
 
         grpSip.Controls.AddRange(new Control[] {
+            lblAccount, cmbSipAccount, btnSaveAccount, btnDeleteAccount, btnNewAccount,
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
             lblUser, txtSipUser, lblAuthId, txtAuthId, lblPassword, txtSipPassword,
             lblDomain, txtDomain, chkAutoAnswer,
@@ -129,7 +154,7 @@ partial class MainForm
         grpCall = new GroupBox
         {
             Text = "🎧 Call Controls",
-            Location = new Point(12, 200),
+            Location = new Point(12, 230),
             Size = new Size(560, 95),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
@@ -227,7 +252,7 @@ partial class MainForm
         grpLogs = new GroupBox
         {
             Text = "📋 Logs & Transcripts",
-            Location = new Point(12, 302),
+            Location = new Point(12, 332),
             Size = new Size(768, 258),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
@@ -333,6 +358,10 @@ partial class MainForm
 
     // SIP Registration
     private GroupBox grpSip;
+    private ComboBox cmbSipAccount;
+    private Button btnSaveAccount;
+    private Button btnDeleteAccount;
+    private Button btnNewAccount;
     private TextBox txtSipServer;
     private TextBox txtSipPort;
     private TextBox txtSipUser;
