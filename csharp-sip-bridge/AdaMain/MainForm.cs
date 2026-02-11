@@ -19,6 +19,7 @@ public partial class MainForm : Form
     private bool _muted;
     private bool _operatorMode;
     private bool _pttActive;
+    private float _operatorMicGain = 2.0f; // Default 2x boost for operator mic output
 
     private SipServer? _sipServer;
     private ILoggerFactory? _loggerFactory;
@@ -760,6 +761,9 @@ public partial class MainForm : Form
                         short sample = BitConverter.ToInt16(e.Buffer, i * 2);
                         alawData[i] = NAudio.Codecs.ALawEncoder.LinearToALawSample(sample);
                     }
+
+                    // Apply operator mic volume boost so caller can hear clearly
+                    ALawVolumeBoost.ApplyInPlace(alawData, _operatorMicGain);
 
                     _sipServer?.SendOperatorAudio(alawData);
                 };
