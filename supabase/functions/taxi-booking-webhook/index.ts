@@ -56,6 +56,29 @@ serve(async (req) => {
         console.error(`[${call_id}] Failed to log booking:`, logError);
       }
 
+      // Forward to dispatch system webhook
+      const dispatchUrl = Deno.env.get("DISPATCH_WEBHOOK_URL");
+      if (dispatchUrl) {
+        try {
+          const dispatchPayload = {
+            pickup,
+            dropoff: destination,
+            passengers: passengers ? parseInt(passengers) : 1,
+            fare: baseFare,
+            phoneNumber: caller_number || "",
+            bookingRef: call_id,
+          };
+          const dispatchRes = await fetch(`${dispatchUrl}/job`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(dispatchPayload),
+          });
+          console.log(`[${call_id}] Dispatch forwarded: ${dispatchRes.status}`);
+        } catch (dispatchErr) {
+          console.error(`[${call_id}] Dispatch forward failed:`, dispatchErr);
+        }
+      }
+
       console.log(`[${call_id}] Booking confirmed: ${pickup} → ${destination}`);
 
       // Return confirmation for OpenAI to speak
