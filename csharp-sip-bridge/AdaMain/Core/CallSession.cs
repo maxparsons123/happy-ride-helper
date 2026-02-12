@@ -207,10 +207,22 @@ public sealed class CallSession : ICallSession
     {
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
         
+        // SAFETY NET: If AI skipped sync_booking_data, populate _booking from book_taxi args
+        if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()) && string.IsNullOrWhiteSpace(_booking.Name))
+            _booking.Name = bn.ToString()!.Trim();
+        if (args.TryGetValue("pickup", out var bp) && !string.IsNullOrWhiteSpace(bp?.ToString()) && string.IsNullOrWhiteSpace(_booking.Pickup))
+            _booking.Pickup = bp.ToString();
+        if (args.TryGetValue("destination", out var bd) && !string.IsNullOrWhiteSpace(bd?.ToString()) && string.IsNullOrWhiteSpace(_booking.Destination))
+            _booking.Destination = bd.ToString();
+        if (args.TryGetValue("passengers", out var bpax) && int.TryParse(bpax?.ToString(), out var bpn) && _booking.Passengers == null)
+            _booking.Passengers = bpn;
+        if (args.TryGetValue("pickup_time", out var bpt) && !string.IsNullOrWhiteSpace(bpt?.ToString()) && string.IsNullOrWhiteSpace(_booking.PickupTime))
+            _booking.PickupTime = bpt.ToString();
+        
         if (action == "request_quote")
         {
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
-                return new { success = false, error = "Missing pickup or destination" };
+                return new { success = false, error = "Missing pickup or destination. Call sync_booking_data first with all collected details, then retry." };
             
             try
             {
@@ -283,6 +295,13 @@ public sealed class CallSession : ICallSession
         
         if (action == "confirmed")
         {
+            // GUARD: Reject if essential booking data is missing
+            if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
+            {
+                _logger.LogWarning("[{SessionId}] ❌ book_taxi confirmed REJECTED — missing pickup/destination", SessionId);
+                return new { success = false, error = "Cannot confirm booking: pickup or destination is missing. Call sync_booking_data first with all details, then request_quote, then confirmed." };
+            }
+            
             // GUARD: Prevent duplicate confirmed calls
             if (Interlocked.CompareExchange(ref _bookTaxiCompleted, 1, 0) == 1)
             {
