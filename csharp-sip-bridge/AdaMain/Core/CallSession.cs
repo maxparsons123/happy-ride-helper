@@ -269,9 +269,26 @@ public sealed class CallSession : ICallSession
                         _booking.Eta = null;
                         OnBookingUpdated?.Invoke(_booking.Clone());
                         
-                        // Use the AI-generated clarification message if available (more natural)
+                        // Build alternatives list for the AI to present
+                        var altsList = new List<string>();
+                        if (result.PickupAlternatives?.Length > 0)
+                            altsList.AddRange(result.PickupAlternatives.Select((a, i) => $"{i + 1}. {a}"));
+                        if (result.DestAlternatives?.Length > 0)
+                            altsList.AddRange(result.DestAlternatives.Select((a, i) => $"{i + 1}. {a}"));
+
                         string clarifMsg;
-                        if (!string.IsNullOrWhiteSpace(result.ClarificationMessage))
+                        if (altsList.Count > 0)
+                        {
+                            var which = result.PickupAlternatives?.Length > 0 ? "pickup" : "destination";
+                            clarifMsg = $"[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED.\n" +
+                                $"The {which} address is ambiguous. Present these alternatives to the caller and ask them to pick one:\n" +
+                                string.Join("\n", altsList) + "\n\n" +
+                                (result.ClarificationMessage != null ? $"Suggested question: \"{result.ClarificationMessage}\"\n" : "") +
+                                "Read the alternatives clearly, e.g. 'I found a few options: 1) David Road in Coventry, 2) David Road in Birmingham, 3) David Road in London. Which one is it?'\n" +
+                                "Do NOT proceed with the booking until the caller picks one. " +
+                                "After they answer, call sync_booking_data with the corrected address INCLUDING the city name.";
+                        }
+                        else if (!string.IsNullOrWhiteSpace(result.ClarificationMessage))
                         {
                             clarifMsg = $"[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED. You MUST ask the caller this question EXACTLY:\n" +
                                 $"\"{result.ClarificationMessage}\"\n" +
@@ -281,9 +298,8 @@ public sealed class CallSession : ICallSession
                         else
                         {
                             clarifMsg = "[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED. " +
-                                (result.PickupAlternatives?.Length > 0 ? $"Pickup could be: {string.Join(", ", result.PickupAlternatives)}. " : "") +
-                                (result.DestAlternatives?.Length > 0 ? $"Destination could be: {string.Join(", ", result.DestAlternatives)}. " : "") +
-                                "You MUST ask the caller which specific location they mean. Do NOT guess or assume. Do NOT proceed until they clarify.";
+                                "The address could not be uniquely resolved. Ask the caller which city or area they mean. " +
+                                "Do NOT guess or assume. Do NOT proceed until they clarify.";
                         }
                         await _aiClient.InjectMessageAndRespondAsync(clarifMsg);
                         return;
@@ -447,14 +463,21 @@ public sealed class CallSession : ICallSession
                     if (result.NeedsClarification)
                     {
                         _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses detected", SessionId);
+                        // Build numbered alternatives list for the AI to present
+                        var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
+                        var destAlts = result.DestAlternatives ?? Array.Empty<string>();
+                        var allAlts = pickupAlts.Concat(destAlts).ToArray();
+                        var numberedAlts = allAlts.Select((a, i) => $"{i + 1}. {a}").ToArray();
+
                         return new
                         {
                             success = false,
                             needs_clarification = true,
-                            pickup_options = result.PickupAlternatives ?? Array.Empty<string>(),
-                            destination_options = result.DestAlternatives ?? Array.Empty<string>(),
+                            pickup_options = pickupAlts,
+                            destination_options = destAlts,
+                            alternatives_list = numberedAlts,
                             clarification_question = result.ClarificationMessage ?? "I found multiple locations with that name. Please confirm which one you meant.",
-                            message = result.ClarificationMessage ?? "I found multiple locations with that name. Please confirm which one you meant."
+                            message = $"I found multiple matches for that address. Please ask the caller which one they mean:\n{string.Join("\n", numberedAlts)}"
                         };
                     }
                 }
@@ -643,14 +666,20 @@ public sealed class CallSession : ICallSession
                 // Handle clarification
                 if (result.NeedsClarification)
                 {
+                    var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
+                    var destAlts = result.DestAlternatives ?? Array.Empty<string>();
+                    var allAlts = pickupAlts.Concat(destAlts).ToArray();
+                    var numberedAlts = allAlts.Select((a, i) => $"{i + 1}. {a}").ToArray();
+
                     return new
                     {
                         success = false,
                         needs_clarification = true,
-                        pickup_options = result.PickupAlternatives ?? Array.Empty<string>(),
-                        destination_options = result.DestAlternatives ?? Array.Empty<string>(),
+                        pickup_options = pickupAlts,
+                        destination_options = destAlts,
+                        alternatives_list = numberedAlts,
                         clarification_question = result.ClarificationMessage ?? "I found multiple locations with that name. Which one did you mean?",
-                        message = result.ClarificationMessage ?? "I found multiple locations with that name. Which one did you mean?"
+                        message = $"I found multiple matches for that address. Please ask the caller which one they mean:\n{string.Join("\n", numberedAlts)}"
                     };
                 }
             }
