@@ -299,6 +299,14 @@
     <h2>🚕 New Job Request</h2>
     <div id="jobInfo">
       <div class="job-info-row">
+        <div class="job-info-label">👤 Name</div>
+        <div class="job-info-value" id="customerName" style="font-weight:700; font-size:17px;">Loading...</div>
+      </div>
+      <div class="job-info-row">
+        <div class="job-info-label">📞 Phone</div>
+        <div class="job-info-value" id="customerPhone" style="font-weight:700; font-size:17px; color:#1f6feb;">Loading...</div>
+      </div>
+      <div class="job-info-row">
         <div class="job-info-label">📍 Pickup</div>
         <div class="job-info-value" id="jobPickup">Loading...</div>
       </div>
@@ -311,12 +319,8 @@
         <div class="job-info-value" id="jobPassengers">—</div>
       </div>
       <div class="job-info-row">
-        <div class="job-info-label">👤 Name</div>
-        <div class="job-info-value" id="customerName">Loading...</div>
-      </div>
-      <div class="job-info-row">
-        <div class="job-info-label">📞 Phone</div>
-        <div class="job-info-value" id="customerPhone">Loading...</div>
+        <div class="job-info-label">📝 Notes</div>
+        <div class="job-info-value" id="jobNotes" style="font-style:italic; color:#666;">—</div>
       </div>
     </div>
     <div id="jobFare" class="job-fare-highlight" style="display:none;">£0.00</div>
@@ -453,6 +457,7 @@
         jobDropoff: document.getElementById('jobDropoff'),
         jobPassengers: document.getElementById('jobPassengers'),
         jobFare: document.getElementById('jobFare'),
+        jobNotes: document.getElementById('jobNotes'),
         customerName: document.getElementById('customerName'),
         customerPhone: document.getElementById('customerPhone'),
         jobTimer: document.getElementById('jobTimer'),
@@ -568,11 +573,12 @@
       // Pickup & Dropoff from dispatcher payload
       const pickup = job.pickup || job.pubName || `(${job.lat?.toFixed(5)}, ${job.lng?.toFixed(5)})`;
       const dropoff = job.dropoff || job.destination || '—';
+      state.els.customerName.textContent = job.customerName || 'Not provided';
+      state.els.customerPhone.textContent = job.customerPhone || 'Not provided';
       state.els.jobPickup.textContent = pickup;
       state.els.jobDropoff.textContent = dropoff;
       state.els.jobPassengers.textContent = job.passengers || '—';
-      state.els.customerName.textContent = job.customerName || 'Not provided';
-      state.els.customerPhone.textContent = job.customerPhone || 'Not provided';
+      state.els.jobNotes.textContent = job.notes || '—';
 
       // Fare
       const fareStr = formatFare(job.fare);
@@ -655,9 +661,10 @@
           <div class="job-detail"><div class="job-label">📍 Pickup</div><div class="job-value">${pickup}</div></div>
           <div class="job-detail"><div class="job-label">🏁 Dropoff</div><div class="job-value">${dropoff}</div></div>
           ${fareHtml}
+          <div class="job-detail"><div class="job-label">👤 Passenger</div><div class="job-value" style="font-weight:700; font-size:17px;">${allocated.customerName || '—'}</div></div>
+          <div class="job-detail"><div class="job-label">📞 Phone</div><div class="job-value" style="font-weight:700; font-size:17px; color:#1f6feb;">${allocated.customerPhone || '—'}</div></div>
           <div class="job-detail"><div class="job-label">👥 Passengers</div><div class="job-value">${allocated.passengers || '—'}</div></div>
-          <div class="job-detail"><div class="job-label">👤 Customer</div><div class="job-value">${allocated.customerName || '—'}</div></div>
-          <div class="job-detail"><div class="job-label">📞 Phone</div><div class="job-value">${allocated.customerPhone || '—'}</div></div>
+          <div class="job-detail"><div class="job-label">📝 Notes</div><div class="job-value" style="font-style:italic;">${allocated.notes || '—'}</div></div>
           <div class="job-detail"><div class="job-label">Status</div><div class="job-value"><span class="job-status status-allocated">ALLOCATED</span></div></div>
         </div>
         <button class="settings-btn" onclick="window.open('https://www.google.com/maps/dir/?api=1&destination=${allocated.lat},${allocated.lng}', '_blank')">🧭 Navigate to Pickup</button>
@@ -695,8 +702,9 @@
         }
         el.innerHTML = `
           <div class="job-id">${job.job}</div>
+          <div class="job-meta" style="font-weight:700; font-size:15px;">👤 ${job.customerName || '—'} · 📞 ${job.customerPhone || '—'}</div>
           <div class="job-route">📍 ${pickup} <span class="arrow">→</span> 🏁 ${dropoff}</div>
-          <div class="job-meta">👤 ${job.customerName || '—'} · 📞 ${job.customerPhone || '—'} · 👥 ${job.passengers || '—'}</div>
+          <div class="job-meta">👥 ${job.passengers || '—'} pax${job.notes ? ` · 📝 ${job.notes}` : ''}</div>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
             <div>${fareHtml} <span class="job-status status-${job.status}">${job.status.toUpperCase()}</span></div>
             <span style="font-size:12px; color:#666;">${dateStr} ${timeStr}</span>
@@ -1078,6 +1086,7 @@
           dropoffLng: data.dropoffLng || 0,
           passengers: data.passengers || 1,
           fare: data.fare || data.estimatedFare || null,
+          notes: data.notes || data.specialRequests || '',
         };
         if (!state.isJobActive) {
           showJobPanel(jobData);
@@ -1110,6 +1119,7 @@
             dropoffLng: data.dropoffLng || 0,
             passengers: data.passengers || 1,
             fare: data.fare || null,
+            notes: data.notes || data.specialRequests || '',
           };
           addJobToHistory(jobData, 'allocated');
           // Show "won" modal if not already showing job panel for this
@@ -1140,6 +1150,7 @@
             dropoffLng: data.dropoffLng || 0,
             passengers: data.passengers || 1,
             fare: data.fare || null,
+            notes: data.notes || data.specialRequests || '',
           };
           if (!state.isJobActive) {
             showJobPanel(jobData);
@@ -1162,6 +1173,7 @@
           if (data.passengers) existing.passengers = data.passengers;
           if (data.customerName) existing.customerName = data.customerName;
           if (data.customerPhone) existing.customerPhone = data.customerPhone;
+          if (data.notes || data.specialRequests) existing.notes = data.notes || data.specialRequests;
           localStorage.setItem(`driver_jobs_${state.DRIVER_ID}`, JSON.stringify(state.driverJobs));
           if (state.isMenuOpen) {
             if (state.currentView === 'jobHistory') renderJobHistory();
@@ -1189,6 +1201,7 @@
             dropoffLng: data.dropoffLng || 0,
             passengers: data.passengers || 1,
             fare: data.fare || null,
+            notes: data.notes || data.specialRequests || '',
           };
           addJobToHistory(jobData, 'allocated');
           state.els.jobWonModal.style.display = 'flex';
@@ -1216,6 +1229,7 @@
           dropoffLng: data.dropoffLng || 0,
           passengers: data.passengers || 1,
           fare: data.fare || null,
+          notes: data.notes || data.specialRequests || '',
         };
         addJobToHistory(jobData, 'allocated');
         return;
