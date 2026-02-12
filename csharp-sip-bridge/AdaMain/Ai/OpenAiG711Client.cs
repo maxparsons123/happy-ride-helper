@@ -1038,8 +1038,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             }
         });
 
-        // Do NOT clear _responseActive here — only response.done should do that.
-        // Clearing here creates false "idle" windows if OpenAI streams audio after tool output.
+        // Clear _responseActive: after response.function_call_arguments.done, OpenAI won't
+        // send more audio for this response, so it's safe to unblock the response gate.
+        Interlocked.Exchange(ref _responseActive, 0);
 
         // STATE GROUNDING: After sync_booking_data, inject state snapshot into conversation
         // This ensures the AI KNOWS what was synced and prevents redundant questions
