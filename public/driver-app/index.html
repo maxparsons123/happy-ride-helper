@@ -1,0 +1,1387 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Black Cab Unite v10.3</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { 
+      margin:0; 
+      font-family:system-ui, -apple-system, "Segoe UI", sans-serif; 
+      background:#f7fafc; 
+      display:flex; 
+      flex-direction:column; 
+      height:100vh; 
+      overflow:hidden;
+    }
+    #map { flex:1; width:100%; height:100%; z-index:1; }
+    #headerBanner {
+      position: absolute; top: 0; left: 0; right: 0;
+      background: #000; color: #FFD700;
+      padding: 12px 16px;
+      display: flex; justify-content: space-between; align-items: center;
+      z-index: 1001;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    #appTitleContainer { display: flex; flex-direction: column; align-items: flex-start; }
+    #appTitle {
+      font-weight: 700; font-size: 18px; letter-spacing: 0.5px;
+      display: flex; align-items: center; gap: 10px; cursor: pointer;
+    }
+    #appTitle::before { content: "🚕"; font-size: 20px; }
+    #statusCaption { font-size: 12px; color: #FFD700; margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .status-available .status-dot { background: #28a745; }
+    .status-busy .status-dot { background: #ffc107; }
+    .status-offline .status-dot { background: #dc3545; }
+    #menuBtn {
+      background: #FFD700; color: #000; border: none;
+      width: 44px; height: 44px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: bold; cursor: pointer; z-index: 1002;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3); transition: transform 0.1s ease;
+    }
+    #menuBtn:active { transform: scale(0.95); }
+    #rankBtn {
+      position: absolute; bottom: 90px; right: 16px;
+      background: #1f6feb; color: white; border: none;
+      width: 56px; height: 56px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: bold; cursor: pointer; z-index: 1002;
+      box-shadow: 0 3px 8px rgba(0,0,0,0.3); font-size: 14px;
+    }
+    #status { 
+      position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
+      background: rgba(255, 255, 255, 0.9);
+      padding: 8px 16px; border-radius: 24px; font-size: 14px; color: #333;
+      z-index: 1000; text-align: center; max-width: 90%;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-weight: 600;
+    }
+    /* Job Panel */
+    #jobPanel { 
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: white; padding: 20px;
+      border-top: 2px solid #eee; z-index: 1000;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.1); display: none;
+      max-height: 70vh; overflow-y: auto;
+    }
+    #jobPanel h2 { margin: 0 0 16px 0; font-size: 20px; color: #1f6feb; text-align: center; }
+    #jobInfo { 
+      background: #f8f9fa; padding: 16px; border-radius: 12px;
+      margin-bottom: 16px; font-size: 15px; line-height: 1.5;
+    }
+    .job-info-row { display: flex; margin-bottom: 10px; }
+    .job-info-label { font-weight: 600; color: #495057; min-width: 90px; flex-shrink: 0; }
+    .job-info-value { font-size: 15px; color: #212529; word-break: break-word; }
+    .job-fare-highlight {
+      background: linear-gradient(135deg, #28a745, #20c997);
+      color: white; padding: 12px 16px; border-radius: 12px;
+      text-align: center; margin-bottom: 16px; font-size: 22px; font-weight: 700;
+    }
+    #jobTimer { margin-top: 8px; font-size: 14px; color: #dc3545; font-weight: bold; display: none; text-align: center; }
+    .job-actions { display: flex; gap: 16px; }
+    .job-btn {
+      flex: 1; padding: 18px 12px; font-size: 18px; border: none;
+      border-radius: 16px; cursor: pointer; font-weight: 700; min-height: 56px;
+    }
+    .accept-btn { background: linear-gradient(135deg, #28a745, #20c997); color: white; }
+    .reject-btn { background: linear-gradient(135deg, #dc3545, #e83e8c); color: white; }
+    #micIndicator { text-align: center; margin: 12px 0; display: none; }
+    .mic-icon {
+      width: 48px; height: 48px; background: #1f6feb; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: white; font-weight: bold;
+      box-shadow: 0 0 12px #1f6feb; animation: micGlow 1.5s infinite alternate;
+    }
+    @keyframes micGlow { from { box-shadow: 0 0 12px #1f6feb; } to { box-shadow: 0 0 24px #1f6feb, 0 0 32px #1f6feb; } }
+    .mic-label { font-size: 13px; color: #555; margin-top: 8px; }
+
+    /* Menu Panel */
+    #menuPanel {
+      position: absolute; bottom: 0; left: 0; right: 0; height: 75vh;
+      background: white; display: none; flex-direction: column; z-index: 2000;
+      box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
+      transform: translateY(100%); transition: transform 0.3s ease;
+    }
+    #menuPanel.active { display: flex; transform: translateY(0); }
+    #menuNav { display: flex; background: #f8f9fa; border-bottom: 1px solid #eee; }
+    .menu-nav-btn {
+      flex: 1; background: transparent; border: none; padding: 14px 0;
+      font-weight: 600; font-size: 14px; color: #666; cursor: pointer;
+    }
+    .menu-nav-btn.active { color: #1f6feb; background: #e8f0fe; border-bottom: 3px solid #1f6feb; }
+    #menuContent { flex: 1; overflow-y: auto; padding: 16px; }
+
+    /* Current Job Detail */
+    .current-job-info {
+      padding: 20px; background: #e8f5e8; border-radius: 12px;
+      margin-bottom: 20px; border-left: 4px solid #28a745;
+    }
+    .job-detail { margin-bottom: 12px; }
+    .job-label { font-weight: 700; color: #1f6feb; font-size: 14px; margin-bottom: 4px; }
+    .job-value { font-size: 16px; color: #333; word-break: break-word; }
+    .job-fare-badge {
+      display: inline-block; background: #28a745; color: white;
+      padding: 6px 14px; border-radius: 20px; font-weight: 700; font-size: 18px;
+    }
+    .no-current-job { text-align: center; padding: 50px 20px; color: #666; }
+    .no-current-job .icon { font-size: 60px; margin-bottom: 20px; opacity: 0.7; }
+
+    /* Job History */
+    .job-item {
+      padding: 14px; border: 1px solid #eee; border-radius: 12px;
+      margin-bottom: 10px; background: #f9f9f9; position: relative; overflow: hidden;
+    }
+    .job-item.allocated { border-left: 4px solid #28a745; background: #e8f5e8; }
+    .job-item.processing, .job-item.bidding { border-left: 4px solid #1f6feb; background: #e8f0fe; }
+    .job-item.completed { border-left: 4px solid #6c757d; background: #f8f9fa; }
+    .job-item.lost, .job-item.rejected, .job-item.expired { border-left: 4px solid #dc3545; background: #f8d7da; }
+    .job-item.queued { border-left: 4px solid #ffc107; background: #fff8e1; }
+    .job-id { font-weight: 700; color: #1f6feb; margin-bottom: 4px; font-size: 15px; }
+    .job-route { font-size: 14px; color: #333; margin-bottom: 4px; }
+    .job-route .arrow { color: #1f6feb; font-weight: bold; }
+    .job-meta { font-size: 13px; color: #666; margin-bottom: 4px; }
+    .job-fare-tag {
+      display: inline-block; background: #28a745; color: white;
+      padding: 3px 10px; border-radius: 12px; font-weight: 700; font-size: 14px;
+    }
+    .job-status {
+      font-size: 12px; font-weight: 700; padding: 4px 8px; border-radius: 6px;
+    }
+    .status-processing, .status-bidding { background: #d1e7ff; color: #084298; }
+    .status-allocated { background: #d1e7dd; color: #0f5132; }
+    .status-completed { background: #e2e3e5; color: #41464b; }
+    .status-lost, .status-rejected, .status-expired { background: #f8d7da; color: #842029; }
+    .status-queued { background: #fff3cd; color: #856404; }
+    .job-item::after {
+      content: "🗑️"; position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
+      background: #dc3545; color: white; width: 36px; height: 36px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center; font-size: 18px;
+      opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
+    }
+    .job-item.swiping::after { opacity: 1; }
+
+    /* Rank Modal */
+    #rankModal {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); z-index: 3000; justify-content: center; align-items: center;
+    }
+    /* Job Won Modal */
+    #jobWonModal {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); z-index: 2000; justify-content: center; align-items: center;
+    }
+    #jobWonModal-content {
+      background: white; padding: 30px; border-radius: 16px; text-align: center;
+      max-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    }
+    /* Passenger Popup */
+    #passengerPopup {
+      display: none; position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.85); color: white; padding: 18px 20px; border-radius: 16px;
+      font-size: 16px; max-width: 300px; text-align: center; z-index: 3000;
+    }
+    .replyBtn {
+      background: #28a745; color: white; border: none; padding: 8px 12px;
+      border-radius: 8px; font-weight: bold; cursor: pointer; flex: 1; margin: 0 4px;
+    }
+    .replyBtn:nth-child(2) { background: #1f6feb; }
+    /* Chat */
+    #chatMessages {
+      flex: 1; padding: 16px; overflow-y: auto; display: flex;
+      flex-direction: column; gap: 12px;
+    }
+    .message {
+      max-width: 85%; padding: 14px 16px; border-radius: 20px;
+      font-size: 15px; line-height: 1.5; word-wrap: break-word;
+    }
+    .received { background: #e9ecef; align-self: flex-start; border-bottom-left-radius: 6px; }
+    .sent { background: #000; color: white; align-self: flex-end; border-bottom-right-radius: 6px; }
+    /* Settings */
+    .settings-group { margin-bottom: 24px; }
+    .settings-label { font-weight: 700; margin-bottom: 12px; color: #333; font-size: 16px; }
+    .settings-input {
+      width: 100%; padding: 14px; border: 2px solid #ccc; border-radius: 12px;
+      font-size: 16px; box-sizing: border-box;
+    }
+    .settings-input:focus { border-color: #1f6feb; outline: none; }
+    .settings-btn {
+      background: #1f6feb; color: white; border: none; padding: 16px;
+      border-radius: 12px; font-weight: 700; cursor: pointer; width: 100%;
+      margin-top: 12px; font-size: 16px;
+    }
+    .settings-info { background: #f8f9fa; padding: 16px; border-radius: 12px; font-size: 14px; color: #666; }
+    /* Loading */
+    #loadingOverlay {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7); display: flex; flex-direction: column;
+      justify-content: center; align-items: center; z-index: 500;
+      color: white; font-size: 18px;
+    }
+    .loading-spinner {
+      width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.3);
+      border-radius: 50%; border-top: 4px solid white;
+      animation: spin 1s linear infinite; margin-bottom: 16px;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    /* Taxi marker */
+    .taxi-marker { background: transparent !important; border: none !important; box-shadow: none !important; }
+    /* Driver list in chat */
+    #driverListContainer { padding: 8px; border-bottom: 1px solid #eee; }
+    .driver-list-header { font-size: 14px; font-weight: bold; color: #333; margin-bottom: 8px; }
+    .driver-item { display: flex; align-items: center; padding: 8px; border-radius: 6px; background: #f8f9fa; margin-bottom: 4px; }
+    .driver-status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
+    .status-available-indicator { background: #28a745; }
+    .status-busy-indicator { background: #ffc107; }
+    .status-offline-indicator { background: #dc3545; }
+    .driver-id-text { font-size: 14px; color: #495057; }
+    .contact-item {
+      display: flex; align-items: center; padding: 12px; border-radius: 8px;
+      cursor: pointer; margin-bottom: 8px;
+    }
+    .contact-item:hover { background: #f0f4f8; }
+    .other-driver-icon {
+      width: 40px; height: 40px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: bold; color: white; margin-right: 12px;
+    }
+    .contact-info { flex: 1; }
+    .contact-name { font-weight: 600; color: #333; }
+    .contact-status { font-size: 12px; color: #666; }
+    .unread-badge {
+      background: #dc3545; color: white; border-radius: 50%;
+      padding: 4px 8px; font-size: 12px; font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- Header -->
+  <div id="headerBanner">
+    <div id="appTitleContainer">
+      <div id="appTitle">Black Cab Unite v10.3</div>
+      <div id="statusCaption" class="status-available">
+        <span class="status-dot"></span> Available
+      </div>
+    </div>
+    <button id="menuBtn">☰</button>
+  </div>
+
+  <!-- Rank Button -->
+  <button id="rankBtn" title="Rank: Route & Nearby Jobs">📍<br>RANK</button>
+
+  <!-- Status Bar -->
+  <div id="status">Initializing...</div>
+
+  <!-- Status Dropdown -->
+  <div id="statusDropdown" style="display:none; position:absolute; top:60px; left:16px; background:white; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,0.2); z-index:2000; overflow:hidden; min-width:180px;">
+    <div class="status-option" data-status="available" style="padding:14px 20px; cursor:pointer; display:flex; align-items:center; gap:8px;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#28a745;display:inline-block;"></span> Available
+    </div>
+    <div class="status-option" data-status="busy" style="padding:14px 20px; cursor:pointer; display:flex; align-items:center; gap:8px;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#ffc107;display:inline-block;"></span> Busy
+    </div>
+    <div class="status-option" data-status="offline" style="padding:14px 20px; cursor:pointer; display:flex; align-items:center; gap:8px;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#dc3545;display:inline-block;"></span> Offline
+    </div>
+    <div class="status-option" data-status="logoff" style="padding:14px 20px; cursor:pointer; border-top:1px solid #eee; display:flex; align-items:center; gap:8px;">
+      🚪 Log Off
+    </div>
+  </div>
+
+  <!-- Job Panel -->
+  <div id="jobPanel">
+    <h2>🚕 New Job Request</h2>
+    <div id="jobInfo">
+      <div class="job-info-row">
+        <div class="job-info-label">📍 Pickup</div>
+        <div class="job-info-value" id="jobPickup">Loading...</div>
+      </div>
+      <div class="job-info-row">
+        <div class="job-info-label">🏁 Dropoff</div>
+        <div class="job-info-value" id="jobDropoff">Loading...</div>
+      </div>
+      <div class="job-info-row">
+        <div class="job-info-label">👥 Pax</div>
+        <div class="job-info-value" id="jobPassengers">—</div>
+      </div>
+      <div class="job-info-row">
+        <div class="job-info-label">👤 Name</div>
+        <div class="job-info-value" id="customerName">Loading...</div>
+      </div>
+      <div class="job-info-row">
+        <div class="job-info-label">📞 Phone</div>
+        <div class="job-info-value" id="customerPhone">Loading...</div>
+      </div>
+    </div>
+    <div id="jobFare" class="job-fare-highlight" style="display:none;">£0.00</div>
+    <div id="jobTimer">⏳ Expires in: <span id="timerSeconds">30</span>s</div>
+    <div id="micIndicator">
+      <div class="mic-icon">🎤</div>
+      <div class="mic-label">Say "accept" or "reject"</div>
+    </div>
+    <div class="job-actions">
+      <button class="job-btn accept-btn" id="acceptBtn">✅ ACCEPT</button>
+      <button class="job-btn reject-btn" id="rejectBtn">❌ REJECT</button>
+    </div>
+  </div>
+
+  <!-- Rank Modal -->
+  <div id="rankModal">
+    <div style="background:white; width:95%; height:90%; border-radius:16px; display:flex; flex-direction:column; overflow:hidden;">
+      <div style="padding:16px; border-bottom:1px solid #eee;">
+        <h3 style="margin:0 0 10px 0;">Rank: Route & Nearby Jobs</h3>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="rankDestination" placeholder="Enter destination..." style="flex:1; padding:12px; border:2px solid #ddd; border-radius:10px; font-size:16px;">
+          <button onclick="searchRankDestination()" style="background:#1f6feb; color:white; border:none; padding:12px 16px; border-radius:10px; font-weight:bold;">🔍</button>
+        </div>
+        <p style="font-size:12px; color:#888; margin:6px 0 0;">Enter destination and click 🔍 or press Enter</p>
+      </div>
+      <div id="rankMapContainer" style="flex:1;"></div>
+      <div style="display:flex; gap:8px; padding:12px;">
+        <button onclick="closeRankModal()" style="flex:1; padding:12px; background:#6c757d; color:white; border:none; border-radius:10px; font-weight:bold;">Close</button>
+        <button onclick="viewDriversOnRank()" style="flex:1; padding:12px; background:#1f6feb; color:white; border:none; border-radius:10px; font-weight:bold;">🚗 View Drivers</button>
+        <button id="rankNavigateBtn" onclick="navigateFromRank()" style="flex:1; padding:12px; background:#28a745; color:white; border:none; border-radius:10px; font-weight:bold;">🧭 Navigate</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Job Won Modal -->
+  <div id="jobWonModal">
+    <div id="jobWonModal-content">
+      <div style="font-size:60px;">🎉</div>
+      <h2>You Won the Job!</h2>
+      <p>Check your Current Job tab.</p>
+    </div>
+  </div>
+
+  <!-- Passenger Popup -->
+  <div id="passengerPopup">
+    <div id="passengerMessage">Passenger message...</div>
+    <div style="display:flex; gap:8px; margin-top:12px;">
+      <button class="replyBtn" onclick="sendPresetReply('On my way')">On my way</button>
+      <button class="replyBtn" onclick="sendPresetReply('Arrived')">Arrived</button>
+    </div>
+  </div>
+
+  <!-- Menu Panel -->
+  <div id="menuPanel">
+    <div id="menuNav">
+      <button class="menu-nav-btn active" data-view="currentJob">📍 Job</button>
+      <button class="menu-nav-btn" data-view="jobHistory">📋 History</button>
+      <button class="menu-nav-btn" data-view="chat">💬 Chats</button>
+      <button class="menu-nav-btn" data-view="settings">⚙️ Settings</button>
+    </div>
+    <div id="menuContent"></div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    Loading map...
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script>
+    // ===== Firebase Setup =====
+    const firebaseConfig = {
+      apiKey: "AIzaSyBq1aN-KRtRW7S243ef7lz7fnZmlBcuN1s",
+      authDomain: "cabunite.firebaseapp.com",
+      projectId: "cabunite",
+      storageBucket: "cabunite.firebasestorage.app",
+      messagingSenderId: "997924656033",
+      appId: "1:997924656033:web:1552b9f26a1af0878eb1e0"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const messaging = firebase.messaging();
+    messaging.onMessage((payload) => {
+      if (Notification.permission === 'granted') {
+        new Notification(payload.notification?.title || "Taxi Update", {
+          body: payload.notification?.body || "You have a new message",
+        });
+      }
+    });
+
+    // ===== CENTRALIZED STATE =====
+    const state = {
+      DRIVER_ID: localStorage.getItem('driver_id'),
+      driverPresence: localStorage.getItem('driver_presence') || 'available',
+      driverCoords: null,
+      map: null,
+      driverMarker: null,
+      client: null,
+      isMenuOpen: false,
+      currentView: 'currentJob',
+      isJobActive: false,
+      currentJob: null,
+      jobTimerInterval: null,
+      speechRecognition: null,
+      isSpeaking: false,
+      voiceAttemptCount: 0,
+      maxRadius: parseFloat(localStorage.getItem('max_radius_km') || '10'),
+      seenJobIds: new Set(),
+      driverJobs: JSON.parse(localStorage.getItem(`driver_jobs_${localStorage.getItem('driver_id')}`)) || [],
+      pendingJobs: JSON.parse(localStorage.getItem(`pending_jobs_${localStorage.getItem('driver_id')}`)) || [],
+      chatMessages: { group: JSON.parse(localStorage.getItem(`chat_group_${localStorage.getItem('driver_id')}`)) || [] },
+      unreadCounts: { group: 0 },
+      otherDrivers: {},
+      driverStatus: {},
+      fcmToken: null,
+      gpsWatchId: null,
+      wakeLock: null,
+      currentChat: 'group',
+      els: {}
+    };
+
+    // Populate seenJobIds from saved jobs
+    const savedDriverJobs = JSON.parse(localStorage.getItem(`driver_jobs_${state.DRIVER_ID}`)) || [];
+    const savedPendingJobs = JSON.parse(localStorage.getItem(`pending_jobs_${state.DRIVER_ID}`)) || [];
+    state.seenJobIds = new Set([...savedDriverJobs.map(j => j.job), ...savedPendingJobs.map(p => p.job)]);
+
+    // Cache DOM elements
+    document.addEventListener('DOMContentLoaded', () => {
+      state.els = {
+        status: document.getElementById('status'),
+        jobPanel: document.getElementById('jobPanel'),
+        jobPickup: document.getElementById('jobPickup'),
+        jobDropoff: document.getElementById('jobDropoff'),
+        jobPassengers: document.getElementById('jobPassengers'),
+        jobFare: document.getElementById('jobFare'),
+        customerName: document.getElementById('customerName'),
+        customerPhone: document.getElementById('customerPhone'),
+        jobTimer: document.getElementById('jobTimer'),
+        timerSeconds: document.getElementById('timerSeconds'),
+        micIndicator: document.getElementById('micIndicator'),
+        menuPanel: document.getElementById('menuPanel'),
+        menuContent: document.getElementById('menuContent'),
+        menuBtn: document.getElementById('menuBtn'),
+        acceptBtn: document.getElementById('acceptBtn'),
+        rejectBtn: document.getElementById('rejectBtn'),
+        statusDropdown: document.getElementById('statusDropdown'),
+        jobWonModal: document.getElementById('jobWonModal')
+      };
+      init();
+    });
+
+    // ===== HELPERS =====
+    function validateDriverId(id) { return id && /^[a-zA-Z0-9_-]+$/.test(id); }
+    function saveToStorage(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+    function showMicIndicator() { state.els.micIndicator.style.display = 'block'; }
+    function hideMicIndicator() { state.els.micIndicator.style.display = 'none'; }
+    function updateChatList() {}
+    function formatFare(fare) {
+      if (fare == null || fare === '') return null;
+      const num = typeof fare === 'string' ? parseFloat(fare.replace(/[£$,]/g, '')) : Number(fare);
+      if (isNaN(num)) return null;
+      return `£${num.toFixed(2)}`;
+    }
+
+    // ===== TTS / STT =====
+    function speakFeedback(message, onDone = null) {
+      if (!('speechSynthesis' in window)) { if (onDone) setTimeout(onDone, 100); return; }
+      state.isSpeaking = true;
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(message);
+      u.lang = 'en-GB'; u.rate = 0.9;
+      u.onend = () => { state.isSpeaking = false; if (onDone) setTimeout(onDone, 600); };
+      speechSynthesis.speak(u);
+    }
+
+    function startVoiceListener() {
+      if (state.isSpeaking || state.speechRecognition) return;
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) return;
+      state.speechRecognition = new SR();
+      state.speechRecognition.lang = 'en-US';
+      state.speechRecognition.continuous = false;
+      state.speechRecognition.interimResults = false;
+      state.speechRecognition.onresult = (e) => {
+        const t = e.results[0][0].transcript.toLowerCase();
+        if (/\baccept\b/.test(t) && !/\breject\b/.test(t)) {
+          state.voiceAttemptCount = 0;
+          respondToJob(true);
+          speakFeedback("Job accepted. Thank you.");
+        } else if (/\breject\b/.test(t)) {
+          state.voiceAttemptCount = 0;
+          respondToJob(false);
+          speakFeedback("Job rejected. Understood.");
+        } else {
+          state.voiceAttemptCount++;
+          stopVoiceListener();
+          promptForVoiceResponse();
+        }
+        state.speechRecognition = null;
+      };
+      state.speechRecognition.onerror = () => { state.speechRecognition = null; };
+      state.speechRecognition.onend = () => { state.speechRecognition = null; hideMicIndicator(); };
+      try { state.speechRecognition.start(); } catch (e) {}
+    }
+
+    function stopVoiceListener() {
+      hideMicIndicator();
+      if (state.speechRecognition) { state.speechRecognition.abort(); state.speechRecognition = null; }
+    }
+
+    function promptForVoiceResponse() {
+      if (state.isSpeaking || !state.isJobActive) return;
+      if (state.voiceAttemptCount === 0) {
+        showMicIndicator();
+        setTimeout(startVoiceListener, 300);
+      } else if (state.voiceAttemptCount < 3) {
+        speakFeedback("Did not hear you. Please say 'accept' or 'reject'.", () => { showMicIndicator(); startVoiceListener(); });
+      } else {
+        speakFeedback("Let me repeat the job.", () => {
+          const job = state.currentJob;
+          if (job) {
+            const fareText = job.fare ? `. Fare: ${job.fare}` : '';
+            const u = new SpeechSynthesisUtterance(
+              `Pickup at ${job.pickup || job.pubName}. Dropoff: ${job.dropoff || 'not specified'}. Customer: ${job.customerName || 'name not given'}${fareText}`
+            );
+            u.onend = () => { state.voiceAttemptCount = 0; showMicIndicator(); setTimeout(promptForVoiceResponse, 300); };
+            speechSynthesis.speak(u);
+          }
+        });
+      }
+    }
+
+    // ===== JOB SYSTEM =====
+    function cleanupJob() {
+      if (state.jobTimerInterval) clearInterval(state.jobTimerInterval);
+      state.els.jobPanel.style.display = 'none';
+      stopVoiceListener();
+      speechSynthesis.cancel();
+      state.currentJob = null;
+      state.isJobActive = false;
+    }
+
+    function showJobPanel(job) {
+      state.isJobActive = true;
+      state.currentJob = job;
+      state.els.jobPanel.style.display = 'block';
+
+      // Pickup & Dropoff from dispatcher payload
+      const pickup = job.pickup || job.pubName || `(${job.lat?.toFixed(5)}, ${job.lng?.toFixed(5)})`;
+      const dropoff = job.dropoff || job.destination || '—';
+      state.els.jobPickup.textContent = pickup;
+      state.els.jobDropoff.textContent = dropoff;
+      state.els.jobPassengers.textContent = job.passengers || '—';
+      state.els.customerName.textContent = job.customerName || 'Not provided';
+      state.els.customerPhone.textContent = job.customerPhone || 'Not provided';
+
+      // Fare
+      const fareStr = formatFare(job.fare);
+      if (fareStr) {
+        state.els.jobFare.textContent = fareStr;
+        state.els.jobFare.style.display = 'block';
+      } else {
+        state.els.jobFare.style.display = 'none';
+      }
+
+      state.els.jobTimer.style.display = 'block';
+      state.els.timerSeconds.textContent = '30';
+      let sec = 30;
+      state.jobTimerInterval = setInterval(() => {
+        sec--;
+        state.els.timerSeconds.textContent = sec;
+        if (sec <= 0) { clearInterval(state.jobTimerInterval); cleanupJob(); }
+      }, 1000);
+
+      const fareAnnounce = fareStr ? `. Fare: ${fareStr}` : '';
+      speakFeedback(`New job! Pickup at ${pickup}. Going to ${dropoff}${fareAnnounce}. Customer: ${job.customerName || 'name not given'}`, () => {
+        state.voiceAttemptCount = 0;
+        promptForVoiceResponse();
+      });
+    }
+
+    function respondToJob(accepted, job = state.currentJob) {
+      if (!job || !state.client) return;
+      if (state.jobTimerInterval) clearInterval(state.jobTimerInterval);
+      stopVoiceListener();
+      speechSynthesis.cancel();
+      const payload = {
+        job: job.job,
+        driver: state.DRIVER_ID,
+        status: accepted ? "bidding" : "rejected",
+        lat: state.driverCoords?.lat || job.lat,
+        lng: state.driverCoords?.lng || job.lng,
+        ts: Date.now()
+      };
+      state.client.publish(`jobs/${job.job}/status`, JSON.stringify(payload));
+      if (job === state.currentJob) {
+        cleanupJob();
+        addJobToHistory(job, accepted ? "bidding" : "rejected");
+      } else {
+        addJobToHistory(job, accepted ? "bidding" : "rejected");
+      }
+    }
+
+    function addJobToHistory(jobData, initialStatus = 'queued') {
+      if (!jobData) return;
+      const job = { ...jobData, status: initialStatus, timestamp: Date.now(), driver: state.DRIVER_ID };
+      const existingIndex = state.driverJobs.findIndex(j => j.job === job.job);
+      if (existingIndex >= 0) {
+        state.driverJobs[existingIndex] = { ...state.driverJobs[existingIndex], ...job };
+      } else {
+        state.driverJobs.unshift(job);
+        if (state.driverJobs.length > 50) state.driverJobs = state.driverJobs.slice(0, 50);
+      }
+      localStorage.setItem(`driver_jobs_${state.DRIVER_ID}`, JSON.stringify(state.driverJobs));
+      if (state.isMenuOpen && state.currentView === 'jobHistory') renderJobHistory();
+      if (state.isMenuOpen && state.currentView === 'currentJob') renderCurrentJob();
+    }
+
+    // ===== MENU SYSTEM =====
+    function renderCurrentJob() {
+      const allocated = state.driverJobs.find(j => j.status === 'allocated');
+      if (!allocated) {
+        state.els.menuContent.innerHTML = '<div class="no-current-job"><div class="icon">🚕</div><div>No active job</div></div>';
+        return;
+      }
+      const pickup = allocated.pickup || allocated.pubName || '—';
+      const dropoff = allocated.dropoff || allocated.destination || '—';
+      const fareStr = formatFare(allocated.fare);
+      const fareHtml = fareStr
+        ? `<div class="job-detail"><div class="job-label">💰 Fare</div><div class="job-value"><span class="job-fare-badge">${fareStr}</span></div></div>`
+        : '';
+      state.els.menuContent.innerHTML = `
+        <div class="current-job-info">
+          <div class="job-detail"><div class="job-label">Job ID</div><div class="job-value">${allocated.job}</div></div>
+          <div class="job-detail"><div class="job-label">📍 Pickup</div><div class="job-value">${pickup}</div></div>
+          <div class="job-detail"><div class="job-label">🏁 Dropoff</div><div class="job-value">${dropoff}</div></div>
+          ${fareHtml}
+          <div class="job-detail"><div class="job-label">👥 Passengers</div><div class="job-value">${allocated.passengers || '—'}</div></div>
+          <div class="job-detail"><div class="job-label">👤 Customer</div><div class="job-value">${allocated.customerName || '—'}</div></div>
+          <div class="job-detail"><div class="job-label">📞 Phone</div><div class="job-value">${allocated.customerPhone || '—'}</div></div>
+          <div class="job-detail"><div class="job-label">Status</div><div class="job-value"><span class="job-status status-allocated">ALLOCATED</span></div></div>
+        </div>
+        <button class="settings-btn" onclick="window.open('https://www.google.com/maps/dir/?api=1&destination=${allocated.lat},${allocated.lng}', '_blank')">🧭 Navigate to Pickup</button>
+        <button class="settings-btn" style="background:#28a745; margin-top:8px;" onclick="window.location.href='tel:${(allocated.customerPhone||'').replace(/\\D/g,'')}'">📞 Call Customer</button>
+      `;
+    }
+
+    function renderJobHistory() {
+      state.els.menuContent.innerHTML = '';
+      if (state.driverJobs.length === 0) {
+        state.els.menuContent.innerHTML = '<div style="text-align:center; padding:50px; color:#666;">No jobs in history</div>';
+        return;
+      }
+      const container = document.createElement('div');
+      container.id = 'jobHistoryContent';
+      state.driverJobs.forEach(job => {
+        const el = document.createElement('div');
+        el.className = `job-item ${job.status}`;
+        el.dataset.jobId = job.job;
+        const date = new Date(job.timestamp);
+        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute:'2-digit' });
+        const dateStr = date.toLocaleDateString();
+        const pickup = job.pickup || job.pubName || '—';
+        const dropoff = job.dropoff || job.destination || '—';
+        const fareStr = formatFare(job.fare);
+        const fareHtml = fareStr ? `<span class="job-fare-tag">${fareStr}</span>` : '';
+        let actionButtons = '';
+        if (job.status === 'queued') {
+          actionButtons = `
+            <div style="display:flex; gap:8px; margin-top:10px;">
+              <button class="settings-btn" style="flex:1; padding:8px; font-size:14px;" data-action="view" data-jobid="${job.job}">View</button>
+              <button class="settings-btn" style="flex:1; padding:8px; font-size:14px; background:#28a745;" data-action="bid" data-jobid="${job.job}">💰 Bid</button>
+            </div>
+          `;
+        }
+        el.innerHTML = `
+          <div class="job-id">${job.job}</div>
+          <div class="job-route">📍 ${pickup} <span class="arrow">→</span> 🏁 ${dropoff}</div>
+          <div class="job-meta">👤 ${job.customerName || '—'} · 📞 ${job.customerPhone || '—'} · 👥 ${job.passengers || '—'}</div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+            <div>${fareHtml} <span class="job-status status-${job.status}">${job.status.toUpperCase()}</span></div>
+            <span style="font-size:12px; color:#666;">${dateStr} ${timeStr}</span>
+          </div>
+          ${actionButtons}
+        `;
+        container.appendChild(el);
+      });
+      state.els.menuContent.appendChild(container);
+      // Action button listeners
+      state.els.menuContent.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const action = e.target.dataset.action;
+          const jobId = e.target.dataset.jobid;
+          const job = state.pendingJobs.find(j => j.job === jobId) || state.driverJobs.find(j => j.job === jobId && j.status === 'queued');
+          if (!job) { alert("Job no longer available."); return; }
+          if (action === 'view') {
+            if (state.isJobActive) { alert("Please finish the current job first."); return; }
+            showJobPanel(job);
+          } else if (action === 'bid') {
+            respondToJob(true, job);
+          }
+        });
+      });
+      attachSwipeToDelete();
+    }
+
+    function attachSwipeToDelete() {
+      const items = document.querySelectorAll('#jobHistoryContent .job-item');
+      items.forEach(item => {
+        let startX = 0, currentX = 0, isSwiping = false;
+        const handleStart = (x) => { startX = x; currentX = x; isSwiping = true; };
+        const handleMove = (x) => {
+          if (!isSwiping) return;
+          currentX = x;
+          const diff = currentX - startX;
+          if (diff > 0) { item.classList.add('swiping'); item.style.transform = `translateX(${Math.min(diff, 80)}px)`; }
+          else { item.classList.remove('swiping'); item.style.transform = ''; }
+        };
+        const handleEnd = () => {
+          if (!isSwiping) return;
+          const diff = currentX - startX;
+          item.classList.remove('swiping');
+          item.style.transform = '';
+          isSwiping = false;
+          if (diff > 50) {
+            const jobId = item.dataset.jobId;
+            if (confirm(`🗑️ Delete job '${jobId}'?`)) {
+              item.style.transition = 'transform 0.3s, opacity 0.3s';
+              item.style.transform = 'translateX(100vw)';
+              item.style.opacity = '0';
+              setTimeout(() => {
+                state.driverJobs = state.driverJobs.filter(j => j.job !== jobId);
+                localStorage.setItem(`driver_jobs_${state.DRIVER_ID}`, JSON.stringify(state.driverJobs));
+                if (state.isMenuOpen && state.currentView === 'jobHistory') renderJobHistory();
+              }, 300);
+            }
+          }
+        };
+        item.addEventListener('touchstart', e => { handleStart(e.touches[0].clientX); e.preventDefault(); });
+        item.addEventListener('touchmove', e => { handleMove(e.touches[0].clientX); e.preventDefault(); });
+        item.addEventListener('touchend', handleEnd);
+        item.addEventListener('mousedown', e => { handleStart(e.clientX); e.preventDefault(); });
+        item.addEventListener('mousemove', e => { if (isSwiping) { handleMove(e.clientX); e.preventDefault(); } });
+        item.addEventListener('mouseup', handleEnd);
+        item.addEventListener('mouseleave', () => { if (isSwiping) handleEnd(); });
+        item.addEventListener('selectstart', e => e.preventDefault());
+      });
+    }
+
+    // ===== CHAT SYSTEM =====
+    function renderChatView() {
+      state.els.menuContent.innerHTML = `
+        <div id="chatContent" style="height:100%; display:flex; flex-direction:column;">
+          <div id="driverListContainer">
+            <div class="driver-list-header">Online Drivers</div>
+            <div id="onlineDriverList"></div>
+          </div>
+          <div id="chatList" style="flex:1; overflow-y:auto; padding:8px;">
+            <div class="contact-item" data-chat="group">
+              <div class="other-driver-icon" style="background:#6f42c1;">GC</div>
+              <div class="contact-info">
+                <div class="contact-name">Group Chat</div>
+                <div class="contact-status">All drivers</div>
+              </div>
+              ${state.unreadCounts.group > 0 ? `<div class="unread-badge">${state.unreadCounts.group}</div>` : ''}
+            </div>
+          </div>
+          <div id="chatMessages" style="flex:1; padding:16px; overflow-y:auto; display:none; flex-direction:column; gap:12px;"></div>
+          <div id="chatInputContainer" style="padding:12px; background:white; border-top:1px solid #eee; display:none; align-items:center;">
+            <input type="text" id="chatInput" placeholder="Type a message..." autocomplete="off" style="flex:1; padding:14px; border:2px solid #ddd; border-radius:24px; font-size:16px;">
+            <button id="sendBtn" style="background:#000; color:#FFD700; border:none; width:52px; height:52px; border-radius:50%; margin-left:12px; cursor:pointer; font-weight:bold; font-size:20px;">➤</button>
+          </div>
+        </div>
+      `;
+      const chatListEl = document.getElementById('chatList');
+      if (chatListEl) {
+        chatListEl.addEventListener('click', (e) => {
+          const contact = e.target.closest('.contact-item');
+          if (contact) { e.stopPropagation(); openChat(contact.dataset.chat); }
+        });
+      }
+      updateOnlineDriverList();
+      openChat('group');
+    }
+
+    function updateOnlineDriverList() {
+      const el = document.getElementById('onlineDriverList');
+      if (!el) return;
+      el.innerHTML = '';
+      const now = Date.now();
+      const online = Object.entries(state.driverStatus).filter(([id, d]) => id !== state.DRIVER_ID && now - (d.ts || 0) < 30000);
+      if (online.length === 0) { el.innerHTML = '<div class="driver-item"><div class="driver-id-text">No other drivers online</div></div>'; return; }
+      online.forEach(([id, d]) => {
+        const color = d.status === 'available' ? 'status-available-indicator' : d.status === 'busy' ? 'status-busy-indicator' : 'status-offline-indicator';
+        el.innerHTML += `<div class="driver-item"><div class="driver-status-dot ${color}"></div><div class="driver-id-text">${id}</div></div>`;
+      });
+    }
+
+    function openChat(chatId) {
+      state.currentChat = chatId;
+      const chatList = document.getElementById('chatList');
+      const chatMessages = document.getElementById('chatMessages');
+      const chatInputContainer = document.getElementById('chatInputContainer');
+      if (chatList) chatList.style.display = 'none';
+      if (chatMessages) chatMessages.style.display = 'flex';
+      if (chatInputContainer) chatInputContainer.style.display = 'flex';
+      state.unreadCounts[chatId] = 0;
+      renderChatMessages();
+      const chatInput = document.getElementById('chatInput');
+      if (chatInput) chatInput.focus();
+      document.getElementById('sendBtn').onclick = sendChatMessage;
+      if (chatInput) chatInput.onkeypress = (e) => { if (e.key === 'Enter') sendChatMessage(); };
+    }
+
+    function renderChatMessages() {
+      const el = document.getElementById('chatMessages');
+      if (!el) return;
+      el.innerHTML = '';
+      (state.chatMessages[state.currentChat] || []).forEach(msg => {
+        const text = typeof msg.text === 'string' ? msg.text : '[No message]';
+        const sender = typeof msg.sender === 'string' ? msg.sender : 'unknown';
+        const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--';
+        const div = document.createElement('div');
+        div.className = `message ${sender === state.DRIVER_ID ? 'sent' : 'received'}`;
+        div.innerHTML = `${text}<div style="display:flex; justify-content:space-between; margin-top:4px; font-size:11px; color:#aaa;"><span>${sender}</span><span>${time}</span></div>`;
+        el.appendChild(div);
+      });
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function sendChatMessage() {
+      const input = document.getElementById('chatInput');
+      const text = input?.value.trim();
+      if (!text || !state.client) return;
+      state.client.publish('chat/group', JSON.stringify({ sender: state.DRIVER_ID, text, timestamp: Date.now() }));
+      addMessage('group', state.DRIVER_ID, text);
+      input.value = '';
+    }
+
+    function addMessage(chatId, sender, text, timestamp = Date.now()) {
+      if (!state.chatMessages[chatId]) state.chatMessages[chatId] = [];
+      state.chatMessages[chatId].push({ sender, text, timestamp });
+      if (state.chatMessages[chatId].length > 50) state.chatMessages[chatId] = state.chatMessages[chatId].slice(-50);
+      localStorage.setItem(`chat_group_${state.DRIVER_ID}`, JSON.stringify(state.chatMessages.group));
+      if (state.isMenuOpen && state.currentView === 'chat') renderChatMessages();
+      if (!state.isMenuOpen || state.currentView !== 'chat') state.unreadCounts[chatId] = (state.unreadCounts[chatId] || 0) + 1;
+    }
+
+    // ===== SETTINGS =====
+    function renderSettingsView() {
+      state.els.menuContent.innerHTML = `
+        <div class="settings-group">
+          <div class="settings-label">Driver ID</div>
+          <input type="text" id="driverIdInput" class="settings-input" value="${state.DRIVER_ID || ''}">
+          <button class="settings-btn" id="saveDriverIdBtn">Save Driver ID</button>
+          <div class="settings-info">Current: <strong>${state.DRIVER_ID || 'Not set'}</strong></div>
+        </div>
+        <div class="settings-group">
+          <div class="settings-label">Max Job Radius (km)</div>
+          <input type="number" id="maxRadiusInput" class="settings-input" value="${state.maxRadius}" min="1" max="50" step="1">
+          <button class="settings-btn" id="saveRadiusBtn">Save Radius</button>
+        </div>
+        <div class="settings-group">
+          <button class="settings-btn" id="clearJobsBtn" style="background:#dc3545;">🗑️ Clear Job History</button>
+        </div>
+        <div class="settings-info" style="margin-top:16px;">
+          <strong>v10.3</strong> — Fare, Pickup & Dropoff fields<br>
+          MQTT: wss://broker.hivemq.com:8884/mqtt
+        </div>
+      `;
+      document.getElementById('saveDriverIdBtn').onclick = () => {
+        const newId = document.getElementById('driverIdInput').value.trim();
+        if (!validateDriverId(newId)) { alert('Invalid Driver ID'); return; }
+        localStorage.setItem('driver_id', newId);
+        state.DRIVER_ID = newId;
+        alert('Driver ID saved. Reloading...');
+        location.reload();
+      };
+      document.getElementById('saveRadiusBtn').onclick = () => {
+        const r = parseFloat(document.getElementById('maxRadiusInput').value);
+        if (r >= 1 && r <= 50) { state.maxRadius = r; localStorage.setItem('max_radius_km', r); alert(`Radius set to ${r} km`); }
+      };
+      document.getElementById('clearJobsBtn').onclick = () => {
+        if (confirm('Clear all job history?')) {
+          state.driverJobs = [];
+          localStorage.setItem(`driver_jobs_${state.DRIVER_ID}`, '[]');
+          alert('Job history cleared.');
+        }
+      };
+    }
+
+    // ===== RANK MODAL =====
+    let rankMap = null, rankDestCoords = null;
+    function openRankModal() {
+      const modal = document.getElementById('rankModal');
+      modal.style.display = 'flex';
+      if (!rankMap) {
+        setTimeout(() => {
+          rankMap = L.map('rankMapContainer').setView([state.driverCoords?.lat || 52.4, state.driverCoords?.lng || -1.5], 13);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OSM' }).addTo(rankMap);
+        }, 100);
+      } else {
+        rankMap.invalidateSize();
+      }
+    }
+    function closeRankModal() { document.getElementById('rankModal').style.display = 'none'; }
+    function searchRankDestination() {
+      const dest = document.getElementById('rankDestination').value.trim();
+      if (!dest) return;
+      fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(dest)}&format=json&limit=1`)
+        .then(r => r.json()).then(data => {
+          if (data[0]) {
+            rankDestCoords = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+            rankMap.setView([rankDestCoords.lat, rankDestCoords.lng], 14);
+            L.marker([rankDestCoords.lat, rankDestCoords.lng]).addTo(rankMap).bindPopup(data[0].display_name).openPopup();
+          }
+        }).catch(() => {});
+    }
+    function viewDriversOnRank() {
+      if (!rankMap) return;
+      Object.entries(state.otherDrivers).forEach(([id, d]) => {
+        if (d.lat && d.lng) L.circleMarker([d.lat, d.lng], { radius: 6, color: '#1f6feb', fillOpacity: 0.8 }).addTo(rankMap).bindPopup(`Driver ${id}`);
+      });
+    }
+    function navigateFromRank() {
+      if (rankDestCoords) window.open(`https://www.google.com/maps/dir/?api=1&destination=${rankDestCoords.lat},${rankDestCoords.lng}`, '_blank');
+    }
+
+    // ===== PASSENGER REPLIES =====
+    function sendPresetReply(text) {
+      if (!state.currentJob || !state.client) return;
+      const payload = { driver: state.DRIVER_ID, job: state.currentJob.job, text, ts: Date.now() };
+      state.client.publish('server/preset_replies', JSON.stringify(payload));
+      document.getElementById('passengerPopup').style.display = 'none';
+    }
+
+    // ===== MAP & GPS =====
+    function initMap() {
+      state.map = L.map('map').setView([52.41, -1.51], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OSM' }).addTo(state.map);
+      document.getElementById('loadingOverlay').style.display = 'none';
+    }
+
+    function startGps() {
+      if (!navigator.geolocation) return;
+      state.gpsWatchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          state.driverCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          if (state.driverMarker) {
+            state.driverMarker.setLatLng([state.driverCoords.lat, state.driverCoords.lng]);
+          } else {
+            state.driverMarker = L.marker([state.driverCoords.lat, state.driverCoords.lng], {
+              icon: L.divIcon({ className: 'taxi-marker', html: '<div style="font-size:28px;">🚕</div>', iconSize: [30, 30], iconAnchor: [15, 15] })
+            }).addTo(state.map);
+            state.map.setView([state.driverCoords.lat, state.driverCoords.lng], 14);
+          }
+          publishLocation();
+        },
+        () => { state.els.status.textContent = '⚠️ GPS unavailable'; },
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+      );
+    }
+
+    function publishLocation() {
+      if (!state.client || !state.driverCoords || !state.DRIVER_ID) return;
+      const payload = {
+        driver: state.DRIVER_ID,
+        lat: state.driverCoords.lat,
+        lng: state.driverCoords.lng,
+        status: state.driverPresence,
+        ts: Date.now(),
+        heading: 0
+      };
+      state.client.publish(`drivers/${state.DRIVER_ID}/location`, JSON.stringify(payload));
+    }
+
+    // ===== MQTT =====
+    function connectMqtt() {
+      const brokerUrl = 'wss://broker.hivemq.com:8884/mqtt';
+      state.client = mqtt.connect(brokerUrl, { clientId: `driver-${state.DRIVER_ID}-${Date.now()}` });
+
+      state.client.on('connect', () => {
+        console.log('✅ MQTT connected');
+        state.els.status.textContent = '✅ Connected';
+        // Subscribe to relevant topics
+        state.client.subscribe(`drivers/${state.DRIVER_ID}/bid-request`);
+        state.client.subscribe(`drivers/${state.DRIVER_ID}/jobs`);
+        state.client.subscribe('jobs/+/status');
+        state.client.subscribe('jobs/+/bidding');
+        state.client.subscribe(`jobs/+/result/${state.DRIVER_ID}`);
+        state.client.subscribe('drivers/+/location');
+        state.client.subscribe('drivers/+/status');
+        state.client.subscribe('chat/group');
+        state.client.subscribe('server/presets');
+        state.client.subscribe('drivers/tokens');
+        // Publish initial status
+        publishStatus();
+        // Start GPS publishing interval
+        setInterval(publishLocation, 5000);
+      });
+
+      state.client.on('message', (topic, message) => {
+        try {
+          const json = JSON.parse(message.toString());
+          handleMqttMessage(topic, json);
+        } catch (e) {
+          console.error('MQTT parse error:', e);
+        }
+      });
+
+      state.client.on('error', (err) => {
+        console.error('MQTT error:', err);
+        state.els.status.textContent = '❌ Connection error';
+      });
+
+      state.client.on('offline', () => {
+        state.els.status.textContent = '⚠️ Reconnecting...';
+      });
+    }
+
+    function handleMqttMessage(topic, data) {
+      // Driver GPS updates (other drivers)
+      if (topic.startsWith('drivers/') && topic.endsWith('/location')) {
+        const driverId = topic.split('/')[1];
+        if (driverId !== state.DRIVER_ID) {
+          state.otherDrivers[driverId] = { lat: data.lat, lng: data.lng, status: data.status, ts: data.ts };
+          // Update driver marker on map
+          updateOtherDriverMarker(driverId, data);
+        }
+        return;
+      }
+
+      // Driver status updates
+      if (topic.startsWith('drivers/') && topic.endsWith('/status')) {
+        const driverId = topic.split('/')[1];
+        if (driverId !== state.DRIVER_ID) {
+          state.driverStatus[driverId] = { status: data.status, ts: data.ts || Date.now() };
+          if (state.isMenuOpen && state.currentView === 'chat') updateOnlineDriverList();
+        }
+        return;
+      }
+
+      // Bid request — show job panel
+      if (topic === `drivers/${state.DRIVER_ID}/bid-request`) {
+        const jobId = data.jobId || data.job;
+        if (!jobId || state.seenJobIds.has(jobId)) return;
+        state.seenJobIds.add(jobId);
+        const jobData = {
+          job: jobId,
+          pubName: data.pickup || data.pubName || '',
+          pickup: data.pickup || data.pubName || '',
+          dropoff: data.dropoff || data.destination || '',
+          customerName: data.customerName || '',
+          customerPhone: data.customerPhone || '',
+          lat: data.pickupLat || data.lat || 0,
+          lng: data.pickupLng || data.lng || 0,
+          dropoffLat: data.dropoffLat || 0,
+          dropoffLng: data.dropoffLng || 0,
+          passengers: data.passengers || 1,
+          fare: data.fare || data.estimatedFare || null,
+        };
+        if (!state.isJobActive) {
+          showJobPanel(jobData);
+        } else {
+          state.pendingJobs.push(jobData);
+          localStorage.setItem(`pending_jobs_${state.DRIVER_ID}`, JSON.stringify(state.pendingJobs));
+          addJobToHistory(jobData, 'queued');
+        }
+        return;
+      }
+
+      // Job status updates (for all jobs)
+      if (topic.startsWith('jobs/') && topic.endsWith('/status')) {
+        const jobId = topic.split('/')[1];
+        const status = data.status;
+
+        // If this is an allocation for THIS driver, show it
+        if (status === 'allocated' && data.driver === state.DRIVER_ID) {
+          const jobData = {
+            job: jobId,
+            pubName: data.pubName || data.pickup || '',
+            pickup: data.pickup || data.pubName || '',
+            dropoff: data.dropoff || data.destination || '',
+            pickupDropoff: data.pickupDropoff || '',
+            customerName: data.customerName || '',
+            customerPhone: data.customerPhone || '',
+            lat: data.lat || data.pickupLat || 0,
+            lng: data.lng || data.pickupLng || 0,
+            dropoffLat: data.dropoffLat || 0,
+            dropoffLng: data.dropoffLng || 0,
+            passengers: data.passengers || 1,
+            fare: data.fare || null,
+          };
+          addJobToHistory(jobData, 'allocated');
+          // Show "won" modal if not already showing job panel for this
+          if (!state.isJobActive || (state.currentJob && state.currentJob.job !== jobId)) {
+            state.els.jobWonModal.style.display = 'flex';
+            setTimeout(() => { state.els.jobWonModal.style.display = 'none'; }, 3000);
+          }
+          if (state.isJobActive && state.currentJob && state.currentJob.job === jobId) {
+            cleanupJob();
+          }
+          return;
+        }
+
+        // If this is a bid-request broadcast
+        if (status === 'bidding') {
+          if (state.seenJobIds.has(jobId)) return;
+          state.seenJobIds.add(jobId);
+          const jobData = {
+            job: jobId,
+            pubName: data.pubName || data.pickup || '',
+            pickup: data.pickup || data.pubName || '',
+            dropoff: data.dropoff || data.destination || '',
+            customerName: data.customerName || '',
+            customerPhone: data.customerPhone || '',
+            lat: data.lat || data.pickupLat || 0,
+            lng: data.lng || data.pickupLng || 0,
+            dropoffLat: data.dropoffLat || 0,
+            dropoffLng: data.dropoffLng || 0,
+            passengers: data.passengers || 1,
+            fare: data.fare || null,
+          };
+          if (!state.isJobActive) {
+            showJobPanel(jobData);
+          } else {
+            state.pendingJobs.push(jobData);
+            localStorage.setItem(`pending_jobs_${state.DRIVER_ID}`, JSON.stringify(state.pendingJobs));
+            addJobToHistory(jobData, 'queued');
+          }
+          return;
+        }
+
+        // Update existing job status
+        const existing = state.driverJobs.find(j => j.job === jobId);
+        if (existing) {
+          existing.status = status;
+          // Update fields if present in payload
+          if (data.pickup) existing.pickup = data.pickup;
+          if (data.dropoff) existing.dropoff = data.dropoff;
+          if (data.fare) existing.fare = data.fare;
+          if (data.passengers) existing.passengers = data.passengers;
+          if (data.customerName) existing.customerName = data.customerName;
+          if (data.customerPhone) existing.customerPhone = data.customerPhone;
+          localStorage.setItem(`driver_jobs_${state.DRIVER_ID}`, JSON.stringify(state.driverJobs));
+          if (state.isMenuOpen) {
+            if (state.currentView === 'jobHistory') renderJobHistory();
+            if (state.currentView === 'currentJob') renderCurrentJob();
+          }
+        }
+        return;
+      }
+
+      // Job result — won/lost
+      if (topic.startsWith('jobs/') && topic.includes('/result/')) {
+        const jobId = topic.split('/')[1];
+        if (data.result === 'won') {
+          const jobData = {
+            job: jobId,
+            pubName: data.pubName || data.pickup || '',
+            pickup: data.pickup || data.pubName || '',
+            dropoff: data.dropoff || data.destination || '',
+            pickupDropoff: data.pickupDropoff || '',
+            customerName: data.customerName || '',
+            customerPhone: data.customerPhone || '',
+            lat: data.lat || data.pickupLat || 0,
+            lng: data.lng || data.pickupLng || 0,
+            dropoffLat: data.dropoffLat || 0,
+            dropoffLng: data.dropoffLng || 0,
+            passengers: data.passengers || 1,
+            fare: data.fare || null,
+          };
+          addJobToHistory(jobData, 'allocated');
+          state.els.jobWonModal.style.display = 'flex';
+          speakFeedback(`You won the job! Pickup at ${jobData.pickup}. Going to ${jobData.dropoff}.`);
+          setTimeout(() => { state.els.jobWonModal.style.display = 'none'; }, 4000);
+          if (state.isJobActive && state.currentJob?.job === jobId) cleanupJob();
+        } else {
+          addJobToHistory({ job: jobId }, 'lost');
+        }
+        return;
+      }
+
+      // Legacy: direct job allocation
+      if (topic === `drivers/${state.DRIVER_ID}/jobs`) {
+        const jobData = {
+          job: data.jobId || data.job,
+          pubName: data.pubName || data.pickup || '',
+          pickup: data.pickup || data.pubName || '',
+          dropoff: data.dropoff || data.destination || '',
+          customerName: data.customerName || '',
+          customerPhone: data.customerPhone || '',
+          lat: data.pickupLat || data.lat || 0,
+          lng: data.pickupLng || data.lng || 0,
+          dropoffLat: data.dropoffLat || 0,
+          dropoffLng: data.dropoffLng || 0,
+          passengers: data.passengers || 1,
+          fare: data.fare || null,
+        };
+        addJobToHistory(jobData, 'allocated');
+        return;
+      }
+
+      // Chat
+      if (topic === 'chat/group') {
+        if (data.sender !== state.DRIVER_ID) {
+          addMessage('group', data.sender, data.text, data.timestamp);
+        }
+        return;
+      }
+
+      // Server presets (passenger messages)
+      if (topic === 'server/presets') {
+        const popup = document.getElementById('passengerPopup');
+        const msgEl = document.getElementById('passengerMessage');
+        if (popup && msgEl) {
+          msgEl.textContent = data.text || data.message || 'Passenger message';
+          popup.style.display = 'block';
+          setTimeout(() => { popup.style.display = 'none'; }, 15000);
+        }
+        return;
+      }
+
+      // FCM token registration
+      if (topic === 'drivers/tokens') {
+        // Respond with our token if we have one
+        if (state.fcmToken && data.request === 'tokens') {
+          state.client.publish('drivers/tokens', JSON.stringify({ driver: state.DRIVER_ID, token: state.fcmToken }));
+        }
+        return;
+      }
+    }
+
+    // Other driver markers
+    const otherDriverMarkers = {};
+    function updateOtherDriverMarker(driverId, data) {
+      if (!state.map || !data.lat || !data.lng) return;
+      if (otherDriverMarkers[driverId]) {
+        otherDriverMarkers[driverId].setLatLng([data.lat, data.lng]);
+      } else {
+        const color = data.status === 'available' ? '#28a745' : data.status === 'busy' ? '#ffc107' : '#6c757d';
+        otherDriverMarkers[driverId] = L.circleMarker([data.lat, data.lng], {
+          radius: 7, color: color, fillColor: color, fillOpacity: 0.8, weight: 2
+        }).addTo(state.map).bindPopup(`Driver ${driverId}`);
+      }
+    }
+
+    // ===== STATUS =====
+    function publishStatus() {
+      if (!state.client || !state.DRIVER_ID) return;
+      const payload = {
+        status: state.driverPresence,
+        lat: state.driverCoords?.lat || 0,
+        lng: state.driverCoords?.lng || 0,
+        name: state.DRIVER_ID,
+        ts: Date.now()
+      };
+      state.client.publish(`drivers/${state.DRIVER_ID}/status`, JSON.stringify(payload));
+    }
+
+    function setDriverStatus(status) {
+      state.driverPresence = status;
+      localStorage.setItem('driver_presence', status);
+      const caption = document.getElementById('statusCaption');
+      const statusMap = { available: 'Available', busy: 'Busy', offline: 'Offline' };
+      caption.className = `status-${status}`;
+      caption.innerHTML = `<span class="status-dot"></span> ${statusMap[status] || status}`;
+      publishStatus();
+      state.els.statusDropdown.style.display = 'none';
+    }
+
+    // ===== WAKE LOCK =====
+    async function acquireWakeLock() {
+      if ('wakeLock' in navigator) {
+        try {
+          state.wakeLock = await navigator.wakeLock.request('screen');
+          state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+        } catch (e) {}
+      }
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !state.wakeLock) acquireWakeLock();
+    });
+
+    // ===== INIT =====
+    function init() {
+      // Prompt for driver ID if not set
+      if (!state.DRIVER_ID || !validateDriverId(state.DRIVER_ID)) {
+        const id = prompt('Enter your Driver ID:');
+        if (!id || !validateDriverId(id)) { alert('Invalid Driver ID'); return; }
+        localStorage.setItem('driver_id', id);
+        state.DRIVER_ID = id;
+      }
+
+      initMap();
+      startGps();
+      connectMqtt();
+      acquireWakeLock();
+
+      // Set initial status display
+      setDriverStatus(state.driverPresence);
+
+      // Menu button
+      state.els.menuBtn.addEventListener('click', () => {
+        state.isMenuOpen = !state.isMenuOpen;
+        if (state.isMenuOpen) {
+          state.els.menuPanel.classList.add('active');
+          switchView(state.currentView);
+        } else {
+          state.els.menuPanel.classList.remove('active');
+        }
+      });
+
+      // Menu nav buttons
+      document.querySelectorAll('.menu-nav-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchView(btn.dataset.view));
+      });
+
+      // Status dropdown
+      document.getElementById('appTitle').addEventListener('click', () => {
+        state.els.statusDropdown.style.display = state.els.statusDropdown.style.display === 'none' ? 'block' : 'none';
+      });
+      document.querySelectorAll('.status-option').forEach(opt => {
+        opt.addEventListener('click', () => {
+          const s = opt.dataset.status;
+          if (s === 'logoff') { if (confirm('Log off?')) location.reload(); return; }
+          setDriverStatus(s);
+        });
+      });
+
+      // Accept/Reject buttons
+      state.els.acceptBtn.addEventListener('click', () => { respondToJob(true); speakFeedback("Job accepted."); });
+      state.els.rejectBtn.addEventListener('click', () => { respondToJob(false); speakFeedback("Job rejected."); });
+
+      // Rank button
+      document.getElementById('rankBtn').addEventListener('click', openRankModal);
+      document.getElementById('rankDestination').addEventListener('keypress', (e) => { if (e.key === 'Enter') searchRankDestination(); });
+
+      // Request notification permission
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
+
+      // FCM token
+      messaging.getToken({ vapidKey: '' }).then(token => {
+        if (token) {
+          state.fcmToken = token;
+          if (state.client?.connected) {
+            state.client.publish('drivers/tokens', JSON.stringify({ driver: state.DRIVER_ID, token }));
+          }
+        }
+      }).catch(() => {});
+    }
+
+    function switchView(view) {
+      state.currentView = view;
+      document.querySelectorAll('.menu-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+      switch (view) {
+        case 'currentJob': renderCurrentJob(); break;
+        case 'jobHistory': renderJobHistory(); break;
+        case 'chat': renderChatView(); break;
+        case 'settings': renderSettingsView(); break;
+      }
+    }
+  </script>
+</body>
+</html>
