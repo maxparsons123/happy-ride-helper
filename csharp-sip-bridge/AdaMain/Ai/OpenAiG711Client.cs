@@ -1446,10 +1446,9 @@ If the user says NO to ""anything else"":
 You MUST perform the FINAL CLOSING and then call end_call.
 
 IMPORTANT: If sync_booking_data returns needs_clarification=true,
-you MUST present the alternatives_list to the caller as a numbered list.
-Read each option clearly, e.g. 'I found a few matches for that address:
-1) School Road in Hall Green, 2) School Road in Moseley, 3) School Road in Yardley.
-Which one is it?'
+you MUST present the alternatives from the tool result to the caller as a numbered list.
+Read each option clearly and ask which one they mean.
+NEVER invent or guess alternatives — ONLY use the ones returned by the tool.
 WAIT for the caller to pick one. Then call sync_booking_data with the full address
 including the city/area name they chose.
 ==============================
