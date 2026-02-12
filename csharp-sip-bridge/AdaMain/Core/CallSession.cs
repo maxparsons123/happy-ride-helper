@@ -281,18 +281,17 @@ public sealed class CallSession : ICallSession
                         {
                             var which = result.PickupAlternatives?.Length > 0 ? "pickup" : "destination";
                             clarifMsg = $"[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED.\n" +
-                                $"The {which} address is ambiguous. Present these alternatives to the caller and ask them to pick one:\n" +
+                                $"The {which} address is ambiguous. Present ONLY these alternatives to the caller and ask which one they mean:\n" +
                                 string.Join("\n", altsList) + "\n\n" +
-                                (result.ClarificationMessage != null ? $"Suggested question: \"{result.ClarificationMessage}\"\n" : "") +
-                                "Read the alternatives clearly, e.g. 'I found a few options: 1) David Road in Coventry, 2) David Road in Birmingham, 3) David Road in London. Which one is it?'\n" +
+                                "Read each option to the caller and ask them to choose. " +
                                 "Do NOT proceed with the booking until the caller picks one. " +
                                 "After they answer, call sync_booking_data with the corrected address INCLUDING the city name.";
                         }
                         else if (!string.IsNullOrWhiteSpace(result.ClarificationMessage))
                         {
-                            clarifMsg = $"[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED. You MUST ask the caller this question EXACTLY:\n" +
-                                $"\"{result.ClarificationMessage}\"\n" +
-                                "Do NOT proceed with the booking until the caller specifies which location they mean. " +
+                            clarifMsg = $"[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED.\n" +
+                                $"{result.ClarificationMessage}\n" +
+                                "Ask the caller to clarify. Do NOT proceed until they specify which location. " +
                                 "After they answer, call sync_booking_data with the corrected address including the city name.";
                         }
                         else
