@@ -433,6 +433,18 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     {
         if (!IsConnected) return;
         
+        // CRITICAL: If a fare result arrives while the AI is mid-response,
+        // cancel the active response first to prevent stale/hallucinated fare announcements.
+        // The AI will then generate a clean response using the injected fare data.
+        bool isFareResult = message.Contains("[FARE RESULT]") || message.Contains("ADDRESS DISAMBIGUATION");
+        if (isFareResult && Volatile.Read(ref _responseActive) == 1)
+        {
+            Log("🛑 Cancelling active response before fare/disambiguation injection");
+            await SendJsonAsync(new { type = "response.cancel" });
+            // Brief wait for cancel to take effect
+            await Task.Delay(50);
+        }
+        
         await SendJsonAsync(new
         {
             type = "conversation.item.create",

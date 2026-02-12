@@ -473,25 +473,41 @@ public sealed class CallSession : ICallSession
             };
         }
         
-        // GUARD: Reject book_taxi if fare recalculation is in progress (address was just corrected)
-        if (Volatile.Read(ref _autoQuoteInProgress) == 1 && string.IsNullOrWhiteSpace(_booking.Fare))
+        // GUARD: Reject book_taxi if pickup or destination are missing
+        if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
         {
-            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — fare recalculation in progress after address correction", SessionId);
+            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — pickup or destination not yet synced", SessionId);
+            // Reset the duplicate-prevention flag so the AI can retry after syncing
+            Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             return new
             {
                 success = false,
-                error = "STOP. A fare recalculation is in progress because the address was just changed. You MUST wait for the [FARE RESULT] message, read back the new verified addresses and fare, and get the user's explicit confirmation BEFORE calling book_taxi again."
+                error = "STOP. Pickup and/or destination have NOT been synced yet. You MUST call sync_booking_data with the pickup and destination FIRST, wait for the fare result, then ask the user to confirm before calling book_taxi."
             };
         }
         
-        // GUARD: Reject book_taxi if awaiting confirmation (AI should wait for user to say "yes" FIRST)
+        // GUARD: Reject book_taxi if fare recalculation is in progress (address was just corrected)
         if (Volatile.Read(ref _autoQuoteInProgress) == 1)
         {
-            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — awaiting user confirmation on fare", SessionId);
+            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — fare calculation in progress", SessionId);
+            // Reset the duplicate-prevention flag so the AI can retry after fare arrives
+            Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             return new
             {
                 success = false,
-                error = "You are still waiting for the user to hear and confirm the fare. Do NOT call book_taxi yet. Wait for the user to say yes/confirm/go ahead FIRST."
+                error = "STOP. A fare calculation is in progress. You MUST wait for the [FARE RESULT] message, read back the verified addresses and fare to the caller, and get their explicit confirmation BEFORE calling book_taxi again."
+            };
+        }
+        
+        // GUARD: Reject book_taxi if no fare has been calculated yet
+        if (string.IsNullOrWhiteSpace(_booking.Fare))
+        {
+            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — no fare calculated yet", SessionId);
+            Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+            return new
+            {
+                success = false,
+                error = "STOP. No fare has been calculated yet. Call sync_booking_data with all travel fields to trigger fare calculation, then wait for the [FARE RESULT] and get user confirmation before booking."
             };
         }
         
