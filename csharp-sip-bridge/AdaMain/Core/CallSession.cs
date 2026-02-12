@@ -167,6 +167,7 @@ public sealed class CallSession : ICallSession
         var prevDest = _booking.Destination;
         var prevPax = _booking.Passengers;
         var prevTime = _booking.PickupTime;
+        var prevName = _booking.Name;
         
         if (args.TryGetValue("caller_name", out var n)) _booking.Name = n?.ToString();
         if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
@@ -174,6 +175,35 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
             _booking.Passengers = pn;
         if (args.TryGetValue("pickup_time", out var pt)) _booking.PickupTime = pt?.ToString();
+        
+        // ⚠️ CRITICAL SECURITY CHECK: Name must be collected FIRST
+        // Reject any sync_booking_data that contains travel fields (pickup/dest/pax/time) without a name
+        bool hasName = !string.IsNullOrWhiteSpace(_booking.Name);
+        bool hasTravelField = !string.IsNullOrWhiteSpace(_booking.Pickup) ||
+                             !string.IsNullOrWhiteSpace(_booking.Destination) ||
+                             _booking.Passengers > 0 ||
+                             !string.IsNullOrWhiteSpace(_booking.PickupTime);
+        
+        if (hasTravelField && !hasName)
+        {
+            _logger.LogWarning("[{SessionId}] ❌ BLOCKED: sync_booking_data called with travel fields but NO name. Forcing name collection.", SessionId);
+            // Clear the travel fields that were just set — force the AI to ask for name first
+            _booking.Pickup = prevPickup;
+            _booking.Destination = prevDest;
+            _booking.Passengers = prevPax;
+            _booking.PickupTime = prevTime;
+            _booking.Name = prevName;
+            
+            // Inject a system message to force the AI back on track
+            if (_aiClient is OpenAiG711Client g711)
+            {
+                await g711.InjectMessageAndRespondAsync(
+                    "[SYSTEM] CRITICAL: You must collect the caller's NAME first before collecting any travel details (pickup/destination/passengers/time). " +
+                    "Ask for their name now.");
+            }
+            
+            return new { success = true, warning = "name_required_first" };
+        }
         
         // If any travel field changed after a fare was already calculated, reset fare to force re-quote
         bool travelFieldChanged = !string.IsNullOrWhiteSpace(_booking.Fare) && (
