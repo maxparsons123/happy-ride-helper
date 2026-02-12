@@ -205,21 +205,15 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             {
                 Instructions = _systemPrompt,
                 Voice = MapVoice(_settings.Voice),
-                Audio = new RealtimeSessionAudioConfiguration
+                InputAudioFormat = ConversationAudioFormat.G711Alaw,
+                OutputAudioFormat = ConversationAudioFormat.G711Alaw,
+                InputTranscriptionOptions = new ConversationInputTranscriptionOptions
                 {
-                    Input = new RealtimeSessionAudioInputConfiguration
-                    {
-                        Format = RealtimeAudioFormat.G711Alaw,
-                        Transcription = new InputTranscriptionOptions { Model = "whisper-1" }
-                    },
-                    Output = new RealtimeSessionAudioOutputConfiguration
-                    {
-                        Format = RealtimeAudioFormat.G711Alaw
-                    }
+                    Model = "whisper-1"
                 },
-                TurnDetectionOptions = ConversationTurnDetectionOptions.CreateServerVADOptions(
-                    threshold: 0.2f,
-                    prefixPadding: TimeSpan.FromMilliseconds(600),
+                TurnDetectionOptions = ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                    detectionThreshold: 0.2f,
+                    prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
                     silenceDuration: TimeSpan.FromMilliseconds(900))
             };
 
@@ -336,7 +330,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             }
 
             Log($"💉 Injecting: {(message.Length > 80 ? message[..80] + "..." : message)}");
-            await _session!.AddItemAsync(RealtimeItem.CreateUserMessage(new[] { message }));
+            await _session!.AddItemAsync(RealtimeItem.CreateUserMessage(new ConversationContentPart[] { ConversationContentPart.CreateInputTextPart(message) }));
             await _session.StartResponseAsync();
         }
         catch (Exception ex)
@@ -571,7 +565,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         {
             var greeting = $"[SYSTEM] A new caller has connected (ID: {_callerId}). " +
                            "Greet them warmly and ask how you can help.";
-            await _session.AddItemAsync(RealtimeItem.CreateUserMessage(new[] { greeting }));
+            await _session.AddItemAsync(RealtimeItem.CreateUserMessage(new ConversationContentPart[] { ConversationContentPart.CreateInputTextPart(greeting) }));
             await _session.StartResponseAsync();
             Log("📢 Greeting sent");
         }
@@ -619,7 +613,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             try
             {
                 await _session!.AddItemAsync(
-                    RealtimeItem.CreateUserMessage(new[] { "[SILENCE] Hello? Are you still there?" }));
+                    RealtimeItem.CreateUserMessage(new ConversationContentPart[] { ConversationContentPart.CreateInputTextPart("[SILENCE] Hello? Are you still there?") }));
                 await _session.StartResponseAsync();
             }
             catch (Exception ex)
