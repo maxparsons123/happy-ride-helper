@@ -20,6 +20,15 @@ public sealed class AppSettings
     public SupabaseSettings Supabase { get; set; } = new();
     public SimliSettings Simli { get; set; } = new();
     public SttSettings Stt { get; set; } = new();
+    public IcabbiSettings Icabbi { get; set; } = new();
+}
+
+public sealed class IcabbiSettings
+{
+    public bool Enabled { get; set; } = false;
+    public string AppKey { get; set; } = "";
+    public string SecretKey { get; set; } = "";
+    public string TenantBase { get; set; } = "https://yourtenant.icabbi.net";
 }
 
 public sealed class SipSettings

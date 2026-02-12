@@ -6,7 +6,7 @@ using AdaMain.Config;
 using AdaMain.Core;
 using AdaMain.Services;
 using AdaMain.Sip;
-using DispatchSystem.Services;
+
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
 
@@ -666,22 +666,11 @@ public partial class MainForm : Form
 
         // Optional iCabbi
         IcabbiBookingService? icabbi = null;
-        bool icabbiEnabled = false;
-        if (_settings.TryGetValue("Icabbi", out var icabbiObj) && icabbiObj is Dictionary<string, object> cfg)
+        var icabbiEnabled = _settings.Icabbi.Enabled;
+        if (icabbiEnabled && !string.IsNullOrEmpty(_settings.Icabbi.AppKey) && !string.IsNullOrEmpty(_settings.Icabbi.SecretKey))
         {
-            icabbiEnabled = cfg.ContainsKey("Enabled") && (bool)cfg["Enabled"];
-            if (icabbiEnabled)
-            {
-                var appKey = cfg.ContainsKey("AppKey") ? cfg["AppKey"].ToString() ?? "" : "";
-                var secretKey = cfg.ContainsKey("SecretKey") ? cfg["SecretKey"].ToString() ?? "" : "";
-                var tenantBase = cfg.ContainsKey("TenantBase") ? cfg["TenantBase"].ToString() ?? "https://yourtenant.icabbi.net" : "https://yourtenant.icabbi.net";
-                
-                if (!string.IsNullOrEmpty(appKey) && !string.IsNullOrEmpty(secretKey))
-                {
-                    icabbi = new IcabbiBookingService(appKey, secretKey, tenantBase: tenantBase);
-                    icabbi.OnLog += msg => Log($"🚕 {msg}");
-                }
-            }
+            icabbi = new IcabbiBookingService(_settings.Icabbi.AppKey, _settings.Icabbi.SecretKey, tenantBase: _settings.Icabbi.TenantBase);
+            icabbi.OnLog += msg => Log($"🚕 {msg}");
         }
 
         using var dlg = new BookingForm(fareCalc, dispatcher, factory.CreateLogger<BookingForm>(), _settings.Supabase, callerPhone, callerName, icabbi, icabbiEnabled);

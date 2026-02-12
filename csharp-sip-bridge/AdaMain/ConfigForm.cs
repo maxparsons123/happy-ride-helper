@@ -139,14 +139,11 @@ public class ConfigForm : Form
         txtBsqdApiKey.Text = Settings.Dispatch.BsqdApiKey;
         txtWhatsAppWebhook.Text = Settings.Dispatch.WhatsAppWebhookUrl;
 
-        // iCabbi settings (ensure they exist in config)
-        if (!Settings.ContainsKey("Icabbi"))
-            Settings["Icabbi"] = new Dictionary<string, object> { { "AppKey", "" }, { "SecretKey", "" }, { "TenantBase", "https://yourtenant.icabbi.net" }, { "Enabled", false } };
-        var icabbiCfg = (Dictionary<string, object>?)Settings["Icabbi"] ?? new();
-        txtIcabbiAppKey.Text = icabbiCfg.ContainsKey("AppKey") ? icabbiCfg["AppKey"].ToString() ?? "" : "";
-        txtIcabbiSecretKey.Text = icabbiCfg.ContainsKey("SecretKey") ? icabbiCfg["SecretKey"].ToString() ?? "" : "";
-        txtIcabbiTenantBase.Text = icabbiCfg.ContainsKey("TenantBase") ? icabbiCfg["TenantBase"].ToString() ?? "https://yourtenant.icabbi.net" : "https://yourtenant.icabbi.net";
-        chkIcabbiEnabled.Checked = icabbiCfg.ContainsKey("Enabled") && (bool)icabbiCfg["Enabled"];
+        // iCabbi settings
+        txtIcabbiAppKey.Text = Settings.Icabbi.AppKey;
+        txtIcabbiSecretKey.Text = Settings.Icabbi.SecretKey;
+        txtIcabbiTenantBase.Text = Settings.Icabbi.TenantBase;
+        chkIcabbiEnabled.Checked = Settings.Icabbi.Enabled;
 
         cmbCodec.SelectedItem = Settings.Audio.PreferredCodec;
         if (cmbCodec.SelectedIndex < 0) cmbCodec.SelectedIndex = 0;
@@ -170,13 +167,10 @@ public class ConfigForm : Form
         Settings.Dispatch.WhatsAppWebhookUrl = txtWhatsAppWebhook.Text.Trim();
 
         // iCabbi settings
-        if (!Settings.ContainsKey("Icabbi"))
-            Settings["Icabbi"] = new Dictionary<string, object>();
-        var icabbiCfg = (Dictionary<string, object>)Settings["Icabbi"];
-        icabbiCfg["AppKey"] = txtIcabbiAppKey.Text.Trim();
-        icabbiCfg["SecretKey"] = txtIcabbiSecretKey.Text.Trim();
-        icabbiCfg["TenantBase"] = txtIcabbiTenantBase.Text.Trim();
-        icabbiCfg["Enabled"] = chkIcabbiEnabled.Checked;
+        Settings.Icabbi.AppKey = txtIcabbiAppKey.Text.Trim();
+        Settings.Icabbi.SecretKey = txtIcabbiSecretKey.Text.Trim();
+        Settings.Icabbi.TenantBase = txtIcabbiTenantBase.Text.Trim();
+        Settings.Icabbi.Enabled = chkIcabbiEnabled.Checked;
 
         Settings.Audio.PreferredCodec = cmbCodec.SelectedItem?.ToString() ?? "PCMA";
         Settings.Audio.VolumeBoost = (double)nudVolumeBoost.Value;
