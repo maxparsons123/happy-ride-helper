@@ -23,7 +23,7 @@ interface BookingState {
 
 const INITIAL_MESSAGE: Message = {
   role: "assistant",
-  content: "Hello! Welcome to Imtech Taxi. Where would you like to be picked up from?",
+  content: "Hello! Welcome to Imtech Taxi. May I have your name please?",
 };
 
 const INITIAL_BOOKING: BookingState = {
