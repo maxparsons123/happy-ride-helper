@@ -89,7 +89,7 @@ public sealed class IcabbiBookingService : IDisposable
                 source = "APP",
                 date = DateTime.UtcNow.AddMinutes(5).ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 name = booking.Name ?? "Customer",
-                phone = booking.CallerPhone ?? "",
+                phone = FormatE164(booking.CallerPhone),
                 account_id = 9428,
                 account_name = "WhatsUrRide",
                 address = new
@@ -319,6 +319,17 @@ public sealed class IcabbiBookingService : IDisposable
 
     private static string Truncate(string s, int max = 300)
         => s.Length <= max ? s : s[..max] + "…";
+
+    /// <summary>
+    /// Ensures the phone number is in E.164 format (e.g. +447539025332).
+    /// </summary>
+    private static string FormatE164(string? phone)
+    {
+        if (string.IsNullOrWhiteSpace(phone)) return "";
+        var digits = phone.Replace(" ", "").Replace("-", "");
+        if (digits.StartsWith("+")) return digits;
+        return "+" + digits;
+    }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
