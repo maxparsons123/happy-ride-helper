@@ -408,6 +408,14 @@ public partial class MainForm : Form
             factory.CreateLogger<BsqdDispatcher>(),
             _settings.Dispatch);
         
+        // Optional iCabbi
+        IcabbiBookingService? icabbi = null;
+        var icabbiEnabled = _settings.Icabbi.Enabled;
+        if (icabbiEnabled && !string.IsNullOrEmpty(_settings.Icabbi.AppKey) && !string.IsNullOrEmpty(_settings.Icabbi.SecretKey))
+        {
+            icabbi = new IcabbiBookingService(_settings.Icabbi.AppKey, _settings.Icabbi.SecretKey, tenantBase: _settings.Icabbi.TenantBase);
+        }
+        
         // Create session
         var session = new CallSession(
             sessionId,
@@ -416,7 +424,9 @@ public partial class MainForm : Form
             _settings,
             aiClient,
             fareCalculator,
-            dispatcher);
+            dispatcher,
+            icabbi,
+            icabbiEnabled);
         
         // Wire session events → UI
         session.OnTranscript += (role, text) => Invoke(() =>

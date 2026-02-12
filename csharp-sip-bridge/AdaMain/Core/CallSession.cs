@@ -19,7 +19,8 @@ public sealed class CallSession : ICallSession
     public IOpenAiClient AiClient => _aiClient;
     private readonly IFareCalculator _fareCalculator;
     private readonly IDispatcher _dispatcher;
-    
+    private readonly IcabbiBookingService? _icabbi;
+    private readonly bool _icabbiEnabled;
     
     private readonly BookingState _booking = new();
     
@@ -47,7 +48,9 @@ public sealed class CallSession : ICallSession
         AppSettings settings,
         IOpenAiClient aiClient,
         IFareCalculator fareCalculator,
-        IDispatcher dispatcher)
+        IDispatcher dispatcher,
+        IcabbiBookingService? icabbi = null,
+        bool icabbiEnabled = false)
     {
         SessionId = sessionId;
         CallerId = callerId;
@@ -56,6 +59,8 @@ public sealed class CallSession : ICallSession
         _aiClient = aiClient;
         _fareCalculator = fareCalculator;
         _dispatcher = dispatcher;
+        _icabbi = icabbi;
+        _icabbiEnabled = icabbiEnabled;
         
         // Wire up AI client events
         _aiClient.OnAudio += HandleAiAudio;
@@ -507,7 +512,7 @@ public sealed class CallSession : ICallSession
             OnBookingUpdated?.Invoke(_booking.Clone());
             _logger.LogInformation("[{SessionId}] ✅ Booked: {Ref}", SessionId, _booking.BookingRef);
             
-            // Fire off BSQD Dispatch + WhatsApp (wait for response to finish first, like WinForms)
+            // Fire off BSQD Dispatch + iCabbi + WhatsApp (wait for response to finish first)
             _ = Task.Run(async () =>
             {
                 // Wait for Ada to finish speaking before dispatching
@@ -518,6 +523,24 @@ public sealed class CallSession : ICallSession
                 }
                 
                 await _dispatcher.DispatchAsync(_booking, CallerId);
+                
+                // Fire-and-forget iCabbi if enabled
+                if (_icabbiEnabled && _icabbi != null)
+                {
+                    try
+                    {
+                        var result = await _icabbi.CreateAndDispatchAsync(_booking);
+                        if (result.Success)
+                            _logger.LogInformation("[{SessionId}] 🚕 iCabbi OK — Journey: {JourneyId}", SessionId, result.JourneyId);
+                        else
+                            _logger.LogWarning("[{SessionId}] ⚠ iCabbi failed: {Message}", SessionId, result.Message);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "[{SessionId}] ❌ iCabbi dispatch error", SessionId);
+                    }
+                }
+                
                 await _dispatcher.SendWhatsAppAsync(CallerId);
             });
             
