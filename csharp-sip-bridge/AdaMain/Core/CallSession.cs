@@ -28,6 +28,7 @@ public sealed class CallSession : ICallSession
     private int _active;
     private int _autoQuoteInProgress; // Prevents safety net from racing with background fare calc
     private int _bookTaxiCompleted;   // Guard: prevent duplicate book_taxi confirmed calls
+    private int _disambiguationPending; // Flag: blocks sync_booking_data/book_taxi until caller confirms address
     private long _lastAdaFinishedAt;
     
     public string SessionId { get; }
@@ -144,6 +145,52 @@ public sealed class CallSession : ICallSession
     private async Task<object> HandleToolCallAsync(string name, Dictionary<string, object?> args)
     {
         _logger.LogDebug("[{SessionId}] Tool call: {Name}", SessionId, name);
+        
+        // ═════════════════════════════════════════════════════════════════════════════════
+        // DISAMBIGUATION GUARD: Block tool calls if waiting for address clarification
+        // ═════════════════════════════════════════════════════════════════════════════════
+        if (Volatile.Read(ref _disambiguationPending) == 1)
+        {
+            // Only allow sync_booking_data if they've provided a city-qualified address
+            if (name == "sync_booking_data")
+            {
+                var pickup = args.TryGetValue("pickup", out var p) ? p?.ToString() : null;
+                var destination = args.TryGetValue("destination", out var d) ? d?.ToString() : null;
+                
+                // Check if addresses now include a city (comma-separated or multipart)
+                bool hasQualifiedPickup = !string.IsNullOrWhiteSpace(pickup) && pickup.Contains(",");
+                bool hasQualifiedDest = !string.IsNullOrWhiteSpace(destination) && destination.Contains(",");
+                
+                // If we only had ambiguity on one side, accept if that side is now qualified
+                // If both were ambiguous, both must be qualified
+                bool needsPickupClarity = !string.IsNullOrWhiteSpace(_booking.Pickup) && !_booking.Pickup.Contains(",");
+                bool needsDestClarity = !string.IsNullOrWhiteSpace(_booking.Destination) && !_booking.Destination.Contains(",");
+                
+                if ((needsPickupClarity && !hasQualifiedPickup) || (needsDestClarity && !hasQualifiedDest))
+                {
+                    _logger.LogInformation("[{SessionId}] 🚫 Disambiguation pending — rejecting sync without full address qualifier", SessionId);
+                    return new
+                    {
+                        success = false,
+                        error = "Please specify which city or area you mean. I need the full location to proceed."
+                    };
+                }
+                
+                // Addresses are now disambiguated — clear the flag
+                Interlocked.Exchange(ref _disambiguationPending, 0);
+                _logger.LogInformation("[{SessionId}] ✅ Address disambiguation confirmed", SessionId);
+            }
+            else if (name == "book_taxi")
+            {
+                // Block booking if still awaiting disambiguation
+                _logger.LogInformation("[{SessionId}] 🚫 Disambiguation pending — rejecting book_taxi", SessionId);
+                return new
+                {
+                    success = false,
+                    error = "Please clarify which location you mean before confirming the booking."
+                };
+            }
+        }
         
         return name switch
         {
@@ -264,6 +311,9 @@ public sealed class CallSession : ICallSession
                     if (result.NeedsClarification)
                     {
                         _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses in auto-quote", SessionId);
+                        // SET FLAG: block further sync/book calls until address is confirmed
+                        Interlocked.Exchange(ref _disambiguationPending, 1);
+                        
                         // Reset fare so re-quote happens after clarification
                         _booking.Fare = null;
                         _booking.Eta = null;
@@ -899,6 +949,7 @@ public sealed class CallSession : ICallSession
         _booking.Reset();
         Interlocked.Exchange(ref _autoQuoteInProgress, 0);
         Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+        Interlocked.Exchange(ref _disambiguationPending, 0);
         
         // Dispose AI client (closes WebSocket, stops log thread, disposes CTS)
         if (_aiClient is IAsyncDisposable disposableAi)
