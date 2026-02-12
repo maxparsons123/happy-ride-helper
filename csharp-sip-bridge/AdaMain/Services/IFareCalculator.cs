@@ -28,6 +28,7 @@ public sealed class FareResult
     public bool NeedsClarification { get; set; }
     public string[]? PickupAlternatives { get; set; }
     public string[]? DestAlternatives { get; set; }
+    public string? ClarificationMessage { get; set; }
 }
 
 /// <summary>

@@ -148,6 +148,10 @@ public sealed class FareCalculator : IFareCalculator
             // Check global status
             if (root.TryGetProperty("status", out var statusEl) && statusEl.GetString() == "clarification_needed")
                 result.NeedsClarification = true;
+            
+            // Extract the AI-generated clarification message (natural language question)
+            if (root.TryGetProperty("clarification_message", out var clarifEl) && clarifEl.ValueKind == JsonValueKind.String)
+                result.ClarificationMessage = clarifEl.GetString();
 
             _logger.LogInformation("📍 Resolved: pickup='{Pickup}' ({PLat},{PLon}), dest='{Dest}' ({DLat},{DLon})",
                 resolvedPickup, pickupLat, pickupLon, resolvedDest, destLat, destLon);
@@ -208,6 +212,7 @@ public sealed class FareCalculator : IFareCalculator
             fareResult.NeedsClarification = result.NeedsClarification;
             fareResult.PickupAlternatives = result.PickupAlternatives;
             fareResult.DestAlternatives = result.DestAlternatives;
+            fareResult.ClarificationMessage = result.ClarificationMessage;
 
             // Override with AI-extracted components where available (higher accuracy)
             if (!string.IsNullOrEmpty(pickupStreet)) fareResult.PickupStreet = pickupStreet;
