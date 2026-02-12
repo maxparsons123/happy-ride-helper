@@ -6,6 +6,7 @@ using AdaMain.Config;
 using AdaMain.Core;
 using AdaMain.Services;
 using AdaMain.Sip;
+using DispatchSystem.Services;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
 
@@ -663,7 +664,27 @@ public partial class MainForm : Form
         var fareCalc = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 
-        using var dlg = new BookingForm(fareCalc, dispatcher, factory.CreateLogger<BookingForm>(), _settings.Supabase, callerPhone, callerName);
+        // Optional iCabbi
+        IcabbiBookingService? icabbi = null;
+        bool icabbiEnabled = false;
+        if (_settings.TryGetValue("Icabbi", out var icabbiObj) && icabbiObj is Dictionary<string, object> cfg)
+        {
+            icabbiEnabled = cfg.ContainsKey("Enabled") && (bool)cfg["Enabled"];
+            if (icabbiEnabled)
+            {
+                var appKey = cfg.ContainsKey("AppKey") ? cfg["AppKey"].ToString() ?? "" : "";
+                var secretKey = cfg.ContainsKey("SecretKey") ? cfg["SecretKey"].ToString() ?? "" : "";
+                var tenantBase = cfg.ContainsKey("TenantBase") ? cfg["TenantBase"].ToString() ?? "https://yourtenant.icabbi.net" : "https://yourtenant.icabbi.net";
+                
+                if (!string.IsNullOrEmpty(appKey) && !string.IsNullOrEmpty(secretKey))
+                {
+                    icabbi = new IcabbiBookingService(appKey, secretKey, tenantBase: tenantBase);
+                    icabbi.OnLog += msg => Log($"🚕 {msg}");
+                }
+            }
+        }
+
+        using var dlg = new BookingForm(fareCalc, dispatcher, factory.CreateLogger<BookingForm>(), _settings.Supabase, callerPhone, callerName, icabbi, icabbiEnabled);
         var result = dlg.ShowDialog(this);
 
         if (result == DialogResult.OK && dlg.CompletedBooking != null)
@@ -671,6 +692,8 @@ public partial class MainForm : Form
             var b = dlg.CompletedBooking;
             Log($"📋 Booking confirmed: {b.BookingRef} — {b.Pickup} → {b.Destination} ({b.Passengers} pax, {b.Fare})");
         }
+
+        icabbi?.Dispose();
     }
 
     private void mnuViewConfig_Click(object? sender, EventArgs e)

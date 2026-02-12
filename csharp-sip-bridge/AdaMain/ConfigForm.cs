@@ -1,4 +1,5 @@
 using AdaMain.Config;
+using AdaMain.Services;
 
 namespace AdaMain;
 
@@ -16,6 +17,8 @@ public class ConfigForm : Form
     private CheckBox chkSimliEnabled = null!;
     private TextBox txtDeepgramKey = null!;
     private TextBox txtBsqdWebhook = null!, txtBsqdApiKey = null!, txtWhatsAppWebhook = null!;
+    private TextBox txtIcabbiAppKey = null!, txtIcabbiSecretKey = null!, txtIcabbiTenantBase = null!;
+    private CheckBox chkIcabbiEnabled = null!;
     private ComboBox cmbCodec = null!;
     private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!;
     private CheckBox chkDiagnostics = null!;
@@ -71,6 +74,14 @@ public class ConfigForm : Form
         txtBsqdApiKey = AddField(tabDispatch, "API Key:", 60, bgInput, fgInput, masked: true);
         txtWhatsAppWebhook = AddField(tabDispatch, "WhatsApp URL:", 100, bgInput, fgInput);
 
+        // ── iCabbi Tab ──
+        var tabIcabbi = new TabPage("🚕 iCabbi") { BackColor = BackColor };
+        chkIcabbiEnabled = new CheckBox { Text = "Enable iCabbi dispatch", Location = new Point(15, 20), AutoSize = true, ForeColor = fgInput };
+        tabIcabbi.Controls.Add(chkIcabbiEnabled);
+        txtIcabbiAppKey = AddField(tabIcabbi, "App Key:", 50, bgInput, fgInput, masked: true);
+        txtIcabbiSecretKey = AddField(tabIcabbi, "Secret Key:", 90, bgInput, fgInput, masked: true);
+        txtIcabbiTenantBase = AddField(tabIcabbi, "Tenant URL:", 130, bgInput, fgInput);
+
         // ── Audio Tab ──
         var tabAudio = new TabPage("🔊 Audio") { BackColor = BackColor };
         var lblCodec = new Label { Text = "Codec:", Location = new Point(15, 23), AutoSize = true };
@@ -86,7 +97,7 @@ public class ConfigForm : Form
 
         tabAudio.Controls.AddRange(new Control[] { lblCodec, cmbCodec, lblVol, nudVolumeBoost, lblEcho, nudEchoGuard, chkDiagnostics });
 
-        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabSimli, tabStt, tabMaps, tabDispatch, tabAudio });
+        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabSimli, tabStt, tabMaps, tabDispatch, tabIcabbi, tabAudio });
 
         // ── OK / Cancel ──
         var pnlButtons = new Panel { Dock = DockStyle.Bottom, Height = 45, BackColor = BackColor };
@@ -128,6 +139,15 @@ public class ConfigForm : Form
         txtBsqdApiKey.Text = Settings.Dispatch.BsqdApiKey;
         txtWhatsAppWebhook.Text = Settings.Dispatch.WhatsAppWebhookUrl;
 
+        // iCabbi settings (ensure they exist in config)
+        if (!Settings.ContainsKey("Icabbi"))
+            Settings["Icabbi"] = new Dictionary<string, object> { { "AppKey", "" }, { "SecretKey", "" }, { "TenantBase", "https://yourtenant.icabbi.net" }, { "Enabled", false } };
+        var icabbiCfg = (Dictionary<string, object>?)Settings["Icabbi"] ?? new();
+        txtIcabbiAppKey.Text = icabbiCfg.ContainsKey("AppKey") ? icabbiCfg["AppKey"].ToString() ?? "" : "";
+        txtIcabbiSecretKey.Text = icabbiCfg.ContainsKey("SecretKey") ? icabbiCfg["SecretKey"].ToString() ?? "" : "";
+        txtIcabbiTenantBase.Text = icabbiCfg.ContainsKey("TenantBase") ? icabbiCfg["TenantBase"].ToString() ?? "https://yourtenant.icabbi.net" : "https://yourtenant.icabbi.net";
+        chkIcabbiEnabled.Checked = icabbiCfg.ContainsKey("Enabled") && (bool)icabbiCfg["Enabled"];
+
         cmbCodec.SelectedItem = Settings.Audio.PreferredCodec;
         if (cmbCodec.SelectedIndex < 0) cmbCodec.SelectedIndex = 0;
         nudVolumeBoost.Value = (decimal)Settings.Audio.VolumeBoost;
@@ -148,6 +168,15 @@ public class ConfigForm : Form
         Settings.Dispatch.BsqdWebhookUrl = txtBsqdWebhook.Text.Trim();
         Settings.Dispatch.BsqdApiKey = txtBsqdApiKey.Text.Trim();
         Settings.Dispatch.WhatsAppWebhookUrl = txtWhatsAppWebhook.Text.Trim();
+
+        // iCabbi settings
+        if (!Settings.ContainsKey("Icabbi"))
+            Settings["Icabbi"] = new Dictionary<string, object>();
+        var icabbiCfg = (Dictionary<string, object>)Settings["Icabbi"];
+        icabbiCfg["AppKey"] = txtIcabbiAppKey.Text.Trim();
+        icabbiCfg["SecretKey"] = txtIcabbiSecretKey.Text.Trim();
+        icabbiCfg["TenantBase"] = txtIcabbiTenantBase.Text.Trim();
+        icabbiCfg["Enabled"] = chkIcabbiEnabled.Checked;
 
         Settings.Audio.PreferredCodec = cmbCodec.SelectedItem?.ToString() ?? "PCMA";
         Settings.Audio.VolumeBoost = (double)nudVolumeBoost.Value;
