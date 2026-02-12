@@ -62,6 +62,9 @@ public sealed class CallSession : ICallSession
         _icabbi = icabbi;
         _icabbiEnabled = icabbiEnabled;
         
+        // Set caller phone in booking state for all dispatch paths (including iCabbi)
+        _booking.CallerPhone = callerId;
+        
         // Wire up AI client events
         _aiClient.OnAudio += HandleAiAudio;
         _aiClient.OnToolCall += HandleToolCallAsync;

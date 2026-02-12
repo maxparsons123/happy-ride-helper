@@ -8,6 +8,7 @@ public sealed class BookingState
 {
     // Core booking fields
     public string? Name { get; set; }
+    public string? CallerPhone { get; set; }
     public string? Pickup { get; set; }
     public string? Destination { get; set; }
     public int? Passengers { get; set; }
@@ -39,7 +40,7 @@ public sealed class BookingState
 
     public void Reset()
     {
-        Name = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
+        Name = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
