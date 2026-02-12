@@ -238,13 +238,13 @@ public sealed class CallSession : ICallSession
         
         // ⚠️ CRITICAL SECURITY CHECK: Name must be collected FIRST
         // Reject any sync_booking_data that contains travel fields (pickup/dest/pax/time) without a name
-        bool hasName = !string.IsNullOrWhiteSpace(_booking.Name);
+        bool hasNamePost = !string.IsNullOrWhiteSpace(_booking.Name);
         bool hasTravelField = !string.IsNullOrWhiteSpace(_booking.Pickup) ||
                              !string.IsNullOrWhiteSpace(_booking.Destination) ||
                              _booking.Passengers > 0 ||
                              !string.IsNullOrWhiteSpace(_booking.PickupTime);
         
-        if (hasTravelField && !hasName)
+        if (hasTravelField && !hasNamePost)
         {
             _logger.LogWarning("[{SessionId}] ❌ BLOCKED: sync_booking_data called with travel fields but NO name. Forcing name collection.", SessionId);
             // Clear the travel fields that were just set — force the AI to ask for name first
@@ -485,7 +485,7 @@ public sealed class CallSession : ICallSession
         }
         
         // GUARD: Reject book_taxi if awaiting confirmation (AI should wait for user to say "yes" FIRST)
-        if (_awaitingConfirmation && Volatile.Read(ref _autoQuoteInProgress) == 1)
+        if (Volatile.Read(ref _autoQuoteInProgress) == 1)
         {
             _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — awaiting user confirmation on fare", SessionId);
             return new
