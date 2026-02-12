@@ -3,6 +3,7 @@ using System.Text.Json;
 using AdaMain.Config;
 using AdaMain.Core;
 using AdaMain.Services;
+using DispatchSystem.Services;
 using Microsoft.Extensions.Logging;
 
 namespace AdaMain;
@@ -46,6 +47,8 @@ public sealed class BookingForm : Form
     private readonly IDispatcher _dispatcher;
     private readonly ILogger _logger;
     private readonly SupabaseSettings _supabaseSettings;
+    private readonly IcabbiBookingService? _icabbi;
+    private readonly bool _icabbiEnabled;
 
     // State
     private FareResult? _lastFareResult;
@@ -71,12 +74,16 @@ public sealed class BookingForm : Form
         ILogger logger,
         SupabaseSettings supabaseSettings,
         string? callerPhone = null,
-        string? callerName = null)
+        string? callerName = null,
+        IcabbiBookingService? icabbi = null,
+        bool icabbiEnabled = false)
     {
         _fareCalculator = fareCalculator;
         _dispatcher = dispatcher;
         _logger = logger;
         _supabaseSettings = supabaseSettings;
+        _icabbi = icabbi;
+        _icabbiEnabled = icabbiEnabled;
 
         BuildUi();
 
@@ -618,6 +625,26 @@ public sealed class BookingForm : Form
 
             // Dispatch to BSQD
             var dispatched = await _dispatcher.DispatchAsync(booking, phone);
+
+            // Fire-and-forget iCabbi if enabled
+            if (_icabbiEnabled && _icabbi != null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var result = await _icabbi.CreateAndDispatchAsync(booking);
+                        if (result.Success)
+                            _logger.LogInformation("🚕 iCabbi OK — Journey: {JourneyId}", result.JourneyId);
+                        else
+                            _logger.LogWarning("⚠ iCabbi failed: {Message}", result.Message);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "❌ iCabbi dispatch error");
+                    }
+                });
+            }
 
             if (dispatched)
             {
