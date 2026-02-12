@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
 using System.Runtime.InteropServices;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
@@ -8,18 +7,27 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// Pure A-law passthrough playout engine with hysteresis anti-grumble buffering.
+/// Pure A-law passthrough playout engine v8.3 with Win32 high-resolution timing.
+/// Uses timeBeginPeriod(1) for sub-millisecond Sleep accuracy and a 240ms
+/// hysteresis start threshold to absorb OpenAI's bursty audio delivery.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
-    private const int FRAME_SIZE = 160;
+    private const int FRAME_SIZE = 160;          // 20ms @ 8kHz
     private const byte ALAW_SILENCE = 0xD5;
     private const byte PAYLOAD_TYPE_PCMA = 8;
-    private const int JITTER_BUFFER_START_THRESHOLD = 10;
+    private const int JITTER_BUFFER_START_THRESHOLD = 12;  // 240ms — proven sweet spot
     private const int MAX_QUEUE_FRAMES = 2000;
     private const int MAX_ACCUMULATOR_SIZE = 65536;
 
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
+
+    // Win32 multimedia timer for 1ms Sleep resolution
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    private static extern uint TimeBeginPeriod(uint uMilliseconds);
+
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    private static extern uint TimeEndPeriod(uint uMilliseconds);
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
@@ -90,7 +98,12 @@ public sealed class ALawRtpPlayout : IDisposable
         _isBuffering = true;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
-        _playoutThread = new Thread(PlayoutLoop) { IsBackground = true, Priority = ThreadPriority.AboveNormal, Name = "ALawPlayout-SDK" };
+        _playoutThread = new Thread(PlayoutLoop)
+        {
+            IsBackground = true,
+            Priority = ThreadPriority.Highest,
+            Name = "ALawPlayout-SDK-v8.3"
+        };
         _playoutThread.Start();
     }
 
@@ -103,36 +116,86 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private void PlayoutLoop()
     {
-        var sw = Stopwatch.StartNew();
-        long nextFrameNs = (long)(sw.ElapsedTicks * TicksToNs);
-        while (_running && Volatile.Read(ref _disposed) == 0)
+        // Request 1ms timer resolution from Windows — critical for smooth 20ms pacing
+        TimeBeginPeriod(1);
+        try
         {
-            long nowNs = (long)(sw.ElapsedTicks * TicksToNs);
-            if (nowNs < nextFrameNs) { if (nextFrameNs - nowNs > 2_000_000) Thread.Sleep(1); else Thread.SpinWait(20); continue; }
-            SendNextFrame();
-            nextFrameNs += 20_000_000;
-            long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
-            if (currentNs - nextFrameNs > 100_000_000) nextFrameNs = currentNs + 20_000_000;
+            var sw = Stopwatch.StartNew();
+            long nextFrameNs = (long)(sw.ElapsedTicks * TicksToNs);
+
+            while (_running && Volatile.Read(ref _disposed) == 0)
+            {
+                long nowNs = (long)(sw.ElapsedTicks * TicksToNs);
+
+                if (nowNs < nextFrameNs)
+                {
+                    long remainNs = nextFrameNs - nowNs;
+                    if (remainNs > 2_000_000)      // >2ms away → sleep 1ms
+                        Thread.Sleep(1);
+                    else if (remainNs > 500_000)    // >0.5ms away → yield
+                        Thread.Yield();
+                    else                            // <0.5ms → spin
+                        Thread.SpinWait(20);
+                    continue;
+                }
+
+                SendNextFrame();
+                nextFrameNs += 20_000_000;  // 20ms in nanoseconds
+
+                // Drift guard: if we fell behind by >100ms, reset to now
+                long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
+                if (currentNs - nextFrameNs > 100_000_000)
+                    nextFrameNs = currentNs + 20_000_000;
+            }
+        }
+        finally
+        {
+            TimeEndPeriod(1);
         }
     }
 
     private void SendNextFrame()
     {
         int qc = Volatile.Read(ref _queueCount);
-        if (_isBuffering) { if (qc < JITTER_BUFFER_START_THRESHOLD) { SendRtp(_silenceFrame); return; } _isBuffering = false; }
+
+        if (_isBuffering)
+        {
+            if (qc < JITTER_BUFFER_START_THRESHOLD)
+            {
+                SendRtp(_silenceFrame);
+                return;
+            }
+            _isBuffering = false;
+            OnLog?.Invoke($"▶ Playout started ({qc} frames buffered)");
+        }
+
         if (_frameQueue.TryDequeue(out var frame))
         {
             Interlocked.Decrement(ref _queueCount);
             SendRtp(frame);
             Interlocked.Increment(ref _framesSent);
-            if (Volatile.Read(ref _queueCount) == 0) { _isBuffering = true; try { OnQueueEmpty?.Invoke(); } catch { } }
+
+            if (Volatile.Read(ref _queueCount) == 0)
+            {
+                _isBuffering = true;
+                try { OnQueueEmpty?.Invoke(); } catch { }
+            }
         }
-        else { _isBuffering = true; SendRtp(_silenceFrame); try { OnQueueEmpty?.Invoke(); } catch { } }
+        else
+        {
+            _isBuffering = true;
+            SendRtp(_silenceFrame);
+            try { OnQueueEmpty?.Invoke(); } catch { }
+        }
     }
 
     private void SendRtp(byte[] frame)
     {
-        try { _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, PAYLOAD_TYPE_PCMA); _timestamp += FRAME_SIZE; }
+        try
+        {
+            _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, PAYLOAD_TYPE_PCMA);
+            _timestamp += FRAME_SIZE;
+        }
         catch { }
     }
 
