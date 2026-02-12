@@ -139,7 +139,7 @@ public sealed class CallSession : ICallSession
     
     private async Task<object> HandleToolCallAsync(string name, Dictionary<string, object?> args)
     {
-        _logger.LogDebug("[{SessionId}] Tool call: {Name}", SessionId, name);
+        _logger.LogDebug("[{SessionId}] Tool call: {Name} (args: {ArgCount})", SessionId, name, args.Count);
         
         return name switch
         {
@@ -207,17 +207,24 @@ public sealed class CallSession : ICallSession
     {
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
         
-        // SAFETY NET: If AI skipped sync_booking_data, populate _booking from book_taxi args
-        if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()) && string.IsNullOrWhiteSpace(_booking.Name))
+        // DEBUG: Log all args received
+        var argsSummary = string.Join(", ", args.Select(kv => $"{kv.Key}={kv.Value}"));
+        _logger.LogInformation("[{SessionId}] 📥 book_taxi args: {Args}", SessionId, argsSummary);
+        
+        // SAFETY NET: Always populate _booking from book_taxi args (overwrite if provided)
+        if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()))
             _booking.Name = bn.ToString()!.Trim();
-        if (args.TryGetValue("pickup", out var bp) && !string.IsNullOrWhiteSpace(bp?.ToString()) && string.IsNullOrWhiteSpace(_booking.Pickup))
+        if (args.TryGetValue("pickup", out var bp) && !string.IsNullOrWhiteSpace(bp?.ToString()))
             _booking.Pickup = bp.ToString();
-        if (args.TryGetValue("destination", out var bd) && !string.IsNullOrWhiteSpace(bd?.ToString()) && string.IsNullOrWhiteSpace(_booking.Destination))
+        if (args.TryGetValue("destination", out var bd) && !string.IsNullOrWhiteSpace(bd?.ToString()))
             _booking.Destination = bd.ToString();
-        if (args.TryGetValue("passengers", out var bpax) && int.TryParse(bpax?.ToString(), out var bpn) && _booking.Passengers == null)
+        if (args.TryGetValue("passengers", out var bpax) && int.TryParse(bpax?.ToString(), out var bpn))
             _booking.Passengers = bpn;
-        if (args.TryGetValue("pickup_time", out var bpt) && !string.IsNullOrWhiteSpace(bpt?.ToString()) && string.IsNullOrWhiteSpace(_booking.PickupTime))
+        if (args.TryGetValue("pickup_time", out var bpt) && !string.IsNullOrWhiteSpace(bpt?.ToString()))
             _booking.PickupTime = bpt.ToString();
+        
+        _logger.LogInformation("[{SessionId}] 📋 After merge: Pickup={Pickup}, Dest={Dest}, Name={Name}, Pax={Pax}",
+            SessionId, _booking.Pickup ?? "NULL", _booking.Destination ?? "NULL", _booking.Name ?? "NULL", _booking.Passengers);
         
         if (action == "request_quote")
         {
