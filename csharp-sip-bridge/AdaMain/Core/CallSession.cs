@@ -243,11 +243,27 @@ public sealed class CallSession : ICallSession
             _booking.Name = prevName;
             
             // Inject a system message to force the AI back on track
+            // Build a reminder of what details the caller already mentioned so the AI doesn't re-ask
+            var mentionedParts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(args.GetValueOrDefault("pickup")?.ToString()))
+                mentionedParts.Add($"pickup='{args["pickup"]}'");
+            if (!string.IsNullOrWhiteSpace(args.GetValueOrDefault("destination")?.ToString()))
+                mentionedParts.Add($"destination='{args["destination"]}'");
+            if (args.TryGetValue("passengers", out var paxVal) && paxVal != null)
+                mentionedParts.Add($"passengers={paxVal}");
+            if (!string.IsNullOrWhiteSpace(args.GetValueOrDefault("pickup_time")?.ToString()))
+                mentionedParts.Add($"time='{args["pickup_time"]}'");
+            
+            var memoryHint = mentionedParts.Count > 0
+                ? $" The caller already mentioned: {string.Join(", ", mentionedParts)}. " +
+                  "After getting their name, call sync_booking_data IMMEDIATELY with the name AND all these previously mentioned details together — do NOT ask for them again."
+                : "";
+            
             if (_aiClient is OpenAiG711Client g711)
             {
                 await g711.InjectMessageAndRespondAsync(
-                    "[SYSTEM] CRITICAL: You must collect the caller's NAME first before collecting any travel details (pickup/destination/passengers/time). " +
-                    "Ask for their name now.");
+                    $"[SYSTEM] CRITICAL: You must collect the caller's NAME first before collecting any travel details (pickup/destination/passengers/time). " +
+                    $"Ask for their name now.{memoryHint}");
             }
             
             return new { success = true, warning = "name_required_first" };
