@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AdaSdkModel</RootNamespace>
+    <AssemblyName>AdaSdkModel</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- OpenAI .NET SDK (Realtime Conversation support) -->
+    <PackageReference Include="OpenAI" Version="2.2.0-beta.4" />
+
+    <!-- SIP stack -->
+    <PackageReference Include="SIPSorcery" Version="10.0.3" />
+    <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
+
+    <!-- MQTT for dispatch -->
+    <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
+
+    <!-- Hosting / DI / Logging -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
