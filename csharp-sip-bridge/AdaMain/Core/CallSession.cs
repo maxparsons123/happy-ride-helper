@@ -217,6 +217,18 @@ public sealed class CallSession : ICallSession
         var prevTime = _booking.PickupTime;
         var prevName = _booking.Name;
         
+        // CRITICAL: Name-first enforcement — block pickup/destination/etc until name is set
+        var hasName = _booking.Name != null && _booking.Name != "Anonymous";
+        var providingPickup = args.ContainsKey("pickup");
+        var providingDest = args.ContainsKey("destination");
+        var providingTravelData = providingPickup || providingDest || args.ContainsKey("passengers");
+        
+        if (!hasName && providingTravelData)
+        {
+            _logger.LogWarning("[{SessionId}] ⚠️ BLOCKED sync_booking_data: travel data before name established", SessionId);
+            return new { success = false, error = "STOP. The caller has not identified themselves yet. Ask for their name FIRST before collecting any travel details." };
+        }
+        
         if (args.TryGetValue("caller_name", out var n)) _booking.Name = n?.ToString();
         if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
         if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
@@ -308,6 +320,14 @@ public sealed class CallSession : ICallSession
         }
         
         // Full path: all travel fields complete — calculate fare asynchronously
+        // GUARD: Don't re-trigger fare calc if it's already in progress (prevent race on address change)
+        if (Volatile.Read(ref _autoQuoteInProgress) == 1)
+        {
+            _logger.LogInformation("[{SessionId}] 💰 Auto-quote already in progress, skipping duplicate trigger", SessionId);
+            OnBookingUpdated?.Invoke(_booking.Clone());
+            return new { success = true };
+        }
+        
         // Return immediately with an interjection so Ada speaks while we calculate
         _logger.LogInformation("[{SessionId}] 💰 All travel fields filled — starting async fare calculation...", SessionId);
         
@@ -461,6 +481,17 @@ public sealed class CallSession : ICallSession
             {
                 success = false,
                 error = "STOP. A fare recalculation is in progress because the address was just changed. You MUST wait for the [FARE RESULT] message, read back the new verified addresses and fare, and get the user's explicit confirmation BEFORE calling book_taxi again."
+            };
+        }
+        
+        // GUARD: Reject book_taxi if awaiting confirmation (AI should wait for user to say "yes" FIRST)
+        if (_awaitingConfirmation && Volatile.Read(ref _autoQuoteInProgress) == 1)
+        {
+            _logger.LogWarning("[{SessionId}] ❌ book_taxi REJECTED — awaiting user confirmation on fare", SessionId);
+            return new
+            {
+                success = false,
+                error = "You are still waiting for the user to hear and confirm the fare. Do NOT call book_taxi yet. Wait for the user to say yes/confirm/go ahead FIRST."
             };
         }
         
