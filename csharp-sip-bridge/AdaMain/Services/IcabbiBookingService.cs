@@ -128,6 +128,15 @@ public sealed class IcabbiBookingService : IDisposable
             try { root = JsonNode.Parse(body); }
             catch { return IcabbiBookingResult.Fail("Invalid JSON in booking response"); }
 
+            // Check for API-level error (body may be [] or contain error info)
+            var isError = root?["error"]?.GetValue<bool>() ?? false;
+            if (isError)
+            {
+                var errMsg = root?["message"]?.GetValue<string>() ?? "Unknown API error";
+                var errCode = root?["code"]?.GetValue<int>() ?? 0;
+                return IcabbiBookingResult.Fail($"iCabbi error {errCode}: {errMsg}");
+            }
+
             var bookingNode = root?["body"]?["booking"];
             if (bookingNode is null)
                 return IcabbiBookingResult.Fail("No body.booking in response");
