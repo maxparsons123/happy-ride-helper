@@ -39,9 +39,9 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5; // ITU-T G.711 A-law silence
     private const byte PAYLOAD_TYPE_PCMA = 8; // RTP payload type for A-law
 
-    // FIXED 100ms buffer (5 frames) - absorbs OpenAI burst delivery
+    // FIXED 400ms buffer (20 frames) - absorbs OpenAI burst delivery
     // Prevents "fast then slow" pacing artifacts from bursty TTS
-    private const int JITTER_BUFFER_FRAMES = 5;
+    private const int JITTER_BUFFER_FRAMES = 20;
     private const int REBUFFER_THRESHOLD = 2; // Re-buffer if queue drops below this
     private const int MAX_QUEUE_FRAMES = 1500; // ~30s safety cap
 
