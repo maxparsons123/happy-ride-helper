@@ -229,7 +229,22 @@ public sealed class CallSession : ICallSession
             return new { success = false, error = "STOP. The caller has not identified themselves yet. Ask for their name FIRST before collecting any travel details." };
         }
         
-        if (args.TryGetValue("caller_name", out var n)) _booking.Name = n?.ToString();
+        if (args.TryGetValue("caller_name", out var n))
+        {
+            var nameVal = n?.ToString()?.Trim();
+            // Reject placeholder/hallucinated names — force the AI to actually ask
+            if (!string.IsNullOrWhiteSpace(nameVal) && 
+                !nameVal.Equals("Anonymous", StringComparison.OrdinalIgnoreCase) &&
+                !nameVal.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
+                !nameVal.Equals("Caller", StringComparison.OrdinalIgnoreCase))
+            {
+                _booking.Name = nameVal;
+            }
+            else if (!string.IsNullOrWhiteSpace(nameVal))
+            {
+                _logger.LogWarning("[{SessionId}] ❌ Rejected placeholder name '{Name}' — must ask caller", SessionId, nameVal);
+            }
+        }
         if (args.TryGetValue("pickup", out var p)) _booking.Pickup = p?.ToString();
         if (args.TryGetValue("destination", out var d)) _booking.Destination = d?.ToString();
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
