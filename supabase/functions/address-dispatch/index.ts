@@ -344,6 +344,73 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       };
     }
 
+    // ── Post-processing: enforce disambiguation for known multi-district streets ──
+    // Gemini sometimes resolves ambiguous streets directly. This safety net catches those cases.
+    const KNOWN_MULTI_DISTRICT_STREETS: Record<string, string[]> = {
+      "Birmingham": [
+        "School Road", "Church Road", "Park Road", "Station Road", "High Street",
+        "Victoria Road", "Albert Road", "Green Lane", "New Road", "Warwick Road",
+        "Church Lane", "Grove Road", "Mill Lane", "King Street", "Queen Street"
+      ],
+      "Coventry": [
+        "Church Road", "Station Road", "High Street", "Park Road", "School Road",
+        "Victoria Road", "Albert Road", "Green Lane", "New Road"
+      ],
+      "London": [
+        "Church Road", "Station Road", "High Street", "Park Road", "School Road",
+        "Victoria Road", "Albert Road", "Green Lane", "New Road"
+      ],
+      "Manchester": [
+        "Church Road", "Station Road", "High Street", "Park Road", "School Road",
+        "Victoria Road", "Albert Road", "Green Lane", "New Road"
+      ],
+    };
+
+    // Check if Gemini returned a non-ambiguous result for a known multi-district street
+    for (const side of ["pickup", "dropoff"] as const) {
+      const addr = parsed[side];
+      if (!addr || addr.is_ambiguous) continue;
+      
+      const city = addr.city || parsed.detected_area || "";
+      const streetName = addr.street_name || "";
+      const knownStreets = KNOWN_MULTI_DISTRICT_STREETS[city];
+      if (!knownStreets) continue;
+      
+      // Check if the street name matches a known ambiguous street (case-insensitive)
+      const isKnownAmbiguous = knownStreets.some(s => 
+        streetName.toLowerCase().replace(/\s+/g, " ").trim() === s.toLowerCase()
+      );
+      if (!isKnownAmbiguous) continue;
+      
+      // Check if the address already contains a district/area qualifier
+      const addressLower = (addr.address || "").toLowerCase();
+      const hasDistrict = addressLower.includes(",") && 
+        addressLower.split(",").length > 2; // e.g., "School Road, Hall Green, Birmingham"
+      const hasPostcode = /\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b/i.test(addr.address || "");
+      
+      // Also check if the caller used a specific district in their original input
+      const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
+      const originalHasDistrict = originalInput.toLowerCase().split(",").length > 2 ||
+        /\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b/i.test(originalInput);
+      
+      // If no district and no postcode in the original input, force disambiguation
+      if (!originalHasDistrict) {
+        console.log(`⚠️ Post-processing: "${streetName}" in ${city} is a known multi-district street — forcing disambiguation`);
+        addr.is_ambiguous = true;
+        parsed.status = "clarification_needed";
+        
+        // If Gemini didn't provide alternatives, generate generic ones
+        if (!addr.alternatives || addr.alternatives.length === 0) {
+          // We don't know the exact districts, but we can ask
+          addr.alternatives = [];
+        }
+        
+        const sideLabel = side === "pickup" ? "pickup" : "destination";
+        parsed.clarification_message = parsed.clarification_message || 
+          `There are several ${streetName}s in ${city}. Which area or district is it in?`;
+      }
+    }
+
     // ── Calculate fare from Gemini coordinates ──
     const pLat = parsed.pickup?.lat;
     const pLon = parsed.pickup?.lon;
