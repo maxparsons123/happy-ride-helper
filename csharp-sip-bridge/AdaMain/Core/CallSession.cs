@@ -80,6 +80,7 @@ public sealed class CallSession : ICallSession
                 OnBargeIn?.Invoke();
             };
             g711Client.IsAutoQuoteInProgress = () => Volatile.Read(ref _autoQuoteInProgress) == 1;
+            g711Client._isDisambiguationPending = () => Volatile.Read(ref _disambiguationPending) == 1;
         }
     }
     

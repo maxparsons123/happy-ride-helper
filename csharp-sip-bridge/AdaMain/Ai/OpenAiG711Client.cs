@@ -89,6 +89,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private const int MAX_NO_REPLY_PROMPTS = 3;
     private const int NO_REPLY_TIMEOUT_MS = 15000;
     private const int CONFIRMATION_TIMEOUT_MS = 30000;
+    private const int DISAMBIGUATION_TIMEOUT_MS = 30000;  // Extended timeout for address selection
 
     // =========================
     // WEBSOCKET
@@ -136,6 +137,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     
     /// <summary>Optional: check if an auto-quote is in progress (prevents safety net race).</summary>
     public Func<bool>? IsAutoQuoteInProgress { get; set; }
+    
+    /// <summary>Optional: check if address disambiguation is pending (extends watchdog timeout to 30s).</summary>
+    public Func<bool>? _isDisambiguationPending { get; set; }
     
     /// <summary>Whether OpenAI is currently streaming a response.</summary>
     public bool IsResponseActive => Volatile.Read(ref _responseActive) == 1;
@@ -460,7 +464,10 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     // =========================
     private void StartNoReplyWatchdog()
     {
-        var timeoutMs = _awaitingConfirmation ? CONFIRMATION_TIMEOUT_MS : NO_REPLY_TIMEOUT_MS;
+        // Determine timeout: disambiguation > confirmation > normal
+        var timeoutMs = _isDisambiguationPending?.Invoke() == true 
+            ? DISAMBIGUATION_TIMEOUT_MS 
+            : (_awaitingConfirmation ? CONFIRMATION_TIMEOUT_MS : NO_REPLY_TIMEOUT_MS);
         var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
 
         _ = Task.Run(async () =>
