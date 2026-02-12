@@ -226,7 +226,31 @@ public sealed class CallSession : ICallSession
         if (!hasName && providingTravelData)
         {
             _logger.LogWarning("[{SessionId}] ⚠️ BLOCKED sync_booking_data: travel data before name established", SessionId);
-            return new { success = false, error = "STOP. The caller has not identified themselves yet. Ask for their name FIRST before collecting any travel details." };
+            
+            // Capture what the caller mentioned so the AI remembers after name collection
+            var mentionedParts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(args.GetValueOrDefault("pickup")?.ToString()))
+                mentionedParts.Add($"pickup='{args["pickup"]}'");
+            if (!string.IsNullOrWhiteSpace(args.GetValueOrDefault("destination")?.ToString()))
+                mentionedParts.Add($"destination='{args["destination"]}'");
+            if (args.TryGetValue("passengers", out var blockedPax) && blockedPax != null)
+                mentionedParts.Add($"passengers={blockedPax}");
+            if (!string.IsNullOrWhiteSpace(args.GetValueOrDefault("pickup_time")?.ToString()))
+                mentionedParts.Add($"time='{args["pickup_time"]}'");
+            
+            var memoryHint = mentionedParts.Count > 0
+                ? $" The caller already mentioned: {string.Join(", ", mentionedParts)}. " +
+                  "After getting their name, call sync_booking_data IMMEDIATELY with the name AND all these previously mentioned details together — do NOT ask for them again."
+                : "";
+            
+            if (_aiClient is OpenAiG711Client g711Early)
+            {
+                await g711Early.InjectMessageAndRespondAsync(
+                    $"[SYSTEM] CRITICAL: You must collect the caller's NAME first before collecting any travel details. " +
+                    $"Ask for their name now.{memoryHint}");
+            }
+            
+            return new { success = true, warning = "name_required_first", memoryHint };
         }
         
         if (args.TryGetValue("caller_name", out var n))
