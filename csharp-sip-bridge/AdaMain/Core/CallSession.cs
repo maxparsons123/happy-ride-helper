@@ -29,6 +29,8 @@ public sealed class CallSession : ICallSession
     private int _autoQuoteInProgress; // Prevents safety net from racing with background fare calc
     private int _bookTaxiCompleted;   // Guard: prevent duplicate book_taxi confirmed calls
     private int _disambiguationPending; // Flag: blocks sync_booking_data/book_taxi until caller confirms address
+    private bool _disambiguationOnPickup;  // Which field triggered disambiguation
+    private bool _disambiguationOnDest;    // Which field triggered disambiguation
     private long _lastAdaFinishedAt;
     
     public string SessionId { get; }
@@ -152,24 +154,20 @@ public sealed class CallSession : ICallSession
         // ═════════════════════════════════════════════════════════════════════════════════
         if (Volatile.Read(ref _disambiguationPending) == 1)
         {
-            // Only allow sync_booking_data if they've provided a city-qualified address
+            // Only allow sync_booking_data if the AMBIGUOUS field now has a city qualifier
             if (name == "sync_booking_data")
             {
                 var pickup = args.TryGetValue("pickup", out var p) ? p?.ToString() : null;
                 var destination = args.TryGetValue("destination", out var d) ? d?.ToString() : null;
                 
-                // Check if addresses now include a city (comma-separated or multipart)
-                bool hasQualifiedPickup = !string.IsNullOrWhiteSpace(pickup) && pickup.Contains(",");
-                bool hasQualifiedDest = !string.IsNullOrWhiteSpace(destination) && destination.Contains(",");
+                // Only check the field(s) that were actually flagged as ambiguous
+                bool pickupOk = !_disambiguationOnPickup || (!string.IsNullOrWhiteSpace(pickup) && pickup.Contains(","));
+                bool destOk = !_disambiguationOnDest || (!string.IsNullOrWhiteSpace(destination) && destination.Contains(","));
                 
-                // If we only had ambiguity on one side, accept if that side is now qualified
-                // If both were ambiguous, both must be qualified
-                bool needsPickupClarity = !string.IsNullOrWhiteSpace(_booking.Pickup) && !_booking.Pickup.Contains(",");
-                bool needsDestClarity = !string.IsNullOrWhiteSpace(_booking.Destination) && !_booking.Destination.Contains(",");
-                
-                if ((needsPickupClarity && !hasQualifiedPickup) || (needsDestClarity && !hasQualifiedDest))
+                if (!pickupOk || !destOk)
                 {
-                    _logger.LogInformation("[{SessionId}] 🚫 Disambiguation pending — rejecting sync without full address qualifier", SessionId);
+                    _logger.LogInformation("[{SessionId}] 🚫 Disambiguation pending — rejecting sync without full address qualifier (needPickup={NeedPickup}, needDest={NeedDest})", 
+                        SessionId, _disambiguationOnPickup && !pickupOk, _disambiguationOnDest && !destOk);
                     return new
                     {
                         success = false,
@@ -179,6 +177,8 @@ public sealed class CallSession : ICallSession
                 
                 // Addresses are now disambiguated — clear the flag
                 Interlocked.Exchange(ref _disambiguationPending, 0);
+                _disambiguationOnPickup = false;
+                _disambiguationOnDest = false;
                 _logger.LogInformation("[{SessionId}] ✅ Address disambiguation confirmed", SessionId);
             }
             else if (name == "book_taxi")
@@ -350,6 +350,8 @@ public sealed class CallSession : ICallSession
                         _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses in auto-quote", SessionId);
                         // SET FLAG: block further sync/book calls until address is confirmed
                         Interlocked.Exchange(ref _disambiguationPending, 1);
+                        _disambiguationOnPickup = result.PickupAlternatives?.Length > 0 || (result.ClarificationMessage?.Contains("pickup", StringComparison.OrdinalIgnoreCase) ?? false);
+                        _disambiguationOnDest = result.DestAlternatives?.Length > 0 || !_disambiguationOnPickup;
                         
                         // Reset fare so re-quote happens after clarification
                         _booking.Fare = null;
@@ -1014,6 +1016,8 @@ public sealed class CallSession : ICallSession
         Interlocked.Exchange(ref _autoQuoteInProgress, 0);
         Interlocked.Exchange(ref _bookTaxiCompleted, 0);
         Interlocked.Exchange(ref _disambiguationPending, 0);
+        _disambiguationOnPickup = false;
+        _disambiguationOnDest = false;
         
         // Dispose AI client (closes WebSocket, stops log thread, disposes CTS)
         if (_aiClient is IAsyncDisposable disposableAi)
