@@ -411,9 +411,16 @@ public partial class MainForm : Form
         // Optional iCabbi
         IcabbiBookingService? icabbi = null;
         var icabbiEnabled = _settings.Icabbi.Enabled;
+        Log($"ℹ [iCabbi] enabled={icabbiEnabled}, appKey={(_settings.Icabbi.AppKey.Length > 0 ? _settings.Icabbi.AppKey[..Math.Min(6, _settings.Icabbi.AppKey.Length)] + "…" : "(empty)")}, secretKey={((_settings.Icabbi.SecretKey?.Length ?? 0) > 0 ? "set" : "(empty)")}");
         if (icabbiEnabled && !string.IsNullOrEmpty(_settings.Icabbi.AppKey) && !string.IsNullOrEmpty(_settings.Icabbi.SecretKey))
         {
             icabbi = new IcabbiBookingService(_settings.Icabbi.AppKey, _settings.Icabbi.SecretKey, tenantBase: _settings.Icabbi.TenantBase);
+            icabbi.OnLog += msg => Invoke(() => Log($"🚕 {msg}"));
+            Log("✅ iCabbi service created for voice call path");
+        }
+        else if (icabbiEnabled)
+        {
+            Log("⚠ iCabbi enabled but AppKey or SecretKey is empty — skipping");
         }
         
         // Create session
