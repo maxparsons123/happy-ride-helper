@@ -488,7 +488,7 @@ public sealed class SipServer : IAsyncDisposable
 
         const int FLUSH_PACKETS = 20;
         const int EARLY_PROTECTION_MS = 500;
-        const int ECHO_GUARD_MS = 120;
+        const int ECHO_GUARD_MS = 300;
         int inboundPacketCount = 0;
         bool inboundFlushComplete = false;
         DateTime lastBargeInLogAt = DateTime.MinValue;
