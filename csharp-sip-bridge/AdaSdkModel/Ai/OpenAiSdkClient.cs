@@ -7,13 +7,15 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using AdaSdkModel.Config;
 using Microsoft.Extensions.Logging;
-using OpenAI.Realtime;
+using OpenAI.RealtimeConversation;
 using System.ClientModel;
+
+#pragma warning disable OPENAI002 // Experimental Realtime API
 
 namespace AdaSdkModel.Ai;
 
 /// <summary>
-/// OpenAI Realtime API client using official .NET SDK (GA 2.8.0) — G.711 A-law passthrough (8kHz).
+/// OpenAI Realtime API client using official .NET SDK (2.1.0-beta.4) — G.711 A-law passthrough (8kHz).
 ///
 /// Production features:
 /// - Native G.711 A-law codec (no resampling, direct SIP passthrough)
@@ -28,11 +30,11 @@ namespace AdaSdkModel.Ai;
 /// - Non-blocking channel-based logger
 /// - Confirmation-awaiting mode (extended watchdog timeout)
 ///
-/// Version 2.0 — AdaSdkModel (OpenAI .NET SDK GA)
+/// Version 2.0 — AdaSdkModel (OpenAI .NET SDK beta)
 /// </summary>
 public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "2.0-sdk-g711-ga";
+    public const string VERSION = "2.0-sdk-g711-beta";
 
     // =========================
     // CONFIG
@@ -44,8 +46,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // SDK INSTANCES
     // =========================
-    private RealtimeClient? _client;
-    private RealtimeSession? _session;
+    private RealtimeConversationClient? _client;
+    private RealtimeConversationSession? _session;
     private CancellationTokenSource? _sessionCts;
     private Task? _eventLoopTask;
     private Task? _keepaliveTask;
@@ -194,31 +196,25 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         Log($"📞 Connecting v{VERSION} (caller: {callerId}, codec: A-law 8kHz, model: {_settings.Model})");
 
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _client = new RealtimeClient(new ApiKeyCredential(_settings.ApiKey));
+
+        // Beta SDK: RealtimeConversationClient takes (model, credential)
+        _client = new RealtimeConversationClient(
+            model: _settings.Model ?? "gpt-4o-realtime-preview",
+            credential: new ApiKeyCredential(_settings.ApiKey));
 
         try
         {
-            _session = await _client.StartConversationSessionAsync(
-                model: _settings.Model ?? "gpt-4o-realtime-preview");
+            _session = await _client.StartConversationSessionAsync(_sessionCts.Token);
 
             var options = new ConversationSessionOptions
             {
                 Instructions = _systemPrompt,
                 Voice = MapVoice(_settings.Voice),
-                Audio = new RealtimeSessionAudioConfiguration()
+                InputAudioFormat = ConversationAudioFormat.G711Alaw,
+                OutputAudioFormat = ConversationAudioFormat.G711Alaw,
+                InputTranscriptionOptions = new ConversationInputTranscriptionOptions
                 {
-                    Input = new RealtimeSessionAudioInputConfiguration()
-                    {
-                        Format = RealtimeAudioFormat.G711Alaw,
-                        Transcription = new InputTranscriptionOptions()
-                        {
-                            Model = "whisper-1",
-                        },
-                    },
-                    Output = new RealtimeSessionAudioOutputConfiguration()
-                    {
-                        Format = RealtimeAudioFormat.G711Alaw,
-                    },
+                    Model = "whisper-1"
                 },
                 TurnDetectionOptions = ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                     detectionThreshold: 0.2f,
@@ -230,7 +226,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             options.Tools.Add(BuildBookTaxiTool());
             options.Tools.Add(BuildEndCallTool());
 
-            await _session.ConfigureConversationSessionAsync(options);
+            await _session.ConfigureSessionAsync(options);
 
             _logger.LogInformation("✅ Session configured (G.711 A-law, model={Model})", _settings.Model);
 
@@ -297,7 +293,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            // GA SDK uses SendInputAudioAsync with a stream; for raw byte chunks we use BinaryData
+            // Beta SDK: SendInputAudio takes BinaryData
             _session!.SendInputAudio(new BinaryData(alawData));
             Volatile.Write(ref _lastUserSpeechAt, NowMs());
         }
@@ -316,6 +312,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         try
         {
             Log("🛑 Cancelling response");
+            await _session!.CancelResponseAsync();
             Interlocked.Exchange(ref _responseActive, 0);
         }
         catch (Exception ex)
@@ -334,12 +331,14 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (isCritical && Volatile.Read(ref _responseActive) == 1)
             {
                 Log("🛑 Cancelling active response before critical injection");
+                await _session!.CancelResponseAsync();
                 Interlocked.Exchange(ref _responseActive, 0);
                 await Task.Delay(100);
             }
 
             Log($"💉 Injecting: {(message.Length > 80 ? message[..80] + "..." : message)}");
-            await _session!.AddItemAsync(RealtimeItem.CreateUserMessage([message]));
+            await _session!.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
             await _session.StartResponseAsync();
         }
         catch (Exception ex)
@@ -399,27 +398,23 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }
     }
 
-    private async Task ProcessUpdateAsync(RealtimeUpdate? update)
+    private async Task ProcessUpdateAsync(ConversationUpdate? update)
     {
         if (update == null) return;
 
         switch (update)
         {
-            case ConversationSessionStartedUpdate:
-                Log("✅ Realtime Session Started");
-                break;
-
             // ── SPEECH DETECTION ──
-            case InputAudioSpeechStartedUpdate:
+            case ConversationInputSpeechStartedUpdate:
                 HandleSpeechStarted();
                 break;
 
-            case InputAudioSpeechFinishedUpdate:
+            case ConversationInputSpeechFinishedUpdate:
                 Log("🔇 User finished speaking");
                 break;
 
             // ── AUDIO STREAMING + TEXT DELTA ──
-            case OutputDeltaUpdate delta:
+            case ConversationItemStreamingPartDeltaUpdate delta:
                 if (delta.AudioBytes != null)
                 {
                     Interlocked.Exchange(ref _hasEnqueuedAudio, 1);
@@ -427,41 +422,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 }
                 break;
 
-            // ── RESPONSE LIFECYCLE ──
-            case ResponseStartedUpdate respStarted:
-                _activeResponseId = respStarted.ResponseId;
-                Interlocked.Exchange(ref _responseActive, 1);
-                Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
-                Log($"🎤 Response started (ID: {_activeResponseId})");
-                break;
-
-            case ResponseFinishedUpdate:
-                Interlocked.Exchange(ref _responseActive, 0);
-                Log("✋ Response finished");
-                OnResponseCompleted?.Invoke();
-
-                if (Interlocked.CompareExchange(ref _deferredResponsePending, 0, 1) == 1)
-                {
-                    Log("⏳ Processing deferred response");
-                    await _session!.StartResponseAsync();
-                }
-                else
-                {
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(10_000);
-                        if (Volatile.Read(ref _responseActive) == 0 &&
-                            Volatile.Read(ref _toolInFlight) == 0 &&
-                            Volatile.Read(ref _callEnded) == 0)
-                        {
-                            StartNoReplyWatchdog();
-                        }
-                    });
-                }
-                break;
-
             // ── ITEM STREAMING FINISHED (transcript + tool calls) ──
-            case OutputStreamingFinishedUpdate itemFinished:
+            case ConversationItemStreamingFinishedUpdate itemFinished:
                 // Handle function call completion
                 if (itemFinished.FunctionCallId is not null)
                 {
@@ -474,9 +436,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 {
                     foreach (var part in itemFinished.MessageContentParts)
                     {
-                        if (!string.IsNullOrEmpty(part.AudioTranscript))
+                        if (!string.IsNullOrEmpty(part.AudioTranscriptValue))
                         {
-                            _lastAdaTranscript = part.AudioTranscript;
+                            _lastAdaTranscript = part.AudioTranscriptValue;
                             OnTranscript?.Invoke("Ada", _lastAdaTranscript);
                             CheckGoodbye(_lastAdaTranscript);
                         }
@@ -485,22 +447,76 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 break;
 
             // ── USER TRANSCRIPT ──
-            case InputAudioTranscriptionFinishedUpdate userTranscript:
+            case ConversationInputTranscriptionFinishedUpdate userTranscript:
                 Interlocked.Exchange(ref _noReplyCount, 0);
                 OnTranscript?.Invoke("User", userTranscript.Transcript);
                 break;
 
             // ── ERROR ──
-            case RealtimeErrorUpdate errorUpdate:
+            case ConversationErrorUpdate errorUpdate:
                 _logger.LogError("OpenAI Realtime error: {Msg}", errorUpdate.Message);
                 break;
+
+            // ── ALL OTHER UPDATES (session started, response lifecycle, etc.) ──
+            default:
+                HandleGenericUpdate(update);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Handle response lifecycle and other events that don't have dedicated types in the beta SDK.
+    /// We match on the type name since the beta SDK generates internal types for these events.
+    /// </summary>
+    private void HandleGenericUpdate(ConversationUpdate update)
+    {
+        var typeName = update.GetType().Name;
+
+        if (typeName.Contains("SessionStarted") || typeName.Contains("SessionCreated"))
+        {
+            Log("✅ Realtime Session Started");
+        }
+        else if (typeName.Contains("ResponseStarted") || typeName.Contains("ResponseCreated"))
+        {
+            Interlocked.Exchange(ref _responseActive, 1);
+            Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
+            Log("🎤 Response started");
+        }
+        else if (typeName.Contains("ResponseDone") || typeName.Contains("ResponseFinished"))
+        {
+            Interlocked.Exchange(ref _responseActive, 0);
+            Log("✋ Response finished");
+            OnResponseCompleted?.Invoke();
+
+            if (Interlocked.CompareExchange(ref _deferredResponsePending, 0, 1) == 1)
+            {
+                Log("⏳ Processing deferred response");
+                _ = Task.Run(async () =>
+                {
+                    try { await _session!.StartResponseAsync(); }
+                    catch (Exception ex) { _logger.LogError(ex, "Error starting deferred response"); }
+                });
+            }
+            else
+            {
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(10_000);
+                    if (Volatile.Read(ref _responseActive) == 0 &&
+                        Volatile.Read(ref _toolInFlight) == 0 &&
+                        Volatile.Read(ref _callEnded) == 0)
+                    {
+                        StartNoReplyWatchdog();
+                    }
+                });
+            }
         }
     }
 
     // =========================
     // TOOL CALL HANDLING
     // =========================
-    private async Task HandleToolCallAsync(OutputStreamingFinishedUpdate itemFinished)
+    private async Task HandleToolCallAsync(ConversationItemStreamingFinishedUpdate itemFinished)
     {
         try
         {
@@ -521,8 +537,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 if (toolName == "sync_booking_data")
                     Interlocked.Increment(ref _syncCallCount);
 
-                // GA SDK: create function output item and add it
-                var outputItem = RealtimeItem.CreateFunctionCallOutput(
+                // Beta SDK: create function output item and add it
+                var outputItem = ConversationItem.CreateFunctionCallOutput(
                     callId: itemFinished.FunctionCallId!,
                     output: resultJson);
                 await _session!.AddItemAsync(outputItem);
@@ -574,7 +590,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         {
             var greeting = $"[SYSTEM] A new caller has connected (ID: {_callerId}). " +
                            "Greet them warmly and ask how you can help.";
-            await _session.AddItemAsync(RealtimeItem.CreateUserMessage([greeting]));
+            await _session.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(greeting) }));
             await _session.StartResponseAsync();
             Log("📢 Greeting sent");
         }
@@ -622,7 +639,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             try
             {
                 await _session!.AddItemAsync(
-                    RealtimeItem.CreateUserMessage(["[SILENCE] Hello? Are you still there?"]));
+                    ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart("[SILENCE] Hello? Are you still there?") }));
                 await _session.StartResponseAsync();
             }
             catch (Exception ex)
