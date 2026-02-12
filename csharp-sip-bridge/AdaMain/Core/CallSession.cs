@@ -515,6 +515,12 @@ public sealed class CallSession : ICallSession
             OnBookingUpdated?.Invoke(_booking.Clone());
             _logger.LogInformation("[{SessionId}] ✅ Booked: {Ref}", SessionId, _booking.BookingRef);
             
+            // CRITICAL: Snapshot booking BEFORE fire-and-forget, because DisposeAsync
+            // calls _booking.Reset() which clears CallerPhone and all fields.
+            // Without this, the iCabbi/BSQD dispatch races with disposal and gets empty data.
+            var bookingSnapshot = _booking.Clone();
+            var callerId = CallerId;
+            
             // Fire off BSQD Dispatch + iCabbi + WhatsApp (wait for response to finish first)
             _ = Task.Run(async () =>
             {
@@ -525,14 +531,14 @@ public sealed class CallSession : ICallSession
                         await Task.Delay(100);
                 }
                 
-                await _dispatcher.DispatchAsync(_booking, CallerId);
+                await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
                 
                 // Fire-and-forget iCabbi if enabled
                 if (_icabbiEnabled && _icabbi != null)
                 {
                     try
                     {
-                        var result = await _icabbi.CreateAndDispatchAsync(_booking);
+                        var result = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
                         if (result.Success)
                             _logger.LogInformation("[{SessionId}] 🚕 iCabbi OK — Journey: {JourneyId}", SessionId, result.JourneyId);
                         else
@@ -544,7 +550,7 @@ public sealed class CallSession : ICallSession
                     }
                 }
                 
-                await _dispatcher.SendWhatsAppAsync(CallerId);
+                await _dispatcher.SendWhatsAppAsync(callerId);
             });
             
             return new
