@@ -11,7 +11,7 @@
 
   <ItemGroup>
     <!-- OpenAI .NET SDK (Realtime GA) -->
-    <PackageReference Include="OpenAI" Version="2.8.0" />
+    <PackageReference Include="OpenAI" Version="2.11.0" />
 
     <!-- SIP stack -->
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
