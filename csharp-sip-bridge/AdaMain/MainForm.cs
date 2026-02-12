@@ -444,6 +444,9 @@ public partial class MainForm : Form
         // Wire Ada's audio output → Simli avatar (A-law → PCM16@16kHz)
         session.OnAudioOut += alawFrame => FeedSimliAudio(alawFrame);
         
+        // Wire Ada's audio output → monitor speakers (local playback)
+        session.OnAudioOut += alawFrame => _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+        
         // Wire barge-in → clear Simli buffer
         session.OnBargeIn += () => ClearSimliBuffer();
         
