@@ -10,8 +10,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- OpenAI .NET SDK (Realtime GA) -->
-    <PackageReference Include="OpenAI" Version="2.11.0" />
+    <!-- OpenAI .NET SDK (Realtime beta) -->
+    <PackageReference Include="OpenAI" Version="2.1.0-beta.4" />
 
     <!-- SIP stack -->
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
