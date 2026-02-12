@@ -707,13 +707,15 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     }
 
                     // PRICE-PROMISE SAFETY NET (ported from WinForms):
-                    // If Ada promised to finalize/book but no tool was called, force create_booking
-                    // CRITICAL: Skip if booking already confirmed — prevents infinite loop
+                    // If Ada explicitly promised to finalize/book but no tool was called, force action.
+                    // CRITICAL: Skip if:
+                    //   1) Booking already confirmed — prevents infinite loop
+                    //   2) Auto-quote is in progress — prevents race with background fare calc
+                    //   3) Awaiting confirmation — we're already waiting for user response (no safety net needed)
                     if (Volatile.Read(ref _bookingConfirmed) == 0 &&
                              Volatile.Read(ref _toolCalledInResponse) == 0 &&
-                             // Removed _syncCallCount > 0 guard: if Ada promises a price but NEVER called
-                             // sync_booking_data at all, the safety net MUST still fire to force tool usage.
                              !(IsAutoQuoteInProgress?.Invoke() ?? false) && // GUARD: don't race with background fare calc
+                             !_awaitingConfirmation && // GUARD: if we're awaiting confirmation, don't trigger safety net
                              !string.IsNullOrEmpty(_lastAdaTranscript) &&
                              HasBookingIntent(_lastAdaTranscript))
                     {
@@ -1207,31 +1209,34 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                (text.Any(char.IsLetter) && text.Any(char.IsDigit));
     }
 
-    /// Detect if Ada's transcript indicates she promised to finalize/book
-    /// but no tool was actually called (price-promise safety net).
-    /// </summary>
-    private static bool HasBookingIntent(string transcript)
-    {
-        var lower = transcript.ToLowerInvariant();
-        
-        // Exclude greetings, questions, and offers — these are NOT booking promises
-        if (lower.Contains("how can i help") || lower.Contains("what can i") ||
-            lower.Contains("would you like") || lower.Contains("shall i") ||
-            lower.Contains("do you want") || lower.Contains("welcome") ||
-            lower.Contains("good morning") || lower.Contains("good afternoon") ||
-            lower.Contains("good evening") || lower.Contains("my name is"))
-            return false;
-        
-        // Only match clear action-oriented statements
-        return lower.Contains("finalize") || lower.Contains("finalise") ||
-               lower.Contains("i'll book") || lower.Contains("i will book") ||
-               lower.Contains("booking your") || lower.Contains("booking that") ||
-               lower.Contains("moment while") || lower.Contains("one moment") ||
-               lower.Contains("let me get") || lower.Contains("i'll get") ||
-               lower.Contains("let me calculate") || lower.Contains("let me check") ||
-               lower.Contains("getting the price") || lower.Contains("getting the fare") ||
-               lower.Contains("just a moment");
-    }
+     /// <summary>
+     /// Detect if Ada's transcript indicates she promised to FINALIZE/BOOK.
+     /// CRITICAL: "let me check"/"let me get a price" are INTERJECTIONS while fare calculates.
+     /// They are NOT booking promises — only phrases promising to FINALIZE or CONFIRM are.
+     /// </summary>
+     private static bool HasBookingIntent(string transcript)
+     {
+         var lower = transcript.ToLowerInvariant();
+         
+         // Exclude interjections, questions, and offers — these are NOT booking promises
+         if (lower.Contains("how can i help") || lower.Contains("what can i") ||
+             lower.Contains("would you like") || lower.Contains("shall i") ||
+             lower.Contains("do you want") || lower.Contains("welcome") ||
+             lower.Contains("good morning") || lower.Contains("good afternoon") ||
+             lower.Contains("good evening") || lower.Contains("my name is") ||
+             lower.Contains("let me check") || lower.Contains("let me get") ||
+             lower.Contains("let me calculate") || lower.Contains("let me look") ||
+             lower.Contains("one moment") || lower.Contains("just a moment") ||
+             lower.Contains("moment please"))
+             return false;
+         
+         // Only match EXPLICIT finalization/confirmation statements
+         return lower.Contains("finalize") || lower.Contains("finalise") ||
+                lower.Contains("i'll book") || lower.Contains("i will book") ||
+                lower.Contains("i'll confirm") || lower.Contains("i will confirm") ||
+                lower.Contains("booking confirmed") || lower.Contains("confirming your") ||
+                lower.Contains("booking is complete");
+     }
 
     /// <summary>
     /// Called by CallSession when awaiting booking confirmation (longer watchdog timeout).
