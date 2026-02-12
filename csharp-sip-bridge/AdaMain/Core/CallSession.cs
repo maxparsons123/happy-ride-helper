@@ -264,12 +264,28 @@ public sealed class CallSession : ICallSession
                     if (result.NeedsClarification)
                     {
                         _logger.LogInformation("[{SessionId}] ⚠️ Ambiguous addresses in auto-quote", SessionId);
+                        // Reset fare so re-quote happens after clarification
+                        _booking.Fare = null;
+                        _booking.Eta = null;
                         OnBookingUpdated?.Invoke(_booking.Clone());
-                        var clarifMsg = "I found multiple possible locations for your addresses. " +
-                            (result.PickupAlternatives?.Length > 0 ? $"Pickup options: {string.Join(", ", result.PickupAlternatives)}. " : "") +
-                            (result.DestAlternatives?.Length > 0 ? $"Destination options: {string.Join(", ", result.DestAlternatives)}. " : "") +
-                            "Please ask the caller which one they mean.";
-                        await _aiClient.InjectMessageAndRespondAsync($"[SYSTEM] {clarifMsg}");
+                        
+                        // Use the AI-generated clarification message if available (more natural)
+                        string clarifMsg;
+                        if (!string.IsNullOrWhiteSpace(result.ClarificationMessage))
+                        {
+                            clarifMsg = $"[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED. You MUST ask the caller this question EXACTLY:\n" +
+                                $"\"{result.ClarificationMessage}\"\n" +
+                                "Do NOT proceed with the booking until the caller specifies which location they mean. " +
+                                "After they answer, call sync_booking_data with the corrected address including the city name.";
+                        }
+                        else
+                        {
+                            clarifMsg = "[SYSTEM] ⚠️ ADDRESS DISAMBIGUATION REQUIRED. " +
+                                (result.PickupAlternatives?.Length > 0 ? $"Pickup could be: {string.Join(", ", result.PickupAlternatives)}. " : "") +
+                                (result.DestAlternatives?.Length > 0 ? $"Destination could be: {string.Join(", ", result.DestAlternatives)}. " : "") +
+                                "You MUST ask the caller which specific location they mean. Do NOT guess or assume. Do NOT proceed until they clarify.";
+                        }
+                        await _aiClient.InjectMessageAndRespondAsync(clarifMsg);
                         return;
                     }
                 }
@@ -437,7 +453,8 @@ public sealed class CallSession : ICallSession
                             needs_clarification = true,
                             pickup_options = result.PickupAlternatives ?? Array.Empty<string>(),
                             destination_options = result.DestAlternatives ?? Array.Empty<string>(),
-                            message = "I found multiple locations with that name. Please confirm which one you meant."
+                            clarification_question = result.ClarificationMessage ?? "I found multiple locations with that name. Please confirm which one you meant.",
+                            message = result.ClarificationMessage ?? "I found multiple locations with that name. Please confirm which one you meant."
                         };
                     }
                 }
@@ -632,7 +649,8 @@ public sealed class CallSession : ICallSession
                         needs_clarification = true,
                         pickup_options = result.PickupAlternatives ?? Array.Empty<string>(),
                         destination_options = result.DestAlternatives ?? Array.Empty<string>(),
-                        message = "I found multiple locations with that name. Which one did you mean?"
+                        clarification_question = result.ClarificationMessage ?? "I found multiple locations with that name. Which one did you mean?",
+                        message = result.ClarificationMessage ?? "I found multiple locations with that name. Which one did you mean?"
                     };
                 }
             }
