@@ -226,7 +226,24 @@ public sealed class MqttDispatchClient : IDisposable
         await PublishAsync($"jobs/{jobId}/status", statusPayload);
         
         // Driver app listens on jobs/{jobId}/result/{driverId} for bid outcome
-        var resultPayload = JsonSerializer.Serialize(new { result = "won" });
+        // Include full booking details so driver app can display them
+        var pickupDropoff = $"{job.Pickup}\ndropoff\n{job.Dropoff}";
+        var resultPayload = JsonSerializer.Serialize(new
+        {
+            result = "won",
+            job = jobId,
+            pickup = job.Pickup,
+            dropoff = job.Dropoff,
+            pickupDropoff,
+            customerName = job.CallerName,
+            customerPhone = job.CallerPhone,
+            passengers = job.Passengers,
+            fare = job.EstimatedFare,
+            lat = job.PickupLat,
+            lng = job.PickupLng,
+            dropoffLat = job.DropoffLat,
+            dropoffLng = job.DropoffLng
+        });
         await PublishAsync($"jobs/{jobId}/result/{driverId}", resultPayload);
         
         OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId} | {job.Pickup} → {job.Dropoff}");
