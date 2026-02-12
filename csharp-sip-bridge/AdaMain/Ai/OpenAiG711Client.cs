@@ -1294,20 +1294,20 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         {
             type = "function",
             name = "book_taxi",
-            description = "Request quote or confirm booking",
+            description = "Request quote or confirm booking. ALWAYS include pickup and destination addresses.",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
-                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
-                    ["caller_name"] = new { type = "string" },
-                    ["pickup"] = new { type = "string" },
-                    ["destination"] = new { type = "string" },
-                    ["passengers"] = new { type = "integer" },
-                    ["pickup_time"] = new { type = "string" }
+                    ["action"] = new { type = "string", @enum = new[] { "request_quote", "confirmed" }, description = "request_quote to get fare, confirmed to finalize" },
+                    ["caller_name"] = new { type = "string", description = "Caller's name" },
+                    ["pickup"] = new { type = "string", description = "Pickup address exactly as spoken" },
+                    ["destination"] = new { type = "string", description = "Destination address exactly as spoken" },
+                    ["passengers"] = new { type = "integer", description = "Number of passengers" },
+                    ["pickup_time"] = new { type = "string", description = "Pickup time as spoken" }
                 },
-                required = new[] { "action" }
+                required = new[] { "action", "pickup", "destination" }
             }
         },
         new
