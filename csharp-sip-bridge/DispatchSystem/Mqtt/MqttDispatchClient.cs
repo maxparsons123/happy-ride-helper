@@ -205,6 +205,7 @@ public sealed class MqttDispatchClient : IDisposable
         
         // Notify driver app and pub app via jobs/{jobId}/status topic
         // Driver app subscribes to jobs/+/status — include full job details
+        var pickupDropoff = $"{job.Pickup}\ndropoff\n{job.Dropoff}";
         var statusPayload = JsonSerializer.Serialize(new
         {
             job = jobId,
@@ -213,6 +214,7 @@ public sealed class MqttDispatchClient : IDisposable
             pubName = job.Pickup,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
+            pickupDropoff,
             customerName = job.CallerName,
             customerPhone = job.CallerPhone,
             lat = job.PickupLat,
@@ -227,7 +229,6 @@ public sealed class MqttDispatchClient : IDisposable
         
         // Driver app listens on jobs/{jobId}/result/{driverId} for bid outcome
         // Include full booking details so driver app can display them
-        var pickupDropoff = $"{job.Pickup}\ndropoff\n{job.Dropoff}";
         var resultPayload = JsonSerializer.Serialize(new
         {
             result = "won",
