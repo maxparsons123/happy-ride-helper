@@ -192,12 +192,16 @@ public sealed class MqttDispatchClient : IDisposable
             driverId,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
+            dropoffName = job.Dropoff,
             pickupLat = job.PickupLat,
             pickupLng = job.PickupLng,
             dropoffLat = job.DropoffLat,
             dropoffLng = job.DropoffLng,
             passengers = job.Passengers,
-            fare = job.EstimatedFare
+            fare = job.EstimatedFare,
+            notes = job.SpecialRequirements ?? "",
+            customerName = job.CallerName ?? "Customer",
+            customerPhone = job.CallerPhone ?? ""
         });
 
         await PublishAsync($"drivers/{driverId}/jobs", payload);
@@ -214,32 +218,35 @@ public sealed class MqttDispatchClient : IDisposable
             pubName = job.Pickup,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
+            dropoffName = job.Dropoff,
             pickupDropoff,
-            customerName = job.CallerName,
-            customerPhone = job.CallerPhone,
+            customerName = job.CallerName ?? "Customer",
+            customerPhone = job.CallerPhone ?? "",
             lat = job.PickupLat,
             lng = job.PickupLng,
             dropoffLat = job.DropoffLat,
             dropoffLng = job.DropoffLng,
             passengers = job.Passengers,
             fare = job.EstimatedFare,
+            notes = job.SpecialRequirements ?? "",
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
         await PublishAsync($"jobs/{jobId}/status", statusPayload);
         
         // Driver app listens on jobs/{jobId}/result/{driverId} for bid outcome
-        // Include full booking details so driver app can display them
         var resultPayload = JsonSerializer.Serialize(new
         {
             result = "won",
             job = jobId,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
+            dropoffName = job.Dropoff,
             pickupDropoff,
-            customerName = job.CallerName,
-            customerPhone = job.CallerPhone,
+            customerName = job.CallerName ?? "Customer",
+            customerPhone = job.CallerPhone ?? "",
             passengers = job.Passengers,
             fare = job.EstimatedFare,
+            notes = job.SpecialRequirements ?? "",
             lat = job.PickupLat,
             lng = job.PickupLng,
             dropoffLat = job.DropoffLat,
@@ -258,10 +265,16 @@ public sealed class MqttDispatchClient : IDisposable
             jobId = job.Id,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
+            dropoffName = job.Dropoff,
             pickupLat = job.PickupLat,
             pickupLng = job.PickupLng,
+            dropoffLat = job.DropoffLat,
+            dropoffLng = job.DropoffLng,
             passengers = job.Passengers,
             fare = job.EstimatedFare,
+            notes = job.SpecialRequirements ?? "",
+            customerName = job.CallerName ?? "Customer",
+            customerPhone = job.CallerPhone ?? "",
             biddingWindowSec = 20
         });
 
