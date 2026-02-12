@@ -16,8 +16,7 @@ namespace AdaSdkModel.Sip;
 
 /// <summary>
 /// Multi-call SIP server with G.711 A-law passthrough + OpenAI SDK.
-/// Each incoming call gets its own SIPUserAgent, VoIPMediaSession,
-/// ALawRtpPlayout, and CallSession — fully isolated.
+/// Supports operator mode (manual answer/reject) and auto-answer mode.
 /// </summary>
 public sealed class SipServer : IAsyncDisposable
 {
@@ -36,10 +35,24 @@ public sealed class SipServer : IAsyncDisposable
 
     private readonly ConcurrentDictionary<string, ActiveCall> _activeCalls = new();
 
+    // Operator mode: pending call waiting for manual answer
+    private PendingCall? _pendingCall;
+    private readonly object _pendingLock = new();
+
     public bool IsRegistered { get; private set; }
     public int ActiveCallCount => _activeCalls.Count;
 
+    /// <summary>When true, incoming calls ring and wait for manual answer.</summary>
+    public bool OperatorMode { get; set; }
+
+    // Events
     public event Action<string>? OnLog;
+    public event Action<string>? OnRegistered;
+    public event Action<string>? OnRegistrationFailed;
+    public event Action<string, string>? OnCallStarted;        // sessionId, callerId
+    public event Action<string, string>? OnCallRinging;         // pendingId, callerId
+    public event Action<string, string>? OnCallEnded;           // sessionId, reason
+    public event Action<byte[]>? OnOperatorCallerAudio;         // A-law audio from caller for monitor
 
     public SipServer(
         ILogger<SipServer> logger,
@@ -88,6 +101,9 @@ public sealed class SipServer : IAsyncDisposable
         _regAgent?.Stop();
         _listenerAgent = null;
 
+        // Reject any pending call
+        RejectPendingCall();
+
         foreach (var sid in _activeCalls.Keys.ToList())
         {
             if (_activeCalls.TryRemove(sid, out var call))
@@ -121,11 +137,13 @@ public sealed class SipServer : IAsyncDisposable
         {
             Log($"✅ SIP Registered as {_settings.Username}@{_settings.Server}");
             IsRegistered = true;
+            OnRegistered?.Invoke($"{_settings.Username}@{_settings.Server}");
         };
         _regAgent.RegistrationFailed += (uri, resp, err) =>
         {
             Log($"❌ SIP Registration failed: {err}");
             IsRegistered = false;
+            OnRegistrationFailed?.Invoke(err ?? "Unknown error");
         };
     }
 
@@ -137,8 +155,86 @@ public sealed class SipServer : IAsyncDisposable
         var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
         await _transport!.SendResponseAsync(ringing);
 
-        if (!_settings.AutoAnswer) return;
+        if (OperatorMode)
+        {
+            // Hold call for manual answer
+            var pendingId = Guid.NewGuid().ToString("N")[..8];
+            lock (_pendingLock)
+            {
+                // Reject any existing pending call
+                RejectPendingCallInternal();
+                _pendingCall = new PendingCall { PendingId = pendingId, CallerId = caller, Request = req };
+            }
+            OnCallRinging?.Invoke(pendingId, caller);
+            Log($"📲 [{pendingId}] Operator mode — waiting for manual answer");
+            return;
+        }
 
+        // Auto-answer mode
+        if (!_settings.AutoAnswer) return;
+        await AnswerAndWireCallAsync(req, caller);
+    }
+
+    /// <summary>Answer the pending call in operator mode.</summary>
+    public async Task<bool> AnswerOperatorCallAsync()
+    {
+        PendingCall? pending;
+        lock (_pendingLock)
+        {
+            pending = _pendingCall;
+            _pendingCall = null;
+        }
+        if (pending == null) { Log("⚠ No pending call to answer"); return false; }
+
+        Log($"✅ Answering pending call from {pending.CallerId}…");
+        await AnswerAndWireCallAsync(pending.Request, pending.CallerId, isOperator: true);
+        return true;
+    }
+
+    /// <summary>Reject the pending call.</summary>
+    public void RejectPendingCall()
+    {
+        lock (_pendingLock) { RejectPendingCallInternal(); }
+    }
+
+    private void RejectPendingCallInternal()
+    {
+        if (_pendingCall == null) return;
+        try
+        {
+            var busy = SIPResponse.GetResponse(_pendingCall.Request, SIPResponseStatusCodesEnum.BusyHere, null);
+            _transport?.SendResponseAsync(busy).GetAwaiter().GetResult();
+        }
+        catch { }
+        Log($"❌ Rejected pending call from {_pendingCall.CallerId}");
+        _pendingCall = null;
+    }
+
+    /// <summary>Hang up all active calls.</summary>
+    public async Task HangupAllAsync(string reason)
+    {
+        foreach (var sid in _activeCalls.Keys.ToList())
+        {
+            if (_activeCalls.TryRemove(sid, out var call))
+                await CleanupCallAsync(call, reason);
+        }
+    }
+
+    /// <summary>Send operator mic audio to the active call's RTP stream.</summary>
+    public void SendOperatorAudio(byte[] alawData)
+    {
+        foreach (var call in _activeCalls.Values)
+        {
+            try
+            {
+                call.Playout?.BufferALaw(alawData);
+            }
+            catch { }
+        }
+    }
+
+    private async Task AnswerAndWireCallAsync(SIPRequest req, string caller, bool isOperator = false)
+    {
         var callAgent = new SIPUserAgent(_transport, null);
         var audioEncoder = new AudioEncoder();
         var audioSource = new AudioExtrasSource(audioEncoder, new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
@@ -171,7 +267,6 @@ public sealed class SipServer : IAsyncDisposable
             await session.EndAsync("duplicate"); callAgent.Hangup(); rtpSession.Close("dup"); return;
         }
 
-        // Create playout
         var playout = new ALawRtpPlayout(rtpSession);
         playout.OnLog += msg => Log($"[{session.SessionId}] {msg}");
         activeCall.Playout = playout;
@@ -179,17 +274,17 @@ public sealed class SipServer : IAsyncDisposable
         if (session.AiClient is OpenAiSdkClient sdk)
             sdk.GetQueuedFrames = () => playout.QueuedFrames;
 
-        // Wire audio pipeline
-        WireAudioPipeline(activeCall, negotiatedCodec);
+        WireAudioPipeline(activeCall, negotiatedCodec, isOperator);
         playout.Start();
 
         callAgent.OnCallHungup += async (d) => await RemoveAndCleanupAsync(session.SessionId, "remote_hangup");
         session.OnEnded += async (s, r) => await RemoveAndCleanupAsync(s.SessionId, r);
 
+        OnCallStarted?.Invoke(session.SessionId, caller);
         Log($"📞 Call {session.SessionId} active for {caller} (total: {_activeCalls.Count})");
     }
 
-    private void WireAudioPipeline(ActiveCall call, AudioCodecsEnum negotiatedCodec)
+    private void WireAudioPipeline(ActiveCall call, AudioCodecsEnum negotiatedCodec, bool isOperator = false)
     {
         var session = call.Session;
         var playout = call.Playout!;
@@ -198,7 +293,6 @@ public sealed class SipServer : IAsyncDisposable
 
         int isBotSpeaking = 0, adaHasStartedSpeaking = 0, watchdogPending = 0;
         DateTime botStoppedSpeakingAt = DateTime.MinValue;
-        DateTime lastBargeInLogAt = DateTime.MinValue;
         var callStartedAt = DateTime.UtcNow;
         bool inboundFlushComplete = false;
         int inboundPacketCount = 0;
@@ -254,6 +348,10 @@ public sealed class SipServer : IAsyncDisposable
 
             byte[] g711ToSend = negotiatedCodec == AudioCodecsEnum.PCMU ? G711Transcode.MuLawToALaw(payload) : payload;
 
+            // In operator mode, forward caller audio to local speaker monitor
+            if (isOperator)
+                OnOperatorCallerAudio?.Invoke(g711ToSend);
+
             bool applySoftGate = Volatile.Read(ref isBotSpeaking) == 1;
             if (!applySoftGate && Volatile.Read(ref adaHasStartedSpeaking) == 1 && botStoppedSpeakingAt != DateTime.MinValue)
             {
@@ -293,6 +391,7 @@ public sealed class SipServer : IAsyncDisposable
     {
         if (_activeCalls.TryRemove(sessionId, out var call))
             await CleanupCallAsync(call, reason);
+        OnCallEnded?.Invoke(sessionId, reason);
     }
 
     private async Task CleanupCallAsync(ActiveCall call, string reason)
@@ -356,5 +455,12 @@ public sealed class SipServer : IAsyncDisposable
         public required SIPUserAgent CallAgent { get; init; }
         public ALawRtpPlayout? Playout { get; set; }
         public int CleanupDone;
+    }
+
+    private sealed class PendingCall
+    {
+        public required string PendingId { get; init; }
+        public required string CallerId { get; init; }
+        public required SIPRequest Request { get; init; }
     }
 }

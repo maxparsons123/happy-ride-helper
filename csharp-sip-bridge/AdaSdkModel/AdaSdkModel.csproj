@@ -21,6 +21,9 @@
     <!-- MQTT for dispatch -->
     <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
 
+    <!-- Audio (operator mic + monitor) -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
+
     <!-- Hosting / DI / Logging -->
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
