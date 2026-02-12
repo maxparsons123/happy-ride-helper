@@ -60,6 +60,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     private int _responseTriggeredByTool;  // Set when response.create is sent after a tool result
     private int _hasEnqueuedAudio;         // FIX #2: Set when playout queue has received audio this response
     private int _vadRespondedThisTurn;    // v4.3: Set when server_vad auto-created a response this speech turn
+    private int _toolInFlight;            // Suppress watchdogs/transcript responses while tool is executing
     private long _lastAdaFinishedAt;      // RTP playout completion time (echo guard source of truth)
     private long _lastUserSpeechAt;
     private long _lastToolCallAt;
@@ -168,7 +169,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     {
         try
         {
-            await foreach (var msg in _logChannel.Reader.ReadAllAsync())
+            await foreach (var msg in _logChannel.Reader.ReadAllAsync(_cts?.Token ?? CancellationToken.None))
             {
                 try { _logger.LogInformation("{Msg}", msg); } catch { }
             }
@@ -203,6 +204,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _bookingConfirmed, 0);
         Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
         Interlocked.Exchange(ref _vadRespondedThisTurn, 0);
+        Interlocked.Exchange(ref _toolInFlight, 0);
         Interlocked.Exchange(ref _syncCallCount, 0);   // FIX: Reset sync counter between calls
         Interlocked.Increment(ref _noReplyWatchdogId);
 
@@ -469,6 +471,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _callEnded) != 0) return;
             if (Volatile.Read(ref _disposed) != 0) return;
             if (!IsConnected) return;
+            if (Volatile.Read(ref _toolInFlight) == 1) return; // Suppress during tool execution
             
             // Don't fire if a response is currently active (e.g. fare still being spoken)
             if (Volatile.Read(ref _responseActive) == 1)
@@ -905,6 +908,7 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                         await Task.Delay(800).ConfigureAwait(false); // Give server_vad time to auto-respond
                         // v4.3: Only fire if server_vad did NOT already create a response for this turn
                         if (Volatile.Read(ref _vadRespondedThisTurn) == 0 &&
+                            Volatile.Read(ref _toolInFlight) == 0 &&
                             Volatile.Read(ref _responseActive) == 0 &&
                             Volatile.Read(ref _callEnded) == 0 &&
                             Volatile.Read(ref _disposed) == 0 &&
@@ -947,6 +951,14 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                     Volatile.Write(ref _speechStoppedAt, NowMs());
                     _ = SendJsonAsync(new { type = "input_audio_buffer.commit" });
                     Log("📝 Committed audio buffer (awaiting transcript)");
+                    
+                    // Hard timeout: if transcript never arrives (noise/silence), unblock after 2s
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(2000);
+                        if (Interlocked.CompareExchange(ref _transcriptPending, 0, 1) == 1)
+                            Log("⏰ Transcript hard timeout (2s) — clearing _transcriptPending");
+                    });
                     break;
 
                 case "response.function_call_arguments.done":
@@ -994,15 +1006,25 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         if (name == "book_taxi")
             Interlocked.Exchange(ref _bookingConfirmed, 1);
 
+        // Suppress watchdogs and transcript-triggered responses while tool executes
+        Interlocked.Exchange(ref _toolInFlight, 1);
+
         Dictionary<string, object?> args;
         try { args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsStr ?? "{}") ?? new(); }
         catch { args = new(); }
 
         object result;
-        if (OnToolCall != null)
-            result = await OnToolCall.Invoke(name, args);
-        else
-            result = new { error = "No handler" };
+        try
+        {
+            if (OnToolCall != null)
+                result = await OnToolCall.Invoke(name, args);
+            else
+                result = new { error = "No handler" };
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _toolInFlight, 0);
+        }
 
         // Send tool result
         await SendJsonAsync(new
@@ -1016,8 +1038,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             }
         });
 
-        // Clear response active since old response is done after tool call
-        Interlocked.Exchange(ref _responseActive, 0);
+        // Do NOT clear _responseActive here — only response.done should do that.
+        // Clearing here creates false "idle" windows if OpenAI streams audio after tool output.
 
         // STATE GROUNDING: After sync_booking_data, inject state snapshot into conversation
         // This ensures the AI KNOWS what was synced and prevents redundant questions
@@ -1242,10 +1264,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         await _sendMutex.WaitAsync().ConfigureAwait(false);
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(
-                _cts?.Token ?? CancellationToken.None);
-            cts.CancelAfter(TimeSpan.FromSeconds(5));
-            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, cts.Token).ConfigureAwait(false);
+            // Standalone CTS — a timeout here won't poison the shared _cts
+            using var sendCts = new CancellationTokenSource(5_000);
+            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, sendCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
