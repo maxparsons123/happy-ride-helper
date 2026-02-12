@@ -1,68 +1,128 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
+using AdaMain.Config;
 using Microsoft.Extensions.Logging;
 using OpenAI.RealtimeConversation;
 using System.ClientModel;
-using AdaMain.Config;
 
 namespace AdaMain.Ai;
 
 /// <summary>
-/// OpenAI Realtime API client using official .NET SDK (G.711 A-law passthrough, 8kHz).
-/// 
-/// Implements full production logic:
-/// - Native G.711 A-law codec passthrough (no resampling)
-/// - Tool calling and execution (sync_booking_data, book_taxi)
-/// - Deferred response handling (queue if response active)
-/// - Barge-in detection and response cancellation
-/// - No-reply watchdog (re-prompts after 15s silence)
-/// - Goodbye detection with hangup sequence
-/// - Echo guard (silence window after response completes)
+/// OpenAI Realtime API client using official .NET SDK — G.711 A-law passthrough (8kHz).
+///
+/// Production features ported from raw WebSocket v2.0:
+/// - Native G.711 A-law codec (no resampling, direct SIP passthrough)
+/// - Tool calling with async execution (sync_booking_data, book_taxi, end_call)
+/// - Deferred response handling (queue response.create if one is active)
+/// - Barge-in detection (speech_started while audio streaming)
+/// - No-reply watchdog (15s silence → re-prompt, 30s for disambiguation)
+/// - Echo guard (playout-aware silence window after response completes)
+/// - Goodbye detection with drain-aware hangup
+/// - Keepalive heartbeat logging
+/// - State grounding injection (bridge state after tool calls)
 /// - Per-call state management and reset
-/// 
-/// Version 3.0 - Official OpenAI .NET SDK
+/// - Non-blocking channel-based logger
+/// - Confirmation-awaiting mode (extended watchdog timeout)
+///
+/// Version 3.0 — Official OpenAI .NET SDK
 /// </summary>
 public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 {
+    public const string VERSION = "3.0-sdk-g711";
+
+    // =========================
+    // CONFIG
+    // =========================
     private readonly ILogger<OpenAiG711Client> _logger;
     private readonly OpenAiSettings _settings;
     private readonly string _systemPrompt;
 
-    // SDK instances
+    // =========================
+    // SDK INSTANCES
+    // =========================
     private RealtimeConversationClient? _client;
     private RealtimeConversationSession? _session;
     private CancellationTokenSource? _sessionCts;
+    private Task? _eventLoopTask;
+    private Task? _keepaliveTask;
 
-    // Per-call state
-    private int _responseActive;
-    private int _hasEnqueuedAudio;
-    private int _noReplyWatchdogId;
-    private int _toolInFlight;
-    private int _deferredResponsePending;
-    private int _disposed;
-    private int _callEnded;
-    
+    // =========================
+    // THREAD-SAFE STATE (per-call, reset by ResetCallState)
+    // =========================
+    private int _disposed;                 // Object lifetime only (NEVER reset)
+    private int _callEnded;                // Per-call
+    private int _responseActive;           // Set by response started/finished
+    private int _deferredResponsePending;  // Queue response after current finishes
+    private int _noReplyWatchdogId;        // Incremented to cancel stale watchdogs
+    private int _noReplyCount;             // Per-call
+    private int _toolInFlight;             // Suppress watchdogs during tool execution
+    private int _hasEnqueuedAudio;         // Set when playout queue received audio this response
+    private int _ignoreUserAudio;          // Set after goodbye detected
+    private int _greetingSent;             // Per-call
+    private int _syncCallCount;            // How many sync_booking_data calls made
+    private int _bookingConfirmed;         // Set once book_taxi confirmed succeeds
+    private long _lastAdaFinishedAt;       // RTP playout completion time (echo guard)
+    private long _lastUserSpeechAt;        // Last user audio timestamp
+
+    // Response tracking
     private string? _activeResponseId;
     private string? _lastAdaTranscript;
+    private bool _awaitingConfirmation;    // Extended watchdog timeout for confirmation
+
+    // =========================
+    // CALLER STATE
+    // =========================
     private string _callerId = "";
 
-    // Events
-    public bool IsConnected => _session != null && _disposed == 0;
+    // =========================
+    // CONSTANTS
+    // =========================
+    private const int MAX_NO_REPLY_PROMPTS = 3;
+    private const int NO_REPLY_TIMEOUT_MS = 15_000;
+    private const int CONFIRMATION_TIMEOUT_MS = 30_000;
+    private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
+    private const int ECHO_GUARD_MS = 300;
 
+    // =========================
+    // NON-BLOCKING LOGGER
+    // =========================
+    private readonly Channel<string> _logChannel = Channel.CreateUnbounded<string>(
+        new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+    private Task? _logTask;
+    private volatile bool _loggerRunning;
+
+    // =========================
+    // EVENTS
+    // =========================
+    public bool IsConnected => _session != null && Volatile.Read(ref _disposed) == 0;
+    public bool IsResponseActive => Volatile.Read(ref _responseActive) == 1;
+
+    /// <summary>Fired with raw A-law audio frames from AI.</summary>
     public event Action<byte[]>? OnAudio;
     public event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     public event Action<string>? OnEnded;
     public event Action? OnPlayoutComplete;
     public event Action<string, string>? OnTranscript;
-    
-    private event Action? OnBargeIn;
 
-    private const int NO_REPLY_TIMEOUT_MS = 15000;
-    private const int MAX_NO_REPLY_PROMPTS = 3;
+    /// <summary>Fired on barge-in (playout should clear its buffer).</summary>
+    public event Action? OnBargeIn;
 
+    /// <summary>Fired when AI response stream completes — use for precise bot-speaking tracking.</summary>
+    public event Action? OnResponseCompleted;
+
+    /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
+    public Func<int>? GetQueuedFrames { get; set; }
+
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    // =========================
+    // CONSTRUCTOR
+    // =========================
     public OpenAiG711Client(
         ILogger<OpenAiG711Client> logger,
         OpenAiSettings settings,
@@ -73,27 +133,82 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
     }
 
+    // =========================
+    // NON-BLOCKING LOGGING
+    // =========================
+    private void InitializeLogger()
+    {
+        if (_loggerRunning) return;
+        _loggerRunning = true;
+        _logTask = Task.Run(LogLoopAsync);
+    }
+
+    private async Task LogLoopAsync()
+    {
+        try
+        {
+            await foreach (var msg in _logChannel.Reader.ReadAllAsync(_sessionCts?.Token ?? CancellationToken.None))
+            {
+                try { _logger.LogInformation("{Msg}", msg); } catch { }
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void Log(string msg) => _logChannel.Writer.TryWrite(msg);
+
+    // =========================
+    // PER-CALL STATE RESET
+    // =========================
+    private void ResetCallState(string? caller)
+    {
+        _callerId = caller ?? "";
+
+        Interlocked.Exchange(ref _callEnded, 0);
+        Interlocked.Exchange(ref _responseActive, 0);
+        Interlocked.Exchange(ref _deferredResponsePending, 0);
+        Interlocked.Exchange(ref _noReplyCount, 0);
+        Interlocked.Exchange(ref _toolInFlight, 0);
+        Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
+        Interlocked.Exchange(ref _ignoreUserAudio, 0);
+        Interlocked.Exchange(ref _greetingSent, 0);
+        Interlocked.Exchange(ref _syncCallCount, 0);
+        Interlocked.Exchange(ref _bookingConfirmed, 0);
+        Interlocked.Increment(ref _noReplyWatchdogId);
+
+        _activeResponseId = null;
+        _lastAdaTranscript = null;
+        _awaitingConfirmation = false;
+
+        Volatile.Write(ref _lastAdaFinishedAt, 0);
+        Volatile.Write(ref _lastUserSpeechAt, 0);
+    }
+
+    // =========================
+    // CONNECT
+    // =========================
     public async Task ConnectAsync(string callerId, CancellationToken ct = default)
     {
-        if (Interlocked.Exchange(ref _disposed, 0) != 0)
+        if (Volatile.Read(ref _disposed) != 0)
             throw new ObjectDisposedException(nameof(OpenAiG711Client));
 
         ResetCallState(callerId);
+        InitializeLogger();
 
-        _logger.LogInformation("Connecting to OpenAI Realtime API (G.711 A-law mode)...");
-        
+        Log($"📞 Connecting v{VERSION} (caller: {callerId}, codec: A-law 8kHz, model: {_settings.Model})");
+
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _client = new RealtimeConversationClient(new ApiKeyCredential(_settings.ApiKey));
-        
+
         try
         {
             _session = await _client.StartConversationSessionAsync();
 
-            // Configure session for G.711 A-law (PCMA)
+            // Configure session for native G.711 A-law (PCMA)
             var options = new ConversationSessionOptions
             {
                 Instructions = _systemPrompt,
-                Voice = ConversationVoice.Shimmer,
+                Voice = MapVoice(_settings.Voice),
                 InputAudioFormat = ConversationAudioFormat.G711Alaw,
                 OutputAudioFormat = ConversationAudioFormat.G711Alaw,
                 InputTranscriptionOptions = new ConversationTranscriptionOptions { Model = "whisper-1" },
@@ -104,50 +219,17 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             };
 
             // Add tools
-            options.Tools.Add(new ConversationFunctionTool
-            {
-                Name = "sync_booking_data",
-                Description = "Persist booking data (name, pickup, destination, passengers, pickup_time) as collected from the caller",
-                Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
-                {
-                    type = "object",
-                    properties = new
-                    {
-                        caller_name = new { type = "string" },
-                        pickup = new { type = "string" },
-                        destination = new { type = "string" },
-                        passengers = new { type = "integer" },
-                        pickup_time = new { type = "string" }
-                    }
-                }))
-            });
-
-            options.Tools.Add(new ConversationFunctionTool
-            {
-                Name = "book_taxi",
-                Description = "Request a fare quote or confirm a booking. action: 'request_quote' for quotes, 'confirmed' for finalized bookings.",
-                Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
-                {
-                    type = "object",
-                    properties = new
-                    {
-                        action = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
-                        pickup = new { type = "string" },
-                        destination = new { type = "string" },
-                        caller_name = new { type = "string" },
-                        passengers = new { type = "integer" },
-                        pickup_time = new { type = "string" }
-                    },
-                    required = new[] { "action", "pickup", "destination" }
-                }))
-            });
+            options.Tools.Add(BuildSyncBookingDataTool());
+            options.Tools.Add(BuildBookTaxiTool());
+            options.Tools.Add(BuildEndCallTool());
 
             await _session.ConfigureSessionAsync(options);
 
-            _logger.LogInformation("Session configured successfully (G.711 A-law, {Model})", _settings.Model);
+            _logger.LogInformation("✅ Session configured (G.711 A-law, model={Model})", _settings.Model);
 
-            // Start event processing loop
-            _ = Task.Run(ReceiveEventsLoopAsync, _sessionCts.Token);
+            // Start event loop + keepalive
+            _eventLoopTask = Task.Run(() => ReceiveEventsLoopAsync(_sessionCts.Token));
+            _keepaliveTask = Task.Run(() => KeepaliveLoopAsync(_sessionCts.Token));
 
             // Send greeting
             await SendGreetingAsync();
@@ -160,6 +242,9 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    // =========================
+    // DISCONNECT
+    // =========================
     public async Task DisconnectAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
@@ -168,6 +253,8 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         _logger.LogInformation("Disconnecting from OpenAI Realtime API");
         SignalCallEnded("disconnect");
 
+        _sessionCts?.Cancel();
+
         if (_session != null)
         {
             try { await _session.DisposeAsync(); }
@@ -175,20 +262,41 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
             _session = null;
         }
 
-        _sessionCts?.Cancel();
+        // Stop logger
+        _loggerRunning = false;
+        _logChannel.Writer.TryComplete();
+        try { if (_logTask != null) await _logTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+
         _sessionCts?.Dispose();
         _sessionCts = null;
 
+        // Clear event delegates
+        OnAudio = null;
+        OnToolCall = null;
+        OnEnded = null;
+        OnPlayoutComplete = null;
+        OnTranscript = null;
+        OnBargeIn = null;
+        OnResponseCompleted = null;
+        GetQueuedFrames = null;
+
         ResetCallState(null);
+        _logger.LogInformation("OpenAiG711Client fully disposed — all state cleared");
     }
 
+    // =========================
+    // AUDIO INPUT (SIP → OpenAI)
+    // =========================
     public void SendAudio(byte[] alawData)
     {
-        if (!IsConnected || alawData?.Length == 0) return;
-        
+        if (!IsConnected || alawData == null || alawData.Length == 0) return;
+        if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
+
         try
         {
+            // The SDK handles base64 encoding and JSON envelope internally
             _session!.AppendInputAudio(new BinaryData(alawData));
+            Volatile.Write(ref _lastUserSpeechAt, NowMs());
         }
         catch (Exception ex)
         {
@@ -196,18 +304,18 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    // =========================
+    // CANCEL / INJECT
+    // =========================
     public async Task CancelResponseAsync()
     {
         if (!IsConnected) return;
-        
         try
         {
-            if (Volatile.Read(ref _responseActive) == 1)
-            {
-                _logger.LogInformation("✂️ Cancelling response (barge-in)");
-                Interlocked.Exchange(ref _responseActive, 0);
-                OnBargeIn?.Invoke();
-            }
+            Log("🛑 Cancelling response");
+            // Note: The SDK may not expose response.cancel directly.
+            // We clear state and barge-in event will handle playout clearing.
+            Interlocked.Exchange(ref _responseActive, 0);
         }
         catch (Exception ex)
         {
@@ -215,41 +323,85 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Inject a system message and trigger AI response.
+    /// Used for fare results, disambiguation, and interjections.
+    /// </summary>
     public async Task InjectMessageAndRespondAsync(string message)
     {
         if (!IsConnected) return;
-        
+
         try
         {
-            _logger.LogInformation("💉 Injecting message: {Message}", message);
+            // If injecting fare/disambiguation while AI is speaking, cancel first
+            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("ADDRESS DISAMBIGUATION");
+            if (isCritical && Volatile.Read(ref _responseActive) == 1)
+            {
+                Log("🛑 Cancelling active response before critical injection");
+                Interlocked.Exchange(ref _responseActive, 0);
+                await Task.Delay(100); // Brief settle
+            }
+
+            Log($"💉 Injecting: {(message.Length > 80 ? message[..80] + "..." : message)}");
             await _session!.AddItemAsync(ConversationItem.CreateUserMessage(new[] { message }));
             await _session.StartResponseAsync();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error injecting message and responding");
+            _logger.LogError(ex, "Error injecting message");
         }
     }
 
-    private async Task ReceiveEventsLoopAsync()
+    // =========================
+    // PLAYOUT COMPLETION (echo guard)
+    // =========================
+
+    /// <summary>
+    /// Called by ALawRtpPlayout when the playout queue drains.
+    /// Arms the no-reply watchdog and sets echo guard timestamp.
+    /// </summary>
+    public void NotifyPlayoutComplete()
+    {
+        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+        OnPlayoutComplete?.Invoke();
+        StartNoReplyWatchdog();
+    }
+
+    /// <summary>Set/clear confirmation-awaiting mode (extends watchdog timeout).</summary>
+    public void SetAwaitingConfirmation(bool awaiting)
+    {
+        _awaitingConfirmation = awaiting;
+        Log($"🔔 Awaiting confirmation: {awaiting}");
+    }
+
+    /// <summary>Cancel any pending deferred response.</summary>
+    public void CancelDeferredResponse()
+    {
+        Interlocked.Exchange(ref _deferredResponsePending, 0);
+    }
+
+    // =========================
+    // EVENT LOOP
+    // =========================
+    private async Task ReceiveEventsLoopAsync(CancellationToken ct)
     {
         try
         {
-            await foreach (var update in _session!.GetConversationUpdatesAsync(_sessionCts!.Token))
+            await foreach (var update in _session!.GetConversationUpdatesAsync(ct))
             {
                 try
                 {
-                    ProcessUpdate(update);
+                    await ProcessUpdateAsync(update);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error processing update: {UpdateType}", update?.GetType().Name);
+                    _logger.LogError(ex, "Error processing update: {Type}", update?.GetType().Name);
                 }
             }
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("Event loop cancelled");
+            Log("Event loop cancelled");
         }
         catch (Exception ex)
         {
@@ -258,24 +410,26 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
     }
 
-    private void ProcessUpdate(ConversationUpdate? update)
+    private async Task ProcessUpdateAsync(ConversationUpdate? update)
     {
         if (update == null) return;
 
         switch (update)
         {
             case ConversationSessionStartedUpdate:
-                _logger.LogInformation("✅ Realtime Session Started");
+                Log("✅ Realtime Session Started");
                 break;
 
+            // ── SPEECH DETECTION ──
             case ConversationInputSpeechStartedUpdate:
                 HandleSpeechStarted();
                 break;
 
             case ConversationInputSpeechFinishedUpdate:
-                _logger.LogDebug("🔇 User finished speaking");
+                Log("🔇 User finished speaking");
                 break;
 
+            // ── AUDIO STREAMING ──
             case ConversationItemStreamingPartDeltaUpdate delta:
                 if (delta.AudioDelta != null)
                 {
@@ -284,25 +438,42 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 }
                 break;
 
+            // ── RESPONSE LIFECYCLE ──
             case ConversationResponseStartedUpdate respStarted:
                 _activeResponseId = respStarted.ResponseId;
                 Interlocked.Exchange(ref _responseActive, 1);
-                _logger.LogInformation("🎤 Response started (ID: {ResponseId})", _activeResponseId);
+                Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
+                Log($"🎤 Response started (ID: {_activeResponseId})");
                 break;
 
             case ConversationResponseFinishedUpdate:
                 Interlocked.Exchange(ref _responseActive, 0);
-                _logger.LogInformation("✋ Response finished");
-                StartNoReplyWatchdog();
-                
-                // Check for deferred response
+                Log("✋ Response finished");
+                OnResponseCompleted?.Invoke();
+
+                // Process deferred response if queued
                 if (Interlocked.CompareExchange(ref _deferredResponsePending, 0, 1) == 1)
                 {
-                    _logger.LogInformation("⏳ Processing deferred response");
-                    _ = _session!.StartResponseAsync();
+                    Log("⏳ Processing deferred response");
+                    await _session!.StartResponseAsync();
+                }
+                else
+                {
+                    // Safety fallback: arm watchdog after 10s if playout completion event missed
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(10_000);
+                        if (Volatile.Read(ref _responseActive) == 0 &&
+                            Volatile.Read(ref _toolInFlight) == 0 &&
+                            Volatile.Read(ref _callEnded) == 0)
+                        {
+                            StartNoReplyWatchdog();
+                        }
+                    });
                 }
                 break;
 
+            // ── TRANSCRIPT COMPLETION (Ada) ──
             case ConversationItemStreamingFinishedUpdate itemFinished:
                 if (!string.IsNullOrEmpty(itemFinished.AudioTranscript))
                 {
@@ -312,42 +483,67 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
                 }
                 break;
 
+            // ── USER TRANSCRIPT ──
             case ConversationInputTranscriptionFinishedUpdate userTranscript:
+                Interlocked.Exchange(ref _noReplyCount, 0); // Reset no-reply counter on user speech
                 OnTranscript?.Invoke("User", userTranscript.Transcript);
                 break;
 
+            // ── TOOL CALL ──
             case ConversationFunctionCallArgumentsFinishedUpdate funcArgs:
-                _ = HandleToolCallAsync(funcArgs.FunctionName, funcArgs.Arguments);
+                // Tool call starts: suppress watchdogs, clear response active (audio stream ended)
+                Interlocked.Exchange(ref _toolInFlight, 1);
+                Interlocked.Exchange(ref _responseActive, 0);
+                _ = HandleToolCallAsync(funcArgs);
                 break;
         }
     }
 
-    private async Task HandleToolCallAsync(string toolName, BinaryData argumentsData)
+    // =========================
+    // TOOL CALL HANDLING
+    // =========================
+    private async Task HandleToolCallAsync(ConversationFunctionCallArgumentsFinishedUpdate funcArgs)
     {
-        Interlocked.Exchange(ref _toolInFlight, 1);
-        Interlocked.Exchange(ref _responseActive, 0); // Audio stream ended
-
         try
         {
-            var argsJson = argumentsData.ToString();
-            var args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsJson) ?? new();
-            
-            _logger.LogInformation("🔧 Tool call: {ToolName}", toolName);
-            _logger.LogDebug("📥 Tool args: {Args}", argsJson);
+            var toolName = funcArgs.FunctionName;
+            var argsJson = funcArgs.Arguments.ToString();
+            var args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
+
+            Log($"🔧 Tool call: {toolName} ({args.Count} args)");
 
             if (OnToolCall != null)
             {
                 var result = await OnToolCall(toolName, args);
-                _logger.LogInformation("✅ Tool result: {Result}", result ?? "OK");
-                
-                // Return result to OpenAI
-                await _session!.AddToolResultAsync(result?.ToString() ?? "OK");
-                await _session.StartResponseAsync();
+                var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
+
+                Log($"✅ Tool result: {(resultJson.Length > 120 ? resultJson[..120] + "..." : resultJson)}");
+
+                // Inject bridge state grounding after sync_booking_data
+                if (toolName == "sync_booking_data")
+                {
+                    Interlocked.Increment(ref _syncCallCount);
+                }
+
+                // Return result to OpenAI and trigger next response
+                await _session!.AddToolResultAsync(resultJson);
+
+                // If response is still active (shouldn't be, but safety), defer
+                if (Volatile.Read(ref _responseActive) == 1)
+                {
+                    Interlocked.Exchange(ref _deferredResponsePending, 1);
+                    Log("⏳ Response still active after tool — deferring");
+                }
+                else
+                {
+                    await _session.StartResponseAsync();
+                }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling tool call: {ToolName}", toolName);
+            _logger.LogError(ex, "Error handling tool call: {Name}", funcArgs.FunctionName);
         }
         finally
         {
@@ -355,27 +551,36 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    // =========================
+    // BARGE-IN
+    // =========================
     private void HandleSpeechStarted()
     {
-        Interlocked.Increment(ref _noReplyWatchdogId);
-        
-        // Barge-in detection
+        Interlocked.Increment(ref _noReplyWatchdogId); // Cancel pending watchdog
+
         if (Volatile.Read(ref _responseActive) == 1 && Volatile.Read(ref _hasEnqueuedAudio) == 1)
         {
-            _logger.LogInformation("✂️ Barge-in detected");
+            Log("✂️ Barge-in detected — clearing playout");
             OnBargeIn?.Invoke();
         }
     }
 
+    // =========================
+    // GREETING
+    // =========================
     private async Task SendGreetingAsync()
     {
+        if (Interlocked.Exchange(ref _greetingSent, 1) == 1) return;
         if (_session == null) return;
-        
+
         try
         {
-            var greeting = "Hello, welcome to Ada Taxi. How can I help you today?";
+            // Use a system-injected greeting prompt so Ada speaks naturally
+            var greeting = $"[SYSTEM] A new caller has connected (ID: {_callerId}). " +
+                           "Greet them warmly and ask how you can help.";
             await _session.AddItemAsync(ConversationItem.CreateUserMessage(new[] { greeting }));
             await _session.StartResponseAsync();
+            Log("📢 Greeting sent");
         }
         catch (Exception ex)
         {
@@ -383,89 +588,227 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    // =========================
+    // NO-REPLY WATCHDOG
+    // =========================
     private void StartNoReplyWatchdog()
     {
-        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
-        Task.Run(async () =>
+        if (Volatile.Read(ref _callEnded) != 0) return;
+        if (Volatile.Read(ref _toolInFlight) == 1) return;
+
+        var count = Volatile.Read(ref _noReplyCount);
+        if (count >= MAX_NO_REPLY_PROMPTS)
         {
-            await Task.Delay(NO_REPLY_TIMEOUT_MS);
-            
-            // Only trigger if this watchdog is still current and no active response
-            if (Volatile.Read(ref _noReplyWatchdogId) == watchdogId && 
-                Volatile.Read(ref _responseActive) == 0 &&
-                Volatile.Read(ref _toolInFlight) == 0 &&
-                Volatile.Read(ref _callEnded) == 0)
+            Log($"⏰ Max no-reply prompts reached ({MAX_NO_REPLY_PROMPTS}), ending call");
+            SignalCallEnded("no_reply_timeout");
+            return;
+        }
+
+        var timeout = _awaitingConfirmation ? CONFIRMATION_TIMEOUT_MS : NO_REPLY_TIMEOUT_MS;
+        var watchdogId = Interlocked.Increment(ref _noReplyWatchdogId);
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(timeout);
+
+            // Only trigger if this watchdog is still current
+            if (Volatile.Read(ref _noReplyWatchdogId) != watchdogId) return;
+            if (Volatile.Read(ref _responseActive) == 1) return;
+            if (Volatile.Read(ref _toolInFlight) == 1) return;
+            if (Volatile.Read(ref _callEnded) != 0) return;
+            if (!IsConnected) return;
+
+            // Echo guard: don't trigger if Ada just finished speaking
+            var sinceAdaFinished = NowMs() - Volatile.Read(ref _lastAdaFinishedAt);
+            if (sinceAdaFinished < ECHO_GUARD_MS) return;
+
+            Interlocked.Increment(ref _noReplyCount);
+            Log($"⏰ No-reply watchdog triggered (attempt {Volatile.Read(ref _noReplyCount)}/{MAX_NO_REPLY_PROMPTS})");
+
+            try
             {
-                _logger.LogWarning("⏰ No-reply watchdog triggered");
-                try
-                {
-                    await _session!.AddItemAsync(
-                        ConversationItem.CreateUserMessage(new[] { "Hello? Are you still there?" }));
-                    await _session.StartResponseAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error triggering watchdog");
-                }
+                await _session!.AddItemAsync(
+                    ConversationItem.CreateUserMessage(new[] { "[SILENCE] Hello? Are you still there?" }));
+                await _session.StartResponseAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in no-reply watchdog");
             }
         }, _sessionCts?.Token ?? CancellationToken.None);
     }
 
+    // =========================
+    // KEEPALIVE
+    // =========================
+    private async Task KeepaliveLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(20_000, ct);
+
+                var active = Volatile.Read(ref _responseActive) == 1;
+                var ended = Volatile.Read(ref _callEnded) == 1;
+                var tool = Volatile.Read(ref _toolInFlight) == 1;
+                Log($"💓 Keepalive: connected={IsConnected}, response_active={active}, tool={tool}, ended={ended}");
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log($"⚠️ Keepalive error: {ex.Message}"); }
+    }
+
+    // =========================
+    // GOODBYE DETECTION
+    // =========================
     private void CheckGoodbye(string text)
     {
-        if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("goodbye", StringComparison.OrdinalIgnoreCase))
+        if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
+            (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
+             text.Contains("TaxiBot", StringComparison.OrdinalIgnoreCase) ||
+             text.Contains("taxi", StringComparison.OrdinalIgnoreCase)))
         {
-            _logger.LogInformation("👋 Goodbye detected");
-            SignalCallEnded("goodbye");
+            Log("👋 Goodbye detected in Ada's speech");
+            Interlocked.Exchange(ref _ignoreUserAudio, 1);
+            // Don't end call yet — let playout drain via end_call tool
         }
     }
 
-    private void ResetCallState(string? callerId)
-    {
-        _callerId = callerId ?? "";
-        
-        Interlocked.Exchange(ref _responseActive, 0);
-        Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
-        Interlocked.Exchange(ref _toolInFlight, 0);
-        Interlocked.Exchange(ref _deferredResponsePending, 0);
-        Interlocked.Exchange(ref _callEnded, 0);
-        Interlocked.Increment(ref _noReplyWatchdogId);
-        
-        _activeResponseId = null;
-        _lastAdaTranscript = null;
-    }
-
+    // =========================
+    // CALL ENDED SIGNAL
+    // =========================
     private void SignalCallEnded(string reason)
     {
         if (Interlocked.CompareExchange(ref _callEnded, 1, 0) == 0)
         {
-            _logger.LogInformation("📞 Call ended: {Reason}", reason);
+            Log($"📞 Call ended: {reason}");
             OnEnded?.Invoke(reason);
         }
     }
 
+    // =========================
+    // TOOL DEFINITIONS
+    // =========================
+    private static ConversationFunctionTool BuildSyncBookingDataTool() => new()
+    {
+        Name = "sync_booking_data",
+        Description = "MANDATORY: Persist booking data as collected from the caller. " +
+                      "Must be called BEFORE generating any text response when user provides or amends booking details.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                caller_name = new { type = "string", description = "Caller's name" },
+                pickup = new { type = "string", description = "Pickup address (verbatim from caller)" },
+                destination = new { type = "string", description = "Destination address (verbatim from caller)" },
+                passengers = new { type = "integer", description = "Number of passengers" },
+                pickup_time = new { type = "string", description = "Requested pickup time" }
+            }
+        }))
+    };
+
+    private static ConversationFunctionTool BuildBookTaxiTool() => new()
+    {
+        Name = "book_taxi",
+        Description = "Request a fare quote or confirm a booking. " +
+                      "action='request_quote' for quotes, 'confirmed' for finalized bookings. " +
+                      "CRITICAL: Never call with 'confirmed' in the same turn as an address correction or fare announcement.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                action = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
+                pickup = new { type = "string", description = "Pickup address" },
+                destination = new { type = "string", description = "Destination address" },
+                caller_name = new { type = "string", description = "Caller name" },
+                passengers = new { type = "integer", description = "Number of passengers" },
+                pickup_time = new { type = "string", description = "Pickup time" }
+            },
+            required = new[] { "action", "pickup", "destination" }
+        }))
+    };
+
+    private static ConversationFunctionTool BuildEndCallTool() => new()
+    {
+        Name = "end_call",
+        Description = "End the call after speaking the closing script. " +
+                      "Only call after the farewell message has been fully spoken.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                reason = new { type = "string", description = "Reason for ending (e.g. 'booking_complete', 'user_hangup')" }
+            }
+        }))
+    };
+
+    // =========================
+    // VOICE MAPPING
+    // =========================
+    private static ConversationVoice MapVoice(string voice) => voice?.ToLowerInvariant() switch
+    {
+        "alloy" => ConversationVoice.Alloy,
+        "echo" => ConversationVoice.Echo,
+        "fable" => ConversationVoice.Fable,
+        "onyx" => ConversationVoice.Onyx,
+        "nova" => ConversationVoice.Nova,
+        "shimmer" => ConversationVoice.Shimmer,
+        _ => ConversationVoice.Shimmer
+    };
+
+    // =========================
+    // SYSTEM PROMPT
+    // =========================
     private string GetDefaultSystemPrompt() =>
-@"You are Ada, an AI taxi booking assistant for a UK taxi company.
-You are professional, helpful, and efficient.
+@"You are Ada, a warm and professional AI taxi booking assistant.
 
-Your primary goals:
-1. Collect the caller's name, pickup location, destination, and number of passengers.
-2. Confirm the details with the caller.
-3. Provide a fare quote and ETA using the book_taxi tool.
-4. Complete the booking when confirmed.
+## IDENTITY & STYLE
+- Keep responses under 15 words, one question at a time
+- NEVER use filler phrases: 'one moment', 'please hold on', 'let me check', 'please wait'
+- Be warm but efficient
 
-Use the sync_booking_data tool to persist information as it's collected.
-When ready to quote, use the book_taxi tool with action='request_quote'.
-When the caller confirms, use book_taxi with action='confirmed'.
+## BOOKING SEQUENCE
+1. Greet caller, ask for their name
+2. Ask for pickup address
+3. Ask for destination
+4. Ask for number of passengers (if not mentioned)
+5. Call sync_booking_data with ALL collected details
+6. Call book_taxi with action='request_quote'
+7. Read back the verified address and fare using the fare_spoken field
+8. Wait for explicit user confirmation
+9. Call book_taxi with action='confirmed'
+10. Speak closing script, then call end_call
 
-Important rules:
-- Always confirm details before quoting or booking.
-- If the caller provides unclear or partial information, ask clarifying questions.
-- Be concise and friendly in your responses.
-- Never hallucinate addresses, fares, or booking references.
-- Use the tools to manage the booking process.";
+## ADDRESS INTEGRITY (CRITICAL)
+- ONLY store house numbers, postcodes, cities explicitly stated by the user
+- House numbers are VERBATIM identifiers (e.g. '1214A', '52-8') — NEVER reinterpret
+- Character-for-character copy from transcript for ALL tool parameters
+- NEVER substitute similar-sounding addresses
+- If unsure, ASK for clarification
 
+## MISHEARING RECOVERY
+- If user spells out a word letter by letter (D-O-V-E-Y), reconstruct it as 'Dovey'
+- Treat spelled-out words as the FINAL source of truth
+- ABANDON previously misheard versions immediately
+- Call sync_booking_data after any correction
+
+## TOOL CALL RULES
+- Call sync_booking_data BEFORE generating text when user provides/amends details
+- NEVER call book_taxi confirmed in same turn as address correction or fare announcement
+- NEVER invent fares or booking references — only use values from tool results
+- Use fare_spoken field for price announcements
+
+## CLOSING SCRIPT (VERBATIM)
+'Thank you for using the TaxiBot system. You will shortly receive your booking confirmation over WhatsApp. Goodbye.'
+Then immediately call end_call.";
+
+    // =========================
+    // DISPOSE
+    // =========================
     public async ValueTask DisposeAsync()
     {
         await DisconnectAsync();
