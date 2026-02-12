@@ -1,7 +1,7 @@
 namespace DispatchSystem.UI;
 
 /// <summary>
-/// Settings dialog for webhook port, auto-dispatch interval, bidding config, and sound.
+/// Settings dialog for webhook port, auto-dispatch interval, bidding config, iCabbi keys, and sound.
 /// </summary>
 public sealed class DispatchSettingsDialog : Form
 {
@@ -11,11 +11,17 @@ public sealed class DispatchSettingsDialog : Form
     public int BiddingWindowSec { get; private set; }
     public double BidRadiusKm { get; private set; }
 
+    // iCabbi
+    public string IcabbiAppKey { get; private set; }
+    public string IcabbiSecretKey { get; private set; }
+    public string IcabbiTenantBase { get; private set; }
+
     public DispatchSettingsDialog(int currentPort, int currentIntervalSec, bool soundEnabled,
-        int biddingWindowSec = 20, double bidRadiusKm = 10.0)
+        int biddingWindowSec = 20, double bidRadiusKm = 10.0,
+        string icabbiAppKey = "", string icabbiSecretKey = "", string icabbiTenantBase = "")
     {
         Text = "⚙ Dispatch Settings";
-        Size = new Size(360, 400);
+        Size = new Size(420, 620);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -29,6 +35,9 @@ public sealed class DispatchSettingsDialog : Form
         SoundEnabled = soundEnabled;
         BiddingWindowSec = biddingWindowSec;
         BidRadiusKm = bidRadiusKm;
+        IcabbiAppKey = icabbiAppKey;
+        IcabbiSecretKey = icabbiSecretKey;
+        IcabbiTenantBase = icabbiTenantBase;
 
         var y = 20;
 
@@ -37,7 +46,7 @@ public sealed class DispatchSettingsDialog : Form
         {
             Text = currentPort.ToString(),
             Location = new Point(180, y),
-            Width = 100,
+            Width = 180,
             BackColor = Color.FromArgb(50, 50, 55),
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle
@@ -50,7 +59,7 @@ public sealed class DispatchSettingsDialog : Form
         {
             Text = currentIntervalSec.ToString(),
             Location = new Point(180, y),
-            Width = 100,
+            Width = 180,
             BackColor = Color.FromArgb(50, 50, 55),
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle
@@ -75,7 +84,7 @@ public sealed class DispatchSettingsDialog : Form
         {
             Text = biddingWindowSec.ToString(),
             Location = new Point(180, y),
-            Width = 100,
+            Width = 180,
             BackColor = Color.FromArgb(50, 50, 55),
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle
@@ -88,7 +97,7 @@ public sealed class DispatchSettingsDialog : Form
         {
             Text = bidRadiusKm.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
             Location = new Point(180, y),
-            Width = 100,
+            Width = 180,
             BackColor = Color.FromArgb(50, 50, 55),
             ForeColor = Color.White,
             BorderStyle = BorderStyle.FixedSingle
@@ -105,6 +114,59 @@ public sealed class DispatchSettingsDialog : Form
             ForeColor = Color.White
         };
         Controls.Add(chkSound);
+        y += 40;
+
+        // ── iCabbi Settings ──
+        var lblIcabbiHeader = new Label
+        {
+            Text = "── iCabbi Integration ──",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.MediumPurple,
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+        };
+        Controls.Add(lblIcabbiHeader);
+        y += 30;
+
+        AddLabel("App Key:", 20, y);
+        var txtAppKey = new TextBox
+        {
+            Text = icabbiAppKey,
+            Location = new Point(180, y),
+            Width = 180,
+            BackColor = Color.FromArgb(50, 50, 55),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            UseSystemPasswordChar = true
+        };
+        Controls.Add(txtAppKey);
+        y += 35;
+
+        AddLabel("Secret Key:", 20, y);
+        var txtSecretKey = new TextBox
+        {
+            Text = icabbiSecretKey,
+            Location = new Point(180, y),
+            Width = 180,
+            BackColor = Color.FromArgb(50, 50, 55),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+            UseSystemPasswordChar = true
+        };
+        Controls.Add(txtSecretKey);
+        y += 35;
+
+        AddLabel("Tenant URL:", 20, y);
+        var txtTenant = new TextBox
+        {
+            Text = icabbiTenantBase,
+            Location = new Point(180, y),
+            Width = 180,
+            BackColor = Color.FromArgb(50, 50, 55),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        Controls.Add(txtTenant);
         y += 50;
 
         var btnOk = new Button
@@ -115,7 +177,7 @@ public sealed class DispatchSettingsDialog : Form
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Size = new Size(90, 34),
-            Location = new Point(80, y)
+            Location = new Point(110, y)
         };
         btnOk.Click += (_, _) =>
         {
@@ -125,6 +187,9 @@ public sealed class DispatchSettingsDialog : Form
             if (double.TryParse(txtBidRadius.Text, System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var br) && br > 0) BidRadiusKm = br;
             SoundEnabled = chkSound.Checked;
+            IcabbiAppKey = txtAppKey.Text.Trim();
+            IcabbiSecretKey = txtSecretKey.Text.Trim();
+            IcabbiTenantBase = txtTenant.Text.Trim();
         };
 
         var btnCancel = new Button
@@ -135,7 +200,7 @@ public sealed class DispatchSettingsDialog : Form
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Size = new Size(90, 34),
-            Location = new Point(185, y)
+            Location = new Point(215, y)
         };
 
         Controls.AddRange(new Control[] { btnOk, btnCancel });

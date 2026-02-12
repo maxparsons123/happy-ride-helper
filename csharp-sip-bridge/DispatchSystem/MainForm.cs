@@ -2,6 +2,7 @@ using System.Media;
 using DispatchSystem.Data;
 using DispatchSystem.Dispatch;
 using DispatchSystem.Mqtt;
+using DispatchSystem.Services;
 using DispatchSystem.UI;
 using DispatchSystem.Webhook;
 
@@ -26,6 +27,7 @@ public class MainForm : Form
     private readonly Button _btnSettings;
     private readonly CheckBox _chkAutoDispatch;
     private readonly CheckBox _chkBiddingMode;
+    private readonly CheckBox _chkIcabbi;
     private readonly Label _lblStatus;
     private readonly Label _lblStats;
 
@@ -43,6 +45,13 @@ public class MainForm : Form
     private int _biddingWindowSec = 20;
     private double _bidRadiusKm = 10.0;
     private bool _soundEnabled = true;
+
+    // ── iCabbi ──
+    private IcabbiBookingService? _icabbi;
+    private string _icabbiAppKey = "eb64fcbef547aa05336ee68b39a9f931ad3e225c";
+    private string _icabbiSecretKey = "c7a01c8156bc9290bc408d206be0039def589504";
+    private string _icabbiTenantBase = "https://yourtenant.icabbi.net";
+    private bool _icabbiEnabled = false;
 
     public MainForm()
     {
@@ -131,7 +140,7 @@ public class MainForm : Form
         toolbar.Controls.AddRange(new Control[]
         {
             _btnConnect, _btnDisconnect, _btnAddDriver, _btnManualDispatch,
-            _btnRunDispatch, _btnSettings, _chkAutoDispatch, _chkBiddingMode, _lblStatus, _lblStats
+            _btnRunDispatch, _btnSettings, _chkAutoDispatch, _chkBiddingMode, _chkIcabbi, _lblStatus, _lblStats
         });
 
         // ── Layout ──
@@ -495,6 +504,29 @@ public class MainForm : Form
         if (_mqtt != null)
             await _mqtt.PublishJobAllocation(job.Id, driver.Id, job);
 
+        // Fire-and-forget iCabbi booking if enabled
+        if (_icabbiEnabled && _icabbi != null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var result = await _icabbi.CreateAndDispatchAsync(job);
+                    BeginInvoke(() =>
+                    {
+                        if (result.Success)
+                            _logPanel.AppendLog($"🚕 iCabbi OK — Journey: {result.JourneyId} | Track: {result.TrackingUrl}", Color.MediumPurple);
+                        else
+                            _logPanel.AppendLog($"⚠ iCabbi failed: {result.Message}", Color.Orange);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    BeginInvoke(() => _logPanel.AppendLog($"❌ iCabbi error: {ex.Message}", Color.Red));
+                }
+            });
+        }
+
         // Marshal to UI thread — this handler fires from background dispatch threads
         if (InvokeRequired)
         {
@@ -511,6 +543,22 @@ public class MainForm : Form
             await _map.DrawAllocationLine(job.Id, driver.Lat, driver.Lng, job.PickupLat, job.PickupLng);
 
         RefreshUI();
+    }
+
+    private void EnsureIcabbiClient()
+    {
+        _icabbi?.Dispose();
+        _icabbi = new IcabbiBookingService(_icabbiAppKey, _icabbiSecretKey, tenantBase: _icabbiTenantBase);
+        _icabbi.OnLog += msg =>
+        {
+            if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog(msg, Color.MediumPurple));
+            else _logPanel.AppendLog(msg, Color.MediumPurple);
+        };
+        _icabbi.OnStatusChanged += (journeyId, oldStatus, newStatus) =>
+        {
+            if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog($"🔄 iCabbi {journeyId}: {oldStatus} → {newStatus}", Color.MediumPurple));
+            else _logPanel.AppendLog($"🔄 iCabbi {journeyId}: {oldStatus} → {newStatus}", Color.MediumPurple);
+        };
     }
 
     // ── Manual Actions ──
@@ -574,10 +622,22 @@ public class MainForm : Form
 
     private void BtnSettings_Click(object? sender, EventArgs e)
     {
-        using var dlg = new DispatchSettingsDialog(_webhookPort, _autoDispatchSec, _soundEnabled, _biddingWindowSec, _bidRadiusKm);
+        using var dlg = new DispatchSettingsDialog(
+            _webhookPort, _autoDispatchSec, _soundEnabled, _biddingWindowSec, _bidRadiusKm,
+            _icabbiAppKey, _icabbiSecretKey, _icabbiTenantBase);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         _soundEnabled = dlg.SoundEnabled;
+
+        // iCabbi keys
+        if (dlg.IcabbiAppKey != _icabbiAppKey || dlg.IcabbiSecretKey != _icabbiSecretKey || dlg.IcabbiTenantBase != _icabbiTenantBase)
+        {
+            _icabbiAppKey = dlg.IcabbiAppKey;
+            _icabbiSecretKey = dlg.IcabbiSecretKey;
+            _icabbiTenantBase = dlg.IcabbiTenantBase;
+            if (_icabbiEnabled) EnsureIcabbiClient();
+            _logPanel.AppendLog("⚙ iCabbi API keys updated", Color.MediumPurple);
+        }
 
         if (dlg.WebhookPort != _webhookPort)
         {
@@ -670,6 +730,7 @@ public class MainForm : Form
         _webhook?.Dispose();
         _dispatcher?.Dispose();
         _bidding?.Dispose();
+        _icabbi?.Dispose();
         _mqtt?.Dispose();
         _db?.Dispose();
         base.OnFormClosing(e);
