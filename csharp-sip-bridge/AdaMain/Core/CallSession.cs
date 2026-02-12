@@ -262,7 +262,28 @@ public sealed class CallSession : ICallSession
                 !nameVal.Equals("Unknown", StringComparison.OrdinalIgnoreCase) &&
                 !nameVal.Equals("Caller", StringComparison.OrdinalIgnoreCase))
             {
+                var nameJustEstablished = _booking.Name == null && nameVal != null;
                 _booking.Name = nameVal;
+                
+                // If name was just established and NO travel data in this sync call,
+                // nudge the AI to recall previously mentioned details from the conversation
+                if (nameJustEstablished && !providingPickup && !providingDest && !args.ContainsKey("passengers"))
+                {
+                    bool noTravelYet = string.IsNullOrWhiteSpace(_booking.Pickup) && string.IsNullOrWhiteSpace(_booking.Destination);
+                    if (noTravelYet && _aiClient is OpenAiG711Client g711Nudge)
+                    {
+                        _logger.LogInformation("[{SessionId}] 💡 Name established without travel data — nudging AI to recall earlier details", SessionId);
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(200); // Let the current tool response complete first
+                            await g711Nudge.InjectMessageAndRespondAsync(
+                                "[SYSTEM] The caller's name is now confirmed. IMPORTANT: Review the conversation history — " +
+                                "the caller likely already mentioned pickup and/or destination details earlier. " +
+                                "Call sync_booking_data NOW with ALL previously mentioned details (pickup, destination, etc.) " +
+                                "together with the name. Do NOT re-ask for details the caller already provided.");
+                        });
+                    }
+                }
             }
             else if (!string.IsNullOrWhiteSpace(nameVal))
             {
