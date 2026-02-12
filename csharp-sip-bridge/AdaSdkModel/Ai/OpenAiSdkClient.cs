@@ -436,9 +436,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 {
                     foreach (var part in itemFinished.MessageContentParts)
                     {
-                        if (!string.IsNullOrEmpty(part.AudioTranscriptValue))
+                        // In SDK 2.1.0-beta.4, use ToString() to extract transcript text
+                        var transcriptText = part?.ToString();
+                        if (!string.IsNullOrEmpty(transcriptText))
                         {
-                            _lastAdaTranscript = part.AudioTranscriptValue;
+                            _lastAdaTranscript = transcriptText;
                             OnTranscript?.Invoke("Ada", _lastAdaTranscript);
                             CheckGoodbye(_lastAdaTranscript);
                         }
