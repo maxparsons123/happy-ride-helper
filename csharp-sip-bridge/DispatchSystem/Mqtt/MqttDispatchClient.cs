@@ -110,8 +110,8 @@ public sealed class MqttDispatchClient : IDisposable
                 }
                 else
                 {
-                    // Pub app uses "pubName" as the pickup location name
-                    var pickupText = booking.pickup ?? booking.pubName ?? "";
+                    // Pub app uses "pubName" as the pickup location name; dispatcher sends "pickupAddress"
+                    var pickupText = booking.pickup ?? booking.pubName ?? booking.pickupAddress ?? "";
                     var dropoffText = booking.dropoff ?? booking.destination ?? "";
 
                     // Pub app sends pickup coords as "lat"/"lng"
@@ -360,6 +360,7 @@ public sealed class MqttDispatchClient : IDisposable
         // ── Pub app format (pubs/requests/+) ──
         public string? job { get; set; }            // job ID
         public string? pubName { get; set; }         // used as pickup name
+        public string? pickupAddress { get; set; }   // dispatcher format: used as pickup name fallback
         public string? customerName { get; set; }    // maps to CallerName
         public string? customerPhone { get; set; }   // maps to CallerPhone
         public string? destination { get; set; }     // maps to Dropoff
