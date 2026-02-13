@@ -85,13 +85,37 @@ export const defaultDiagnosticGroups: DiagnosticGroup[] = [
     label: "Voice Activity Detection",
     icon: "🎙️",
     description:
-      "OpenAI's server-side VAD settings. These control when the AI considers the caller to be speaking or silent, directly affecting turn-taking behavior.",
+      "OpenAI's turn detection settings. Toggle between silence-based (server_vad) and meaning-based (semantic_vad) modes. Semantic VAD is superior for address collection — it waits for complete thoughts instead of cutting off pauses.",
     params: [
       {
-        key: "vadThreshold",
-        label: "VAD Threshold",
+        key: "vadMode",
+        label: "VAD Mode",
         description:
-          "Sensitivity of OpenAI's voice activity detector. Lower = more sensitive (detects quieter speech). Range: 0.0–1.0. Default 0.3 is tuned for telephony noise floors. Go lower (0.2) for very quiet callers.",
+          "server_vad: Triggers on silence duration — fast but cuts off callers thinking mid-sentence. semantic_vad: Triggers when the AI thinks the caller finished their thought — better for addresses, postcodes, and complex info. Takes immediate effect on the next session configure.",
+        type: "select",
+        options: [
+          { label: "🧠 Semantic VAD (recommended)", value: "semantic" },
+          { label: "⏱️ Server VAD (silence-based)", value: "server" },
+        ],
+        defaultValue: "semantic",
+      },
+      {
+        key: "semanticEagerness",
+        label: "Semantic Eagerness",
+        description:
+          "How quickly the AI responds after it thinks the caller finished. Low (0.3) = very patient, waits for complete addresses. Medium (0.5) = balanced. High (0.9) = quick responses, good for yes/no questions but may interrupt thinking pauses. Only applies in Semantic VAD mode.",
+        type: "slider",
+        min: 0.1,
+        max: 1.0,
+        step: 0.05,
+        unit: "",
+        defaultValue: 0.5,
+      },
+      {
+        key: "vadThreshold",
+        label: "VAD Threshold (Server mode)",
+        description:
+          "Sensitivity of OpenAI's voice activity detector. Only used in Server VAD mode. Lower = more sensitive (detects quieter speech). Range: 0.0–1.0. Default 0.3 is tuned for telephony noise floors.",
         type: "slider",
         min: 0.05,
         max: 1.0,
