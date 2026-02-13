@@ -77,6 +77,16 @@ public partial class MainForm : Form
                     settings.Dispatch.BsqdWebhookUrl = defaults.BsqdWebhookUrl;
                 if (string.IsNullOrWhiteSpace(settings.Dispatch.BsqdApiKey))
                     settings.Dispatch.BsqdApiKey = defaults.BsqdApiKey;
+
+                // Seed SipAccounts from inline Sip block if array is empty
+                if (settings.SipAccounts.Count == 0 && !string.IsNullOrWhiteSpace(settings.Sip.Server))
+                {
+                    var acct = new SipAccount();
+                    acct.FromSipSettings(settings.Sip, $"{settings.Sip.Username}@{settings.Sip.Server}");
+                    settings.SipAccounts.Add(acct);
+                    settings.SelectedSipAccountIndex = 0;
+                }
+
                 return settings;
             }
         }
