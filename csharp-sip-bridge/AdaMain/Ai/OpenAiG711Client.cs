@@ -575,18 +575,69 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            // Use a system-injected greeting prompt so Ada speaks naturally
-            var greeting = $"[SYSTEM] A new caller has connected (ID: {_callerId}). " +
-                           "Greet them warmly and ask how you can help.";
+            var lang = DetectLanguage(_callerId);
+            var langName = GetLanguageName(lang);
+            var localizedGreeting = GetLocalizedGreeting(lang);
+
+            var greeting = $"[SYSTEM] [LANG: {langName}] A new caller has connected (ID: {_callerId}). " +
+                           $"Greet them in {langName}. Say: \"{localizedGreeting}\"";
             await _session.AddItemAsync(ConversationItem.CreateUserMessage(new[] { greeting }));
             await _session.StartResponseAsync();
-            Log("📢 Greeting sent");
+            Log($"📢 Greeting sent (language: {langName})");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending greeting");
         }
     }
+
+    // =========================
+    // LANGUAGE DETECTION
+    // =========================
+    private static string DetectLanguage(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone)) return "en";
+        var clean = phone.Replace(" ", "").Replace("-", "");
+        if (clean.StartsWith("+31") || clean.StartsWith("0031") || clean.StartsWith("06"))
+            return "nl";
+        if (clean.StartsWith("+33") || clean.StartsWith("0033"))
+            return "fr";
+        if (clean.StartsWith("+49") || clean.StartsWith("0049"))
+            return "de";
+        if (clean.StartsWith("+34") || clean.StartsWith("0034"))
+            return "es";
+        if (clean.StartsWith("+39") || clean.StartsWith("0039"))
+            return "it";
+        if (clean.StartsWith("+48") || clean.StartsWith("0048"))
+            return "pl";
+        if (clean.StartsWith("+351") || clean.StartsWith("00351"))
+            return "pt";
+        return "en";
+    }
+
+    private static string GetLanguageName(string lang) => lang switch
+    {
+        "nl" => "Dutch",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "it" => "Italian",
+        "pl" => "Polish",
+        "pt" => "Portuguese",
+        _ => "English"
+    };
+
+    private static string GetLocalizedGreeting(string lang) => lang switch
+    {
+        "nl" => "Hallo, welkom bij Taxibot. Ik ben Ada. Wat is uw naam?",
+        "fr" => "Bonjour, bienvenue chez Taxibot. Je suis Ada. Quel est votre nom?",
+        "de" => "Hallo, willkommen bei Taxibot. Ich bin Ada. Wie heißen Sie?",
+        "es" => "Hola, bienvenido a Taxibot. Soy Ada. ¿Cuál es su nombre?",
+        "it" => "Ciao, benvenuto a Taxibot. Sono Ada. Qual è il suo nome?",
+        "pl" => "Cześć, witamy w Taxibot. Jestem Ada. Jak się Pan/Pani nazywa?",
+        "pt" => "Olá, bem-vindo ao Taxibot. Sou a Ada. Qual é o seu nome?",
+        _ => "Hello, welcome to Taxibot. I'm Ada. What's your name?"
+    };
 
     // =========================
     // NO-REPLY WATCHDOG
@@ -804,7 +855,16 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
 
 ## CLOSING SCRIPT (VERBATIM)
 'Thank you for using the TaxiBot system. You will shortly receive your booking confirmation over WhatsApp. Goodbye.'
-Then immediately call end_call.";
+Then immediately call end_call.
+
+## LANGUAGE
+You will be told the caller's initial language in the greeting injection (e.g. [LANG: Dutch]).
+Start speaking in THAT language.
+CONTINUOUSLY MONITOR the caller's spoken language.
+If they speak another language or ask to switch, IMMEDIATELY switch for all responses.
+
+Supported languages:
+English, Dutch, French, German, Spanish, Italian, Polish, Portuguese.";
 
     // =========================
     // DISPOSE
