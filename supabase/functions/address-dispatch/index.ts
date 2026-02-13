@@ -371,6 +371,12 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       const addr = parsed[side];
       if (!addr || addr.is_ambiguous) continue;
       
+      // CALLER HISTORY BIAS: If Gemini resolved from caller history, trust it — skip disambiguation
+      if (addr.matched_from_history === true) {
+        console.log(`✅ "${addr.street_name || addr.address}" matched from caller history — skipping disambiguation`);
+        continue;
+      }
+      
       const city = addr.city || parsed.detected_area || "";
       const streetName = addr.street_name || "";
       const knownStreets = KNOWN_MULTI_DISTRICT_STREETS[city];
