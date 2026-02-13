@@ -335,11 +335,19 @@ public partial class MainForm : Form
         // Wire session events → UI
         session.OnTranscript += (role, text) => Invoke(() => Log($"💬 {role}: {text}"));
 
-        // Wire audio → monitor + Simli avatar
+        // Wire audio → Simli avatar OR monitor speakers (never both to avoid double audio)
         session.OnAudioOut += alawFrame =>
         {
-            _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
-            FeedSimliAudio(alawFrame);
+            if (_simliAvatar?.IsConnected == true)
+            {
+                // Avatar is active – route audio to avatar only (it has its own speaker)
+                FeedSimliAudio(alawFrame);
+            }
+            else
+            {
+                // No avatar – fall back to local monitor speakers
+                _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+            }
         };
 
         // Wire barge-in → clear Simli buffer
