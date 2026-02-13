@@ -298,6 +298,7 @@ public sealed class CallSession : ICallSession
                                 }
 
                                 _pickupDisambiguated = false;
+                                _activePickupAlternatives = pickupAlts;
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: PICKUP disambiguation needed: {Alts}", sessionId, string.Join("|", pickupAlts));
                                 // Switch to semantic VAD for disambiguation (caller choosing from options)
                                 if (_aiClient is OpenAiSdkClient sdkVad1)
@@ -309,11 +310,14 @@ public sealed class CallSession : ICallSession
                                         $"options=[{string.Join(", ", pickupAlts)}]. " +
                                         "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination. " +
                                         "Present the options with numbers, then STOP and WAIT for their answer. " +
+                                        "IMPORTANT: If the caller provides a completely DIFFERENT address instead of choosing from the list, " +
+                                        "call clarify_address with that new address as 'selected'. " +
                                         "When they choose, call clarify_address(target=\"pickup\", selected=\"[their choice]\").");
                             }
                             else if (destAlts.Length > 0)
                             {
                                 _destDisambiguated = false;
+                                _activeDestAlternatives = destAlts;
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: DESTINATION disambiguation needed: {Alts}", sessionId, string.Join("|", destAlts));
 
                                 if (_aiClient is OpenAiSdkClient sdkClarif)
@@ -322,6 +326,8 @@ public sealed class CallSession : ICallSession
                                         $"options=[{string.Join(", ", destAlts)}]. " +
                                         "Pickup is confirmed. Now ask the caller ONLY about the DESTINATION. " +
                                         "Present the options with numbers, then STOP and WAIT for their answer. " +
+                                        "IMPORTANT: If the caller provides a completely DIFFERENT address instead of choosing from the list, " +
+                                        "call clarify_address with that new address as 'selected'. " +
                                         "When they choose, call clarify_address(target=\"destination\", selected=\"[their choice]\").");
                             }
                             else
@@ -357,6 +363,7 @@ public sealed class CallSession : ICallSession
                         // (pickup was ambiguous, now resolved, but dest still needs clarification)
                         if (_pendingDestAlternatives != null && _pendingDestAlternatives.Length > 0 && !_destDisambiguated)
                         {
+                            _activeDestAlternatives = _pendingDestAlternatives;
                             var destAltsList = string.Join(", ", _pendingDestAlternatives);
                             _logger.LogInformation("[{SessionId}] 🔄 Now resolving pending destination disambiguation: {Alts}", sessionId, destAltsList);
 
@@ -364,7 +371,9 @@ public sealed class CallSession : ICallSession
                                 await sdkDestClarif.InjectMessageAndRespondAsync(
                                     $"[DESTINATION DISAMBIGUATION] Good, the pickup is confirmed. Now the DESTINATION address is ambiguous. The options are: {destAltsList}. " +
                                     "Ask the caller ONLY about the DESTINATION location. " +
-                                    "Present the destination options clearly, then STOP and WAIT for their answer.");
+                                    "Present the destination options clearly, then STOP and WAIT for their answer. " +
+                                    "IMPORTANT: If the caller provides a completely DIFFERENT address instead of choosing from the list, " +
+                                    "call clarify_address with that new address as 'selected'.");
 
                             _pendingDestAlternatives = null;
                             _pendingDestClarificationMessage = null;
@@ -488,6 +497,13 @@ public sealed class CallSession : ICallSession
     // =========================
     // CLARIFY ADDRESS
     // =========================
+    /// <summary>
+    /// Known alternatives currently being presented to the caller.
+    /// Used to detect if the caller provides a completely new address instead of choosing from the list.
+    /// </summary>
+    private string[]? _activePickupAlternatives;
+    private string[]? _activeDestAlternatives;
+
     private object HandleClarifyAddress(Dictionary<string, object?> args)
     {
         var target = args.TryGetValue("target", out var t) ? t?.ToString() : null;
@@ -498,10 +514,27 @@ public sealed class CallSession : ICallSession
 
         if (target == "pickup")
         {
+            // Detect if the user gave a NEW address instead of choosing from alternatives
+            if (_activePickupAlternatives != null && _activePickupAlternatives.Length > 0
+                && !IsSelectionFromAlternatives(selected, _activePickupAlternatives))
+            {
+                _logger.LogInformation("[{SessionId}] 🔄 Pickup: user gave NEW address '{New}' instead of choosing from alternatives — updating via sync", SessionId, selected);
+                _booking.Pickup = selected;
+                _booking.PickupLat = _booking.PickupLon = null;
+                _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+                _pickupDisambiguated = true;
+                _activePickupAlternatives = null;
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                OnBookingUpdated?.Invoke(_booking.Clone());
+                _ = TriggerFareCalculationAsync();
+                return new { success = true, needs_disambiguation = false, message = $"Pickup updated to '{selected}'. Fare calculation in progress — wait for [FARE RESULT]." };
+            }
+
             _booking.Pickup = selected;
             _booking.PickupLat = _booking.PickupLon = null;
             _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
             _pickupDisambiguated = true;
+            _activePickupAlternatives = null;
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
             _logger.LogInformation("[{SessionId}] 🔒 Pickup LOCKED: {Pickup}", SessionId, selected);
@@ -510,19 +543,19 @@ public sealed class CallSession : ICallSession
             if (_pendingDestAlternatives != null && _pendingDestAlternatives.Length > 0)
             {
                 var options = _pendingDestAlternatives;
+                _activeDestAlternatives = options;
                 _pendingDestAlternatives = null;
                 _pendingDestClarificationMessage = null;
 
                 OnBookingUpdated?.Invoke(_booking.Clone());
 
-                // Return structured disambiguation for destination
                 return new
                 {
                     success = false,
                     needs_disambiguation = true,
                     target = "destination",
                     options,
-                    instructions = "Pickup is confirmed. Now ask the user to clarify the destination from these options."
+                    instructions = "Pickup is confirmed. Now ask the user to clarify the destination from these options. If the user provides a completely DIFFERENT address instead of choosing from the list, call clarify_address with that new address."
                 };
             }
 
@@ -534,10 +567,18 @@ public sealed class CallSession : ICallSession
 
         if (target == "destination")
         {
+            // Detect if the user gave a NEW address instead of choosing from alternatives
+            if (_activeDestAlternatives != null && _activeDestAlternatives.Length > 0
+                && !IsSelectionFromAlternatives(selected, _activeDestAlternatives))
+            {
+                _logger.LogInformation("[{SessionId}] 🔄 Destination: user gave NEW address '{New}' instead of choosing from alternatives — updating", SessionId, selected);
+            }
+
             _booking.Destination = selected;
             _booking.DestLat = _booking.DestLon = null;
             _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
             _destDisambiguated = true;
+            _activeDestAlternatives = null;
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
             _logger.LogInformation("[{SessionId}] 🔒 Destination LOCKED: {Destination}", SessionId, selected);
@@ -548,6 +589,44 @@ public sealed class CallSession : ICallSession
         }
 
         return new { success = false, needs_disambiguation = false, error = $"Unknown target: {target}" };
+    }
+
+    /// <summary>
+    /// Check if the selected value fuzzy-matches any of the provided alternatives.
+    /// Returns false if it looks like a completely different address.
+    /// </summary>
+    private static bool IsSelectionFromAlternatives(string selected, string[] alternatives)
+    {
+        var selNorm = NormalizeForComparison(selected);
+        foreach (var alt in alternatives)
+        {
+            var altNorm = NormalizeForComparison(alt);
+            // Exact or substring match
+            if (selNorm == altNorm || altNorm.Contains(selNorm) || selNorm.Contains(altNorm))
+                return true;
+            // Check if the street name from the alternative appears in the selection
+            var altStreet = ExtractStreetName(alt);
+            var selStreet = ExtractStreetName(selected);
+            if (!string.IsNullOrEmpty(altStreet) && !string.IsNullOrEmpty(selStreet)
+                && string.Equals(altStreet, selStreet, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    private static string NormalizeForComparison(string s)
+        => s.Trim().ToLowerInvariant().Replace(",", "").Replace(".", "");
+
+    private static string ExtractStreetName(string address)
+    {
+        // Remove leading house number and trailing city/postcode
+        var parts = address.Split(',');
+        var first = parts[0].Trim();
+        // Strip leading digits (house number)
+        var idx = 0;
+        while (idx < first.Length && (char.IsDigit(first[idx]) || first[idx] == ' ' || char.IsLetter(first[idx]) && idx < 4 && char.IsDigit(first[Math.Max(0, idx - 1)])))
+            idx++;
+        return first[idx..].Trim();
     }
 
     private async Task TriggerFareCalculationAsync()
