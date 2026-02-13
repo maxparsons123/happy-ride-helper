@@ -437,6 +437,7 @@ public sealed class CallSession : ICallSession
 
             var bookingSnapshot = _booking.Clone();
             var callerId = CallerId;
+            var sessionId = SessionId;
 
             _ = Task.Run(async () =>
             {

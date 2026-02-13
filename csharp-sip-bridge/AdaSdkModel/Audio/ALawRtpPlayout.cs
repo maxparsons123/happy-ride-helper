@@ -63,7 +63,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private System.Threading.Timer? _natKeepaliveTimer;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
-    private volatile int _disposed;
+    private int _disposed;
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
