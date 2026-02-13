@@ -130,14 +130,41 @@ public sealed class SipServer : IAsyncDisposable
     {
         var authUser = _settings.EffectiveAuthUser;
         var resolvedHost = ResolveDns(_settings.Server);
+        var domain = string.IsNullOrWhiteSpace(_settings.Domain) ? resolvedHost : _settings.Domain;
         var registrar = _settings.Port == 5060 ? resolvedHost : $"{resolvedHost}:{_settings.Port}";
 
-        _regAgent = new SIPRegistrationUserAgent(_transport, _settings.Username, _settings.Password, registrar, 120);
+        // Determine the SIP protocol from settings (TCP, TLS, etc.)
+        var sipProtocol = _settings.Transport.ToUpperInvariant() switch
+        {
+            "TCP" => SIPProtocolsEnum.tcp,
+            "TLS" => SIPProtocolsEnum.tls,
+            _ => SIPProtocolsEnum.udp
+        };
+
+        // Build a SIPCallDescriptor so the registration uses the correct transport protocol.
+        // The simple constructor hardcodes UDP which causes failures on TCP-only channels.
+        var regUri = SIPURI.ParseSIPURI($"sip:{registrar}");
+        regUri.Protocol = sipProtocol;
+
+        var regDescriptor = new SIPCallDescriptor(
+            _settings.Username,
+            _settings.Password,
+            regUri.ToString(),
+            $"sip:{_settings.Username}@{domain}",
+            regUri.ToString(),
+            null, null, null,
+            SIPCallDirection.Out,
+            SDP.SDP.SDP_MIME_CONTENTTYPE,
+            null, null);
+
+        regDescriptor.AuthUsername = authUser;
+
+        _regAgent = new SIPRegistrationUserAgent(_transport, regDescriptor, null, domain, 120);
         _regAgent.RegistrationSuccessful += (uri, resp) =>
         {
-            Log($"✅ SIP Registered as {_settings.Username}@{_settings.Server}");
+            Log($"✅ SIP Registered as {_settings.Username}@{domain}");
             IsRegistered = true;
-            OnRegistered?.Invoke($"{_settings.Username}@{_settings.Server}");
+            OnRegistered?.Invoke($"{_settings.Username}@{domain}");
         };
         _regAgent.RegistrationFailed += (uri, resp, err) =>
         {
