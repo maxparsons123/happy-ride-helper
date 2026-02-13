@@ -25,6 +25,8 @@ public class MainForm : Form
     private readonly Button _btnAddDriver;
     private readonly Button _btnRunDispatch;
     private readonly Button _btnSettings;
+    private readonly Button _btnToggleLog;
+    private Form _logModal;
     private readonly CheckBox _chkAutoDispatch;
     private readonly CheckBox _chkBiddingMode;
     private readonly CheckBox _chkIcabbi;
@@ -92,6 +94,18 @@ public class MainForm : Form
         _btnSettings = MakeButton("⚙ Settings", Color.FromArgb(70, 70, 80));
         _btnSettings.Click += BtnSettings_Click;
 
+        _btnToggleLog = MakeButton("📋 Log", Color.FromArgb(60, 60, 90));
+        _btnToggleLog.Click += (_, _) =>
+        {
+            if (_logModal.Visible)
+                _logModal.Hide();
+            else
+            {
+                _logModal.Location = new Point(Right - _logModal.Width - 20, Bottom - _logModal.Height - 40);
+                _logModal.Show(this);
+            }
+        };
+
         _chkAutoDispatch = new CheckBox
         {
             Text = "Auto",
@@ -140,24 +154,16 @@ public class MainForm : Form
         toolbar.Controls.AddRange(new Control[]
         {
             _btnConnect, _btnDisconnect, _btnAddDriver, _btnManualDispatch,
-            _btnRunDispatch, _btnSettings, _chkAutoDispatch, _chkBiddingMode, _chkIcabbi, _lblStatus, _lblStats
+            _btnRunDispatch, _btnSettings, _btnToggleLog, _chkAutoDispatch, _chkBiddingMode, _chkIcabbi, _lblStatus, _lblStats
         });
 
         // ── Layout ──
-        var splitMain = new SplitContainer
-        {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 620,
-            BackColor = Color.FromArgb(28, 28, 32),
-            Panel1MinSize = 300,
-            Panel2MinSize = 120
-        };
-
+        // No more horizontal split for log — log is now a floating modal overlay
         var splitTop = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Vertical
+            Orientation = Orientation.Vertical,
+            BackColor = Color.FromArgb(28, 28, 32)
         };
 
         // Left side: map on top, job tabs below
@@ -196,10 +202,30 @@ public class MainForm : Form
 
         _jobTabs.TabPages.AddRange(new[] { tabActive, tabHistory });
 
-        // Right side: drivers
+        // Right side: drivers (narrower)
         _driverList = new DriverListPanel { Dock = DockStyle.Fill };
 
         _logPanel = new LogPanel { Dock = DockStyle.Fill };
+
+        // ── Floating Log Modal ──
+        _logModal = new Form
+        {
+            Text = "📋 Dispatch Log",
+            Size = new Size(700, 400),
+            StartPosition = FormStartPosition.Manual,
+            FormBorderStyle = FormBorderStyle.SizableToolWindow,
+            BackColor = Color.FromArgb(20, 20, 25),
+            ForeColor = Color.White,
+            TopMost = true,
+            ShowInTaskbar = false
+        };
+        _logModal.Controls.Add(_logPanel);
+        _logModal.FormClosing += (_, args) =>
+        {
+            // Hide instead of close so we can re-show
+            args.Cancel = true;
+            _logModal.Hide();
+        };
 
         // Context menu on job grid
         SetupJobContextMenu();
@@ -210,10 +236,7 @@ public class MainForm : Form
         splitTop.Panel1.Controls.Add(splitMapJobs);
         splitTop.Panel2.Controls.Add(_driverList);
 
-        splitMain.Panel1.Controls.Add(splitTop);
-        splitMain.Panel2.Controls.Add(_logPanel);
-
-        Controls.Add(splitMain);
+        Controls.Add(splitTop);
         Controls.Add(toolbar);
 
         // ── Refresh timer ──
@@ -222,9 +245,14 @@ public class MainForm : Form
 
         Load += (_, _) =>
         {
-            splitTop.Panel1MinSize = 300;
-            splitTop.Panel2MinSize = 200;
-            splitTop.SplitterDistance = Math.Max(splitTop.Panel1MinSize, Math.Min(700, splitTop.Width - splitTop.Panel2MinSize - 1));
+            // Give map+jobs ~75% width, drivers ~25%
+            splitTop.Panel1MinSize = 400;
+            splitTop.Panel2MinSize = 160;
+            splitTop.SplitterDistance = Math.Max(splitTop.Panel1MinSize, (int)(splitTop.Width * 0.78));
+
+            // Position log modal at bottom-right of main form
+            _logModal.Location = new Point(Right - _logModal.Width - 20, Bottom - _logModal.Height - 40);
+
             InitDatabase();
         };
     }
@@ -733,6 +761,14 @@ public class MainForm : Form
         _icabbi?.Dispose();
         _mqtt?.Dispose();
         _db?.Dispose();
+
+        // Force-close log modal (bypass the cancel in FormClosing)
+        if (_logModal != null)
+        {
+            _logModal.FormClosing -= null!;
+            _logModal.Dispose();
+        }
+
         base.OnFormClosing(e);
     }
 
