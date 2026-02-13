@@ -16,6 +16,17 @@ public sealed class BookingState
     public string? Eta { get; set; }
     public bool Confirmed { get; set; }
     public string? BookingRef { get; set; }
+    public string VehicleType { get; set; } = "Saloon";
+
+    /// <summary>
+    /// Recommends vehicle type based on passenger count. Can be overridden by explicit request.
+    /// </summary>
+    public static string RecommendVehicle(int passengers) => passengers switch
+    {
+        <= 4 => "Saloon",
+        5 or 6 => "Estate",
+        >= 7 => "Minibus",
+    };
 
     // Geocoded coordinates for dispatch
     public double? PickupLat { get; set; }
@@ -40,6 +51,7 @@ public sealed class BookingState
     {
         Name = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
+        VehicleType = "Saloon";
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;
