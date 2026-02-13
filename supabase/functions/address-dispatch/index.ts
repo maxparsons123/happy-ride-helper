@@ -393,15 +393,26 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       const originalHasDistrict = originalInput.toLowerCase().split(",").length > 2 ||
         /\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b/i.test(originalInput);
       
-      // If no district and no postcode in the original input, force disambiguation
+      // Extract house number to check if it's discriminating (500+ is highly specific)
+      const houseNumberMatch = (addr.street_number || "").match(/^(\d+)/);
+      const houseNumber = houseNumberMatch ? parseInt(houseNumberMatch[1], 10) : 0;
+      const isHighHouseNumber = houseNumber >= 500; // High numbers discriminate well
+      
+      // If no district and no postcode in the original input, consider forcing disambiguation
       if (!originalHasDistrict) {
+        // SKIP disambiguation if house number is high (500+) — it's discriminating enough
+        if (isHighHouseNumber) {
+          console.log(`✅ House number ${houseNumber} is discriminating enough for "${streetName}" in ${city} — skipping disambiguation`);
+          continue;
+        }
+        
         console.log(`⚠️ Post-processing: "${streetName}" in ${city} is a known multi-district street — forcing disambiguation`);
         addr.is_ambiguous = true;
         parsed.status = "clarification_needed";
         
-        // If Gemini didn't provide alternatives, generate generic ones
+        // If Gemini provided alternatives, keep them. Otherwise, ask for city/area.
         if (!addr.alternatives || addr.alternatives.length === 0) {
-          // We don't know the exact districts, but we can ask
+          // Empty alternatives will trigger the fallback in C# to ask for city/area
           addr.alternatives = [];
         }
         
