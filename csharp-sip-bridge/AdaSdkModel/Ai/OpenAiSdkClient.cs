@@ -290,6 +290,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         if (!IsConnected || alawData == null || alawData.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
+        // Suppress user audio while a critical tool (book_taxi, end_call) is in flight
+        // This prevents background noise from confusing the AI mid-tool-execution
+        if (Volatile.Read(ref _toolInFlight) == 1) return;
 
         try
         {
@@ -431,14 +434,16 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                     Interlocked.Exchange(ref _responseActive, 0);
                     _ = HandleToolCallAsync(itemFinished);
                 }
-                // Handle audio transcript from Ada
+            // Handle audio transcript from Ada
                 else if (itemFinished.MessageContentParts?.Count > 0)
                 {
                     foreach (var part in itemFinished.MessageContentParts)
                     {
-                        // In SDK 2.1.0-beta.4, use ToString() to extract transcript text
-                        var transcriptText = part?.ToString();
-                        if (!string.IsNullOrEmpty(transcriptText))
+                        // Fix: extract AudioTranscript explicitly instead of ToString()
+                        // ToString() returns the class name (InternalRealtimeResponseAudioContentPart)
+                        var transcriptText = part?.AudioTranscript ?? part?.Text ?? part?.ToString();
+                        if (!string.IsNullOrEmpty(transcriptText) &&
+                            !transcriptText.Contains("InternalRealtime"))
                         {
                             _lastAdaTranscript = transcriptText;
                             OnTranscript?.Invoke("Ada", _lastAdaTranscript);
@@ -1183,6 +1188,20 @@ When the user says NO after a fare quote or confirmation question:
 - If they want to cancel entirely, acknowledge and THEN do FINAL CLOSING + end_call
 
 ""Nope"" or ""No"" to ""Would you like to proceed?"" means they want to EDIT or CANCEL — NOT that they are done.
+
+==============================
+TOOL CALL BEHAVIOUR (CRITICAL)
+==============================
+
+When you call ANY tool (sync_booking_data, book_taxi, end_call):
+- Do NOT generate speech UNTIL the tool returns a result
+- Do NOT guess or invent any tool result — wait for the actual response
+- After book_taxi succeeds, the tool result contains the booking reference and instructions — follow them EXACTLY
+- After book_taxi, read the booking_ref from the tool result to the caller — NEVER invent a reference number
+- If book_taxi fails, tell the user and offer to retry
+
+After EVERY tool call, your next spoken response MUST be based on the tool's actual output.
+NEVER speak ahead of a tool result. If you do, you will hallucinate information.
 
 ==============================
 RESPONSE STYLE
