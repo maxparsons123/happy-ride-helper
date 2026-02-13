@@ -329,6 +329,13 @@ public class MainForm : Form
                 if (InvokeRequired) BeginInvoke(() => OnJobAllocated(job, driver));
                 else OnJobAllocated(job, driver);
             };
+            _bidding.OnBidLost += (job, losingDriverId) =>
+            {
+                if (_mqtt == null) return;
+                _ = _mqtt.PublishBidResult(job.Id, losingDriverId, "lost");
+                if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange));
+                else _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange);
+            };
             _bidding.OnNoBids += job =>
             {
                 if (InvokeRequired) BeginInvoke(() =>
@@ -532,6 +539,35 @@ public class MainForm : Form
         if (_mqtt != null)
             await _mqtt.PublishJobAllocation(job.Id, driver.Id, job);
 
+        // Send WhatsApp tracking link to passenger
+        if (_mqtt != null && !string.IsNullOrEmpty(job.CallerPhone))
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var trackingUrl = $"https://coherent-civil-imp.ngrok.app/track?driver={driver.Id}&job={job.Id}&plat={job.PickupLat}&plon={job.PickupLng}";
+                    var waPayload = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        phone = job.CallerPhone,
+                        driverName = driver.Name,
+                        driverId = driver.Id,
+                        jobId = job.Id,
+                        trackingUrl,
+                        pickup = job.Pickup,
+                        dropoff = job.Dropoff,
+                        eta = job.DriverEtaMinutes
+                    });
+                    await _mqtt.PublishAsync("dispatch/whatsapp", waPayload);
+                    BeginInvoke(() => _logPanel.AppendLog($"📱 WhatsApp tracking sent for {job.Id} → {job.CallerPhone}", Color.LimeGreen));
+                }
+                catch (Exception ex)
+                {
+                    BeginInvoke(() => _logPanel.AppendLog($"⚠ WhatsApp send failed: {ex.Message}", Color.Orange));
+                }
+            });
+        }
+
         // Fire-and-forget iCabbi booking if enabled
         if (_icabbiEnabled && _icabbi != null)
         {
@@ -713,6 +749,13 @@ public class MainForm : Form
             {
                 if (InvokeRequired) BeginInvoke(() => OnJobAllocated(job, driver));
                 else OnJobAllocated(job, driver);
+            };
+            _bidding.OnBidLost += (job, losingDriverId) =>
+            {
+                if (_mqtt == null) return;
+                _ = _mqtt.PublishBidResult(job.Id, losingDriverId, "lost");
+                if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange));
+                else _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange);
             };
             _bidding.OnNoBids += job =>
             {

@@ -23,6 +23,8 @@ public sealed class BiddingDispatcher : IDisposable
     public event Action<Job, List<Driver>>? OnBidRequestSent;
     /// <summary>Fired when a winner is chosen after bidding window closes.</summary>
     public event Action<Job, Driver>? OnJobAllocated;
+    /// <summary>Fired for each losing bidder after winner is chosen. Args: job, losingDriverId.</summary>
+    public event Action<Job, string>? OnBidLost;
     /// <summary>Fired when no bids received.</summary>
     public event Action<Job>? OnNoBids;
 
@@ -207,6 +209,13 @@ public sealed class BiddingDispatcher : IDisposable
                 allocatedJob.DriverDistanceKm = winner.DistanceKm;
                 allocatedJob.DriverEtaMinutes = etaMins;
                 OnJobAllocated?.Invoke(allocatedJob, driver);
+
+                // Notify losing bidders
+                foreach (var loser in bids.Where(b => b.DriverId != winner.DriverId))
+                {
+                    OnLog?.Invoke($"📤 Bid lost → {loser.DriverId} for {jobId}");
+                    OnBidLost?.Invoke(allocatedJob, loser.DriverId);
+                }
             }
         }
         catch (Exception ex)
