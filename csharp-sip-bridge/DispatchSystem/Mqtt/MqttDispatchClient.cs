@@ -139,7 +139,7 @@ public sealed class MqttDispatchClient : IDisposable
                         Dropoff = dropoffText,
                         Passengers = booking.passengers > 0 ? booking.passengers : 1,
                         VehicleRequired = Enum.TryParse<VehicleType>(booking.vehicleType, true, out var vt) ? vt : VehicleType.Saloon,
-                        SpecialRequirements = booking.specialRequirements,
+                        SpecialRequirements = booking.notes ?? booking.specialRequirements,
                         EstimatedFare = fare,
                         PickupLat = pLat,
                         PickupLng = pLng,
@@ -147,6 +147,9 @@ public sealed class MqttDispatchClient : IDisposable
                         DropoffLng = dLng,
                         CallerPhone = booking.callerPhone ?? booking.customerPhone ?? "",
                         CallerName = booking.callerName ?? booking.customerName ?? "Customer",
+                        CreatedAt = booking.timestamp > 0
+                            ? DateTimeOffset.FromUnixTimeMilliseconds(booking.timestamp).UtcDateTime
+                            : DateTime.UtcNow
                     };
                     OnLog?.Invoke($"✅ Booking parsed: {job.Pickup} → {job.Dropoff}, {job.Passengers} pax, fare={fare?.ToString("F2") ?? "n/a"}");
                     OnBookingReceived?.Invoke(job);
@@ -365,6 +368,8 @@ public sealed class MqttDispatchClient : IDisposable
         public double lat { get; set; }              // pickup lat
         public double lng { get; set; }              // pickup lng
         public string? fare { get; set; }            // string like "£12.50"
+        public string? notes { get; set; }           // special requirements / notes
+        public long timestamp { get; set; }          // epoch ms
     }
 
     private class JobStatusMsg
