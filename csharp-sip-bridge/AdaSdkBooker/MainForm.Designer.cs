@@ -521,7 +521,8 @@ partial class MainForm
         this.Load += (s, e) =>
         {
             splitMain.SplitterDistance = Math.Max(splitMain.Panel1MinSize, this.ClientSize.Width - 380);
-            splitBookingMap.SplitterDistance = Math.Max(200, splitBookingMap.Width - 300);
+            // Booking form: ~280px, Map: remainder of width
+            splitBookingMap.SplitterDistance = Math.Max(200, 280);
         };
 
         this.Controls.Add(splitMain);
