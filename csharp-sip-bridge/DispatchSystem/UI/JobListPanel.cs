@@ -71,20 +71,24 @@ public sealed class JobListPanel : Panel
             EnableHeadersVisualStyles = false,
         };
 
-        // Columns
+        // Columns — use Fill mode so grid stretches to match parent width
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
         _grid.Columns.AddRange(
-            Col("ColId", "ID", 80),
-            Col("ColStatus", "Status", 75),
-            Col("ColPickup", "Pickup", 160),
-            Col("ColDropoff", "Dropoff", 160),
-            Col("ColPassengers", "Pax", 40),
-            Col("ColPhone", "Phone", 100),
-            Col("ColRef", "Ref", 80),
-            Col("ColWait", "Wait", 60),
-            Col("ColDriver", "Driver", 80),
+            Col("ColId", "ID", 90),
+            Col("ColStatus", "Status", 80),
+            Col("ColPickup", "Pickup", 220),
+            Col("ColDropoff", "Dropoff", 220),
+            Col("ColPassengers", "Pax", 45),
+            Col("ColPhone", "Phone", 130),
+            Col("ColRef", "Ref", 90),
+            Col("ColWait", "Wait", 55),
+            Col("ColDriver", "Driver", 90),
             Col("ColEta", "ETA", 50),
-            Col("ColFare", "Fare", 60)
+            Col("ColFare", "Fare", 70)
         );
+        // Make Pickup and Dropoff columns fill remaining space
+        _grid.Columns["ColPickup"]!.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        _grid.Columns["ColDropoff"]!.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
         _grid.SelectionChanged += (_, _) =>
         {
