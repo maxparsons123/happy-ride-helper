@@ -328,8 +328,7 @@ partial class MainForm
         // ┌─────────────────────────────┐
         // │  🤖 ADA                     │
         // └─────────────────────────────┘
-        pnlAdaMap = MakeSectionPanel(DockStyle.Top, bgSection, sectionBorder);
-        pnlAdaMap.Height = 220;
+        pnlAdaMap = MakeSectionPanel(DockStyle.Fill, bgSection, sectionBorder);
 
         pnlAdaMapHeader = new Panel { Dock = DockStyle.Top, Height = 28, BackColor = headerBg, Padding = new Padding(10, 0, 10, 0) };
         lblAdaMapTitle = new Label { Text = "🤖  ADA", Location = new Point(6, 4), AutoSize = true, ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 10F, FontStyle.Bold) };
