@@ -62,21 +62,24 @@ public sealed class DriverListPanel : Panel
         if (InvokeRequired) { BeginInvoke(() => RefreshDrivers(drivers)); return; }
 
         _list.BeginUpdate();
-        _list.Items.Clear();
 
+        // Build a lookup of incoming drivers
+        var incoming = new Dictionary<string, Driver>();
+        foreach (var d in drivers) incoming[d.Id] = d;
+
+        // Remove drivers no longer present
+        for (int i = _list.Items.Count - 1; i >= 0; i--)
+        {
+            if (_list.Items[i].Tag is string id && !incoming.ContainsKey(id))
+                _list.Items.RemoveAt(i);
+        }
+
+        // Update existing or add new
         foreach (var d in drivers)
         {
             var age = (DateTime.UtcNow - d.LastGpsUpdate).TotalMinutes;
             var gpsAge = age < 1 ? "Live" : age < 5 ? $"{age:F0}m" : "Stale";
-
-            var item = new ListViewItem(d.Id) { Tag = d.Id };
-            item.SubItems.Add(d.Name);
-            item.SubItems.Add(d.Registration);
-            item.SubItems.Add(d.Status.ToString());
-            item.SubItems.Add(d.Vehicle.ToString());
-            item.SubItems.Add(gpsAge);
-
-            item.ForeColor = d.Status switch
+            var color = d.Status switch
             {
                 DriverStatus.Online => Color.LimeGreen,
                 DriverStatus.OnJob => Color.Cyan,
@@ -84,9 +87,41 @@ public sealed class DriverListPanel : Panel
                 _ => Color.Gray
             };
 
-            _list.Items.Add(item);
+            // Find existing item
+            ListViewItem? existing = null;
+            foreach (ListViewItem li in _list.Items)
+            {
+                if (li.Tag is string id && id == d.Id) { existing = li; break; }
+            }
+
+            if (existing != null)
+            {
+                // Only update sub-items if values changed (avoids flicker)
+                UpdateSubItem(existing, 1, d.Name);
+                UpdateSubItem(existing, 2, d.Registration);
+                UpdateSubItem(existing, 3, d.Status.ToString());
+                UpdateSubItem(existing, 4, d.Vehicle.ToString());
+                UpdateSubItem(existing, 5, gpsAge);
+                if (existing.ForeColor != color) existing.ForeColor = color;
+            }
+            else
+            {
+                var item = new ListViewItem(d.Id) { Tag = d.Id, ForeColor = color };
+                item.SubItems.Add(d.Name);
+                item.SubItems.Add(d.Registration);
+                item.SubItems.Add(d.Status.ToString());
+                item.SubItems.Add(d.Vehicle.ToString());
+                item.SubItems.Add(gpsAge);
+                _list.Items.Add(item);
+            }
         }
 
         _list.EndUpdate();
+    }
+
+    private static void UpdateSubItem(ListViewItem item, int index, string value)
+    {
+        if (item.SubItems[index].Text != value)
+            item.SubItems[index].Text = value;
     }
 }
