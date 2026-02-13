@@ -74,7 +74,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private string? _activeResponseId;
     private string? _lastAdaTranscript;
     private bool _awaitingConfirmation;
-
+    private bool _useSemanticVad = true;   // default: semantic for better address collection
+    private float _semanticEagerness = 0.5f; // low = patient, high = quick
     // Transcript comparison: stash Whisper STT for mismatch detection
     private string? _lastUserTranscript;
 
@@ -223,10 +224,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 {
                     Model = "whisper-1"
                 },
-                TurnDetectionOptions = ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                    detectionThreshold: 0.2f,
-                    prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                    silenceDuration: TimeSpan.FromMilliseconds(900))
+                TurnDetectionOptions = _useSemanticVad
+                    ? ConversationTurnDetectionOptions.CreateSemanticTurnDetectionOptions(
+                        eagerness: _semanticEagerness)
+                    : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                        detectionThreshold: 0.2f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
+                        silenceDuration: TimeSpan.FromMilliseconds(900))
             };
 
             options.Tools.Add(BuildSyncBookingDataTool());
@@ -377,6 +381,42 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     public void CancelDeferredResponse()
     {
         Interlocked.Exchange(ref _deferredResponsePending, 0);
+    }
+
+    /// <summary>
+    /// Live-switch between semantic_vad and server_vad mid-session.
+    /// Reconfigures the OpenAI session immediately — takes effect on the next turn.
+    /// </summary>
+    public async Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f)
+    {
+        _useSemanticVad = useSemantic;
+        _semanticEagerness = Math.Clamp(eagerness, 0.1f, 1.0f);
+
+        if (!IsConnected || _session == null) return;
+
+        var mode = useSemantic ? $"semantic (eagerness={_semanticEagerness:F2})" : "server_vad";
+        Log($"🔄 Switching VAD mode → {mode}");
+
+        try
+        {
+            var options = new ConversationSessionOptions
+            {
+                TurnDetectionOptions = useSemantic
+                    ? ConversationTurnDetectionOptions.CreateSemanticTurnDetectionOptions(
+                        eagerness: _semanticEagerness)
+                    : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                        detectionThreshold: 0.2f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
+                        silenceDuration: TimeSpan.FromMilliseconds(900))
+            };
+
+            await _session.ConfigureSessionAsync(options);
+            Log($"✅ VAD mode switched to {mode}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to switch VAD mode to {Mode}", mode);
+        }
     }
 
     // =========================
