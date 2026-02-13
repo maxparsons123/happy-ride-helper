@@ -724,6 +724,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         Description = "Request a fare quote or confirm a booking. " +
                       "action='request_quote' for quotes, 'confirmed' for finalized bookings. " +
+                      "CRITICAL: Never call with 'confirmed' unless the user has explicitly said 'yes' or 'confirm'. " +
                       "CRITICAL: Never call with 'confirmed' in the same turn as an address correction or fare announcement.",
         Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
         {
@@ -731,13 +732,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             properties = new
             {
                 action = new { type = "string", @enum = new[] { "request_quote", "confirmed" } },
-                pickup = new { type = "string", description = "Pickup address" },
-                destination = new { type = "string", description = "Destination address" },
-                caller_name = new { type = "string", description = "Caller name" },
+                pickup = new { type = "string", description = "Pickup address (verbatim from caller)" },
+                destination = new { type = "string", description = "Destination address (verbatim from caller)" },
+                caller_name = new { type = "string", description = "Caller name (must be a real name, NOT 'unknown' or 'caller')" },
                 passengers = new { type = "integer", description = "Number of passengers" },
                 pickup_time = new { type = "string", description = "Pickup time" }
             },
-            required = new[] { "action", "pickup", "destination" }
+            required = new[] { "action", "pickup", "destination", "caller_name", "passengers" }
         }))
     };
 
@@ -780,27 +781,42 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 - NEVER use filler phrases: 'one moment', 'please hold on', 'let me check', 'please wait'
 - Be warm but efficient
 
+## NAME-FIRST RULE (MANDATORY)
+- You MUST collect the caller's name FIRST before anything else
+- Do NOT accept 'unknown', 'caller', 'anonymous', or any placeholder as a name
+- If the caller provides travel details before their name, acknowledge them but ask for the name FIRST
+- Only after you have a real name, proceed to collect/confirm travel details
+
 ## BOOKING SEQUENCE
 1. Greet caller, ask for their name
-2. Ask for pickup address
-3. Ask for destination
+2. Ask for pickup address (if not already provided)
+3. Ask for destination (if not already provided)
 4. Ask for number of passengers (if not mentioned)
 5. Call sync_booking_data with ALL collected details
 6. Call book_taxi with action='request_quote'
-7. Read back the verified address and fare using the fare_spoken field
-8. Wait for explicit user confirmation
-9. Call book_taxi with action='confirmed'
-10. Speak closing script, then call end_call
+7. Read back the verified address and fare using the fare_spoken field EXACTLY
+8. Ask: 'Would you like to confirm this booking?'
+9. WAIT for explicit 'yes' or 'confirm' from user — NEVER assume confirmation
+10. Only THEN call book_taxi with action='confirmed'
+11. Speak closing script, then call end_call
 
 ## ADDRESS INTEGRITY (CRITICAL)
-- ONLY store house numbers, postcodes, cities explicitly stated by the user
-- House numbers are VERBATIM identifiers (e.g. '1214A', '52-8') — NEVER reinterpret
+- ONLY store house numbers, postcodes, cities EXPLICITLY stated by the user
+- House numbers are VERBATIM identifiers (e.g. '1214A', '52A') — NEVER reinterpret
+- '52A' must stay '52A' — NEVER change to '52-8', '528', '52 A', or any variation
 - Character-for-character copy from transcript for ALL tool parameters
-- NEVER substitute similar-sounding addresses
-- If unsure, ASK for clarification
+- NEVER substitute similar-sounding addresses (e.g. 'David' ≠ 'Dovey', 'Dovey' ≠ 'David')
+- If unsure about an address, read it back to the caller and ASK for confirmation
+- If the caller corrects you, use THEIR version exactly — abandon your previous version
+
+## CONFIRMATION SAFETY (CRITICAL)
+- NEVER call book_taxi with action='confirmed' unless the user has EXPLICITLY said 'yes', 'yeah', 'confirm', or similar
+- Saying their name, providing details, or just speaking is NOT confirmation
+- After quoting the fare, you MUST wait for the user's explicit 'yes' before confirming
+- If user says 'no', ask what they'd like to change
 
 ## MISHEARING RECOVERY
-- If user spells out a word letter by letter (D-O-V-E-Y), reconstruct it as 'Dovey'
+- If user spells out a word letter by letter (D-A-V-I-D), reconstruct it as 'David'
 - Treat spelled-out words as the FINAL source of truth
 - ABANDON previously misheard versions immediately
 - Call sync_booking_data after any correction
