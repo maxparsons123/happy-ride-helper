@@ -225,63 +225,88 @@ public sealed class CallSession : ICallSession
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
                 return new { success = false, error = "Missing pickup or destination." };
 
-            try
-            {
-                var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
-                var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+            // NON-BLOCKING: return immediately so Ada speaks an interjection,
+            // then inject the fare result asynchronously when ready.
+            var pickup = _booking.Pickup;
+            var destination = _booking.Destination;
+            var callerId = CallerId;
+            var sessionId = SessionId;
 
-                FareResult result;
-                if (completed == aiTask)
+            _ = Task.Run(async () =>
+            {
+                try
                 {
-                    result = await aiTask;
-                    if (result.NeedsClarification)
+                    _logger.LogInformation("[{SessionId}] 🔄 Background fare calculation starting for {Pickup} → {Dest}",
+                        sessionId, pickup, destination);
+
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+                    var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+
+                    FareResult result;
+                    if (completed == aiTask)
                     {
-                        var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
-                        var destAlts = result.DestAlternatives ?? Array.Empty<string>();
-                        var allAlts = pickupAlts.Concat(destAlts).ToArray();
-                        var numberedAlts = allAlts.Select((alt, i) => $"{i + 1}. {alt}").ToArray();
-
-                        return new
+                        result = await aiTask;
+                        if (result.NeedsClarification)
                         {
-                            success = false,
-                            needs_clarification = true,
-                            pickup_options = pickupAlts,
-                            destination_options = destAlts,
-                            alternatives_list = numberedAlts,
-                            message = "I found multiple locations. Please ask the caller which city or area they are in."
-                        };
+                            var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
+                            var destAlts = result.DestAlternatives ?? Array.Empty<string>();
+                            var allAlts = pickupAlts.Concat(destAlts).ToArray();
+
+                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations. Which city or area are you in?";
+                            var altsList = string.Join(", ", allAlts);
+
+                            if (_aiClient is OpenAiSdkClient sdkClarif)
+                                await sdkClarif.InjectMessageAndRespondAsync(
+                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} Options: {altsList}");
+
+                            return;
+                        }
                     }
+                    else
+                    {
+                        _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
+                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                    }
+
+                    ApplyFareResult(result);
+
+                    if (_aiClient is OpenAiSdkClient sdk)
+                        sdk.SetAwaitingConfirmation(true);
+
+                    OnBookingUpdated?.Invoke(_booking.Clone());
+
+                    var spokenFare = FormatFareForSpeech(_booking.Fare);
+                    _logger.LogInformation("[{SessionId}] 💰 Fare ready: {Fare} ({Spoken}), ETA: {Eta}",
+                        sessionId, _booking.Fare, spokenFare, _booking.Eta);
+
+                    // Inject fare result into conversation — Ada will read it back
+                    if (_aiClient is OpenAiSdkClient sdkInject)
+                        await sdkInject.InjectMessageAndRespondAsync(
+                            $"[FARE RESULT] The fare from {pickup} to {destination} is {spokenFare}, " +
+                            $"estimated time of arrival is {_booking.Eta}. " +
+                            $"Read back these details to the caller and ask them to confirm the booking.");
                 }
-                else
+                catch (Exception ex)
                 {
-                    result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
+                    _logger.LogWarning(ex, "[{SessionId}] Background fare calculation failed", sessionId);
+                    _booking.Fare = "£8.00";
+                    _booking.Eta = "8 minutes";
+                    OnBookingUpdated?.Invoke(_booking.Clone());
+
+                    if (_aiClient is OpenAiSdkClient sdkFallback)
+                        await sdkFallback.InjectMessageAndRespondAsync(
+                            "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
+                            "Read back these details to the caller and ask them to confirm.");
                 }
+            });
 
-                ApplyFareResult(result);
-
-                if (_aiClient is OpenAiSdkClient sdk)
-                    sdk.SetAwaitingConfirmation(true);
-
-                OnBookingUpdated?.Invoke(_booking.Clone());
-
-                var spokenFare = FormatFareForSpeech(_booking.Fare);
-                return new
-                {
-                    success = true,
-                    fare = _booking.Fare,
-                    fare_spoken = spokenFare,
-                    eta = _booking.Eta,
-                    message = $"The fare is {spokenFare} and ETA is {_booking.Eta}. Ask to confirm."
-                };
-            }
-            catch (Exception ex)
+            // Return immediately — Ada will speak "let me check that" while fare calculates
+            return new
             {
-                _logger.LogWarning(ex, "[{SessionId}] Fare calculation failed", SessionId);
-                _booking.Fare = "£8.00";
-                _booking.Eta = "8 minutes";
-                OnBookingUpdated?.Invoke(_booking.Clone());
-                return new { success = true, fare = "£8.00", fare_spoken = "8 pounds", eta = "8 minutes" };
-            }
+                success = true,
+                status = "calculating",
+                message = "I'm checking the fare now. Tell the caller you're just looking up the fare and it will only take a moment."
+            };
         }
 
         if (action == "confirmed")
