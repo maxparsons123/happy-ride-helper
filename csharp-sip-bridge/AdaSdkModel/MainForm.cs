@@ -212,6 +212,7 @@ public partial class MainForm : Form
             var label = _settings.SipAccounts[idx].Label;
             _settings.SipAccounts[idx].FromSipSettings(_settings.Sip, label);
         }
+    }
 
     // ══════════════════════════════════════
     //  SIP CONNECTION
