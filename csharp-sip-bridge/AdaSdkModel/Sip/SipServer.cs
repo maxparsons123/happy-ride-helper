@@ -119,6 +119,17 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeSipTransport()
     {
         _transport = new SIPTransport();
+
+        // SIP trace logging for debugging registration/call issues
+        _transport.SIPRequestOutTraceEvent += (ep, dst, req) =>
+            Log($"📤 SIP OUT → {dst}: {req.Method} {req.URI}");
+        _transport.SIPResponseInTraceEvent += (ep, src, resp) =>
+            Log($"📥 SIP IN ← {src}: {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        _transport.SIPResponseOutTraceEvent += (ep, dst, resp) =>
+            Log($"📤 SIP RESP → {dst}: {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        _transport.SIPRequestInTraceEvent += (ep, src, req) =>
+            Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
+
         _transport.AddSIPChannel(_settings.Transport.ToUpperInvariant() switch
         {
             "TCP" => (SIPChannel)new SIPTCPChannel(new IPEndPoint(_localIp!, 0)),
