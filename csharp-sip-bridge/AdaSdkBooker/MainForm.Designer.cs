@@ -82,7 +82,9 @@ partial class MainForm
             BackColor = bgDark,
             BorderStyle = BorderStyle.None,
             FixedPanel = FixedPanel.Panel2,
-            Panel2MinSize = 340
+            Panel1MinSize = 400,
+            Panel2MinSize = 340,
+            SplitterDistance = 900
         };
 
         // ══════════════════════════════════════════════════
@@ -515,9 +517,12 @@ partial class MainForm
         this.BackColor = bgDark;
         this.ForeColor = fgLight;
 
-        // Set splitter distances after form sizing
-        splitMain.SplitterDistance = this.ClientSize.Width - 380;
-        splitBookingMap.SplitterDistance = splitMain.SplitterDistance - 310;
+        // Defer splitter distances to after layout is complete
+        this.Load += (s, e) =>
+        {
+            splitMain.SplitterDistance = Math.Max(splitMain.Panel1MinSize, this.ClientSize.Width - 380);
+            splitBookingMap.SplitterDistance = Math.Max(200, splitBookingMap.Width - 300);
+        };
 
         this.Controls.Add(splitMain);
         this.Controls.Add(pnlLog);
