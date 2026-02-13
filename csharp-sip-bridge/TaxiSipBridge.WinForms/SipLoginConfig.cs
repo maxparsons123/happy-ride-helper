@@ -18,6 +18,11 @@ public class SipLoginConfig
     public string AuthUser { get; set; } = "";
 
     /// <summary>
+    /// SIP display name shown in From header (e.g. "Ai Agent"). Cosmetic only — not used for auth.
+    /// </summary>
+    public string DisplayName { get; set; } = "";
+
+    /// <summary>
     /// Gets the effective authentication username (AuthUser if set, otherwise SipUser).
     /// </summary>
     public string EffectiveAuthUser => string.IsNullOrWhiteSpace(AuthUser) ? SipUser : AuthUser;

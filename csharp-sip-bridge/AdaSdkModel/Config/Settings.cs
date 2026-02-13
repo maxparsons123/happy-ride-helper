@@ -48,6 +48,10 @@ public sealed class SipSettings
     public string Password { get; set; } = "";
     public string? AuthId { get; set; }
     public string? Domain { get; set; }
+
+    /// <summary>SIP display name shown in From header (e.g. "Ai Agent"). Cosmetic only — not used for auth.</summary>
+    public string? DisplayName { get; set; }
+
     public bool AutoAnswer { get; set; } = true;
     public bool EnableStun { get; set; } = true;
     public string StunServer { get; set; } = "stun.l.google.com";
@@ -111,6 +115,7 @@ public sealed class SipAccount
     public string Password { get; set; } = "";
     public string? AuthId { get; set; }
     public string? Domain { get; set; }
+    public string? DisplayName { get; set; }
     public bool AutoAnswer { get; set; } = true;
     public bool EnableStun { get; set; } = true;
     public string StunServer { get; set; } = "stun.l.google.com";
@@ -120,7 +125,7 @@ public sealed class SipAccount
     {
         Server = Server, Port = Port, Transport = Transport,
         Username = Username, Password = Password, AuthId = AuthId,
-        Domain = Domain, AutoAnswer = AutoAnswer,
+        Domain = Domain, DisplayName = DisplayName, AutoAnswer = AutoAnswer,
         EnableStun = EnableStun, StunServer = StunServer, StunPort = StunPort
     };
 
@@ -128,7 +133,7 @@ public sealed class SipAccount
     {
         Label = label; Server = s.Server; Port = s.Port; Transport = s.Transport;
         Username = s.Username; Password = s.Password; AuthId = s.AuthId;
-        Domain = s.Domain; AutoAnswer = s.AutoAnswer;
+        Domain = s.Domain; DisplayName = s.DisplayName; AutoAnswer = s.AutoAnswer;
         EnableStun = s.EnableStun; StunServer = s.StunServer; StunPort = s.StunPort;
     }
 

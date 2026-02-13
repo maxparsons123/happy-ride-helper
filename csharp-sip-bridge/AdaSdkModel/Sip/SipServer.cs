@@ -163,6 +163,10 @@ public sealed class SipServer : IAsyncDisposable
             var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, sipProtocol);
             var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
 
+            // Set display name in the AOR (appears in From header as "Ai Agent" <sip:241203@...>)
+            if (!string.IsNullOrWhiteSpace(_settings.DisplayName))
+                sipAccountAor.User = _settings.Username; // ensure user stays as extension number
+
             _regAgent = new SIPRegistrationUserAgent(
                 sipTransport: _transport,
                 outboundProxy: outboundProxy,
@@ -175,7 +179,7 @@ public sealed class SipServer : IAsyncDisposable
                 expiry: 120,
                 customHeaders: null);
 
-            Log($"🔐 Domain registration: AOR={_settings.Username}@{registrarHostWithPort}, AuthUser={authUser}, Proxy={registrarIp}");
+            Log($"🔐 Domain registration: AOR={_settings.Username}@{registrarHostWithPort}, DisplayName={_settings.DisplayName ?? "(none)"}, AuthUser={authUser}, Proxy={registrarIp}");
         }
         else
         {
