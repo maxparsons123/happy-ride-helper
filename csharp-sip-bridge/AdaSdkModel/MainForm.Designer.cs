@@ -192,13 +192,45 @@ partial class MainForm
         grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, lblOpVolume, trkOpVolume, lblOpVolumeVal, lblCallInfo });
 
         // ══════════════════════════════════════
+        //  SIMLI AVATAR
+        // ══════════════════════════════════════
+        grpAvatar = new GroupBox
+        {
+            Text = "🎭 Avatar",
+            Location = new Point(580, 30),
+            Size = new Size(320, 280),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            ForeColor = fgLight,
+            BackColor = bgPanel
+        };
+
+        pnlAvatarHost = new Panel
+        {
+            Location = new Point(10, 22),
+            Size = new Size(300, 230),
+            BackColor = Color.Black
+        };
+
+        lblAvatarStatus = new Label
+        {
+            Text = "Waiting…",
+            Location = new Point(10, 255),
+            Size = new Size(300, 20),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8F),
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+
+        grpAvatar.Controls.AddRange(new Control[] { pnlAvatarHost, lblAvatarStatus });
+
+        // ══════════════════════════════════════
         //  LOGS
         // ══════════════════════════════════════
         grpLogs = new GroupBox
         {
             Text = "📋 Logs & Transcripts",
             Location = new Point(12, 332),
-            Size = new Size(560, 258),
+            Size = new Size(880, 258),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -207,7 +239,7 @@ partial class MainForm
         txtLog = new RichTextBox
         {
             Location = new Point(10, 22),
-            Size = new Size(540, 225),
+            Size = new Size(860, 225),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             Font = new Font("Cascadia Mono", 9F),
             BackColor = Color.FromArgb(20, 20, 20),
@@ -235,8 +267,8 @@ partial class MainForm
         // ══════════════════════════════════════
         this.AutoScaleDimensions = new SizeF(7F, 15F);
         this.AutoScaleMode = AutoScaleMode.Font;
-        this.ClientSize = new Size(590, 620);
-        this.MinimumSize = new Size(550, 520);
+        this.ClientSize = new Size(920, 620);
+        this.MinimumSize = new Size(900, 560);
         this.Text = "🚕 AdaSdkModel — SDK Voice AI Bridge v2.0";
         this.StartPosition = FormStartPosition.CenterScreen;
         this.Font = new Font("Segoe UI", 9F);
@@ -244,7 +276,7 @@ partial class MainForm
         this.ForeColor = fgLight;
         this.MainMenuStrip = menuStrip;
 
-        this.Controls.AddRange(new Control[] { menuStrip, grpSip, grpCall, grpLogs, statusStrip });
+        this.Controls.AddRange(new Control[] { menuStrip, grpSip, grpCall, grpAvatar, grpLogs, statusStrip });
 
         this.ResumeLayout(false);
         this.PerformLayout();
@@ -292,6 +324,11 @@ partial class MainForm
     private CheckBox chkManualMode;
     private Label lblCallInfo, lblOpVolume, lblOpVolumeVal;
     private TrackBar trkOpVolume;
+
+    // Avatar
+    private GroupBox grpAvatar;
+    private Panel pnlAvatarHost;
+    private Label lblAvatarStatus;
 
     // Logs
     private GroupBox grpLogs;
