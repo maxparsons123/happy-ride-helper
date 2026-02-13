@@ -353,6 +353,7 @@ public partial class MainForm : Form
                 SipPort = int.Parse(txtSipPort.Text.Trim()),
                 SipUser = txtSipUser.Text.Trim(),
                 AuthUser = txtAuthUser.Text.Trim(),
+                DisplayName = txtDisplayName.Text.Trim(),
                 SipPassword = txtSipPassword.Text.Trim(),
                 Transport = (SipTransportType)cmbTransport.SelectedIndex
             };

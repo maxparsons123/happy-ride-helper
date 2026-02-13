@@ -123,12 +123,16 @@ partial class MainForm
         txtSipPassword = MakeTextBox(425, 85, 120, bgInput, fgLight);
         txtSipPassword.UseSystemPasswordChar = true;
 
-        // Row 3: Domain / Auto-Answer
+        // Row 3: Domain / Display Name / Auto-Answer
         var lblDomain = MakeLabel("Domain:", 15, 121);
-        txtDomain = MakeTextBox(85, 118, 190, bgInput, fgLight);
+        txtDomain = MakeTextBox(85, 118, 140, bgInput, fgLight);
         txtDomain.PlaceholderText = "(optional override)";
 
-        chkAutoAnswer = new CheckBox { Text = "Auto-Answer", Location = new Point(290, 120), Size = new Size(110, 23), ForeColor = fgLight, Checked = true };
+        var lblDisplayName = MakeLabel("Display Name:", 240, 121);
+        txtDisplayName = MakeTextBox(335, 118, 120, bgInput, fgLight);
+        txtDisplayName.PlaceholderText = "(e.g. Ai Agent)";
+
+        chkAutoAnswer = new CheckBox { Text = "Auto-Answer", Location = new Point(470, 120), Size = new Size(110, 23), ForeColor = fgLight, Checked = true };
 
         // Row 4: Connect button
         btnConnect = MakeButton("▶ Connect", 15, 152, 120, 32, green);
@@ -144,7 +148,7 @@ partial class MainForm
             lblAccount, cmbSipAccount, btnSaveAccount, btnDeleteAccount, btnNewAccount,
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
             lblUser, txtSipUser, lblAuthId, txtAuthId, lblPassword, txtSipPassword,
-            lblDomain, txtDomain, chkAutoAnswer,
+            lblDomain, txtDomain, lblDisplayName, txtDisplayName, chkAutoAnswer,
             btnConnect, btnDisconnect, lblSipStatus
         });
 
@@ -368,6 +372,7 @@ partial class MainForm
     private TextBox txtAuthId;
     private TextBox txtSipPassword;
     private TextBox txtDomain;
+    private TextBox txtDisplayName;
     private ComboBox cmbTransport;
     private CheckBox chkAutoAnswer;
     private Button btnConnect;
