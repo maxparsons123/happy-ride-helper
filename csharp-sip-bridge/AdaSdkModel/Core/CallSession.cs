@@ -142,10 +142,23 @@ public sealed class CallSession : ICallSession
     // =========================
     // SYNC BOOKING DATA
     // =========================
+    private static readonly HashSet<string> _rejectedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "unknown", "caller", "anonymous", "user", "customer", "guest", "n/a", "na", "none", ""
+    };
+
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
+        // Name validation guard — reject placeholder names
         if (args.TryGetValue("caller_name", out var n))
-            _booking.Name = n?.ToString()?.Trim();
+        {
+            var nameVal = n?.ToString()?.Trim();
+            if (!string.IsNullOrEmpty(nameVal) && !_rejectedNames.Contains(nameVal))
+                _booking.Name = nameVal;
+            else if (_rejectedNames.Contains(nameVal ?? ""))
+                _logger.LogWarning("[{SessionId}] ⛔ Rejected placeholder name: '{Name}'", SessionId, nameVal);
+        }
+
         if (args.TryGetValue("pickup", out var p))
         {
             var incoming = p?.ToString();
@@ -175,6 +188,11 @@ public sealed class CallSession : ICallSession
             SessionId, _booking.Name ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?", _booking.Passengers);
 
         OnBookingUpdated?.Invoke(_booking.Clone());
+
+        // If name is still missing, tell Ada to ask for it
+        if (string.IsNullOrWhiteSpace(_booking.Name))
+            return new { success = true, warning = "Name is required before booking. Ask the caller for their name." };
+
         return new { success = true };
     }
 
@@ -185,9 +203,14 @@ public sealed class CallSession : ICallSession
     {
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
 
-        // SAFETY NET: populate _booking from book_taxi args
-        if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString()))
+        // SAFETY NET: populate _booking from book_taxi args (with name validation)
+        if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString())
+            && !_rejectedNames.Contains(bn.ToString()!.Trim()))
             _booking.Name = bn.ToString()!.Trim();
+
+        // Name guard — reject booking without a real name
+        if (string.IsNullOrWhiteSpace(_booking.Name) || _rejectedNames.Contains(_booking.Name))
+            return new { success = false, error = "Caller name is required. Ask the caller for their name before booking." };
         if (args.TryGetValue("pickup", out var bp) && !string.IsNullOrWhiteSpace(bp?.ToString()))
             _booking.Pickup = bp.ToString();
         if (args.TryGetValue("destination", out var bd) && !string.IsNullOrWhiteSpace(bd?.ToString()))
