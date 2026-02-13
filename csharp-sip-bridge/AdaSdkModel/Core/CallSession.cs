@@ -277,16 +277,31 @@ public sealed class CallSession : ICallSession
                             }
                             else
                             {
-                                // NeedsClarification=true but no alternatives — fallback
-                                _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — using fallback fare", sessionId);
-                                result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
-                            }
+                                // NeedsClarification=true but no alternatives provided — 
+                                // The edge function couldn't resolve the addresses but also couldn't suggest alternatives.
+                                // Instead of falling back to Nominatim (which can geocode to wrong cities and produce
+                                // absurd fares like £106.50), ask the caller to specify the city/area.
+                                _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
 
-                            if (pickupAlts.Length > 0 || destAlts.Length > 0)
-                            {
+                                if (_aiClient is OpenAiSdkClient sdkAskArea)
+                                {
+                                    var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
+                                        ? result.ClarificationMessage
+                                        : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
+
+                                    await sdkAskArea.InjectMessageAndRespondAsync(
+                                        $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
+                                        $"Ask the caller: \"{clarMsg}\" " +
+                                        "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
+                                }
+
                                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                                 return;
                             }
+
+                            // Has disambiguation alternatives — already handled above, exit
+                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                            return;
                         }
 
                         // Check if there are pending destination alternatives from a previous round
