@@ -334,11 +334,11 @@ public sealed class SipServer : IAsyncDisposable
             if (mt != SDPMediaTypesEnum.audio) return;
             var payload = pkt.Payload;
             var alawData = negotiatedCodec == AudioCodecsEnum.PCMU
-                ? G711Audio.MuLawToALaw(payload) : payload;
+                ? G711Transcode.MuLawToALaw(payload) : payload;
 
             var boosted = new byte[alawData.Length];
             Buffer.BlockCopy(alawData, 0, boosted, 0, alawData.Length);
-            G711Audio.ApplyInPlace(boosted, _audioSettings.IngressGain);
+            ALawVolumeBoost.ApplyInPlace(boosted, (float)_audioSettings.IngressVolumeBoost);
 
             session.FeedCallerAudio(boosted);
             OnOperatorCallerAudio?.Invoke(boosted);
