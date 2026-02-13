@@ -506,8 +506,36 @@ public partial class MainForm : Form
     private void btnMute_Click(object? sender, EventArgs e)
     {
         _muted = !_muted;
-        btnMute.Text = _muted ? "🔇" : "🔊";
+        btnMute.Text = _muted ? "🔇 Muted" : "🔊 Mute";
         if (_muted) { _monitorOut?.Pause(); } else { _monitorOut?.Play(); }
+    }
+
+    private async void btnCallOut_Click(object? sender, EventArgs e)
+    {
+        var phone = txtPhone.Text.Trim();
+        if (string.IsNullOrWhiteSpace(phone))
+        {
+            MessageBox.Show("Enter a phone number in the booking form first.", "No Number", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        if (!_sipConnected || _sipServer == null)
+        {
+            MessageBox.Show("Connect to SIP first.", "Not Connected", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        Log($"📞 Calling out to {phone}…");
+        try
+        {
+            await _sipServer.MakeCallAsync(phone);
+            SetInCall(true);
+            StartAudioMonitor();
+            if (_operatorMode) StartMicrophone();
+            statusCallId.Text = $"→ {phone}";
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ Call-out failed: {ex.Message}");
+        }
     }
 
     private void chkManualMode_CheckedChanged(object? sender, EventArgs e)

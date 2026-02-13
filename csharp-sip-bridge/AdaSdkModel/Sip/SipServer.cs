@@ -272,7 +272,97 @@ public sealed class SipServer : IAsyncDisposable
         }
     }
 
-    /// <summary>Send operator mic audio to the active call's RTP stream.</summary>
+    /// <summary>Initiate an outbound call to the given number/SIP URI.</summary>
+    public async Task MakeCallAsync(string destination)
+    {
+        if (_transport == null) throw new InvalidOperationException("SIP transport not started");
+
+        var serverAddr = _settings.Server.Trim();
+        if (!IPAddress.TryParse(serverAddr, out _))
+        {
+            var resolved = Dns.GetHostAddresses(serverAddr)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+            if (resolved != null) serverAddr = resolved.ToString();
+        }
+        var portPart = _settings.Port == 5060 ? "" : $":{_settings.Port}";
+        var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}");
+
+        var callAgent = new SIPUserAgent(_transport, null);
+        var audioEncoder = new AudioEncoder();
+        var audioSource = new AudioExtrasSource(audioEncoder, new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
+        audioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
+
+        var rtpSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = audioSource });
+        rtpSession.AcceptRtpFromAny = true;
+
+        AudioCodecsEnum negotiatedCodec = AudioCodecsEnum.PCMA;
+        rtpSession.OnAudioFormatsNegotiated += formats => negotiatedCodec = formats.FirstOrDefault().Codec;
+
+        var sessionId = $"out-{Guid.NewGuid():N}[..8]";
+        sessionId = $"out-{Guid.NewGuid().ToString("N")[..8]}";
+
+        Log($"📞 Dialling {destination} via {serverAddr}{portPart}…");
+        var result = await callAgent.Call(destUri.ToString(), null, null, rtpSession);
+        if (!result)
+        {
+            Log($"❌ Outbound call to {destination} failed.");
+            rtpSession.Close("call_failed");
+            callAgent.Dispose();
+            return;
+        }
+
+        var playout = new ALawRtpPlayout();
+        var session = _sessionManager.CreateSession(sessionId, destination);
+
+        var activeCall = new ActiveCall
+        {
+            Agent = callAgent,
+            RtpSession = rtpSession,
+            AudioSource = audioSource,
+            Playout = playout,
+            Session = session,
+            CallerId = destination,
+            NegotiatedCodec = negotiatedCodec
+        };
+        _activeCalls[sessionId] = activeCall;
+
+        // Wire RTP receive
+        rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
+        {
+            if (mt != SDPMediaTypesEnum.audio) return;
+            var payload = pkt.Payload;
+            var alawData = negotiatedCodec == AudioCodecsEnum.PCMU
+                ? G711Codec.MulawToAlaw(payload) : payload;
+
+            var boosted = new byte[alawData.Length];
+            Buffer.BlockCopy(alawData, 0, boosted, 0, alawData.Length);
+            ALawVolumeBoost.ApplyInPlace(boosted, _audioSettings.IngressGain);
+
+            session.FeedCallerAudio(boosted);
+            OnOperatorCallerAudio?.Invoke(boosted);
+        };
+
+        // Wire AI audio out
+        session.OnAudioOut += alawFrame =>
+        {
+            playout.BufferALaw(alawFrame);
+            var rtpPayload = negotiatedCodec == AudioCodecsEnum.PCMU
+                ? G711Codec.AlawToMulaw(alawFrame) : alawFrame;
+            audioSource.ExternalAudioSourceRawSample(
+                new AudioSamplingRatesEnum[] { AudioSamplingRatesEnum.Rate8KHz }.First(), (uint)(rtpPayload.Length / 8000 * 1000), rtpPayload);
+        };
+
+        callAgent.OnCallHungup += async (dlg) =>
+        {
+            if (_activeCalls.TryRemove(sessionId, out var c))
+                await CleanupCallAsync(c, "remote_hangup");
+        };
+
+        _ = session.StartAsync();
+        OnCallStarted?.Invoke(sessionId, destination);
+        Log($"✅ Outbound call connected: {destination}");
+    }
+
     public void SendOperatorAudio(byte[] alawData)
     {
         foreach (var call in _activeCalls.Values)

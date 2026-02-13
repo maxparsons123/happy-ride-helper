@@ -18,69 +18,66 @@ partial class MainForm
         this.components = new System.ComponentModel.Container();
         this.SuspendLayout();
 
-        var bgDark = Color.FromArgb(24, 24, 28);
-        var bgPanel = Color.FromArgb(36, 36, 40);
-        var bgInput = Color.FromArgb(52, 52, 58);
-        var fgLight = Color.FromArgb(220, 220, 225);
-        var accent = Color.FromArgb(0, 122, 204);
-        var green = Color.FromArgb(40, 167, 69);
-        var red = Color.FromArgb(200, 50, 50);
-        var orange = Color.FromArgb(255, 152, 0);
-        var borderColor = Color.FromArgb(60, 60, 68);
+        // ── Color palette ──
+        var bgDark = Color.FromArgb(20, 20, 24);
+        var bgPanel = Color.FromArgb(30, 30, 36);
+        var bgSection = Color.FromArgb(38, 38, 44);
+        var bgInput = Color.FromArgb(50, 50, 58);
+        var fgLight = Color.FromArgb(225, 225, 230);
+        var accent = Color.FromArgb(70, 140, 220);
+        var accentDim = Color.FromArgb(50, 100, 170);
+        var green = Color.FromArgb(40, 170, 70);
+        var red = Color.FromArgb(195, 50, 50);
+        var orange = Color.FromArgb(245, 160, 20);
+        var borderColor = Color.FromArgb(55, 58, 68);
+        var sectionBorder = Color.FromArgb(60, 65, 78);
 
         // ══════════════════════════════════════
-        //  TOOLSTRIP (top bar — all menus here)
+        //  TOOLSTRIP (top bar)
         // ══════════════════════════════════════
         toolStrip = new ToolStrip
         {
-            BackColor = Color.FromArgb(30, 30, 34),
+            BackColor = Color.FromArgb(26, 26, 30),
             ForeColor = fgLight,
             GripStyle = ToolStripGripStyle.Hidden,
-            Padding = new Padding(4, 0, 4, 0),
-            RenderMode = ToolStripRenderMode.Professional
+            Padding = new Padding(8, 2, 8, 2),
+            RenderMode = ToolStripRenderMode.Professional,
+            Font = new Font("Segoe UI", 9F)
         };
 
-        // Settings dropdown
-        var tsiSettings = new ToolStripDropDownButton("⚙ Settings");
-        tsiSettings.ForeColor = fgLight;
+        var tsiSettings = new ToolStripDropDownButton("⚙ Settings") { ForeColor = fgLight };
         tsiOpenAi = new ToolStripMenuItem("🤖 OpenAI / Audio / Dispatch…");
         tsiOpenAi.Click += tsiSettings_Click;
         tsiViewConfig = new ToolStripMenuItem("📄 View Config File");
         tsiViewConfig.Click += tsiViewConfig_Click;
         tsiSettings.DropDownItems.AddRange(new ToolStripItem[] { tsiOpenAi, tsiViewConfig });
 
-        // Ada toggle button
         tsiAdaToggle = new ToolStripButton("🤖 Ada: ON") { ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
         tsiAdaToggle.Click += tsiAdaToggle_Click;
 
-        // Log toggle
         tsiLogToggle = new ToolStripButton("📋 Log") { ForeColor = fgLight };
         tsiLogToggle.Click += tsiLogToggle_Click;
 
-        // About
         var tsiAbout = new ToolStripButton("ℹ About") { ForeColor = fgLight };
         tsiAbout.Click += (s, e) => MessageBox.Show("AdaSdkBooker v1.0\nAI-Powered Taxi Booking System\n\nBuilt on AdaSdkModel engine.", "About", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
         toolStrip.Items.AddRange(new ToolStripItem[]
         {
-            tsiSettings,
-            new ToolStripSeparator(),
-            tsiAdaToggle,
-            new ToolStripSeparator(),
-            tsiLogToggle,
-            new ToolStripSeparator(),
+            tsiSettings, new ToolStripSeparator(),
+            tsiAdaToggle, new ToolStripSeparator(),
+            tsiLogToggle, new ToolStripSeparator(),
             tsiAbout
         });
 
         // ══════════════════════════════════════
-        //  MAIN SPLIT — LEFT (booking+jobs) | RIGHT (ada/map+sip+call)
+        //  MAIN SPLIT — LEFT (booking+jobs) | RIGHT (ada+sip+call+audio)
         // ══════════════════════════════════════
         splitMain = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
-            SplitterDistance = 520,
-            SplitterWidth = 3,
+            SplitterDistance = 560,
+            SplitterWidth = 4,
             BackColor = bgDark,
             BorderStyle = BorderStyle.None,
             FixedPanel = FixedPanel.None
@@ -91,112 +88,115 @@ partial class MainForm
         // ══════════════════════════════════════════════════
         var pnlLeft = splitMain.Panel1;
         pnlLeft.BackColor = bgDark;
-        pnlLeft.Padding = new Padding(6, 4, 3, 4);
+        pnlLeft.Padding = new Padding(8, 6, 4, 6);
 
-        // Split left into booking (top) and jobs (bottom)
         splitLeftVert = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Horizontal,
-            SplitterDistance = 310,
-            SplitterWidth = 3,
+            SplitterDistance = 360,
+            SplitterWidth = 6,
             BackColor = bgDark,
             BorderStyle = BorderStyle.None
         };
 
-        // ── BOOKING FORM ──
-        pnlBooking = new Panel { Dock = DockStyle.Fill, BackColor = bgPanel, Padding = new Padding(10, 8, 10, 8) };
+        // ┌───────────────────────────────────┐
+        // │  📋 NEW BOOKING                   │
+        // └───────────────────────────────────┘
+        pnlBooking = MakeSectionPanel(DockStyle.Fill, bgSection, sectionBorder);
 
-        var lblBookingTitle = new Label
-        {
-            Text = "📋 NEW BOOKING",
-            Dock = DockStyle.Top, Height = 24,
-            ForeColor = accent, Font = new Font("Segoe UI", 10F, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft
-        };
+        var lblBookingTitle = MakeSectionTitle("📋  NEW BOOKING", accent);
 
-        var pnlBookingFields = new Panel { Dock = DockStyle.Fill, BackColor = bgPanel };
+        var pnlBookingFields = new Panel { Dock = DockStyle.Fill, BackColor = bgSection, Padding = new Padding(12, 8, 12, 8) };
 
         int y = 4;
-        pnlBookingFields.Controls.Add(MakeLabel("Name:", 0, y + 3));
-        txtCallerName = MakeTextBox(65, y, 150, bgInput, fgLight);
+        // Row 1: Name + Phone + Repeat
+        pnlBookingFields.Controls.Add(MakeLabel("Name:", 0, y + 4, 9F));
+        txtCallerName = MakeTextBox(70, y, 195, bgInput, fgLight, 9.5F);
         txtCallerName.PlaceholderText = "Customer name";
-        pnlBookingFields.Controls.Add(MakeLabel("Phone:", 225, y + 3));
-        txtPhone = MakeTextBox(280, y, 140, bgInput, fgLight);
+        txtCallerName.Height = 28;
+        pnlBookingFields.Controls.Add(MakeLabel("Phone:", 280, y + 4, 9F));
+        txtPhone = MakeTextBox(340, y, 160, bgInput, fgLight, 9.5F);
         txtPhone.PlaceholderText = "+44…";
-        btnRepeatLast = MakeButton("🔁", 425, y, 50, 24, Color.FromArgb(55, 55, 65));
+        txtPhone.Height = 28;
+        btnRepeatLast = MakeButton("🔁 Last", 510, y, 65, 28, Color.FromArgb(55, 55, 68));
+        btnRepeatLast.Font = new Font("Segoe UI", 8F);
         btnRepeatLast.Visible = false;
         btnRepeatLast.Click += btnRepeatLast_Click;
         pnlBookingFields.Controls.AddRange(new Control[] { txtCallerName, txtPhone, btnRepeatLast });
-        y += 30;
+        y += 38;
 
-        pnlBookingFields.Controls.Add(MakeLabel("Pickup:", 0, y + 3));
-        cmbPickup = MakeComboBox(65, y, 355, bgInput, fgLight);
-        lblPickupStatus = new Label { Text = "", Location = new Point(425, y + 1), Size = new Size(24, 22), Font = new Font("Segoe UI", 12F) };
+        // Row 2: Pickup
+        pnlBookingFields.Controls.Add(MakeLabel("Pickup:", 0, y + 4, 9F));
+        cmbPickup = MakeComboBox(70, y, 430, bgInput, fgLight);
+        cmbPickup.Font = new Font("Segoe UI", 9.5F);
+        cmbPickup.Height = 28;
+        lblPickupStatus = new Label { Text = "", Location = new Point(510, y + 2), Size = new Size(26, 26), Font = new Font("Segoe UI", 13F) };
         pnlBookingFields.Controls.AddRange(new Control[] { cmbPickup, lblPickupStatus });
-        y += 28;
-        lblPickupResolved = new Label { Text = "", Location = new Point(65, y), Size = new Size(380, 14), ForeColor = Color.FromArgb(110, 170, 110), Font = new Font("Segoe UI", 7.5F, FontStyle.Italic) };
+        y += 30;
+        lblPickupResolved = new Label { Text = "", Location = new Point(70, y), Size = new Size(430, 16), ForeColor = Color.FromArgb(110, 175, 110), Font = new Font("Segoe UI", 7.8F, FontStyle.Italic) };
         pnlBookingFields.Controls.Add(lblPickupResolved);
-        y += 16;
+        y += 20;
 
-        pnlBookingFields.Controls.Add(MakeLabel("Dropoff:", 0, y + 3));
-        cmbDropoff = MakeComboBox(65, y, 355, bgInput, fgLight);
-        lblDropoffStatus = new Label { Text = "", Location = new Point(425, y + 1), Size = new Size(24, 22), Font = new Font("Segoe UI", 12F) };
+        // Row 3: Dropoff
+        pnlBookingFields.Controls.Add(MakeLabel("Dropoff:", 0, y + 4, 9F));
+        cmbDropoff = MakeComboBox(70, y, 430, bgInput, fgLight);
+        cmbDropoff.Font = new Font("Segoe UI", 9.5F);
+        cmbDropoff.Height = 28;
+        lblDropoffStatus = new Label { Text = "", Location = new Point(510, y + 2), Size = new Size(26, 26), Font = new Font("Segoe UI", 13F) };
         pnlBookingFields.Controls.AddRange(new Control[] { cmbDropoff, lblDropoffStatus });
-        y += 28;
-        lblDropoffResolved = new Label { Text = "", Location = new Point(65, y), Size = new Size(380, 14), ForeColor = Color.FromArgb(110, 170, 110), Font = new Font("Segoe UI", 7.5F, FontStyle.Italic) };
+        y += 30;
+        lblDropoffResolved = new Label { Text = "", Location = new Point(70, y), Size = new Size(430, 16), ForeColor = Color.FromArgb(110, 175, 110), Font = new Font("Segoe UI", 7.8F, FontStyle.Italic) };
         pnlBookingFields.Controls.Add(lblDropoffResolved);
-        y += 18;
+        y += 22;
 
-        pnlBookingFields.Controls.Add(MakeLabel("Pax:", 0, y + 3));
-        nudPassengers = new NumericUpDown { Location = new Point(65, y), Size = new Size(55, 23), Minimum = 1, Maximum = 16, Value = 1, BackColor = bgInput, ForeColor = fgLight, BorderStyle = BorderStyle.FixedSingle };
-        pnlBookingFields.Controls.Add(MakeLabel("Vehicle:", 130, y + 3));
-        cmbVehicle = MakeComboBox(190, y, 120, bgInput, fgLight);
+        // Row 4: Pax, Vehicle, Time
+        pnlBookingFields.Controls.Add(MakeLabel("Pax:", 0, y + 4, 9F));
+        nudPassengers = new NumericUpDown { Location = new Point(70, y), Size = new Size(60, 28), Minimum = 1, Maximum = 16, Value = 1, BackColor = bgInput, ForeColor = fgLight, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 9.5F) };
+        pnlBookingFields.Controls.Add(MakeLabel("Vehicle:", 145, y + 4, 9F));
+        cmbVehicle = MakeComboBox(210, y, 130, bgInput, fgLight);
         cmbVehicle.DropDownStyle = ComboBoxStyle.DropDownList;
         cmbVehicle.Items.AddRange(new object[] { "Saloon", "Estate", "MPV", "Minibus" });
         cmbVehicle.SelectedIndex = 0;
-        pnlBookingFields.Controls.Add(MakeLabel("Time:", 320, y + 3));
-        cmbPickupTime = MakeComboBox(365, y, 85, bgInput, fgLight);
+        pnlBookingFields.Controls.Add(MakeLabel("Time:", 355, y + 4, 9F));
+        cmbPickupTime = MakeComboBox(400, y, 100, bgInput, fgLight);
         cmbPickupTime.Items.AddRange(new object[] { "ASAP", "15 min", "30 min", "1 hour" });
         cmbPickupTime.SelectedIndex = 0;
         pnlBookingFields.Controls.AddRange(new Control[] { nudPassengers, cmbVehicle, cmbPickupTime });
-        y += 30;
+        y += 38;
 
-        // Quote row
-        btnVerify = MakeButton("🔍 Get Quote", 0, y, 120, 28, accent);
+        // Row 5: Quote
+        btnVerify = MakeButton("🔍 Get Quote", 0, y, 130, 32, accent);
         btnVerify.Click += async (s, e) => await VerifyAndQuoteAsync();
-        lblFare = new Label { Text = "Fare: —", Location = new Point(130, y + 2), Size = new Size(140, 22), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 10F, FontStyle.Bold) };
-        lblEta = new Label { Text = "ETA: —", Location = new Point(275, y + 4), Size = new Size(100, 20), ForeColor = Color.FromArgb(160, 200, 160), Font = new Font("Segoe UI", 8.5F) };
+        lblFare = new Label { Text = "Fare: —", Location = new Point(145, y + 4), Size = new Size(160, 24), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 11F, FontStyle.Bold) };
+        lblEta = new Label { Text = "ETA: —", Location = new Point(310, y + 6), Size = new Size(120, 20), ForeColor = Color.FromArgb(160, 200, 160), Font = new Font("Segoe UI", 9F) };
         pnlBookingFields.Controls.AddRange(new Control[] { btnVerify, lblFare, lblEta });
-        y += 34;
+        y += 42;
 
-        // Action row
-        btnDispatch = MakeButton("✅ Dispatch", 0, y, 120, 30, green);
+        // Row 6: Actions
+        btnDispatch = MakeButton("✅ Dispatch", 0, y, 130, 34, green);
+        btnDispatch.Font = new Font("Segoe UI", 10F, FontStyle.Bold);
         btnDispatch.Enabled = false;
         btnDispatch.Click += async (s, e) => await ConfirmBookingAsync();
-        btnClearBooking = MakeButton("🗑 Clear", 130, y, 80, 30, Color.FromArgb(70, 70, 75));
+        btnClearBooking = MakeButton("🗑 Clear", 140, y, 90, 34, Color.FromArgb(65, 65, 72));
         btnClearBooking.Click += (s, e) => ClearBookingForm();
-        lblBookingStatus = new Label { Text = "", Location = new Point(220, y + 6), Size = new Size(240, 18), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F, FontStyle.Italic) };
+        lblBookingStatus = new Label { Text = "", Location = new Point(242, y + 8), Size = new Size(280, 20), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.5F, FontStyle.Italic) };
         pnlBookingFields.Controls.AddRange(new Control[] { btnDispatch, btnClearBooking, lblBookingStatus });
 
         pnlBooking.Controls.Add(pnlBookingFields);
         pnlBooking.Controls.Add(lblBookingTitle);
 
-        // ── JOB GRID ──
-        pnlJobs = new Panel { Dock = DockStyle.Fill, BackColor = bgPanel, Padding = new Padding(6, 4, 6, 4) };
+        // ┌───────────────────────────────────┐
+        // │  📊 JOBS                          │
+        // └───────────────────────────────────┘
+        pnlJobs = MakeSectionPanel(DockStyle.Fill, bgSection, sectionBorder);
 
-        var lblJobsTitle = new Label
-        {
-            Text = "📊 JOBS",
-            Dock = DockStyle.Top, Height = 22,
-            ForeColor = accent, Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft
-        };
+        var lblJobsTitle = MakeSectionTitle("📊  JOBS", accent);
 
         dgvJobs = new DataGridView
         {
             Dock = DockStyle.Fill,
-            BackgroundColor = Color.FromArgb(28, 28, 32),
+            BackgroundColor = Color.FromArgb(26, 26, 30),
             ForeColor = fgLight,
             GridColor = borderColor,
             BorderStyle = BorderStyle.None,
@@ -211,17 +211,17 @@ partial class MainForm
             Font = new Font("Segoe UI", 8.5F),
             DefaultCellStyle = new DataGridViewCellStyle
             {
-                BackColor = Color.FromArgb(28, 28, 32),
+                BackColor = Color.FromArgb(26, 26, 30),
                 ForeColor = fgLight,
                 SelectionBackColor = Color.FromArgb(0, 80, 160),
                 SelectionForeColor = Color.White,
-                Padding = new Padding(2)
+                Padding = new Padding(3)
             },
             ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
             {
-                BackColor = Color.FromArgb(42, 42, 48),
+                BackColor = Color.FromArgb(40, 42, 50),
                 ForeColor = Color.FromArgb(180, 200, 220),
-                Font = new Font("Segoe UI", 8F, FontStyle.Bold),
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
                 Alignment = DataGridViewContentAlignment.MiddleLeft
             },
             EnableHeadersVisualStyles = false
@@ -248,123 +248,173 @@ partial class MainForm
         pnlLeft.Controls.Add(splitLeftVert);
 
         // ══════════════════════════════════════════════════
-        //  RIGHT PANEL — ADA/MAP + SIP + CALL CONTROLS
+        //  RIGHT PANEL — ADA/MAP + SIP + CALL + AUDIO
         // ══════════════════════════════════════════════════
         var pnlRight = splitMain.Panel2;
         pnlRight.BackColor = bgDark;
-        pnlRight.Padding = new Padding(3, 4, 6, 4);
+        pnlRight.Padding = new Padding(4, 6, 8, 6);
 
-        var pnlRightInner = new Panel { Dock = DockStyle.Fill, BackColor = bgDark };
+        var pnlRightInner = new Panel { Dock = DockStyle.Fill, BackColor = bgDark, AutoScroll = true };
 
-        // ── ADA / MAP VIEW ──
-        pnlAdaMap = new Panel
-        {
-            Dock = DockStyle.Top, Height = 290,
-            BackColor = bgPanel, Padding = new Padding(6, 4, 6, 4)
-        };
+        // ┌───────────────────────────────────┐
+        // │  🤖 ADA / 🗺️ MAP                 │
+        // └───────────────────────────────────┘
+        pnlAdaMap = MakeSectionPanel(DockStyle.Top, bgSection, sectionBorder);
+        pnlAdaMap.Height = 320;
 
-        pnlAdaMapHeader = new Panel { Dock = DockStyle.Top, Height = 28, BackColor = bgPanel };
-        lblAdaMapTitle = new Label { Text = "🤖 ADA", Location = new Point(2, 4), AutoSize = true, ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
-        lblAdaMapStatus = new Label { Text = "Waiting…", Location = new Point(200, 6), Size = new Size(140, 16), ForeColor = Color.Gray, Font = new Font("Segoe UI", 7.5F), TextAlign = ContentAlignment.MiddleRight, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        pnlAdaMapHeader = new Panel { Dock = DockStyle.Top, Height = 30, BackColor = bgSection, Padding = new Padding(8, 0, 8, 0) };
+        lblAdaMapTitle = new Label { Text = "🤖  ADA", Location = new Point(4, 5), AutoSize = true, ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 10F, FontStyle.Bold) };
+        lblAdaMapStatus = new Label { Text = "Waiting…", Dock = DockStyle.Right, Width = 120, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F), TextAlign = ContentAlignment.MiddleRight };
         pnlAdaMapHeader.Controls.AddRange(new Control[] { lblAdaMapTitle, lblAdaMapStatus });
 
-        pnlAdaMapHost = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
+        pnlAdaMapHost = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black, Padding = new Padding(1) };
 
         pnlAdaMap.Controls.Add(pnlAdaMapHost);
         pnlAdaMap.Controls.Add(pnlAdaMapHeader);
 
-        // ── SIP REGISTRATION (compact) ──
-        pnlSip = new Panel
-        {
-            Dock = DockStyle.Top, Height = 108,
-            BackColor = bgPanel, Padding = new Padding(6, 2, 6, 4)
-        };
+        // ┌───────────────────────────────────┐
+        // │  📞 SIP CONNECTION                │
+        // └───────────────────────────────────┘
+        pnlSip = MakeSectionPanel(DockStyle.Top, bgSection, sectionBorder);
+        pnlSip.Height = 130;
 
-        var lblSipTitle = new Label { Text = "📞 SIP", Location = new Point(2, 2), AutoSize = true, ForeColor = accent, Font = new Font("Segoe UI", 8.5F, FontStyle.Bold) };
-        pnlSip.Controls.Add(lblSipTitle);
+        var lblSipTitle = MakeSectionTitle("📞  SIP CONNECTION", accent);
 
-        int sy = 20;
-        pnlSip.Controls.Add(MakeLabel("Acct:", 0, sy + 3, 8F));
-        cmbSipAccount = new ComboBox { Location = new Point(42, sy), Size = new Size(180, 22), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight, Font = new Font("Segoe UI", 8F) };
+        var pnlSipFields = new Panel { Dock = DockStyle.Fill, BackColor = bgSection, Padding = new Padding(12, 4, 12, 4) };
+
+        int sy = 2;
+        pnlSipFields.Controls.Add(MakeLabel("Account:", 0, sy + 4, 8.5F));
+        cmbSipAccount = new ComboBox { Location = new Point(65, sy), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight, Font = new Font("Segoe UI", 8.5F) };
         cmbSipAccount.SelectedIndexChanged += cmbSipAccount_SelectedIndexChanged;
-        btnSaveSip = MakeButton("💾", 226, sy, 28, 22, Color.FromArgb(55, 55, 65));
-        btnSaveSip.Font = new Font("Segoe UI", 7F);
+        btnSaveSip = MakeButton("💾", 272, sy, 30, 24, Color.FromArgb(55, 55, 68));
+        btnSaveSip.Font = new Font("Segoe UI", 8F);
         btnSaveSip.Click += btnSaveAccount_Click;
-        pnlSip.Controls.AddRange(new Control[] { cmbSipAccount, btnSaveSip });
-        sy += 26;
+        pnlSipFields.Controls.AddRange(new Control[] { cmbSipAccount, btnSaveSip });
+        sy += 30;
 
-        pnlSip.Controls.Add(MakeLabel("Svr:", 0, sy + 3, 8F));
-        txtSipServer = MakeTextBox(42, sy, 120, bgInput, fgLight, 8F);
+        pnlSipFields.Controls.Add(MakeLabel("Server:", 0, sy + 4, 8.5F));
+        txtSipServer = MakeTextBox(65, sy, 145, bgInput, fgLight, 8.5F);
         txtSipServer.PlaceholderText = "sip.example.com";
-        pnlSip.Controls.Add(MakeLabel("Ext:", 168, sy + 3, 8F));
-        txtSipUser = MakeTextBox(196, sy, 58, bgInput, fgLight, 8F);
-        pnlSip.Controls.AddRange(new Control[] { txtSipServer, txtSipUser });
-        sy += 24;
+        pnlSipFields.Controls.Add(MakeLabel("Ext:", 218, sy + 4, 8.5F));
+        txtSipUser = MakeTextBox(248, sy, 60, bgInput, fgLight, 8.5F);
+        pnlSipFields.Controls.AddRange(new Control[] { txtSipServer, txtSipUser });
+        sy += 28;
 
-        pnlSip.Controls.Add(MakeLabel("Pass:", 0, sy + 3, 8F));
-        txtSipPassword = MakeTextBox(42, sy, 88, bgInput, fgLight, 8F);
+        pnlSipFields.Controls.Add(MakeLabel("Pass:", 0, sy + 4, 8.5F));
+        txtSipPassword = MakeTextBox(65, sy, 100, bgInput, fgLight, 8.5F);
         txtSipPassword.UseSystemPasswordChar = true;
-        pnlSip.Controls.Add(MakeLabel("Port:", 136, sy + 3, 8F));
-        txtSipPort = MakeTextBox(170, sy, 42, bgInput, fgLight, 8F);
+        pnlSipFields.Controls.Add(MakeLabel("Port:", 174, sy + 4, 8.5F));
+        txtSipPort = MakeTextBox(210, sy, 48, bgInput, fgLight, 8.5F);
         txtSipPort.Text = "5060";
-        chkAutoAnswer = new CheckBox { Text = "Auto", Location = new Point(218, sy + 1), Size = new Size(50, 20), ForeColor = fgLight, Font = new Font("Segoe UI", 7.5F), Checked = true };
-        pnlSip.Controls.AddRange(new Control[] { txtSipPassword, txtSipPort, chkAutoAnswer });
-        sy += 24;
+        chkAutoAnswer = new CheckBox { Text = "Auto", Location = new Point(266, sy + 2), Size = new Size(52, 22), ForeColor = fgLight, Font = new Font("Segoe UI", 8F), Checked = true };
+        pnlSipFields.Controls.AddRange(new Control[] { txtSipPassword, txtSipPort, chkAutoAnswer });
+        sy += 28;
 
-        btnConnect = MakeButton("▶ Connect", 0, sy, 80, 24, green);
-        btnConnect.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+        btnConnect = MakeButton("▶ Connect", 0, sy, 95, 26, green);
+        btnConnect.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
         btnConnect.Click += btnConnect_Click;
-        btnDisconnect = MakeButton("■ Stop", 84, sy, 65, 24, red);
-        btnDisconnect.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+        btnDisconnect = MakeButton("■ Stop", 100, sy, 70, 26, red);
+        btnDisconnect.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
         btnDisconnect.Enabled = false;
         btnDisconnect.Click += btnDisconnect_Click;
-        lblSipStatus = new Label { Text = "● Offline", Location = new Point(154, sy + 4), Size = new Size(110, 16), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
-        pnlSip.Controls.AddRange(new Control[] { btnConnect, btnDisconnect, lblSipStatus });
+        lblSipStatus = new Label { Text = "● Offline", Location = new Point(178, sy + 5), Size = new Size(130, 18), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.5F, FontStyle.Bold) };
+        pnlSipFields.Controls.AddRange(new Control[] { btnConnect, btnDisconnect, lblSipStatus });
 
-        // ── CALL CONTROLS (compact) ──
-        pnlCall = new Panel
-        {
-            Dock = DockStyle.Top, Height = 78,
-            BackColor = bgPanel, Padding = new Padding(6, 2, 6, 4)
-        };
+        pnlSip.Controls.Add(pnlSipFields);
+        pnlSip.Controls.Add(lblSipTitle);
 
-        var lblCallTitle = new Label { Text = "🎧 CALL", Location = new Point(2, 2), AutoSize = true, ForeColor = accent, Font = new Font("Segoe UI", 8.5F, FontStyle.Bold) };
+        // ┌───────────────────────────────────┐
+        // │  🎧 CALL CONTROLS                 │
+        // └───────────────────────────────────┘
+        pnlCall = MakeSectionPanel(DockStyle.Top, bgSection, sectionBorder);
+        pnlCall.Height = 110;
+
+        var lblCallTitle = MakeSectionTitle("🎧  CALL CONTROLS", accent);
+
+        var pnlCallFields = new Panel { Dock = DockStyle.Fill, BackColor = bgSection, Padding = new Padding(12, 4, 12, 4) };
+
+        int cy = 2;
+        // Call action buttons
+        btnAnswer = MakeButton("✅ Answer", 0, cy, 80, 28, green);
+        btnAnswer.Enabled = false; btnAnswer.Click += btnAnswer_Click;
+        btnReject = MakeButton("❌ Reject", 86, cy, 80, 28, red);
+        btnReject.Enabled = false; btnReject.Click += btnReject_Click;
+        btnHangUp = MakeButton("📴 Hang Up", 172, cy, 90, 28, Color.FromArgb(160, 45, 45));
+        btnHangUp.Enabled = false; btnHangUp.Click += btnHangUp_Click;
+        pnlCallFields.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp });
+        cy += 34;
+
+        // Call Out + Mute + Status
+        btnCallOut = MakeButton("📞 Call Out", 0, cy, 90, 28, accentDim);
+        btnCallOut.Click += btnCallOut_Click;
+        btnMute = MakeButton("🔊 Mute", 96, cy, 76, 28, Color.FromArgb(60, 60, 68));
+        btnMute.Enabled = false; btnMute.Click += btnMute_Click;
+        lblCallInfo = new Label { Text = "No call", Location = new Point(180, cy + 6), Size = new Size(140, 18), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.5F) };
+        pnlCallFields.Controls.AddRange(new Control[] { btnCallOut, btnMute, lblCallInfo });
+        cy += 34;
+
+        // Operator mode
+        chkManualMode = new CheckBox { Text = "🎤 Operator Mode", Location = new Point(0, cy), Size = new Size(140, 22), ForeColor = orange, Font = new Font("Segoe UI", 8.5F, FontStyle.Bold) };
+        chkManualMode.CheckedChanged += chkManualMode_CheckedChanged;
+        pnlCallFields.Controls.Add(chkManualMode);
+
+        pnlCall.Controls.Add(pnlCallFields);
         pnlCall.Controls.Add(lblCallTitle);
 
-        int cy = 20;
-        btnAnswer = MakeButton("✅", 0, cy, 38, 24, green);
-        btnAnswer.Enabled = false; btnAnswer.Click += btnAnswer_Click;
-        btnReject = MakeButton("❌", 42, cy, 38, 24, red);
-        btnReject.Enabled = false; btnReject.Click += btnReject_Click;
-        btnHangUp = MakeButton("📴", 84, cy, 38, 24, Color.FromArgb(160, 45, 45));
-        btnHangUp.Enabled = false; btnHangUp.Click += btnHangUp_Click;
-        btnMute = MakeButton("🔊", 126, cy, 38, 24, Color.FromArgb(65, 65, 70));
-        btnMute.Enabled = false; btnMute.Click += btnMute_Click;
-        lblCallInfo = new Label { Text = "No call", Location = new Point(170, cy + 4), Size = new Size(100, 16), ForeColor = Color.Gray, Font = new Font("Segoe UI", 7.5F) };
-        pnlCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, lblCallInfo });
-        cy += 28;
+        // ┌───────────────────────────────────┐
+        // │  🔊 AUDIO / VOLUME                │
+        // └───────────────────────────────────┘
+        pnlAudio = MakeSectionPanel(DockStyle.Top, bgSection, sectionBorder);
+        pnlAudio.Height = 110;
 
-        chkManualMode = new CheckBox { Text = "🎤 Operator", Location = new Point(0, cy), Size = new Size(100, 20), ForeColor = orange, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
-        chkManualMode.CheckedChanged += chkManualMode_CheckedChanged;
+        var lblAudioTitle = MakeSectionTitle("🔊  AUDIO / VOLUME", accent);
+
+        var pnlAudioFields = new Panel { Dock = DockStyle.Fill, BackColor = bgSection, Padding = new Padding(12, 6, 12, 6) };
+
+        int ay = 0;
+        // Customer Volume (what they hear)
+        pnlAudioFields.Controls.Add(MakeLabel("📱 Customer Vol:", 0, ay + 4, 8.5F));
+        trkCustomerVolume = new TrackBar
+        {
+            Location = new Point(120, ay), Size = new Size(150, 30),
+            Minimum = 0, Maximum = 100, Value = 80,
+            TickFrequency = 20, SmallChange = 5, BackColor = bgSection
+        };
+        lblCustomerVolVal = new Label { Text = "80%", Location = new Point(275, ay + 4), Size = new Size(40, 18), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
+        trkCustomerVolume.ValueChanged += (s, e) => { lblCustomerVolVal.Text = $"{trkCustomerVolume.Value}%"; };
+        pnlAudioFields.Controls.AddRange(new Control[] { trkCustomerVolume, lblCustomerVolVal });
+        ay += 36;
+
+        // Listener Volume (what operator hears)
+        pnlAudioFields.Controls.Add(MakeLabel("🎧 Listener Vol:", 0, ay + 4, 8.5F));
         trkOpVolume = new TrackBar
         {
-            Location = new Point(105, cy - 2), Size = new Size(100, 25),
+            Location = new Point(120, ay), Size = new Size(150, 30),
             Minimum = 10, Maximum = 60, Value = 20,
-            TickFrequency = 10, SmallChange = 5, BackColor = bgPanel
+            TickFrequency = 10, SmallChange = 5, BackColor = bgSection
         };
-        trkOpVolume.ValueChanged += (s, e) => { _operatorMicGain = trkOpVolume.Value / 10f; };
-        lblOpVolumeVal = new Label { Text = "2.0x", Location = new Point(210, cy + 2), Size = new Size(36, 16), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 7.5F, FontStyle.Bold) };
-        pnlCall.Controls.AddRange(new Control[] { chkManualMode, trkOpVolume, lblOpVolumeVal });
+        lblOpVolumeVal = new Label { Text = "2.0x", Location = new Point(275, ay + 4), Size = new Size(40, 18), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
+        trkOpVolume.ValueChanged += (s, e) =>
+        {
+            _operatorMicGain = trkOpVolume.Value / 10f;
+            lblOpVolumeVal.Text = $"{_operatorMicGain:F1}x";
+        };
+        pnlAudioFields.Controls.AddRange(new Control[] { trkOpVolume, lblOpVolumeVal });
 
-        // ── SPACERS between right panels ──
-        var spacer1 = new Panel { Dock = DockStyle.Top, Height = 4, BackColor = bgDark };
-        var spacer2 = new Panel { Dock = DockStyle.Top, Height = 4, BackColor = bgDark };
+        pnlAudio.Controls.Add(pnlAudioFields);
+        pnlAudio.Controls.Add(lblAudioTitle);
 
-        // Add right panels in reverse dock order (bottom to top)
+        // ── Assemble right panels (reverse dock order) ──
+        var gap1 = new Panel { Dock = DockStyle.Top, Height = 6, BackColor = bgDark };
+        var gap2 = new Panel { Dock = DockStyle.Top, Height = 6, BackColor = bgDark };
+        var gap3 = new Panel { Dock = DockStyle.Top, Height = 6, BackColor = bgDark };
+
+        pnlRightInner.Controls.Add(pnlAudio);
+        pnlRightInner.Controls.Add(gap3);
         pnlRightInner.Controls.Add(pnlCall);
-        pnlRightInner.Controls.Add(spacer2);
+        pnlRightInner.Controls.Add(gap2);
         pnlRightInner.Controls.Add(pnlSip);
-        pnlRightInner.Controls.Add(spacer1);
+        pnlRightInner.Controls.Add(gap1);
         pnlRightInner.Controls.Add(pnlAdaMap);
 
         pnlRight.Controls.Add(pnlRightInner);
@@ -372,24 +422,24 @@ partial class MainForm
         // ══════════════════════════════════════
         //  LOG PANEL (toggleable, docked bottom)
         // ══════════════════════════════════════
-        pnlLog = new Panel { Dock = DockStyle.Bottom, Height = 150, BackColor = bgPanel, Visible = false, Padding = new Padding(6, 2, 6, 4) };
+        pnlLog = new Panel { Dock = DockStyle.Bottom, Height = 160, BackColor = bgPanel, Visible = false, Padding = new Padding(8, 4, 8, 4) };
         txtLog = new RichTextBox
         {
             Dock = DockStyle.Fill,
             Font = new Font("Cascadia Mono", 8.5F),
-            BackColor = Color.FromArgb(18, 18, 20),
+            BackColor = Color.FromArgb(16, 16, 18),
             ForeColor = Color.LightGreen,
             ReadOnly = true,
             BorderStyle = BorderStyle.None
         };
-        var lblLogTitle = new Label { Text = "📋 LOG", Dock = DockStyle.Top, Height = 18, ForeColor = accent, Font = new Font("Segoe UI", 8F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
+        var lblLogTitle = MakeSectionTitle("📋  LOG", accent);
         pnlLog.Controls.Add(txtLog);
         pnlLog.Controls.Add(lblLogTitle);
 
         // ══════════════════════════════════════
         //  STATUS BAR
         // ══════════════════════════════════════
-        statusStrip = new StatusStrip { BackColor = Color.FromArgb(30, 30, 34), ForeColor = fgLight };
+        statusStrip = new StatusStrip { BackColor = Color.FromArgb(26, 26, 30), ForeColor = fgLight, SizingGrip = true };
         statusLabel = new ToolStripStatusLabel("Ready") { ForeColor = fgLight };
         statusCallId = new ToolStripStatusLabel("") { Spring = true, TextAlign = ContentAlignment.MiddleRight, ForeColor = fgLight };
         statusStrip.Items.AddRange(new ToolStripItem[] { statusLabel, statusCallId });
@@ -399,8 +449,8 @@ partial class MainForm
         // ══════════════════════════════════════
         this.AutoScaleDimensions = new SizeF(7F, 15F);
         this.AutoScaleMode = AutoScaleMode.Font;
-        this.ClientSize = new Size(1080, 680);
-        this.MinimumSize = new Size(960, 600);
+        this.ClientSize = new Size(1200, 780);
+        this.MinimumSize = new Size(1080, 700);
         this.Text = "🚕 AdaSdkBooker — AI Taxi Booking System v1.0";
         this.StartPosition = FormStartPosition.CenterScreen;
         this.Font = new Font("Segoe UI", 9F);
@@ -419,14 +469,53 @@ partial class MainForm
     #endregion
 
     // ── Helpers ──
+    private static Panel MakeSectionPanel(DockStyle dock, Color bg, Color border)
+    {
+        var pnl = new BorderedPanel
+        {
+            Dock = dock,
+            BackColor = bg,
+            Padding = new Padding(2),
+            Margin = new Padding(0, 0, 0, 2),
+            BorderColor = border
+        };
+        return pnl;
+    }
+
+    private class BorderedPanel : Panel
+    {
+        public Color BorderColor { get; set; } = Color.FromArgb(60, 65, 78);
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            using var pen = new Pen(BorderColor, 1);
+            e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        }
+    }
+
+    private static Label MakeSectionTitle(string text, Color fg)
+    {
+        return new Label
+        {
+            Text = text,
+            Dock = DockStyle.Top,
+            Height = 28,
+            ForeColor = fg,
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(8, 0, 0, 0),
+            BackColor = Color.FromArgb(32, 34, 42)
+        };
+    }
+
     private static Label MakeLabel(string text, int x, int y, float fontSize = 9F)
         => new Label { Text = text, Location = new Point(x, y), AutoSize = true, Font = new Font("Segoe UI", fontSize) };
 
     private static TextBox MakeTextBox(int x, int y, int w, Color bg, Color fg, float fontSize = 8.5F)
-        => new TextBox { Location = new Point(x, y), Size = new Size(w, 22), BackColor = bg, ForeColor = fg, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", fontSize) };
+        => new TextBox { Location = new Point(x, y), Size = new Size(w, 26), BackColor = bg, ForeColor = fg, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", fontSize) };
 
     private static ComboBox MakeComboBox(int x, int y, int w, Color bg, Color fg)
-        => new ComboBox { Location = new Point(x, y), Size = new Size(w, 22), BackColor = bg, ForeColor = fg, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 8.5F) };
+        => new ComboBox { Location = new Point(x, y), Size = new Size(w, 26), BackColor = bg, ForeColor = fg, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 9F) };
 
     private static Button MakeButton(string text, int x, int y, int w, int h, Color bg)
     {
@@ -437,7 +526,8 @@ partial class MainForm
             FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
             Font = new Font("Segoe UI", 9F, FontStyle.Bold)
         };
-        btn.FlatAppearance.BorderSize = 0;
+        btn.FlatAppearance.BorderSize = 1;
+        btn.FlatAppearance.BorderColor = Color.FromArgb(70, 75, 85);
         return btn;
     }
 
@@ -476,10 +566,14 @@ partial class MainForm
 
     // Call controls
     private Panel pnlCall;
-    private Button btnAnswer, btnReject, btnHangUp, btnMute;
+    private Button btnAnswer, btnReject, btnHangUp, btnMute, btnCallOut;
     private CheckBox chkManualMode;
-    private TrackBar trkOpVolume;
-    private Label lblOpVolumeVal, lblCallInfo;
+    private Label lblCallInfo;
+
+    // Audio / Volume
+    private Panel pnlAudio;
+    private TrackBar trkCustomerVolume, trkOpVolume;
+    private Label lblCustomerVolVal, lblOpVolumeVal;
 
     // Log
     private Panel pnlLog;
