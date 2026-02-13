@@ -18,6 +18,15 @@ public sealed class AppSettings
     public DispatchSettings Dispatch { get; set; } = new();
     public GoogleMapsSettings GoogleMaps { get; set; } = new();
     public SupabaseSettings Supabase { get; set; } = new();
+    public IcabbiSettings Icabbi { get; set; } = new();
+}
+
+public sealed class IcabbiSettings
+{
+    public bool Enabled { get; set; } = false;
+    public string AppKey { get; set; } = "";
+    public string SecretKey { get; set; } = "";
+    public string TenantBase { get; set; } = "https://yourtenant.icabbi.net";
 }
 
 public sealed class SipSettings
@@ -41,7 +50,7 @@ public sealed class OpenAiSettings
 {
     public string ApiKey { get; set; } = "";
     public string Model { get; set; } = "gpt-4o-mini-realtime-preview-2024-12-17";
-    public string Voice { get; set; } = "shimmer";
+    public string Voice { get; set; } = "alloy";
 }
 
 public sealed class AudioSettings
