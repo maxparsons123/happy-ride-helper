@@ -130,53 +130,55 @@ public sealed class SipServer : IAsyncDisposable
     {
         var authUser = _settings.EffectiveAuthUser;
         var resolvedHost = ResolveDns(_settings.Server);
-        var domain = string.IsNullOrWhiteSpace(_settings.Domain) ? resolvedHost : _settings.Domain;
+        var domain = string.IsNullOrWhiteSpace(_settings.Domain) ? _settings.Server : _settings.Domain;
         var registrar = _settings.Port == 5060 ? resolvedHost : $"{resolvedHost}:{_settings.Port}";
 
-        if (authUser != _settings.Username)
+        // Determine SIP protocol for transport
+        var sipProtocol = _settings.Transport.ToUpperInvariant() switch
         {
-            // Separate Auth ID — use full constructor with outbound proxy
-            if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
-            {
-                try { registrarIp = Dns.GetHostAddresses(resolvedHost).First(a => a.AddressFamily == AddressFamily.InterNetwork); }
-                catch { registrarIp = null; }
-            }
+            "TCP" => SIPProtocolsEnum.tcp,
+            "TLS" => SIPProtocolsEnum.tls,
+            _ => SIPProtocolsEnum.udp
+        };
 
-            if (registrarIp != null)
-            {
-                var sipProtocol = _settings.Transport.ToUpperInvariant() switch
-                {
-                    "TCP" => SIPProtocolsEnum.tcp,
-                    "TLS" => SIPProtocolsEnum.tls,
-                    _ => SIPProtocolsEnum.udp
-                };
-                var outboundProxy = new SIPEndPoint(sipProtocol, new IPEndPoint(registrarIp, _settings.Port));
-                var sipAccountAor = new SIPURI(_settings.Username, registrar, null, SIPSchemesEnum.sip, sipProtocol);
-                var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
+        // Resolve registrar IP for outbound proxy
+        IPAddress? registrarIp = null;
+        if (!IPAddress.TryParse(resolvedHost, out registrarIp))
+        {
+            try { registrarIp = Dns.GetHostAddresses(resolvedHost).First(a => a.AddressFamily == AddressFamily.InterNetwork); }
+            catch { registrarIp = null; }
+        }
 
-                _regAgent = new SIPRegistrationUserAgent(
-                    sipTransport: _transport,
-                    outboundProxy: outboundProxy,
-                    sipAccountAOR: sipAccountAor,
-                    authUsername: authUser,
-                    password: _settings.Password,
-                    realm: null,
-                    registrarHost: registrar,
-                    contactURI: contactUri,
-                    expiry: 120,
-                    customHeaders: null);
+        // Use full constructor when Domain differs from resolved host, or when AuthId is separate
+        bool needsDomainAor = !string.IsNullOrWhiteSpace(_settings.Domain) && _settings.Domain != resolvedHost;
+        bool needsAuthId = authUser != _settings.Username;
 
-                Log($"🔐 Using separate Auth ID: {authUser}, Registrar: {registrar}");
-            }
-            else
-            {
-                _regAgent = new SIPRegistrationUserAgent(_transport, _settings.Username, _settings.Password, registrar, 120);
-            }
+        if ((needsDomainAor || needsAuthId) && registrarIp != null)
+        {
+            var outboundProxy = new SIPEndPoint(sipProtocol, new IPEndPoint(registrarIp, _settings.Port));
+            var sipAccountAor = new SIPURI(_settings.Username, domain, null, SIPSchemesEnum.sip, sipProtocol);
+            var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
+
+            _regAgent = new SIPRegistrationUserAgent(
+                sipTransport: _transport,
+                outboundProxy: outboundProxy,
+                sipAccountAOR: sipAccountAor,
+                authUsername: authUser,
+                password: _settings.Password,
+                realm: null,
+                registrarHost: domain,
+                contactURI: contactUri,
+                expiry: 120,
+                customHeaders: null);
+
+            Log($"🔐 Registration AOR: {_settings.Username}@{domain}, Registrar: {registrar}" +
+                (needsAuthId ? $", AuthId: {authUser}" : ""));
         }
         else
         {
-            // Simple registration — matches AdaMain working path
+            // Simple registration — no separate domain or auth ID
             _regAgent = new SIPRegistrationUserAgent(_transport, _settings.Username, _settings.Password, registrar, 120);
+            Log($"📡 Simple registration: {_settings.Username}@{registrar}");
         }
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
