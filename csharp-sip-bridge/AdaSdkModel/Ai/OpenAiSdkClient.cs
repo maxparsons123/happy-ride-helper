@@ -451,7 +451,32 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             // ── USER TRANSCRIPT ──
             case ConversationInputTranscriptionFinishedUpdate userTranscript:
                 Interlocked.Exchange(ref _noReplyCount, 0);
-                OnTranscript?.Invoke("User", userTranscript.Transcript);
+                var transcript = userTranscript.Transcript;
+                OnTranscript?.Invoke("User", transcript);
+
+                // TRANSCRIPT GROUNDING: inject the exact STT words back into
+                // the conversation so the AI uses verbatim text for tool args.
+                // This prevents the model from "reinterpreting" addresses
+                // (e.g. "David Road" → "Dovey Road") in its tool calls.
+                if (!string.IsNullOrWhiteSpace(transcript) && transcript.Length > 2)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            if (_session == null || !IsConnected) return;
+                            var grounding = $"[TRANSCRIPT] The caller's exact words were: \"{transcript}\". " +
+                                "Use these EXACT words for any tool call arguments — do NOT substitute similar-sounding names.";
+                            await _session.AddItemAsync(
+                                ConversationItem.CreateUserMessage(new[] {
+                                    ConversationContentPart.CreateInputTextPart(grounding) }));
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "Failed to inject transcript grounding");
+                        }
+                    });
+                }
                 break;
 
             // ── ERROR ──
@@ -800,11 +825,17 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 10. Only THEN call book_taxi with action='confirmed'
 11. Speak closing script, then call end_call
 
+## TRANSCRIPT GROUNDING (CRITICAL)
+- You will receive [TRANSCRIPT] messages containing the caller's EXACT words
+- When calling sync_booking_data or book_taxi, your tool arguments MUST match the [TRANSCRIPT] text
+- If your internal hearing differs from [TRANSCRIPT], ALWAYS trust [TRANSCRIPT]
+- Example: if you think you heard 'Dovey Road' but [TRANSCRIPT] says 'David Road', use 'David Road'
+
 ## ADDRESS INTEGRITY (CRITICAL)
 - ONLY store house numbers, postcodes, cities EXPLICITLY stated by the user
 - House numbers are VERBATIM identifiers (e.g. '1214A', '52A') — NEVER reinterpret
 - '52A' must stay '52A' — NEVER change to '52-8', '528', '52 A', or any variation
-- Character-for-character copy from transcript for ALL tool parameters
+- Character-for-character copy from [TRANSCRIPT] for ALL tool parameters
 - NEVER substitute similar-sounding addresses (e.g. 'David' ≠ 'Dovey', 'Broad' ≠ 'Board')
 - Many similar street names exist (David Road, Dovey Road, etc.) — ALWAYS read the address back to the caller BEFORE calling book_taxi
 - If the caller says 'no' or corrects you, use THEIR version exactly — abandon your previous version
