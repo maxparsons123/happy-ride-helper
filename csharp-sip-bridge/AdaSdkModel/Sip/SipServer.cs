@@ -331,8 +331,7 @@ public sealed class SipServer : IAsyncDisposable
         AudioCodecsEnum negotiatedCodec = AudioCodecsEnum.PCMA;
         rtpSession.OnAudioFormatsNegotiated += formats => negotiatedCodec = formats.FirstOrDefault().Codec;
 
-        var sessionId = $"out-{Guid.NewGuid():N}[..8]";
-        sessionId = $"out-{Guid.NewGuid().ToString("N")[..8]}";
+        var sessionId = $"out-{Guid.NewGuid().ToString("N")[..8]}";
 
         Log($"📞 Dialling {destination} via {serverAddr}{portPart}…");
         var result = await callAgent.Call(destUri.ToString(), null, null, rtpSession);
@@ -344,54 +343,60 @@ public sealed class SipServer : IAsyncDisposable
             return;
         }
 
-        var playout = new ALawRtpPlayout();
-        var session = _sessionManager.CreateSession(sessionId, destination);
+        ICallSession session;
+        try { session = await _sessionManager.CreateSessionAsync(destination); }
+        catch (Exception ex) { Log($"❌ AI init failed: {ex.Message}"); callAgent.Hangup(); rtpSession.Close("ai_fail"); return; }
 
         var activeCall = new ActiveCall
         {
-            Agent = callAgent,
-            RtpSession = rtpSession,
-            AudioSource = audioSource,
-            Playout = playout,
+            SessionId = session.SessionId,
             Session = session,
-            CallerId = destination,
-            NegotiatedCodec = negotiatedCodec
+            RtpSession = rtpSession,
+            CallAgent = callAgent
         };
         _activeCalls[sessionId] = activeCall;
 
-        // Wire RTP receive
+        var playout = new ALawRtpPlayout(rtpSession);
+        playout.OnLog += msg => Log($"[{sessionId}] {msg}");
+        activeCall.Playout = playout;
+
+        if (session.AiClient is OpenAiSdkClient sdk)
+            sdk.GetQueuedFrames = () => playout.QueuedFrames;
+
+        // Wire RTP receive — apply ingress gain
         rtpSession.OnRtpPacketReceived += (ep, mt, pkt) =>
         {
             if (mt != SDPMediaTypesEnum.audio) return;
             var payload = pkt.Payload;
             var alawData = negotiatedCodec == AudioCodecsEnum.PCMU
-                ? G711Codec.MulawToAlaw(payload) : payload;
+                ? G711Transcode.MuLawToALaw(payload) : payload;
 
-            var boosted = new byte[alawData.Length];
-            Buffer.BlockCopy(alawData, 0, boosted, 0, alawData.Length);
-            ALawVolumeBoost.ApplyInPlace(boosted, _audioSettings.IngressGain);
-
-            session.FeedCallerAudio(boosted);
-            OnOperatorCallerAudio?.Invoke(boosted);
+            var ingressGain = (float)_audioSettings.IngressVolumeBoost;
+            if (ingressGain > 1.01f)
+            {
+                var boosted = new byte[alawData.Length];
+                Buffer.BlockCopy(alawData, 0, boosted, 0, alawData.Length);
+                ALawVolumeBoost.ApplyInPlace(boosted, ingressGain);
+                session.FeedCallerAudio(boosted);
+            }
+            else
+            {
+                session.FeedCallerAudio(alawData);
+            }
+            OnOperatorCallerAudio?.Invoke(alawData);
         };
 
         // Wire AI audio out
-        session.OnAudioOut += alawFrame =>
-        {
-            playout.BufferALaw(alawFrame);
-            var rtpPayload = negotiatedCodec == AudioCodecsEnum.PCMU
-                ? G711Codec.AlawToMulaw(alawFrame) : alawFrame;
-            audioSource.ExternalAudioSourceRawSample(
-                new AudioSamplingRatesEnum[] { AudioSamplingRatesEnum.Rate8KHz }.First(), (uint)(rtpPayload.Length / 8000 * 1000), rtpPayload);
-        };
+        session.OnAudioOut += alawFrame => playout.BufferALaw(alawFrame);
 
         callAgent.OnCallHungup += async (dlg) =>
         {
             if (_activeCalls.TryRemove(sessionId, out var c))
                 await CleanupCallAsync(c, "remote_hangup");
         };
+        session.OnEnded += async (s, r) => await RemoveAndCleanupAsync(sessionId, r);
 
-        _ = session.StartAsync();
+        playout.Start();
         OnCallStarted?.Invoke(sessionId, destination);
         Log($"✅ Outbound call connected: {destination}");
     }
