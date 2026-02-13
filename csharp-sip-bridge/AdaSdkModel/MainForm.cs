@@ -203,6 +203,16 @@ public partial class MainForm : Form
         _settings.Sip.AutoAnswer = chkAutoAnswer.Checked;
     }
 
+    /// <summary>Keep the selected SipAccount in sync with the inline Sip fields so accounts don't get lost on save.</summary>
+    private void SyncSelectedAccountFromSip()
+    {
+        var idx = _settings.SelectedSipAccountIndex;
+        if (idx >= 0 && idx < _settings.SipAccounts.Count)
+        {
+            var label = _settings.SipAccounts[idx].Label;
+            _settings.SipAccounts[idx].FromSipSettings(_settings.Sip, label);
+        }
+
     // ══════════════════════════════════════
     //  SIP CONNECTION
     // ══════════════════════════════════════
@@ -210,6 +220,7 @@ public partial class MainForm : Form
     private async void btnConnect_Click(object? sender, EventArgs e)
     {
         ReadSipFromUi();
+        SyncSelectedAccountFromSip();
 
         if (string.IsNullOrWhiteSpace(_settings.Sip.Server) || string.IsNullOrWhiteSpace(_settings.Sip.Username))
         {
