@@ -224,13 +224,17 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 {
                     Model = "whisper-1"
                 },
+                // SDK 2.1.0-beta.4 doesn't support semantic_vad natively.
+                // Simulate patient vs responsive modes using server_vad with different parameters.
                 TurnDetectionOptions = _useSemanticVad
-                    ? ConversationTurnDetectionOptions.CreateSemanticTurnDetectionOptions(
-                        eagerness: _semanticEagerness)
+                    ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                        detectionThreshold: 0.3f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
+                        silenceDuration: TimeSpan.FromMilliseconds(1500))  // Patient: long silence for address thinking
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
                         prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                        silenceDuration: TimeSpan.FromMilliseconds(900))
+                        silenceDuration: TimeSpan.FromMilliseconds(900))   // Responsive: quick for short answers
             };
 
             options.Tools.Add(BuildSyncBookingDataTool());
@@ -401,13 +405,16 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         {
             var options = new ConversationSessionOptions
             {
+                // SDK 2.1.0-beta.4: simulate semantic-like patience using server_vad parameters
                 TurnDetectionOptions = useSemantic
-                    ? ConversationTurnDetectionOptions.CreateSemanticTurnDetectionOptions(
-                        eagerness: _semanticEagerness)
+                    ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                        detectionThreshold: 0.3f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
+                        silenceDuration: TimeSpan.FromMilliseconds(1500))  // Patient mode
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
                         prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                        silenceDuration: TimeSpan.FromMilliseconds(900))
+                        silenceDuration: TimeSpan.FromMilliseconds(900))   // Responsive mode
             };
 
             await _session.ConfigureSessionAsync(options);
