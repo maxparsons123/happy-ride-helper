@@ -129,10 +129,10 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeRegistration()
     {
         var authUser = _settings.EffectiveAuthUser;
-        var resolvedHost = ResolveDns(_settings.Server);
+        // Use original hostname for SIP headers (domain matters for 404 prevention)
         var registrarHostWithPort = _settings.Port == 5060
-            ? resolvedHost
-            : $"{resolvedHost}:{_settings.Port}";
+            ? _settings.Server
+            : $"{_settings.Server}:{_settings.Port}";
 
         // Only use complex constructor when AuthId differs from Username
         // (matches AdaMain's proven registration logic)
