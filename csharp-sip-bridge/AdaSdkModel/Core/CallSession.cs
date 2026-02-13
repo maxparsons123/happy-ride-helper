@@ -261,9 +261,12 @@ public sealed class CallSession : ICallSession
                     _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
                         sessionId, _booking.Fare, spokenFare, _booking.Eta);
 
+                    var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
+                    var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
+
                     if (_aiClient is OpenAiSdkClient sdkInject)
                         await sdkInject.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The fare from {pickup} to {destination} is {spokenFare}, " +
+                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
                             $"estimated time of arrival is {_booking.Eta}. " +
                             $"Read back the VERIFIED addresses and fare to the caller and ask them to confirm the booking.");
                 }
@@ -370,10 +373,13 @@ public sealed class CallSession : ICallSession
                     _logger.LogInformation("[{SessionId}] 💰 Fare ready: {Fare} ({Spoken}), ETA: {Eta}",
                         sessionId, _booking.Fare, spokenFare, _booking.Eta);
 
+                    var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
+                    var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
+
                     // Inject fare result into conversation — Ada will read it back
                     if (_aiClient is OpenAiSdkClient sdkInject)
                         await sdkInject.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The fare from {pickup} to {destination} is {spokenFare}, " +
+                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
                             $"estimated time of arrival is {_booking.Eta}. " +
                             $"Read back these details to the caller and ask them to confirm the booking.");
                 }
@@ -529,6 +535,22 @@ public sealed class CallSession : ICallSession
             return pence > 0 ? $"{whole} {currencyWord} {pence}" : $"{whole} {currencyWord}";
         }
         return fare;
+    }
+
+    private static string FormatAddressForReadback(string? number, string? street, string? postalCode, string? city)
+    {
+        var parts = new List<string>();
+        
+        if (!string.IsNullOrWhiteSpace(number))
+            parts.Add(number);
+        if (!string.IsNullOrWhiteSpace(street))
+            parts.Add(street);
+        if (!string.IsNullOrWhiteSpace(postalCode))
+            parts.Add(postalCode);
+        if (!string.IsNullOrWhiteSpace(city))
+            parts.Add(city);
+        
+        return parts.Count > 0 ? string.Join(", ", parts) : "the address";
     }
 
     private void ApplyFareResult(FareResult result)
