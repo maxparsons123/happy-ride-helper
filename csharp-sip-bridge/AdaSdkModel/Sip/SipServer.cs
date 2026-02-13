@@ -133,33 +133,52 @@ public sealed class SipServer : IAsyncDisposable
         var domain = string.IsNullOrWhiteSpace(_settings.Domain) ? resolvedHost : _settings.Domain;
         var registrar = _settings.Port == 5060 ? resolvedHost : $"{resolvedHost}:{_settings.Port}";
 
-        // Determine the SIP protocol from settings (TCP, TLS, etc.)
-        var sipProtocol = _settings.Transport.ToUpperInvariant() switch
+        if (authUser != _settings.Username)
         {
-            "TCP" => SIPProtocolsEnum.tcp,
-            "TLS" => SIPProtocolsEnum.tls,
-            _ => SIPProtocolsEnum.udp
-        };
+            // Separate Auth ID — use full constructor with outbound proxy
+            if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
+            {
+                try { registrarIp = Dns.GetHostAddresses(resolvedHost).First(a => a.AddressFamily == AddressFamily.InterNetwork); }
+                catch { registrarIp = null; }
+            }
 
-        // Build a SIPCallDescriptor so the registration uses the correct transport protocol.
-        // The simple constructor hardcodes UDP which causes failures on TCP-only channels.
-        var regUri = SIPURI.ParseSIPURI($"sip:{registrar}");
-        regUri.Protocol = sipProtocol;
+            if (registrarIp != null)
+            {
+                var sipProtocol = _settings.Transport.ToUpperInvariant() switch
+                {
+                    "TCP" => SIPProtocolsEnum.tcp,
+                    "TLS" => SIPProtocolsEnum.tls,
+                    _ => SIPProtocolsEnum.udp
+                };
+                var outboundProxy = new SIPEndPoint(sipProtocol, new IPEndPoint(registrarIp, _settings.Port));
+                var sipAccountAor = new SIPURI(_settings.Username, registrar, null, SIPSchemesEnum.sip, sipProtocol);
+                var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
 
-        var regDescriptor = new SIPCallDescriptor(
-            _settings.Username,
-            _settings.Password,
-            regUri.ToString(),
-            $"sip:{_settings.Username}@{domain}",
-            regUri.ToString(),
-            null, null, null,
-            SIPCallDirection.Out,
-            SDP.SDP.SDP_MIME_CONTENTTYPE,
-            null, null);
+                _regAgent = new SIPRegistrationUserAgent(
+                    sipTransport: _transport,
+                    outboundProxy: outboundProxy,
+                    sipAccountAOR: sipAccountAor,
+                    authUsername: authUser,
+                    password: _settings.Password,
+                    realm: null,
+                    registrarHost: registrar,
+                    contactURI: contactUri,
+                    expiry: 120,
+                    customHeaders: null);
 
-        regDescriptor.AuthUsername = authUser;
+                Log($"🔐 Using separate Auth ID: {authUser}, Registrar: {registrar}");
+            }
+            else
+            {
+                _regAgent = new SIPRegistrationUserAgent(_transport, _settings.Username, _settings.Password, registrar, 120);
+            }
+        }
+        else
+        {
+            // Simple registration — matches AdaMain working path
+            _regAgent = new SIPRegistrationUserAgent(_transport, _settings.Username, _settings.Password, registrar, 120);
+        }
 
-        _regAgent = new SIPRegistrationUserAgent(_transport, regDescriptor, null, domain, 120);
         _regAgent.RegistrationSuccessful += (uri, resp) =>
         {
             Log($"✅ SIP Registered as {_settings.Username}@{domain}");
@@ -468,7 +487,7 @@ public sealed class SipServer : IAsyncDisposable
 
     private void Log(string msg)
     {
-        _logger.LogInformation("{Msg}", msg);
+        // Only use OnLog — CallbackLoggerProvider already routes ILogger to UI
         OnLog?.Invoke(msg);
     }
 
