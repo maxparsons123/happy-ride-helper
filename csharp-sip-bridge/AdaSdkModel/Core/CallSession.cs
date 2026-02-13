@@ -335,6 +335,21 @@ public sealed class CallSession : ICallSession
                     _pickupDisambiguated = true;
                     _destDisambiguated = true;
 
+                    // FARE SANITY CHECK: If fare is absurdly high, the destination is likely wrong (STT error)
+                    if (!IsFareSane(result))
+                    {
+                        _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED — asking user to verify destination", sessionId);
+                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+
+                        if (_aiClient is OpenAiSdkClient sdkSanity)
+                            await sdkSanity.InjectMessageAndRespondAsync(
+                                "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
+                                "Ask the caller to confirm or repeat their DESTINATION address. " +
+                                "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
+                                "When they respond, call sync_booking_data with the corrected destination.");
+                        return;
+                    }
+
                     ApplyFareResult(result);
 
                     if (_aiClient is OpenAiSdkClient sdk)
@@ -483,7 +498,21 @@ public sealed class CallSession : ICallSession
                 }
             }
 
-            // Both addresses resolved — apply fare
+            // Both addresses resolved — sanity check before applying
+            if (!IsFareSane(result))
+            {
+                _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED after clarification — asking user to verify destination", sessionId);
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+
+                if (_aiClient is OpenAiSdkClient sdkSanity)
+                    await sdkSanity.InjectMessageAndRespondAsync(
+                        "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
+                        "Ask the caller to confirm or repeat their DESTINATION address. " +
+                        "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
+                        "When they respond, call sync_booking_data with the corrected destination.");
+                return;
+            }
+
             ApplyFareResult(result);
 
             if (_aiClient is OpenAiSdkClient sdkConf)
@@ -630,6 +659,20 @@ public sealed class CallSession : ICallSession
                     // Clear pending disambiguation state
                     _pendingDestAlternatives = null;
                     _pendingDestClarificationMessage = null;
+
+                    // FARE SANITY CHECK
+                    if (!IsFareSane(result))
+                    {
+                        _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED (book_taxi path) — asking user to verify destination", sessionId);
+
+                        if (_aiClient is OpenAiSdkClient sdkSanity)
+                            await sdkSanity.InjectMessageAndRespondAsync(
+                                "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
+                                "Ask the caller to confirm or repeat their DESTINATION address. " +
+                                "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
+                                "When they respond, call sync_booking_data with the corrected destination.");
+                        return;
+                    }
 
                     ApplyFareResult(result);
 
@@ -820,6 +863,45 @@ public sealed class CallSession : ICallSession
             parts.Add(city);
         
         return parts.Count > 0 ? string.Join(", ", parts) : "the address";
+    }
+
+    // =========================
+    // FARE SANITY CHECK
+    // =========================
+    private const decimal MAX_SANE_FARE = 100m;
+    private const int MAX_SANE_ETA_MINUTES = 120;
+
+    /// <summary>
+    /// Returns true if the fare and ETA are within reasonable bounds.
+    /// Catches cases where STT mishears a destination (e.g. "Kochi" instead of "Coventry")
+    /// resulting in absurd cross-country/international fares.
+    /// </summary>
+    private bool IsFareSane(FareResult result)
+    {
+        // Parse fare amount
+        var fareStr = result.Fare?.Replace("£", "").Replace("€", "").Replace("$", "").Trim();
+        if (decimal.TryParse(fareStr, System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out var fareAmount))
+        {
+            if (fareAmount > MAX_SANE_FARE)
+            {
+                _logger.LogWarning("[{SessionId}] 🚨 INSANE FARE detected: {Fare} (max={Max})", SessionId, result.Fare, MAX_SANE_FARE);
+                return false;
+            }
+        }
+
+        // Parse ETA minutes
+        var etaStr = result.Eta?.Replace("minutes", "").Replace("minute", "").Trim();
+        if (int.TryParse(etaStr, out var etaMinutes))
+        {
+            if (etaMinutes > MAX_SANE_ETA_MINUTES)
+            {
+                _logger.LogWarning("[{SessionId}] 🚨 INSANE ETA detected: {Eta} (max={Max} min)", SessionId, result.Eta, MAX_SANE_ETA_MINUTES);
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void ApplyFareResult(FareResult result)
