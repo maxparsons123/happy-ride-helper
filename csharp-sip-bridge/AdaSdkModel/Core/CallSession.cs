@@ -438,12 +438,33 @@ public sealed class CallSession : ICallSession
 
                             return;
                         }
+
+                        // Check for pending destination alternatives (pickup was resolved, dest still needs it)
+                        if (_pendingDestAlternatives != null && _pendingDestAlternatives.Length > 0 && !_destDisambiguated)
+                        {
+                            var destAltsList = string.Join(", ", _pendingDestAlternatives);
+                            _logger.LogInformation("[{SessionId}] 🔄 Now resolving pending destination disambiguation: {Alts}", sessionId, destAltsList);
+
+                            if (_aiClient is OpenAiSdkClient sdkDestClarif)
+                                await sdkDestClarif.InjectMessageAndRespondAsync(
+                                    $"[DESTINATION DISAMBIGUATION] Good, the pickup is confirmed. Now the DESTINATION address is ambiguous. The options are: {destAltsList}. " +
+                                    "Ask the caller ONLY about the DESTINATION location. " +
+                                    "Present the destination options clearly, then STOP and WAIT for their answer.");
+
+                            _pendingDestAlternatives = null;
+                            _pendingDestClarificationMessage = null;
+                            return;
+                        }
                     }
                     else
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
                         result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
                     }
+
+                    // Clear pending disambiguation state
+                    _pendingDestAlternatives = null;
+                    _pendingDestClarificationMessage = null;
 
                     ApplyFareResult(result);
 
