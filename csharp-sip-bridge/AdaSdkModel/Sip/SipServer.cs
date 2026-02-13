@@ -136,25 +136,25 @@ public sealed class SipServer : IAsyncDisposable
 
         // Only use complex constructor when AuthId differs from Username
         // (matches AdaMain's proven registration logic)
-        if (authUser != _settings.Username)
-        {
-            IPAddress? registrarIp = null;
-            if (!IPAddress.TryParse(resolvedHost, out registrarIp))
-            {
-                try
-                {
-                    registrarIp = Dns.GetHostAddresses(resolvedHost)
-                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
-                }
-                catch
-                {
-                    Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
-                    _regAgent = new SIPRegistrationUserAgent(
-                        _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-                    WireRegistrationEvents();
-                    return;
-                }
-            }
+         if (authUser != _settings.Username)
+         {
+             IPAddress? registrarIp = null;
+             if (!IPAddress.TryParse(_settings.Server, out registrarIp))
+             {
+                 try
+                 {
+                     registrarIp = Dns.GetHostAddresses(_settings.Server)
+                         .First(a => a.AddressFamily == AddressFamily.InterNetwork);
+                 }
+                 catch
+                 {
+                     Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
+                     _regAgent = new SIPRegistrationUserAgent(
+                         _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
+                     WireRegistrationEvents();
+                     return;
+                 }
+             }
 
             var sipProtocol = _settings.Transport.ToUpperInvariant() switch
             {
