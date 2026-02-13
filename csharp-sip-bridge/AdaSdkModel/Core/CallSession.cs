@@ -290,6 +290,9 @@ public sealed class CallSession : ICallSession
 
                                 _pickupDisambiguated = false;
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: PICKUP disambiguation needed: {Alts}", sessionId, string.Join("|", pickupAlts));
+                                // Switch to semantic VAD for disambiguation (caller choosing from options)
+                                if (_aiClient is OpenAiSdkClient sdkVad1)
+                                    await sdkVad1.SetVadModeAsync(useSemantic: true, eagerness: 0.5f);
 
                                 if (_aiClient is OpenAiSdkClient sdkClarif)
                                     await sdkClarif.InjectMessageAndRespondAsync(
@@ -389,13 +392,18 @@ public sealed class CallSession : ICallSession
 
                     ApplyFareResult(result);
 
-                    if (_aiClient is OpenAiSdkClient sdk)
-                        sdk.SetAwaitingConfirmation(true);
+            if (_aiClient is OpenAiSdkClient sdk)
+            {
+                sdk.SetAwaitingConfirmation(true);
+                // Switch to server VAD for fast yes/no confirmation response
+                await sdk.SetVadModeAsync(useSemantic: false);
+                _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no)", sessionId);
+            }
 
-                    OnBookingUpdated?.Invoke(_booking.Clone());
+            OnBookingUpdated?.Invoke(_booking.Clone());
 
-                    var spokenFare = FormatFareForSpeech(_booking.Fare);
-                    _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
+            var spokenFare = FormatFareForSpeech(_booking.Fare);
+            _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
                         sessionId, _booking.Fare, spokenFare, _booking.Eta);
 
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
@@ -424,7 +432,48 @@ public sealed class CallSession : ICallSession
             return new { success = true, fare_calculating = true, message = "Fare is being calculated. Do NOT repeat any interjection—the system will inject the next step once address validation is complete." };
         }
 
+        // AUTO VAD SWITCH: Determine what we're collecting next and switch mode
+        _ = AutoSwitchVadForNextStepAsync();
+
         return new { success = true };
+    }
+
+    // =========================
+    // AUTO VAD SWITCHING
+    // =========================
+    /// <summary>
+    /// Automatically switches between semantic_vad (patient, for addresses) and server_vad (fast, for short replies)
+    /// based on what the next required booking field is.
+    /// </summary>
+    private async Task AutoSwitchVadForNextStepAsync()
+    {
+        if (_aiClient is not OpenAiSdkClient sdk) return;
+
+        // Determine the next missing field
+        bool needsPickup = string.IsNullOrWhiteSpace(_booking.Pickup);
+        bool needsDest = string.IsNullOrWhiteSpace(_booking.Destination);
+        bool needsName = string.IsNullOrWhiteSpace(_booking.Name);
+        bool needsPax = _booking.Passengers <= 0;
+        bool needsTime = string.IsNullOrWhiteSpace(_booking.PickupTime);
+
+        // Address fields → semantic VAD (patient, waits for complete thoughts)
+        if (needsPickup || needsDest)
+        {
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting address)", SessionId);
+            await sdk.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
+        }
+        // Short-answer fields (name, passengers, time) → server VAD (fast response)
+        else if (needsName || needsPax || needsTime)
+        {
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (collecting short answer)", SessionId);
+            await sdk.SetVadModeAsync(useSemantic: false);
+        }
+        // All fields filled → fare calculating, then confirmation → server VAD (yes/no)
+        else
+        {
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (awaiting confirmation)", SessionId);
+            await sdk.SetVadModeAsync(useSemantic: false);
+        }
     }
 
     // =========================
@@ -553,7 +602,10 @@ public sealed class CallSession : ICallSession
             ApplyFareResult(result);
 
             if (_aiClient is OpenAiSdkClient sdkConf)
+            {
                 sdkConf.SetAwaitingConfirmation(true);
+                await sdkConf.SetVadModeAsync(useSemantic: false);
+            }
 
             OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -714,7 +766,10 @@ public sealed class CallSession : ICallSession
                     ApplyFareResult(result);
 
                     if (_aiClient is OpenAiSdkClient sdk)
+                    {
                         sdk.SetAwaitingConfirmation(true);
+                        await sdk.SetVadModeAsync(useSemantic: false);
+                    }
 
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
