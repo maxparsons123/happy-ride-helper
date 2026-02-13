@@ -134,27 +134,23 @@ public sealed class SipServer : IAsyncDisposable
             ? _settings.Server
             : $"{_settings.Server}:{_settings.Port}";
 
-        // Only use complex constructor when AuthId differs from Username
-        // (matches AdaMain's proven registration logic)
-         if (authUser != _settings.Username)
-         {
-             IPAddress? registrarIp = null;
-             if (!IPAddress.TryParse(_settings.Server, out registrarIp))
-             {
-                 try
-                 {
-                     registrarIp = Dns.GetHostAddresses(_settings.Server)
-                         .First(a => a.AddressFamily == AddressFamily.InterNetwork);
-                 }
-                 catch
-                 {
-                     Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
-                     _regAgent = new SIPRegistrationUserAgent(
-                         _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-                     WireRegistrationEvents();
-                     return;
-                 }
-             }
+        // Always use domain-based AOR with outbound proxy for hostname servers
+        // to prevent SIPSorcery from resolving hostname to IP in SIP headers (causes 404)
+        bool isHostname = !IPAddress.TryParse(_settings.Server, out _);
+
+        if (isHostname)
+        {
+            IPAddress registrarIp;
+            try
+            {
+                registrarIp = Dns.GetHostAddresses(_settings.Server)
+                    .First(a => a.AddressFamily == AddressFamily.InterNetwork);
+            }
+            catch
+            {
+                Log("⚠️ Could not resolve registrar to IPv4; cannot register.");
+                return;
+            }
 
             var sipProtocol = _settings.Transport.ToUpperInvariant() switch
             {
@@ -179,11 +175,11 @@ public sealed class SipServer : IAsyncDisposable
                 expiry: 120,
                 customHeaders: null);
 
-            Log($"🔐 Auth: AOR={_settings.Username}@{registrarHostWithPort}, AuthUser={authUser}");
+            Log($"🔐 Domain registration: AOR={_settings.Username}@{registrarHostWithPort}, AuthUser={authUser}, Proxy={registrarIp}");
         }
         else
         {
-            // Simple registration — let SIPSorcery handle transport routing
+            // IP-based server — simple registration is fine
             _regAgent = new SIPRegistrationUserAgent(
                 _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
             Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort}");
