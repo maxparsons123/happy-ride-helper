@@ -88,7 +88,12 @@ public sealed class SipServer : IAsyncDisposable
             }, TaskScheduler.Default);
         };
 
-        _regAgent!.Start();
+        if (_regAgent == null)
+        {
+            Log("❌ Registration agent was not created — check server address (trim whitespace, ensure valid IP or hostname).");
+            return;
+        }
+        _regAgent.Start();
         _isRunning = true;
         Log("🟢 Waiting for SIP registration...");
     }
