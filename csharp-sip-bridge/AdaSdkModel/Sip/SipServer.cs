@@ -130,33 +130,41 @@ public sealed class SipServer : IAsyncDisposable
     {
         var authUser = _settings.EffectiveAuthUser;
         var resolvedHost = ResolveDns(_settings.Server);
-        var domain = string.IsNullOrWhiteSpace(_settings.Domain) ? _settings.Server : _settings.Domain;
-        var registrar = _settings.Port == 5060 ? resolvedHost : $"{resolvedHost}:{_settings.Port}";
+        var registrarHostWithPort = _settings.Port == 5060
+            ? resolvedHost
+            : $"{resolvedHost}:{_settings.Port}";
 
-        // Determine SIP protocol for transport
-        var sipProtocol = _settings.Transport.ToUpperInvariant() switch
+        // Only use complex constructor when AuthId differs from Username
+        // (matches AdaMain's proven registration logic)
+        if (authUser != _settings.Username)
         {
-            "TCP" => SIPProtocolsEnum.tcp,
-            "TLS" => SIPProtocolsEnum.tls,
-            _ => SIPProtocolsEnum.udp
-        };
+            IPAddress? registrarIp = null;
+            if (!IPAddress.TryParse(resolvedHost, out registrarIp))
+            {
+                try
+                {
+                    registrarIp = Dns.GetHostAddresses(resolvedHost)
+                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
+                }
+                catch
+                {
+                    Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
+                    _regAgent = new SIPRegistrationUserAgent(
+                        _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
+                    WireRegistrationEvents();
+                    return;
+                }
+            }
 
-        // Resolve registrar IP for outbound proxy
-        IPAddress? registrarIp = null;
-        if (!IPAddress.TryParse(resolvedHost, out registrarIp))
-        {
-            try { registrarIp = Dns.GetHostAddresses(resolvedHost).First(a => a.AddressFamily == AddressFamily.InterNetwork); }
-            catch { registrarIp = null; }
-        }
+            var sipProtocol = _settings.Transport.ToUpperInvariant() switch
+            {
+                "TCP" => SIPProtocolsEnum.tcp,
+                "TLS" => SIPProtocolsEnum.tls,
+                _ => SIPProtocolsEnum.udp
+            };
 
-        // Use full constructor when Domain differs from resolved host, or when AuthId is separate
-        bool needsDomainAor = !string.IsNullOrWhiteSpace(_settings.Domain) && _settings.Domain != resolvedHost;
-        bool needsAuthId = authUser != _settings.Username;
-
-        if ((needsDomainAor || needsAuthId) && registrarIp != null)
-        {
             var outboundProxy = new SIPEndPoint(sipProtocol, new IPEndPoint(registrarIp, _settings.Port));
-            var sipAccountAor = new SIPURI(_settings.Username, domain, null, SIPSchemesEnum.sip, sipProtocol);
+            var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, sipProtocol);
             var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
 
             _regAgent = new SIPRegistrationUserAgent(
@@ -166,26 +174,31 @@ public sealed class SipServer : IAsyncDisposable
                 authUsername: authUser,
                 password: _settings.Password,
                 realm: null,
-                registrarHost: domain,
+                registrarHost: registrarHostWithPort,
                 contactURI: contactUri,
                 expiry: 120,
                 customHeaders: null);
 
-            Log($"🔐 Registration AOR: {_settings.Username}@{domain}, Registrar: {registrar}" +
-                (needsAuthId ? $", AuthId: {authUser}" : ""));
+            Log($"🔐 Auth: AOR={_settings.Username}@{registrarHostWithPort}, AuthUser={authUser}");
         }
         else
         {
-            // Simple registration — no separate domain or auth ID
-            _regAgent = new SIPRegistrationUserAgent(_transport, _settings.Username, _settings.Password, registrar, 120);
-            Log($"📡 Simple registration: {_settings.Username}@{registrar}");
+            // Simple registration — let SIPSorcery handle transport routing
+            _regAgent = new SIPRegistrationUserAgent(
+                _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
+            Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort}");
         }
 
-        _regAgent.RegistrationSuccessful += (uri, resp) =>
+        WireRegistrationEvents();
+    }
+
+    private void WireRegistrationEvents()
+    {
+        _regAgent!.RegistrationSuccessful += (uri, resp) =>
         {
-            Log($"✅ SIP Registered as {_settings.Username}@{domain}");
+            Log($"✅ SIP Registered as {_settings.Username}@{_settings.Server}");
             IsRegistered = true;
-            OnRegistered?.Invoke($"{_settings.Username}@{domain}");
+            OnRegistered?.Invoke($"{_settings.Username}@{_settings.Server}");
         };
         _regAgent.RegistrationFailed += (uri, resp, err) =>
         {
