@@ -18,6 +18,8 @@ public sealed class CallSession : ICallSession
     public IOpenAiClient AiClient => _aiClient;
     private readonly IFareCalculator _fareCalculator;
     private readonly IDispatcher _dispatcher;
+    private readonly IcabbiBookingService? _icabbi;
+    private readonly bool _icabbiEnabled;
 
     private readonly BookingState _booking = new();
 
@@ -44,7 +46,9 @@ public sealed class CallSession : ICallSession
         AppSettings settings,
         IOpenAiClient aiClient,
         IFareCalculator fareCalculator,
-        IDispatcher dispatcher)
+        IDispatcher dispatcher,
+        IcabbiBookingService? icabbi = null,
+        bool icabbiEnabled = false)
     {
         SessionId = sessionId;
         CallerId = callerId;
@@ -53,6 +57,8 @@ public sealed class CallSession : ICallSession
         _aiClient = aiClient;
         _fareCalculator = fareCalculator;
         _dispatcher = dispatcher;
+        _icabbi = icabbi;
+        _icabbiEnabled = icabbiEnabled;
 
         _booking.CallerPhone = callerId;
 
@@ -293,6 +299,23 @@ public sealed class CallSession : ICallSession
 
                 await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
                 await _dispatcher.SendWhatsAppAsync(callerId);
+
+                // iCabbi dispatch (fire-and-forget)
+                if (_icabbiEnabled && _icabbi != null)
+                {
+                    try
+                    {
+                        var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
+                        if (icabbiResult.Success)
+                            _logger.LogInformation("[{SessionId}] 🚕 iCabbi booking created: {JourneyId}", sessionId, icabbiResult.JourneyId);
+                        else
+                            _logger.LogWarning("[{SessionId}] ⚠️ iCabbi booking failed: {Msg}", sessionId, icabbiResult.Message);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[{SessionId}] iCabbi dispatch error", sessionId);
+                    }
+                }
             });
 
             return new { success = true, booking_ref = _booking.BookingRef, message = "Taxi booked!" };

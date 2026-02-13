@@ -304,8 +304,27 @@ public partial class MainForm : Form
         var fareCalculator = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 
+        // iCabbi integration
+        IcabbiBookingService? icabbi = null;
+        var icabbiEnabled = _settings.Icabbi.Enabled;
+        if (icabbiEnabled && !string.IsNullOrWhiteSpace(_settings.Icabbi.AppKey))
+        {
+            icabbi = new IcabbiBookingService(
+                _settings.Icabbi.AppKey,
+                _settings.Icabbi.SecretKey,
+                tenantBase: _settings.Icabbi.TenantBase);
+            icabbi.OnLog += msg => Invoke(() => Log(msg));
+            Log($"🚕 iCabbi enabled (tenant: {_settings.Icabbi.TenantBase})");
+        }
+        else if (icabbiEnabled)
+        {
+            Log("⚠️ iCabbi enabled but AppKey is empty — skipping");
+            icabbiEnabled = false;
+        }
+
         var session = new CallSession(sessionId, callerId,
-            factory.CreateLogger<CallSession>(), _settings, aiClient, fareCalculator, dispatcher);
+            factory.CreateLogger<CallSession>(), _settings, aiClient, fareCalculator, dispatcher,
+            icabbi, icabbiEnabled);
 
         // Wire session events → UI
         session.OnTranscript += (role, text) => Invoke(() => Log($"💬 {role}: {text}"));
