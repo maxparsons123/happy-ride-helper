@@ -123,7 +123,7 @@ public sealed class MapPanel : Panel
     </head><body>
     <div id="map"></div>
     <script>
-        const map = L.map('map').setView([51.9, 4.48], 12);
+        const map = L.map('map').setView([52.48, -1.90], 12);   // Default: Birmingham
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
         }).addTo(map);
@@ -172,6 +172,7 @@ public sealed class MapPanel : Panel
                 drivers[id] = L.marker([lat, lng], { icon: driverIcon(color) })
                     .bindTooltip(label, { permanent: false })
                     .addTo(map);
+                fitAll();
             }
         }
 
@@ -183,6 +184,7 @@ public sealed class MapPanel : Panel
             jobs[id] = L.marker([lat, lng], { icon: passengerIcon(color) })
                 .bindPopup(`<b>Job ${id}</b><br>${label}<br>Waiting: ${mins} min`)
                 .addTo(map);
+            fitAll();
         }
 
         function removeJob(id) {
@@ -195,6 +197,16 @@ public sealed class MapPanel : Panel
             lines[id] = L.polyline([[dLat, dLng], [pLat, pLng]], {
                 color: '#2196F3', weight: 3, dashArray: '8,8'
             }).addTo(map);
+        }
+
+        // Auto-fit map to show all markers whenever one is added/updated
+        function fitAll() {
+            const allLatLngs = [];
+            for (const id in drivers) allLatLngs.push(drivers[id].getLatLng());
+            for (const id in jobs) allLatLngs.push(jobs[id].getLatLng());
+            if (allLatLngs.length > 0) {
+                map.fitBounds(L.latLngBounds(allLatLngs).pad(0.1));
+            }
         }
 
         // Refresh passenger icon colors every 30 seconds
