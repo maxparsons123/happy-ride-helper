@@ -315,8 +315,8 @@ public sealed class SipServer : IAsyncDisposable
             return;
         }
 
-        var playout = new ALawRtpPlayout();
-        var session = _sessionManager.CreateSession(sessionId, destination);
+        var playout = new ALawRtpPlayout(rtpSession);
+        var session = await _sessionManager.CreateSessionAsync(destination);
 
         var activeCall = new ActiveCall
         {
@@ -340,7 +340,7 @@ public sealed class SipServer : IAsyncDisposable
             Buffer.BlockCopy(alawData, 0, boosted, 0, alawData.Length);
             ALawVolumeBoost.ApplyInPlace(boosted, (float)_audioSettings.IngressVolumeBoost);
 
-            session.FeedCallerAudio(boosted);
+            session.ProcessInboundAudio(boosted);
             OnOperatorCallerAudio?.Invoke(boosted);
         };
 
@@ -356,7 +356,7 @@ public sealed class SipServer : IAsyncDisposable
                 await CleanupCallAsync(c, "remote_hangup");
         };
 
-        _ = session.StartAsync();
+        // Session already started by CreateSessionAsync
         OnCallStarted?.Invoke(sessionId, destination);
         Log($"✅ Outbound call connected: {destination}");
     }
