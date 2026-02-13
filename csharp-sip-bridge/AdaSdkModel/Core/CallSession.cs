@@ -168,36 +168,48 @@ public sealed class CallSession : ICallSession
                 _logger.LogWarning("[{SessionId}] ⛔ Rejected placeholder name: '{Name}'", SessionId, nameVal);
         }
 
-        // ── TRANSCRIPT MISMATCH DETECTION ──
-        // Compare Ada's interpreted values (tool args) with the raw Whisper STT transcript.
-        // If they differ significantly, flag for clarification.
+        // ── HYBRID TRANSCRIPT MISMATCH DETECTION ──
+        // Trust Ada's audio interpretation as PRIMARY source of truth.
+        // Only flag mismatches when Whisper produces valid, intelligible English text
+        // that significantly differs from Ada's interpretation.
+        // Skip entirely when Whisper produces garbage (non-Latin, very short, etc.)
         string? mismatchWarning = null;
         if (_aiClient is OpenAiSdkClient sdkTranscript && !string.IsNullOrWhiteSpace(sdkTranscript.LastUserTranscript))
         {
             var sttText = sdkTranscript.LastUserTranscript;
             
-            // Check pickup mismatch
-            if (args.TryGetValue("pickup", out var pickupArg) && !string.IsNullOrWhiteSpace(pickupArg?.ToString()))
+            // Only run mismatch detection if Whisper produced intelligible English text
+            if (IsIntelligibleEnglish(sttText))
             {
-                var pickupVal = pickupArg.ToString()!;
-                if (IsSignificantlyDifferent(pickupVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Pickup) 
-                    && IsSignificantlyDifferent(pickupVal, _booking.Pickup))
+                // Check pickup mismatch
+                if (args.TryGetValue("pickup", out var pickupArg) && !string.IsNullOrWhiteSpace(pickupArg?.ToString()))
                 {
-                    _logger.LogWarning("[{SessionId}] ⚠️ PICKUP MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, pickupVal);
-                    mismatchWarning = $"PICKUP address mismatch detected: the system transcribed '{sttText}' but you interpreted it as '{pickupVal}'. Ask the caller to confirm: did they say '{pickupVal}'?";
+                    var pickupVal = pickupArg.ToString()!;
+                    if (IsSignificantlyDifferent(pickupVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Pickup) 
+                        && IsSignificantlyDifferent(pickupVal, _booking.Pickup))
+                    {
+                        _logger.LogWarning("[{SessionId}] ⚠️ PICKUP MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, pickupVal);
+                        mismatchWarning = $"SOFT WARNING: The backup transcription heard '{sttText}' but you interpreted the pickup as '{pickupVal}'. " +
+                            "You may optionally confirm with the caller if you're unsure, but trust your own interpretation as primary.";
+                    }
+                }
+                
+                // Check destination mismatch
+                if (args.TryGetValue("destination", out var destArg) && !string.IsNullOrWhiteSpace(destArg?.ToString()))
+                {
+                    var destVal = destArg.ToString()!;
+                    if (IsSignificantlyDifferent(destVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Destination)
+                        && IsSignificantlyDifferent(destVal, _booking.Destination))
+                    {
+                        _logger.LogWarning("[{SessionId}] ⚠️ DEST MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, destVal);
+                        mismatchWarning = $"SOFT WARNING: The backup transcription heard '{sttText}' but you interpreted the destination as '{destVal}'. " +
+                            "You may optionally confirm with the caller if you're unsure, but trust your own interpretation as primary.";
+                    }
                 }
             }
-            
-            // Check destination mismatch
-            if (args.TryGetValue("destination", out var destArg) && !string.IsNullOrWhiteSpace(destArg?.ToString()))
+            else
             {
-                var destVal = destArg.ToString()!;
-                if (IsSignificantlyDifferent(destVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Destination)
-                    && IsSignificantlyDifferent(destVal, _booking.Destination))
-                {
-                    _logger.LogWarning("[{SessionId}] ⚠️ DEST MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, destVal);
-                    mismatchWarning = $"DESTINATION address mismatch detected: the system transcribed '{sttText}' but you interpreted it as '{destVal}'. Ask the caller to confirm: did they say '{destVal}'?";
-                }
+                _logger.LogDebug("[{SessionId}] 🔇 Whisper STT not intelligible English — skipping mismatch check: '{Stt}'", SessionId, sttText);
             }
         }
 
@@ -1302,8 +1314,48 @@ public sealed class CallSession : ICallSession
     }
 
     /// <summary>
+    /// <summary>
+    /// Check if Whisper STT output looks like intelligible English text.
+    /// Returns false for garbled text, non-Latin scripts, very short fragments, etc.
+    /// When false, we skip mismatch detection entirely and trust Ada's interpretation.
+    /// </summary>
+    private static bool IsIntelligibleEnglish(string sttText)
+    {
+        if (string.IsNullOrWhiteSpace(sttText)) return false;
+        
+        var trimmed = sttText.Trim();
+        
+        // Too short to be meaningful (e.g., single word fragments)
+        if (trimmed.Length < 5) return false;
+        
+        // Check ratio of Latin characters — if less than 60%, it's likely non-English/garbled
+        int latinCount = 0, totalLetters = 0;
+        foreach (var c in trimmed)
+        {
+            if (char.IsLetter(c))
+            {
+                totalLetters++;
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                    latinCount++;
+            }
+        }
+        
+        // If no letters at all, or mostly non-Latin script, skip
+        if (totalLetters == 0) return false;
+        var latinRatio = (double)latinCount / totalLetters;
+        if (latinRatio < 0.6) return false;
+        
+        // Check if it has at least 2 recognizable English-like words (3+ chars, Latin)
+        var words = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var englishLikeWords = words.Count(w => w.Length >= 3 && w.All(c => char.IsLetterOrDigit(c) || c == '\'' || c == '-'));
+        if (englishLikeWords < 2) return false;
+        
+        return true;
+    }
+
+    /// <summary>
     /// Compares two strings for significant differences using word-level similarity.
-    /// Returns true if the strings differ enough to warrant clarification.
+    /// Returns true if the strings differ enough to warrant a soft advisory.
     /// Used for transcript mismatch detection (Whisper STT vs Ada's interpretation).
     /// </summary>
     private static bool IsSignificantlyDifferent(string adaValue, string sttText)
