@@ -231,6 +231,10 @@ public sealed class CallSession : ICallSession
                     if (completed == aiTask)
                     {
                         result = await aiTask;
+                        _logger.LogInformation("[{SessionId}] 📊 Fare result: NeedsClarification={Clarif}, Fare={Fare}, Eta={Eta}, PickupAlts={PAlts}, DestAlts={DAlts}",
+                            sessionId, result.NeedsClarification, result.Fare, result.Eta,
+                            result.PickupAlternatives != null ? string.Join("|", result.PickupAlternatives) : "none",
+                            result.DestAlternatives != null ? string.Join("|", result.DestAlternatives) : "none");
                         if (result.NeedsClarification)
                         {
                             var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
@@ -273,10 +277,20 @@ public sealed class CallSession : ICallSession
                                         "Ask the caller ONLY about the DESTINATION location. " +
                                         "Present the destination options clearly, then STOP and WAIT for their answer.");
                             }
+                            else
+                            {
+                                // NeedsClarification=true but no alternatives provided — fall through to fallback fare
+                                _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — using fallback fare", sessionId);
+                                result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                                // Don't return — fall through to normal fare injection below
+                            }
 
-                            // Reset so fare can be re-triggered after clarification
-                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                            return;
+                            if (pickupAlts.Length > 0 || destAlts.Length > 0)
+                            {
+                                // Reset so fare can be re-triggered after clarification
+                                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                                return;
+                            }
                         }
 
                         // Check if there are pending destination alternatives from a previous round
