@@ -35,7 +35,8 @@ public sealed class LogPanel : Panel
 
     public void AppendLog(string message, Color? color = null)
     {
-        if (InvokeRequired) { BeginInvoke(() => AppendLog(message, color)); return; }
+        if (_log.IsDisposed) return;
+        if (_log.InvokeRequired) { _log.BeginInvoke(() => AppendLog(message, color)); return; }
 
         _log.SelectionStart = _log.TextLength;
         _log.SelectionColor = color ?? Color.LightGreen;
