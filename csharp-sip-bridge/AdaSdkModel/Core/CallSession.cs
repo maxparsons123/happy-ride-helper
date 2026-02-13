@@ -474,7 +474,7 @@ public sealed class CallSession : ICallSession
                 }
             });
 
-            return new { success = true, booking_ref = _booking.BookingRef, message = "Taxi booked!" };
+            return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: Your booking reference is {_booking.BookingRef}. Then ask if they need anything else. If not, say the FINAL CLOSING script verbatim and call end_call." };
         }
 
         return new { error = "Invalid action" };
