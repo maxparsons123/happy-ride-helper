@@ -230,7 +230,7 @@ partial class MainForm
         {
             Text = "📋 Logs & Transcripts",
             Location = new Point(12, 332),
-            Size = new Size(880, 258),
+            Size = new Size(880, 388),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -267,8 +267,8 @@ partial class MainForm
         // ══════════════════════════════════════
         this.AutoScaleDimensions = new SizeF(7F, 15F);
         this.AutoScaleMode = AutoScaleMode.Font;
-        this.ClientSize = new Size(920, 620);
-        this.MinimumSize = new Size(900, 560);
+        this.ClientSize = new Size(920, 750);
+        this.MinimumSize = new Size(900, 680);
         this.Text = "🚕 AdaSdkModel — SDK Voice AI Bridge v2.0";
         this.StartPosition = FormStartPosition.CenterScreen;
         this.Font = new Font("Segoe UI", 9F);
