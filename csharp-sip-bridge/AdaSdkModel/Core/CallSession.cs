@@ -241,10 +241,9 @@ public sealed class CallSession : ICallSession
                             var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
                             var destAlts = result.DestAlternatives ?? Array.Empty<string>();
 
-                            // Sequential disambiguation: pickup FIRST, then dropoff
+                            // ADDRESS LOCK: Pickup first, stash dest for later
                             if (pickupAlts.Length > 0)
                             {
-                                // Stash dest alternatives for later if both are ambiguous
                                 if (destAlts.Length > 0)
                                 {
                                     _pendingDestAlternatives = destAlts;
@@ -252,43 +251,39 @@ public sealed class CallSession : ICallSession
                                     _destDisambiguated = false;
                                 }
 
-                                var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that pickup address.";
-                                var altsList = string.Join(", ", pickupAlts);
                                 _pickupDisambiguated = false;
-
-                                _logger.LogInformation("[{SessionId}] 🔄 Pickup disambiguation needed: {Alts}", sessionId, altsList);
+                                _logger.LogInformation("[{SessionId}] 🔒 Address Lock: PICKUP disambiguation needed: {Alts}", sessionId, string.Join("|", pickupAlts));
 
                                 if (_aiClient is OpenAiSdkClient sdkClarif)
                                     await sdkClarif.InjectMessageAndRespondAsync(
-                                        $"[PICKUP DISAMBIGUATION] The PICKUP address is ambiguous. The options are: {altsList}. " +
-                                        "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination yet. " +
-                                        "Present the pickup options clearly, then STOP and WAIT for their answer.");
+                                        $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=pickup, " +
+                                        $"options=[{string.Join(", ", pickupAlts)}]. " +
+                                        "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination. " +
+                                        "Present the options with numbers, then STOP and WAIT for their answer. " +
+                                        "When they choose, call clarify_address(target=\"pickup\", selected=\"[their choice]\").");
                             }
                             else if (destAlts.Length > 0)
                             {
-                                var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that destination.";
-                                var altsList = string.Join(", ", destAlts);
                                 _destDisambiguated = false;
-
-                                _logger.LogInformation("[{SessionId}] 🔄 Destination disambiguation needed: {Alts}", sessionId, altsList);
+                                _logger.LogInformation("[{SessionId}] 🔒 Address Lock: DESTINATION disambiguation needed: {Alts}", sessionId, string.Join("|", destAlts));
 
                                 if (_aiClient is OpenAiSdkClient sdkClarif)
                                     await sdkClarif.InjectMessageAndRespondAsync(
-                                        $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
-                                        "Ask the caller ONLY about the DESTINATION location. " +
-                                        "Present the destination options clearly, then STOP and WAIT for their answer.");
+                                        $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=destination, " +
+                                        $"options=[{string.Join(", ", destAlts)}]. " +
+                                        "Pickup is confirmed. Now ask the caller ONLY about the DESTINATION. " +
+                                        "Present the options with numbers, then STOP and WAIT for their answer. " +
+                                        "When they choose, call clarify_address(target=\"destination\", selected=\"[their choice]\").");
                             }
                             else
                             {
-                                // NeedsClarification=true but no alternatives provided — fall through to fallback fare
+                                // NeedsClarification=true but no alternatives — fallback
                                 _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — using fallback fare", sessionId);
                                 result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
-                                // Don't return — fall through to normal fare injection below
                             }
 
                             if (pickupAlts.Length > 0 || destAlts.Length > 0)
                             {
-                                // Reset so fare can be re-triggered after clarification
                                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                                 return;
                             }
@@ -374,7 +369,7 @@ public sealed class CallSession : ICallSession
         var selected = args.TryGetValue("selected", out var s) ? s?.ToString() : null;
 
         if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(selected))
-            return new { success = false, error = "Missing target or selected address" };
+            return new { success = false, needs_disambiguation = false, error = "Missing target or selected address." };
 
         if (target == "pickup")
         {
@@ -383,27 +378,36 @@ public sealed class CallSession : ICallSession
             _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
             _pickupDisambiguated = true;
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
-            
-            _logger.LogInformation("[{SessionId}] ✅ Pickup clarified: {Pickup}", SessionId, selected);
 
-            // If we have pending dest alternatives, show those next
+            _logger.LogInformation("[{SessionId}] 🔒 Pickup LOCKED: {Pickup}", SessionId, selected);
+
+            // Check if dest still needs disambiguation
             if (_pendingDestAlternatives != null && _pendingDestAlternatives.Length > 0)
             {
-                var altsList = string.Join(", ", _pendingDestAlternatives);
-                _ = _aiClient.InjectMessageAndRespondAsync(
-                    $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
-                    "Ask the caller ONLY about the DESTINATION location. " +
-                    "Present the destination options clearly, then STOP and WAIT for their answer.");
+                var options = _pendingDestAlternatives;
                 _pendingDestAlternatives = null;
                 _pendingDestClarificationMessage = null;
+
+                OnBookingUpdated?.Invoke(_booking.Clone());
+
+                // Return structured disambiguation for destination
+                return new
+                {
+                    success = false,
+                    needs_disambiguation = true,
+                    target = "destination",
+                    options,
+                    instructions = "Pickup is confirmed. Now ask the user to clarify the destination from these options."
+                };
             }
-            else
-            {
-                // Re-trigger fare calculation now that pickup is clarified
-                _ = TriggerFareCalculationAsync();
-            }
+
+            // Both locked — re-trigger fare
+            OnBookingUpdated?.Invoke(_booking.Clone());
+            _ = TriggerFareCalculationAsync();
+            return new { success = true, needs_disambiguation = false, message = "Pickup locked. Fare calculation in progress — wait for [FARE RESULT]." };
         }
-        else if (target == "destination")
+
+        if (target == "destination")
         {
             _booking.Destination = selected;
             _booking.DestLat = _booking.DestLon = null;
@@ -411,14 +415,14 @@ public sealed class CallSession : ICallSession
             _destDisambiguated = true;
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
-            _logger.LogInformation("[{SessionId}] ✅ Destination clarified: {Destination}", SessionId, selected);
+            _logger.LogInformation("[{SessionId}] 🔒 Destination LOCKED: {Destination}", SessionId, selected);
 
-            // Re-trigger fare calculation now that destination is clarified
+            OnBookingUpdated?.Invoke(_booking.Clone());
             _ = TriggerFareCalculationAsync();
+            return new { success = true, needs_disambiguation = false, message = "Destination locked. Fare calculation in progress — wait for [FARE RESULT]." };
         }
 
-        OnBookingUpdated?.Invoke(_booking.Clone());
-        return new { success = true, message = "Address clarified. Proceeding with booking flow." };
+        return new { success = false, needs_disambiguation = false, error = $"Unknown target: {target}" };
     }
 
     private async Task TriggerFareCalculationAsync()
@@ -433,22 +437,69 @@ public sealed class CallSession : ICallSession
 
         try
         {
-            _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after clarification", sessionId);
+            _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after Address Lock resolution", sessionId);
             var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
-            
-            _booking.Fare = result.Fare;
-            _booking.Eta = result.Eta;
+
+            // Check if re-disambiguation is needed (e.g. clarified address still ambiguous in a different way)
+            if (result.NeedsClarification)
+            {
+                var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
+                var destAlts = result.DestAlternatives ?? Array.Empty<string>();
+
+                if (pickupAlts.Length > 0)
+                {
+                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                    if (_aiClient is OpenAiSdkClient sdk)
+                        await sdk.InjectMessageAndRespondAsync(
+                            $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=pickup, " +
+                            $"options=[{string.Join(", ", pickupAlts)}]. " +
+                            "Ask the caller to clarify the PICKUP. Present options with numbers, then WAIT.");
+                    return;
+                }
+                if (destAlts.Length > 0)
+                {
+                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                    if (_aiClient is OpenAiSdkClient sdk)
+                        await sdk.InjectMessageAndRespondAsync(
+                            $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=destination, " +
+                            $"options=[{string.Join(", ", destAlts)}]. " +
+                            "Ask the caller to clarify the DESTINATION. Present options with numbers, then WAIT.");
+                    return;
+                }
+            }
+
+            // Both addresses resolved — apply fare
+            ApplyFareResult(result);
+
+            if (_aiClient is OpenAiSdkClient sdkConf)
+                sdkConf.SetAwaitingConfirmation(true);
+
             OnBookingUpdated?.Invoke(_booking.Clone());
 
-            if (_aiClient is OpenAiSdkClient sdk)
-                await sdk.InjectMessageAndRespondAsync(
-                    $"[FARE RESULT] Your pickup is {result.PickupFormatted ?? pickup} going to {result.DestFormatted ?? destination}. " +
-                    $"The fare is {result.Fare} with an estimated arrival in {result.Eta}. " +
-                    "Read back these details and ask the caller to confirm.");
+            var spokenFare = FormatFareForSpeech(_booking.Fare);
+            var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
+            var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
+
+            _logger.LogInformation("[{SessionId}] 💰 Fare ready after clarification: {Fare}, ETA: {Eta}",
+                sessionId, _booking.Fare, _booking.Eta);
+
+            if (_aiClient is OpenAiSdkClient sdkInject)
+                await sdkInject.InjectMessageAndRespondAsync(
+                    $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
+                    $"estimated time of arrival is {_booking.Eta}. " +
+                    "Read back the VERIFIED addresses and fare to the caller and ask them to confirm.");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[{SessionId}] Fare re-calculation failed", sessionId);
+            _logger.LogWarning(ex, "[{SessionId}] Fare re-calculation failed after clarification", sessionId);
+            _booking.Fare = "£8.00";
+            _booking.Eta = "8 minutes";
+            OnBookingUpdated?.Invoke(_booking.Clone());
+
+            if (_aiClient is OpenAiSdkClient sdkFallback)
+                await sdkFallback.InjectMessageAndRespondAsync(
+                    "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
+                    "Read back the details to the caller and ask them to confirm.");
         }
     }
 
