@@ -159,6 +159,7 @@ public partial class MainForm : Form
         txtAuthId.Text = sip.AuthId ?? "";
         txtSipPassword.Text = sip.Password;
         txtDomain.Text = sip.Domain ?? "";
+        txtDisplayName.Text = sip.DisplayName ?? "";
         chkAutoAnswer.Checked = sip.AutoAnswer;
 
         var idx = cmbTransport.Items.IndexOf(sip.Transport.ToUpperInvariant());
@@ -261,6 +262,7 @@ public partial class MainForm : Form
         _settings.Sip.AuthId = string.IsNullOrWhiteSpace(txtAuthId.Text) ? null : txtAuthId.Text.Trim();
         _settings.Sip.Password = txtSipPassword.Text;
         _settings.Sip.Domain = string.IsNullOrWhiteSpace(txtDomain.Text) ? null : txtDomain.Text.Trim();
+        _settings.Sip.DisplayName = string.IsNullOrWhiteSpace(txtDisplayName.Text) ? null : txtDisplayName.Text.Trim();
         _settings.Sip.Transport = cmbTransport.SelectedItem?.ToString() ?? "UDP";
         _settings.Sip.AutoAnswer = chkAutoAnswer.Checked;
     }
@@ -515,6 +517,7 @@ public partial class MainForm : Form
         txtAuthId.Enabled = enabled;
         txtSipPassword.Enabled = enabled;
         txtDomain.Enabled = enabled;
+        txtDisplayName.Enabled = enabled;
         cmbTransport.Enabled = enabled;
     }
 

@@ -68,12 +68,17 @@ partial class MainForm
 
         // Auth ID (optional - for 3CX etc. where auth ID differs from extension)
         var lblAuthUser = new Label { Text = "Auth ID:", Location = new Point(190, 58), Size = new Size(55, 23) };
-        txtAuthUser = new TextBox { Location = new Point(250, 55), Size = new Size(120, 23) };
+        txtAuthUser = new TextBox { Location = new Point(250, 55), Size = new Size(100, 23) };
         txtAuthUser.PlaceholderText = "(optional)";
 
+        // Display Name (cosmetic - shown in SIP From header)
+        var lblDisplayName = new Label { Text = "Name:", Location = new Point(355, 58), Size = new Size(45, 23) };
+        txtDisplayName = new TextBox { Location = new Point(405, 55), Size = new Size(90, 23) };
+        txtDisplayName.PlaceholderText = "(e.g. Ai Agent)";
+
         // SIP Password
-        var lblPass = new Label { Text = "Password:", Location = new Point(380, 58), Size = new Size(65, 23) };
-        txtSipPassword = new TextBox { Location = new Point(450, 55), Size = new Size(145, 23), UseSystemPasswordChar = true };
+        var lblPass = new Label { Text = "Password:", Location = new Point(500, 58), Size = new Size(65, 23) };
+        txtSipPassword = new TextBox { Location = new Point(570, 55), Size = new Size(125, 23), UseSystemPasswordChar = true };
 
         // Audio Mode
         var lblAudioMode = new Label { Text = "Audio Mode:", Location = new Point(15, 88), Size = new Size(80, 23) };
@@ -258,7 +263,7 @@ partial class MainForm
 
         grpConfig.Controls.AddRange(new Control[] {
             lblServer, txtSipServer, lblPort, txtSipPort, lblTransport, cmbTransport,
-            lblUser, txtSipUser, lblAuthUser, txtAuthUser, lblPass, txtSipPassword, 
+            lblUser, txtSipUser, lblAuthUser, txtAuthUser, lblDisplayName, txtDisplayName, lblPass, txtSipPassword, 
             lblAudioMode, cmbAudioMode,
             lblResampler, cmbResampler,
             chkLocalOpenAI, chkManualAnswer, chkSimliAvatar, chkMonitorAudio,
@@ -387,6 +392,7 @@ partial class MainForm
     private TextBox txtSipPort;
     private TextBox txtSipUser;
     private TextBox txtAuthUser;
+    private TextBox txtDisplayName;
     private TextBox txtSipPassword;
     private TextBox txtWebSocketUrl;
     private TextBox txtApiKey;
