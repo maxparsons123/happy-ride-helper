@@ -377,11 +377,11 @@ public sealed class SipServer : IAsyncDisposable
                 var boosted = new byte[alawData.Length];
                 Buffer.BlockCopy(alawData, 0, boosted, 0, alawData.Length);
                 ALawVolumeBoost.ApplyInPlace(boosted, ingressGain);
-                session.FeedCallerAudio(boosted);
+                session.ProcessInboundAudio(boosted);
             }
             else
             {
-                session.FeedCallerAudio(alawData);
+                session.ProcessInboundAudio(alawData);
             }
             OnOperatorCallerAudio?.Invoke(alawData);
         };
