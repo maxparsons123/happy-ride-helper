@@ -239,9 +239,9 @@ public class MainForm : Form
         Controls.Add(splitTop);
         Controls.Add(toolbar);
 
-        // ── Refresh timer ──
-        _refreshTimer = new System.Windows.Forms.Timer { Interval = 3000 };
-        _refreshTimer.Tick += (_, _) => RefreshUI();
+        // ── Refresh timer (stats-only, no driver/job list rebuild) ──
+        _refreshTimer = new System.Windows.Forms.Timer { Interval = 30000 };
+        _refreshTimer.Tick += (_, _) => RefreshStats();
 
         Load += (_, _) =>
         {
@@ -726,6 +726,7 @@ public class MainForm : Form
 
     // ── Refresh ──
 
+    /// <summary>Full UI refresh — call only when MQTT data changes (bookings, GPS, status).</summary>
     private void RefreshUI()
     {
         if (_db == null) return;
@@ -737,6 +738,22 @@ public class MainForm : Form
         _driverList.RefreshDrivers(drivers);
         _jobList.RefreshJobs(jobs);
 
+        RefreshStatsFromData(drivers, jobs);
+    }
+
+    /// <summary>Lightweight stats-only refresh for the periodic timer (no list rebuild).</summary>
+    private void RefreshStats()
+    {
+        if (_db == null) return;
+        if (InvokeRequired) { BeginInvoke(RefreshStats); return; }
+
+        var drivers = _db.GetAllDrivers();
+        var jobs = _db.GetActiveJobs();
+        RefreshStatsFromData(drivers, jobs);
+    }
+
+    private void RefreshStatsFromData(List<Driver> drivers, List<Job> jobs)
+    {
         var online = drivers.Count(d => d.Status == DriverStatus.Online);
         var onJob = drivers.Count(d => d.Status == DriverStatus.OnJob);
         var pending = jobs.Count(j => j.Status == JobStatus.Pending);
