@@ -235,6 +235,8 @@ public sealed class CallSession : ICallSession
                             var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that address.";
                             var altsList = string.Join(", ", allAlts);
 
+                            _logger.LogInformation("[{SessionId}] 🔄 Address disambiguation needed: {Alts}", sessionId, altsList);
+
                             if (_aiClient is OpenAiSdkClient sdkClarif)
                                 await sdkClarif.InjectMessageAndRespondAsync(
                                     $"[ADDRESS DISAMBIGUATION] {clarMsg} The options are: {altsList}. " +
@@ -286,7 +288,7 @@ public sealed class CallSession : ICallSession
                 }
             });
 
-            return new { success = true, fare_calculating = true, message = "Fare is being calculated. Say: 'Let me check those addresses and get you a price.'" };
+            return new { success = true, fare_calculating = true, message = "Fare is being calculated. Do NOT repeat any interjection—the system will inject the next step once address validation is complete." };
         }
 
         return new { success = true };
