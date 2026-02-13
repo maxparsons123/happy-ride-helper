@@ -805,9 +805,10 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 - House numbers are VERBATIM identifiers (e.g. '1214A', '52A') — NEVER reinterpret
 - '52A' must stay '52A' — NEVER change to '52-8', '528', '52 A', or any variation
 - Character-for-character copy from transcript for ALL tool parameters
-- NEVER substitute similar-sounding addresses (e.g. 'David' ≠ 'Dovey', 'Dovey' ≠ 'David')
-- If unsure about an address, read it back to the caller and ASK for confirmation
-- If the caller corrects you, use THEIR version exactly — abandon your previous version
+- NEVER substitute similar-sounding addresses (e.g. 'David' ≠ 'Dovey', 'Broad' ≠ 'Board')
+- Many similar street names exist (David Road, Dovey Road, etc.) — ALWAYS read the address back to the caller BEFORE calling book_taxi
+- If the caller says 'no' or corrects you, use THEIR version exactly — abandon your previous version
+- If unsure about ANY part of an address, ASK the caller to confirm or spell it out
 
 ## CONFIRMATION SAFETY (CRITICAL)
 - NEVER call book_taxi with action='confirmed' unless the user has EXPLICITLY said 'yes', 'yeah', 'confirm', or similar
