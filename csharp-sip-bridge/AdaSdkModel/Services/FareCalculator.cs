@@ -118,7 +118,9 @@ public sealed class FareCalculator : IFareCalculator
                 if (fareEl.TryGetProperty("eta", out var ev)) edgeEta = ev.GetString();
             }
 
-            if (pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
+            // Only calculate fare if disambiguation is NOT needed
+            if (!result.NeedsClarification && 
+                pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
                 pickupLat.Value != 0 && destLat.Value != 0)
             {
                 if (!string.IsNullOrWhiteSpace(edgeFare))
@@ -142,8 +144,8 @@ public sealed class FareCalculator : IFareCalculator
                 result.DestStreet = destStreet; result.DestNumber = destNumber;
                 result.DestPostalCode = destPostal; result.DestCity = destCity ?? detectedArea;
                 result.DestFormatted = resolvedDest;
-                return result;
             }
+            return result;
 
             return await CalculateAsync(pickup, destination, phoneNumber);
         }
