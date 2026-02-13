@@ -148,6 +148,10 @@ public sealed class CallSession : ICallSession
     };
 
     private int _fareAutoTriggered;
+    private bool _pickupDisambiguated;
+    private bool _destDisambiguated;
+    private string[]? _pendingDestAlternatives;
+    private string? _pendingDestClarificationMessage;
 
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
@@ -231,19 +235,65 @@ public sealed class CallSession : ICallSession
                         {
                             var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
                             var destAlts = result.DestAlternatives ?? Array.Empty<string>();
-                            var allAlts = pickupAlts.Concat(destAlts).ToArray();
-                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that address.";
-                            var altsList = string.Join(", ", allAlts);
 
-                            _logger.LogInformation("[{SessionId}] 🔄 Address disambiguation needed: {Alts}", sessionId, altsList);
+                            // Sequential disambiguation: pickup FIRST, then dropoff
+                            if (pickupAlts.Length > 0)
+                            {
+                                // Stash dest alternatives for later if both are ambiguous
+                                if (destAlts.Length > 0)
+                                {
+                                    _pendingDestAlternatives = destAlts;
+                                    _pendingDestClarificationMessage = result.ClarificationMessage;
+                                    _destDisambiguated = false;
+                                }
 
-                            if (_aiClient is OpenAiSdkClient sdkClarif)
-                                await sdkClarif.InjectMessageAndRespondAsync(
-                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} The options are: {altsList}. " +
-                                    "Present these options clearly and slowly to the caller, then STOP and WAIT for their answer. " +
-                                    "Do NOT proceed until they choose one.");
+                                var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that pickup address.";
+                                var altsList = string.Join(", ", pickupAlts);
+                                _pickupDisambiguated = false;
+
+                                _logger.LogInformation("[{SessionId}] 🔄 Pickup disambiguation needed: {Alts}", sessionId, altsList);
+
+                                if (_aiClient is OpenAiSdkClient sdkClarif)
+                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                        $"[PICKUP DISAMBIGUATION] The PICKUP address is ambiguous. The options are: {altsList}. " +
+                                        "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination yet. " +
+                                        "Present the pickup options clearly, then STOP and WAIT for their answer.");
+                            }
+                            else if (destAlts.Length > 0)
+                            {
+                                var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that destination.";
+                                var altsList = string.Join(", ", destAlts);
+                                _destDisambiguated = false;
+
+                                _logger.LogInformation("[{SessionId}] 🔄 Destination disambiguation needed: {Alts}", sessionId, altsList);
+
+                                if (_aiClient is OpenAiSdkClient sdkClarif)
+                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                        $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
+                                        "Ask the caller ONLY about the DESTINATION location. " +
+                                        "Present the destination options clearly, then STOP and WAIT for their answer.");
+                            }
 
                             // Reset so fare can be re-triggered after clarification
+                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                            return;
+                        }
+
+                        // Check if there are pending destination alternatives from a previous round
+                        // (pickup was ambiguous, now resolved, but dest still needs clarification)
+                        if (_pendingDestAlternatives != null && _pendingDestAlternatives.Length > 0 && !_destDisambiguated)
+                        {
+                            var destAltsList = string.Join(", ", _pendingDestAlternatives);
+                            _logger.LogInformation("[{SessionId}] 🔄 Now resolving pending destination disambiguation: {Alts}", sessionId, destAltsList);
+
+                            if (_aiClient is OpenAiSdkClient sdkDestClarif)
+                                await sdkDestClarif.InjectMessageAndRespondAsync(
+                                    $"[DESTINATION DISAMBIGUATION] Good, the pickup is confirmed. Now the DESTINATION address is ambiguous. The options are: {destAltsList}. " +
+                                    "Ask the caller ONLY about the DESTINATION location. " +
+                                    "Present the destination options clearly, then STOP and WAIT for their answer.");
+
+                            _pendingDestAlternatives = null;
+                            _pendingDestClarificationMessage = null;
                             Interlocked.Exchange(ref _fareAutoTriggered, 0);
                             return;
                         }
@@ -253,6 +303,12 @@ public sealed class CallSession : ICallSession
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
                         result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
                     }
+
+                    // Clear any pending disambiguation state
+                    _pendingDestAlternatives = null;
+                    _pendingDestClarificationMessage = null;
+                    _pickupDisambiguated = true;
+                    _destDisambiguated = true;
 
                     ApplyFareResult(result);
 
@@ -348,16 +404,37 @@ public sealed class CallSession : ICallSession
                         {
                             var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
                             var destAlts = result.DestAlternatives ?? Array.Empty<string>();
-                            var allAlts = pickupAlts.Concat(destAlts).ToArray();
 
-                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that address.";
-                            var altsList = string.Join(", ", allAlts);
+                            // Sequential disambiguation: pickup FIRST, then dropoff
+                            if (pickupAlts.Length > 0)
+                            {
+                                if (destAlts.Length > 0)
+                                {
+                                    _pendingDestAlternatives = destAlts;
+                                    _pendingDestClarificationMessage = result.ClarificationMessage;
+                                    _destDisambiguated = false;
+                                }
 
-                            if (_aiClient is OpenAiSdkClient sdkClarif)
-                                await sdkClarif.InjectMessageAndRespondAsync(
-                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} The options are: {altsList}. " +
-                                    "Present these options clearly and slowly to the caller, then STOP and WAIT for their answer. " +
-                                    "Do NOT proceed until they choose one.");
+                                var altsList = string.Join(", ", pickupAlts);
+                                _pickupDisambiguated = false;
+
+                                if (_aiClient is OpenAiSdkClient sdkClarif)
+                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                        $"[PICKUP DISAMBIGUATION] The PICKUP address is ambiguous. The options are: {altsList}. " +
+                                        "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination yet. " +
+                                        "Present the pickup options clearly, then STOP and WAIT for their answer.");
+                            }
+                            else if (destAlts.Length > 0)
+                            {
+                                var altsList = string.Join(", ", destAlts);
+                                _destDisambiguated = false;
+
+                                if (_aiClient is OpenAiSdkClient sdkClarif)
+                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                        $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
+                                        "Ask the caller ONLY about the DESTINATION location. " +
+                                        "Present the destination options clearly, then STOP and WAIT for their answer.");
+                            }
 
                             return;
                         }

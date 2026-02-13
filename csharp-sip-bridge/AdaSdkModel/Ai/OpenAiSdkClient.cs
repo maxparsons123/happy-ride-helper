@@ -330,7 +330,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("ADDRESS DISAMBIGUATION");
+            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("DISAMBIGUATION");
             if (isCritical && Volatile.Read(ref _responseActive) == 1)
             {
                 Log("🛑 Cancelling active response before critical injection");
@@ -956,18 +956,29 @@ or School Road in Moseley?"").
 ADDRESS DISAMBIGUATION (CRITICAL)
 ==============================
 
-When you receive an [ADDRESS DISAMBIGUATION] message:
-1. CANCEL any interjection you were about to say (e.g., "Let me check those addresses...")
-2. Read out the alternatives clearly and slowly — the caller needs time to hear each option
-3. Present options as a numbered list: "I found a few options. Is it: 1) Warwick Road in Acocks Green, 2) Warwick Road in Tyseley, or 3) Warwick Road in Moseley?"
-4. STOP TALKING and WAIT for the caller to respond
-5. Do NOT proceed with fare calculation or booking until the caller has chosen
-6. Do NOT assume or guess which option they want
-7. After the caller picks one, call sync_booking_data with the clarified address (e.g. "1214A Warwick Road, Acocks Green, Birmingham")
-8. NEVER rush through the options — pause after listing them
-9. Do NOT repeat the same clarification question multiple times (this creates a loop)
+The system resolves ambiguous addresses ONE AT A TIME — pickup first, then destination.
 
-If the caller says a number ("one", "the first one") or a place name ("Acocks Green"),
+When you receive a [PICKUP DISAMBIGUATION] message:
+1. CANCEL any interjection you were about to say (e.g., ""Let me check those addresses..."")
+2. Ask ONLY about the PICKUP location — do NOT mention the destination at all
+3. Present the pickup options clearly: ""I found a few pickup options. Is it: 1) School Road in Hall Green, or 2) School Road in Moseley?""
+4. STOP TALKING and WAIT for the caller to respond
+5. After they choose, call sync_booking_data with the clarified pickup address
+
+When you receive a [DESTINATION DISAMBIGUATION] message:
+1. Ask ONLY about the DESTINATION location
+2. Present the destination options clearly
+3. STOP TALKING and WAIT for the caller to respond
+4. After they choose, call sync_booking_data with the clarified destination address
+
+RULES FOR ALL DISAMBIGUATION:
+- Do NOT mention both pickup and destination ambiguity at the same time
+- Do NOT assume or guess which option they want
+- NEVER rush through the options — pause after listing them
+- Do NOT repeat the same clarification question multiple times (this creates a loop)
+- After the caller picks one, call sync_booking_data with the clarified address (include area, e.g. ""1214A Warwick Road, Acocks Green, Birmingham"")
+
+If the caller says a number (""one"", ""the first one"") or a place name (""Acocks Green""),
 map it to the correct option and proceed.
 
 CRITICAL: Your response after disambiguation MUST end with a question and silence.
