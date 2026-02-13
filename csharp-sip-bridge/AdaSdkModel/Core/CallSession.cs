@@ -147,6 +147,8 @@ public sealed class CallSession : ICallSession
         "unknown", "caller", "anonymous", "user", "customer", "guest", "n/a", "na", "none", ""
     };
 
+    private int _fareAutoTriggered;
+
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
         // Name validation guard — reject placeholder names
@@ -166,6 +168,8 @@ public sealed class CallSession : ICallSession
             {
                 _booking.PickupLat = _booking.PickupLon = null;
                 _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+                // Reset fare auto-trigger if address changed after previous fare
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
             }
             _booking.Pickup = incoming;
         }
@@ -176,6 +180,7 @@ public sealed class CallSession : ICallSession
             {
                 _booking.DestLat = _booking.DestLon = null;
                 _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
             }
             _booking.Destination = incoming;
         }
@@ -192,6 +197,92 @@ public sealed class CallSession : ICallSession
         // If name is still missing, tell Ada to ask for it
         if (string.IsNullOrWhiteSpace(_booking.Name))
             return new { success = true, warning = "Name is required before booking. Ask the caller for their name." };
+
+        // AUTO-TRIGGER: When all 5 fields are filled, automatically calculate fare
+        // This matches the v3.9 prompt: "When sync_booking_data is called with all 5 fields filled,
+        // the system will AUTOMATICALLY validate the addresses and calculate the fare."
+        bool allFieldsFilled = !string.IsNullOrWhiteSpace(_booking.Name)
+            && !string.IsNullOrWhiteSpace(_booking.Pickup)
+            && !string.IsNullOrWhiteSpace(_booking.Destination)
+            && _booking.Passengers > 0
+            && !string.IsNullOrWhiteSpace(_booking.PickupTime);
+
+        if (allFieldsFilled && Interlocked.CompareExchange(ref _fareAutoTriggered, 1, 0) == 0)
+        {
+            _logger.LogInformation("[{SessionId}] 🚀 All fields filled — auto-triggering fare calculation", SessionId);
+
+            var pickup = _booking.Pickup!;
+            var destination = _booking.Destination!;
+            var callerId = CallerId;
+            var sessionId = SessionId;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+                    var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+
+                    FareResult result;
+                    if (completed == aiTask)
+                    {
+                        result = await aiTask;
+                        if (result.NeedsClarification)
+                        {
+                            var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
+                            var destAlts = result.DestAlternatives ?? Array.Empty<string>();
+                            var allAlts = pickupAlts.Concat(destAlts).ToArray();
+                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations. Which city or area are you in?";
+                            var altsList = string.Join(", ", allAlts);
+
+                            if (_aiClient is OpenAiSdkClient sdkClarif)
+                                await sdkClarif.InjectMessageAndRespondAsync(
+                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} Options: {altsList}");
+
+                            // Reset so fare can be re-triggered after clarification
+                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
+                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                    }
+
+                    ApplyFareResult(result);
+
+                    if (_aiClient is OpenAiSdkClient sdk)
+                        sdk.SetAwaitingConfirmation(true);
+
+                    OnBookingUpdated?.Invoke(_booking.Clone());
+
+                    var spokenFare = FormatFareForSpeech(_booking.Fare);
+                    _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
+                        sessionId, _booking.Fare, spokenFare, _booking.Eta);
+
+                    if (_aiClient is OpenAiSdkClient sdkInject)
+                        await sdkInject.InjectMessageAndRespondAsync(
+                            $"[FARE RESULT] The fare from {pickup} to {destination} is {spokenFare}, " +
+                            $"estimated time of arrival is {_booking.Eta}. " +
+                            $"Read back the VERIFIED addresses and fare to the caller and ask them to confirm the booking.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[{SessionId}] Auto fare calculation failed", sessionId);
+                    _booking.Fare = "£8.00";
+                    _booking.Eta = "8 minutes";
+                    OnBookingUpdated?.Invoke(_booking.Clone());
+
+                    if (_aiClient is OpenAiSdkClient sdkFallback)
+                        await sdkFallback.InjectMessageAndRespondAsync(
+                            "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
+                            "Read back the details to the caller and ask them to confirm.");
+                }
+            });
+
+            return new { success = true, fare_calculating = true, message = "Fare is being calculated. Say: 'Let me check those addresses and get you a price.'" };
+        }
 
         return new { success = true };
     }
