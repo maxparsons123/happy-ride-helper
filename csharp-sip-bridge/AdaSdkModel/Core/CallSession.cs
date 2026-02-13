@@ -22,6 +22,7 @@ public sealed class CallSession : ICallSession
     private readonly bool _icabbiEnabled;
 
     private readonly BookingState _booking = new();
+    private readonly Audio.ALawThinningFilter? _thinningFilter;
 
     private int _disposed;
     private int _active;
@@ -61,6 +62,10 @@ public sealed class CallSession : ICallSession
         _icabbiEnabled = icabbiEnabled;
 
         _booking.CallerPhone = callerId;
+
+        // Init thinning filter if configured
+        if (settings.Audio.ThinningAlpha > 0.01f)
+            _thinningFilter = new Audio.ALawThinningFilter(settings.Audio.ThinningAlpha);
 
         // Wire up AI client events
         _aiClient.OnAudio += HandleAiAudio;
@@ -110,9 +115,14 @@ public sealed class CallSession : ICallSession
 
     private void HandleAiAudio(byte[] alawFrame)
     {
+        // 1. Volume boost
         var gain = (float)_settings.Audio.VolumeBoost;
         if (gain > 1.01f || gain < 0.99f)
             Audio.ALawVolumeBoost.ApplyInPlace(alawFrame, gain);
+
+        // 2. High-pass thinning filter (removes bass mud, crisper telephony voice)
+        _thinningFilter?.ApplyInPlace(alawFrame);
+
         OnAudioOut?.Invoke(alawFrame);
     }
 

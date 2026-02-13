@@ -61,6 +61,12 @@ public sealed class AudioSettings
     public int EchoGuardMs { get; set; } = 200;
     public float BargeInRmsThreshold { get; set; } = 1500f;
     public bool EnableDiagnostics { get; set; } = true;
+
+    /// <summary>
+    /// High-pass thinning filter alpha (0.80 = very thin, 0.88 = crisp, 0.95 = natural).
+    /// Set to 0 to disable the filter entirely.
+    /// </summary>
+    public float ThinningAlpha { get; set; } = 0.88f;
 }
 
 public sealed class DispatchSettings
