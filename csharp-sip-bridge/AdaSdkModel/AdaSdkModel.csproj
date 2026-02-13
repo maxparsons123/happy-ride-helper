@@ -16,6 +16,9 @@
 
     <!-- SIP stack -->
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
+
+    <!-- Simli avatar (WebView2) -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
     <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
 
     <!-- MQTT for dispatch -->

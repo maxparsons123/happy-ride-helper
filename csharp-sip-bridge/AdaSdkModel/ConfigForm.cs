@@ -17,6 +17,8 @@ public sealed class ConfigForm : Form
     private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!;
     private CheckBox chkDiagnostics = null!;
     private TextBox txtSupabaseUrl = null!, txtSupabaseKey = null!;
+    private TextBox txtSimliApiKey = null!, txtSimliFaceId = null!;
+    private CheckBox chkSimliEnabled = null!;
 
     public ConfigForm(AppSettings settings)
     {
@@ -77,7 +79,14 @@ public sealed class ConfigForm : Form
         txtSupabaseUrl = AddField(tabSupabase, "URL:", 20, bgInput, fgInput);
         txtSupabaseKey = AddField(tabSupabase, "Anon Key:", 60, bgInput, fgInput, masked: true);
 
-        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabMaps, tabDispatch, tabAudio, tabSupabase });
+        // ── Simli Tab ──
+        var tabSimli = new TabPage("🎭 Avatar") { BackColor = BackColor };
+        txtSimliApiKey = AddField(tabSimli, "API Key:", 20, bgInput, fgInput, masked: true);
+        txtSimliFaceId = AddField(tabSimli, "Face ID:", 60, bgInput, fgInput);
+        chkSimliEnabled = new CheckBox { Text = "Enable Simli avatar during calls", Location = new Point(15, 100), AutoSize = true, ForeColor = fgInput };
+        tabSimli.Controls.Add(chkSimliEnabled);
+
+        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabMaps, tabDispatch, tabAudio, tabSupabase, tabSimli });
 
         // ── OK / Cancel ──
         var pnlButtons = new Panel { Dock = DockStyle.Bottom, Height = 45, BackColor = BackColor };
@@ -121,6 +130,9 @@ public sealed class ConfigForm : Form
         chkDiagnostics.Checked = Settings.Audio.EnableDiagnostics;
         txtSupabaseUrl.Text = Settings.Supabase.Url;
         txtSupabaseKey.Text = Settings.Supabase.AnonKey;
+        txtSimliApiKey.Text = Settings.Simli.ApiKey;
+        txtSimliFaceId.Text = Settings.Simli.FaceId;
+        chkSimliEnabled.Checked = Settings.Simli.Enabled;
     }
 
     private void WriteToSettings()
@@ -138,6 +150,9 @@ public sealed class ConfigForm : Form
         Settings.Audio.EnableDiagnostics = chkDiagnostics.Checked;
         Settings.Supabase.Url = txtSupabaseUrl.Text.Trim();
         Settings.Supabase.AnonKey = txtSupabaseKey.Text.Trim();
+        Settings.Simli.ApiKey = txtSimliApiKey.Text.Trim();
+        Settings.Simli.FaceId = txtSimliFaceId.Text.Trim();
+        Settings.Simli.Enabled = chkSimliEnabled.Checked;
     }
 
     private static AppSettings Clone(AppSettings src)

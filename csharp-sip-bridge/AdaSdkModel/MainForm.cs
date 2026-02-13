@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using AdaSdkModel.Ai;
 using AdaSdkModel.Audio;
+using AdaSdkModel.Avatar;
 using AdaSdkModel.Config;
 using AdaSdkModel.Core;
 using AdaSdkModel.Services;
@@ -33,11 +34,14 @@ public partial class MainForm : Form
     private WaveInEvent? _micInput;
     private readonly object _micLock = new();
 
+    // Simli avatar
+    private SimliAvatar? _simliAvatar;
     public MainForm()
     {
         InitializeComponent();
         _settings = LoadSettings();
         ApplySettingsToUi();
+        InitSimliAvatar();
         Log($"AdaSdkModel v{OpenAiSdkClient.VERSION} started. Configure SIP and click Connect.");
     }
 
@@ -254,6 +258,7 @@ public partial class MainForm : Form
                 SetInCall(true);
                 statusCallId.Text = $"{callerId} [{sessionId}]";
                 StartAudioMonitor();
+                _ = ConnectSimliAsync();
             });
 
             _sipServer.OnCallRinging += (pendingId, callerId) => Invoke(() =>
@@ -283,6 +288,7 @@ public partial class MainForm : Form
                     lblCallInfo.Text = "No active call";
                     lblCallInfo.ForeColor = Color.Gray;
                     StopAudioMonitor();
+                    _ = DisconnectSimliAsync();
                 }
             });
 
@@ -329,8 +335,15 @@ public partial class MainForm : Form
         // Wire session events → UI
         session.OnTranscript += (role, text) => Invoke(() => Log($"💬 {role}: {text}"));
 
-        // Wire audio → monitor
-        session.OnAudioOut += alawFrame => _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+        // Wire audio → monitor + Simli avatar
+        session.OnAudioOut += alawFrame =>
+        {
+            _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+            FeedSimliAudio(alawFrame);
+        };
+
+        // Wire barge-in → clear Simli buffer
+        session.OnBargeIn += () => ClearSimliBuffer();
 
         session.OnBookingUpdated += booking => Invoke(() =>
         {
@@ -528,6 +541,98 @@ public partial class MainForm : Form
     }
 
     // ══════════════════════════════════════
+    //  SIMLI AVATAR
+    // ══════════════════════════════════════
+
+    private void InitSimliAvatar()
+    {
+        try
+        {
+            var apiKey = _settings.Simli.ApiKey;
+            var faceId = _settings.Simli.FaceId;
+
+            if (string.IsNullOrWhiteSpace(apiKey))
+                apiKey = _settings.Simli.ApiKey = "vlw7tr7vxhhs52bi3rum7";
+            if (string.IsNullOrWhiteSpace(faceId))
+                faceId = _settings.Simli.FaceId = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+
+            Log($"🎭 InitSimliAvatar: apiKey={apiKey[..Math.Min(6, apiKey.Length)]}..., faceId={faceId[..Math.Min(8, faceId.Length)]}...");
+
+            var factory = GetLoggerFactory();
+            _simliAvatar = new SimliAvatar(factory.CreateLogger<SimliAvatar>());
+            _simliAvatar.Configure(apiKey, faceId);
+            _simliAvatar.Dock = DockStyle.Fill;
+            pnlAvatarHost.Controls.Clear();
+            pnlAvatarHost.Controls.Add(_simliAvatar);
+            lblAvatarStatus.Text = "Ready";
+            Log("🎭 Simli avatar initialized successfully");
+        }
+        catch (Exception ex)
+        {
+            Log($"🎭 Simli init FAILED: {ex.Message}");
+            lblAvatarStatus.Text = $"Init failed: {ex.Message}";
+            _simliAvatar = null;
+        }
+    }
+
+    private async Task ConnectSimliAsync()
+    {
+        if (!_settings.Simli.Enabled)
+        {
+            Log("🎭 Simli disabled — skipping avatar connection");
+            return;
+        }
+
+        if (_simliAvatar == null)
+        {
+            Log("🎭 Simli was null at call start — retrying init...");
+            InitSimliAvatar();
+        }
+
+        if (_simliAvatar == null)
+        {
+            Log("🎭 Simli still null after retry — skipping avatar");
+            return;
+        }
+
+        try { await _simliAvatar.ConnectAsync(); }
+        catch (Exception ex) { Log($"🎭 Simli connect error: {ex.Message}"); }
+    }
+
+    private async Task DisconnectSimliAsync()
+    {
+        if (_simliAvatar == null) return;
+        try { await _simliAvatar.DisconnectAsync(); }
+        catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
+    }
+
+    private void FeedSimliAudio(byte[] alawFrame)
+    {
+        if (!_settings.Simli.Enabled) return;
+        if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
+            return;
+
+        var frameCopy = new byte[alawFrame.Length];
+        Buffer.BlockCopy(alawFrame, 0, frameCopy, 0, alawFrame.Length);
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                var pcm16at16k = AlawToSimliResampler.Convert(frameCopy);
+                _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
+            }
+            catch { /* Simli errors must never affect call audio */ }
+        });
+    }
+
+    private void ClearSimliBuffer()
+    {
+        if (_simliAvatar == null || !_simliAvatar.IsConnected) return;
+        _ = _simliAvatar.ClearBufferAsync();
+    }
+
+    // ══════════════════════════════════════
     //  AUDIO MONITOR
     // ══════════════════════════════════════
 
@@ -625,6 +730,19 @@ public partial class MainForm : Form
     {
         StopMicrophone();
         StopAudioMonitor();
+
+        // Disconnect and dispose Simli avatar
+        try
+        {
+            if (_simliAvatar != null)
+            {
+                _simliAvatar.DisconnectAsync().GetAwaiter().GetResult();
+                _simliAvatar.Dispose();
+                _simliAvatar = null;
+            }
+        }
+        catch { }
+
         try { (_currentSession as IDisposable)?.Dispose(); } catch { }
         _currentSession = null;
         if (_sipServer != null)

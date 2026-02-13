@@ -18,7 +18,17 @@ public sealed class AppSettings
     public DispatchSettings Dispatch { get; set; } = new();
     public GoogleMapsSettings GoogleMaps { get; set; } = new();
     public SupabaseSettings Supabase { get; set; } = new();
+    public SimliSettings Simli { get; set; } = new();
     public IcabbiSettings Icabbi { get; set; } = new();
+}
+
+public sealed class SimliSettings
+{
+    public string ApiKey { get; set; } = "vlw7tr7vxhhs52bi3rum7";
+    public string FaceId { get; set; } = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+
+    /// <summary>Enable Simli avatar audio feeding during calls. Disable to eliminate potential jitter from upsampling/WebRTC.</summary>
+    public bool Enabled { get; set; } = false;
 }
 
 public sealed class IcabbiSettings
