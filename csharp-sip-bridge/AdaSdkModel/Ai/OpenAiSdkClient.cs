@@ -240,6 +240,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             options.Tools.Add(BuildSyncBookingDataTool());
             options.Tools.Add(BuildClarifyAddressTool());
             options.Tools.Add(BuildBookTaxiTool());
+            options.Tools.Add(BuildCreateBookingTool());
+            options.Tools.Add(BuildFindLocalEventsTool());
             options.Tools.Add(BuildEndCallTool());
 
             await _session.ConfigureSessionAsync(options);
@@ -896,6 +898,39 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
+    private static ConversationFunctionTool BuildCreateBookingTool() => new("create_booking")
+    {
+        Description = "Create a booking with AI-powered address extraction. " +
+                      "Use when you have pickup and optionally destination. Handles geocoding and fare calculation automatically.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                pickup_address = new { type = "string", description = "Pickup address (verbatim from caller)" },
+                dropoff_address = new { type = "string", description = "Destination address (verbatim from caller)" },
+                passenger_count = new { type = "integer", description = "Number of passengers" }
+            },
+            required = new[] { "pickup_address" }
+        }))
+    };
+
+    private static ConversationFunctionTool BuildFindLocalEventsTool() => new("find_local_events")
+    {
+        Description = "Search for local events (concerts, sports, theatre, etc.) near a location. " +
+                      "Use when the caller asks about events happening nearby or wants a taxi to an event.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                category = new { type = "string", description = "Event category: concert, sports, theatre, comedy, all" },
+                near = new { type = "string", description = "Location or area to search near" },
+                date = new { type = "string", description = "Date or time frame (e.g. 'tonight', 'this weekend', 'Saturday')" }
+            }
+        }))
+    };
+
     private static ConversationFunctionTool BuildEndCallTool() => new("end_call")
     {
         Description = "End the call after speaking the closing script. " +
@@ -947,8 +982,16 @@ LANGUAGE
 
 You will be told the caller's initial language in the greeting injection (e.g. [LANG: Dutch]).
 Start speaking in THAT language.
-CONTINUOUSLY MONITOR the caller's spoken language.
-If they speak another language or ask to switch, IMMEDIATELY switch for all responses.
+
+CONTINUOUS LANGUAGE MONITORING (CRITICAL):
+After EVERY caller utterance, detect what language they are speaking.
+If they speak in a DIFFERENT language from your current one, IMMEDIATELY switch ALL subsequent responses to THEIR language.
+If they explicitly request a language change (e.g. ""can you speak English?"", ""spreek Nederlands""), switch IMMEDIATELY.
+Do NOT ask for confirmation before switching — just switch.
+Do NOT revert to the previous language unless they ask.
+
+This applies at ALL times during the call — greeting, booking flow, disambiguation, fare readback, closing script.
+The closing script MUST also be spoken in the caller's current language.
 
 Supported languages:
 English, Dutch, French, German, Spanish, Italian, Polish, Portuguese.

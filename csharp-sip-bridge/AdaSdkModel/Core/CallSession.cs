@@ -135,6 +135,8 @@ public sealed class CallSession : ICallSession
             "sync_booking_data" => HandleSyncBookingData(args),
             "clarify_address" => HandleClarifyAddress(args),
             "book_taxi" => await HandleBookTaxiAsync(args),
+            "create_booking" => await HandleCreateBookingAsync(args),
+            "find_local_events" => HandleFindLocalEvents(args),
             "end_call" => HandleEndCall(args),
             _ => new { error = $"Unknown tool: {name}" }
         };
@@ -882,6 +884,153 @@ public sealed class CallSession : ICallSession
         }
 
         return new { error = "Invalid action" };
+    }
+
+    // =========================
+    // CREATE BOOKING (straight-through, with AI extraction)
+    // =========================
+    private async Task<object> HandleCreateBookingAsync(Dictionary<string, object?> args)
+    {
+        if (args.TryGetValue("pickup_address", out var pu)) _booking.Pickup = pu?.ToString();
+        if (args.TryGetValue("dropoff_address", out var dd)) _booking.Destination = dd?.ToString();
+        if (args.TryGetValue("passenger_count", out var pc) && int.TryParse(pc?.ToString(), out var pn))
+            _booking.Passengers = pn;
+
+        if (string.IsNullOrWhiteSpace(_booking.Pickup))
+            return new { success = false, error = "Missing pickup address" };
+
+        _logger.LogInformation("[{SessionId}] 🚕 create_booking: {Pickup} → {Dest}, {Pax} pax",
+            SessionId, _booking.Pickup, _booking.Destination ?? "TBD", _booking.Passengers ?? 1);
+
+        try
+        {
+            var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
+                _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId);
+            var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+
+            FareResult result;
+            if (completed == aiTask)
+            {
+                result = await aiTask;
+
+                if (result.NeedsClarification)
+                {
+                    var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
+                    var destAlts = result.DestAlternatives ?? Array.Empty<string>();
+                    var allAlts = pickupAlts.Concat(destAlts).ToArray();
+                    var numberedAlts = allAlts.Select((alt, i) => $"{i + 1}. {alt}").ToArray();
+
+                    return new
+                    {
+                        success = false,
+                        needs_clarification = true,
+                        pickup_options = pickupAlts,
+                        destination_options = destAlts,
+                        alternatives_list = numberedAlts,
+                        message = $"I found multiple matches. Please ask the caller which one they mean:\n{string.Join("\n", numberedAlts)}"
+                    };
+                }
+            }
+            else
+            {
+                _logger.LogWarning("[{SessionId}] ⏱️ AI extraction timeout, using fallback", SessionId);
+                result = await _fareCalculator.CalculateAsync(
+                    _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId);
+            }
+
+            ApplyFareResult(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Fare error, using fallback", SessionId);
+            _booking.Fare = "£12.50";
+            _booking.Eta = "6 minutes";
+        }
+
+        _booking.Confirmed = true;
+        _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+        OnBookingUpdated?.Invoke(_booking.Clone());
+        _logger.LogInformation("[{SessionId}] ✅ Booked: {Ref}, Fare: {Fare}, ETA: {Eta}",
+            SessionId, _booking.BookingRef, _booking.Fare, _booking.Eta);
+
+        var bookingSnapshot = _booking.Clone();
+        var callerId = CallerId;
+
+        _ = Task.Run(async () =>
+        {
+            await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
+            await _dispatcher.SendWhatsAppAsync(callerId);
+
+            if (_icabbiEnabled && _icabbi != null)
+            {
+                try
+                {
+                    var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
+                    if (icabbiResult.Success)
+                        _logger.LogInformation("[{SessionId}] 🚕 iCabbi OK — Journey: {JourneyId}", SessionId, icabbiResult.JourneyId);
+                    else
+                        _logger.LogWarning("[{SessionId}] ⚠ iCabbi failed: {Message}", SessionId, icabbiResult.Message);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[{SessionId}] ❌ iCabbi dispatch error", SessionId);
+                }
+            }
+        });
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(15000);
+            if (!IsActive) return;
+            if (_aiClient is OpenAiSdkClient sdk)
+            {
+                if (!sdk.IsConnected) return;
+                sdk.CancelDeferredResponse();
+                _logger.LogInformation("[{SessionId}] ⏰ Post-booking timeout - requesting farewell", SessionId);
+            }
+        });
+
+        var fareSpoken = FormatFareForSpeech(_booking.Fare);
+
+        return new
+        {
+            success = true,
+            booking_ref = _booking.BookingRef,
+            fare = _booking.Fare,
+            fare_spoken = fareSpoken,
+            eta = _booking.Eta,
+            message = string.IsNullOrWhiteSpace(_booking.Name)
+                ? $"Your taxi is booked! Fare is {fareSpoken}, driver arrives in {_booking.Eta}."
+                : $"Thanks {_booking.Name.Trim()}, your taxi is booked! Fare is {fareSpoken}, driver arrives in {_booking.Eta}."
+        };
+    }
+
+    // =========================
+    // FIND LOCAL EVENTS
+    // =========================
+    private object HandleFindLocalEvents(Dictionary<string, object?> args)
+    {
+        var category = args.TryGetValue("category", out var cat) ? cat?.ToString() ?? "all" : "all";
+        var near = args.TryGetValue("near", out var n) ? n?.ToString() : null;
+        var date = args.TryGetValue("date", out var dt) ? dt?.ToString() ?? "this weekend" : "this weekend";
+
+        _logger.LogInformation("[{SessionId}] 🎭 Events lookup: {Category} near {Near} on {Date}",
+            SessionId, category, near ?? "unknown", date);
+
+        var mockEvents = new[]
+        {
+            new { name = "Live Music at The Empire", venue = near ?? "city centre", date = "Tonight, 8pm", type = "concert" },
+            new { name = "Comedy Night at The Kasbah", venue = near ?? "city centre", date = "Saturday, 9pm", type = "comedy" },
+            new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
+        };
+
+        return new
+        {
+            success = true,
+            events = mockEvents,
+            message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+        };
     }
 
     // =========================
