@@ -75,6 +75,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private string? _lastAdaTranscript;
     private bool _awaitingConfirmation;
 
+    // Transcript comparison: stash Whisper STT for mismatch detection
+    private string? _lastUserTranscript;
+
+    /// <summary>Last Whisper STT transcript for mismatch comparison in tool calls.</summary>
+    public string? LastUserTranscript => _lastUserTranscript;
+
     // Caller state
     private string _callerId = "";
 
@@ -176,6 +182,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         _activeResponseId = null;
         _lastAdaTranscript = null;
+        _lastUserTranscript = null;
         _awaitingConfirmation = false;
 
         Volatile.Write(ref _lastAdaFinishedAt, 0);
@@ -458,6 +465,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             case ConversationInputTranscriptionFinishedUpdate userTranscript:
                 Interlocked.Exchange(ref _noReplyCount, 0);
                 var transcript = userTranscript.Transcript;
+                _lastUserTranscript = transcript; // Stash for mismatch comparison
                 OnTranscript?.Invoke("User", transcript);
 
                 // TRANSCRIPT GROUNDING: inject the exact STT words back into

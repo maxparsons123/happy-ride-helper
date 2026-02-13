@@ -166,6 +166,39 @@ public sealed class CallSession : ICallSession
                 _logger.LogWarning("[{SessionId}] ⛔ Rejected placeholder name: '{Name}'", SessionId, nameVal);
         }
 
+        // ── TRANSCRIPT MISMATCH DETECTION ──
+        // Compare Ada's interpreted values (tool args) with the raw Whisper STT transcript.
+        // If they differ significantly, flag for clarification.
+        string? mismatchWarning = null;
+        if (_aiClient is OpenAiSdkClient sdkTranscript && !string.IsNullOrWhiteSpace(sdkTranscript.LastUserTranscript))
+        {
+            var sttText = sdkTranscript.LastUserTranscript;
+            
+            // Check pickup mismatch
+            if (args.TryGetValue("pickup", out var pickupArg) && !string.IsNullOrWhiteSpace(pickupArg?.ToString()))
+            {
+                var pickupVal = pickupArg.ToString()!;
+                if (IsSignificantlyDifferent(pickupVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Pickup) 
+                    && IsSignificantlyDifferent(pickupVal, _booking.Pickup))
+                {
+                    _logger.LogWarning("[{SessionId}] ⚠️ PICKUP MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, pickupVal);
+                    mismatchWarning = $"PICKUP address mismatch detected: the system transcribed '{sttText}' but you interpreted it as '{pickupVal}'. Ask the caller to confirm: did they say '{pickupVal}'?";
+                }
+            }
+            
+            // Check destination mismatch
+            if (args.TryGetValue("destination", out var destArg) && !string.IsNullOrWhiteSpace(destArg?.ToString()))
+            {
+                var destVal = destArg.ToString()!;
+                if (IsSignificantlyDifferent(destVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Destination)
+                    && IsSignificantlyDifferent(destVal, _booking.Destination))
+                {
+                    _logger.LogWarning("[{SessionId}] ⚠️ DEST MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, destVal);
+                    mismatchWarning = $"DESTINATION address mismatch detected: the system transcribed '{sttText}' but you interpreted it as '{destVal}'. Ask the caller to confirm: did they say '{destVal}'?";
+                }
+            }
+        }
+
         if (args.TryGetValue("pickup", out var p))
         {
             var incoming = p?.ToString();
@@ -198,6 +231,10 @@ public sealed class CallSession : ICallSession
             SessionId, _booking.Name ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?", _booking.Passengers);
 
         OnBookingUpdated?.Invoke(_booking.Clone());
+
+        // If transcript mismatch was detected, return warning to Ada
+        if (mismatchWarning != null)
+            return new { success = true, warning = mismatchWarning };
 
         // If name is still missing, tell Ada to ask for it
         if (string.IsNullOrWhiteSpace(_booking.Name))
@@ -797,6 +834,22 @@ public sealed class CallSession : ICallSession
     // =========================
     private object HandleEndCall(Dictionary<string, object?> args)
     {
+        // ── END-CALL GUARD: Block premature hangup if booking flow was started but never completed ──
+        bool fareWasCalculated = !string.IsNullOrWhiteSpace(_booking.Fare);
+        bool bookingCompleted = Volatile.Read(ref _bookTaxiCompleted) == 1;
+
+        if (fareWasCalculated && !bookingCompleted)
+        {
+            _logger.LogWarning("[{SessionId}] ⛔ END_CALL BLOCKED: fare was quoted but book_taxi(confirmed) never called", SessionId);
+            return new
+            {
+                success = false,
+                error = "Cannot end call yet — a fare was quoted but the booking was never confirmed. " +
+                        "You MUST read back the fare and ask the caller to confirm before ending. " +
+                        "If they already said yes, call book_taxi(action: 'confirmed') first."
+            };
+        }
+
         _ = Task.Run(async () =>
         {
             if (_aiClient is OpenAiSdkClient sdk)
@@ -956,6 +1009,39 @@ public sealed class CallSession : ICallSession
         string Normalize(string s) =>
             System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"\d|[^a-z ]", "").Trim();
         return Normalize(oldAddress) != Normalize(newAddress);
+    }
+
+    /// <summary>
+    /// Compares two strings for significant differences using word-level similarity.
+    /// Returns true if the strings differ enough to warrant clarification.
+    /// Used for transcript mismatch detection (Whisper STT vs Ada's interpretation).
+    /// </summary>
+    private static bool IsSignificantlyDifferent(string adaValue, string sttText)
+    {
+        if (string.IsNullOrWhiteSpace(adaValue) || string.IsNullOrWhiteSpace(sttText))
+            return false;
+
+        // Extract the street-name portion (remove numbers, punctuation)
+        static string NormalizeForComparison(string s) =>
+            System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"[^a-z ]", " ").Trim();
+
+        var adaNorm = NormalizeForComparison(adaValue);
+        var sttNorm = NormalizeForComparison(sttText);
+
+        // If Ada's value is fully contained in the STT, no mismatch
+        if (sttNorm.Contains(adaNorm) || adaNorm.Contains(sttNorm))
+            return false;
+
+        // Word-level check: if Ada's street words appear in STT, it's fine
+        var adaWords = adaNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length > 2).ToArray(); // Skip tiny words like "a", "to"
+        var sttWords = new HashSet<string>(sttNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+        if (adaWords.Length == 0) return false;
+
+        // If fewer than half of Ada's significant words appear in STT, flag it
+        var matchCount = adaWords.Count(w => sttWords.Contains(w));
+        return matchCount < adaWords.Length / 2.0;
     }
 
     public async ValueTask DisposeAsync()
