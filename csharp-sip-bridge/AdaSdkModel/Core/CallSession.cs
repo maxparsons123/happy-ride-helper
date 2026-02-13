@@ -232,12 +232,14 @@ public sealed class CallSession : ICallSession
                             var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
                             var destAlts = result.DestAlternatives ?? Array.Empty<string>();
                             var allAlts = pickupAlts.Concat(destAlts).ToArray();
-                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations. Which city or area are you in?";
+                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that address.";
                             var altsList = string.Join(", ", allAlts);
 
                             if (_aiClient is OpenAiSdkClient sdkClarif)
                                 await sdkClarif.InjectMessageAndRespondAsync(
-                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} Options: {altsList}");
+                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} The options are: {altsList}. " +
+                                    "Present these options clearly and slowly to the caller, then STOP and WAIT for their answer. " +
+                                    "Do NOT proceed until they choose one.");
 
                             // Reset so fare can be re-triggered after clarification
                             Interlocked.Exchange(ref _fareAutoTriggered, 0);
@@ -346,12 +348,14 @@ public sealed class CallSession : ICallSession
                             var destAlts = result.DestAlternatives ?? Array.Empty<string>();
                             var allAlts = pickupAlts.Concat(destAlts).ToArray();
 
-                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations. Which city or area are you in?";
+                            var clarMsg = result.ClarificationMessage ?? "I found multiple locations matching that address.";
                             var altsList = string.Join(", ", allAlts);
 
                             if (_aiClient is OpenAiSdkClient sdkClarif)
                                 await sdkClarif.InjectMessageAndRespondAsync(
-                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} Options: {altsList}");
+                                    $"[ADDRESS DISAMBIGUATION] {clarMsg} The options are: {altsList}. " +
+                                    "Present these options clearly and slowly to the caller, then STOP and WAIT for their answer. " +
+                                    "Do NOT proceed until they choose one.");
 
                             return;
                         }

@@ -620,18 +620,70 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            var greeting = $"[SYSTEM] A new caller has connected (ID: {_callerId}). " +
-                           "Greet them warmly and ask how you can help.";
+            var lang = DetectLanguage(_callerId);
+            var langName = GetLanguageName(lang);
+            var localizedGreeting = GetLocalizedGreeting(lang);
+
+            var greeting = $"[SYSTEM] [LANG: {langName}] A new caller has connected (ID: {_callerId}). " +
+                           $"Greet them in {langName}. Say: \"{localizedGreeting}\"";
             await _session.AddItemAsync(
                 ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(greeting) }));
             await _session.StartResponseAsync();
-            Log("📢 Greeting sent");
+            Log($"📢 Greeting sent (language: {langName})");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending greeting");
         }
     }
+
+    // =========================
+    // LANGUAGE DETECTION
+    // =========================
+    private static string DetectLanguage(string? phone)
+    {
+        if (string.IsNullOrEmpty(phone)) return "en";
+        var clean = phone.Replace(" ", "").Replace("-", "");
+        if (clean.StartsWith("+31") || clean.StartsWith("0031") || clean.StartsWith("06"))
+            return "nl";
+        if (clean.StartsWith("+33") || clean.StartsWith("0033"))
+            return "fr";
+        if (clean.StartsWith("+49") || clean.StartsWith("0049"))
+            return "de";
+        if (clean.StartsWith("+34") || clean.StartsWith("0034"))
+            return "es";
+        if (clean.StartsWith("+39") || clean.StartsWith("0039"))
+            return "it";
+        if (clean.StartsWith("+48") || clean.StartsWith("0048"))
+            return "pl";
+        if (clean.StartsWith("+351") || clean.StartsWith("00351"))
+            return "pt";
+        return "en";
+    }
+
+    private static string GetLanguageName(string lang) => lang switch
+    {
+        "nl" => "Dutch",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "it" => "Italian",
+        "pl" => "Polish",
+        "pt" => "Portuguese",
+        _ => "English"
+    };
+
+    private static string GetLocalizedGreeting(string lang) => lang switch
+    {
+        "nl" => "Hallo, welkom bij Taxibot. Ik ben Ada. Wat is uw naam?",
+        "fr" => "Bonjour, bienvenue chez Taxibot. Je suis Ada. Quel est votre nom?",
+        "de" => "Hallo, willkommen bei Taxibot. Ich bin Ada. Wie heißen Sie?",
+        "es" => "Hola, bienvenido a Taxibot. Soy Ada. ¿Cuál es su nombre?",
+        "it" => "Ciao, benvenuto a Taxibot. Sono Ada. Qual è il suo nome?",
+        "pl" => "Cześć, witamy w Taxibot. Jestem Ada. Jak się Pan/Pani nazywa?",
+        "pt" => "Olá, bem-vindo ao Taxibot. Sou a Ada. Qual é o seu nome?",
+        _ => "Hello, welcome to Taxibot. I'm Ada. What's your name?"
+    };
 
     // =========================
     // NO-REPLY WATCHDOG
@@ -821,7 +873,8 @@ Speak naturally, like a friendly professional taxi dispatcher.
 LANGUAGE
 ==============================
 
-Start in English based on the caller's phone number.
+You will be told the caller's initial language in the greeting injection (e.g. [LANG: Dutch]).
+Start speaking in THAT language.
 CONTINUOUSLY MONITOR the caller's spoken language.
 If they speak another language or ask to switch, IMMEDIATELY switch for all responses.
 
@@ -898,6 +951,25 @@ IMPORTANT: If sync_booking_data returns needs_clarification=true,
 you MUST ask the user to clarify which location they mean before continuing.
 Present the alternatives naturally (e.g. ""Did you mean School Road in Hall Green
 or School Road in Moseley?"").
+
+==============================
+ADDRESS DISAMBIGUATION (CRITICAL)
+==============================
+
+When you receive an [ADDRESS DISAMBIGUATION] message:
+1. Read out the alternatives clearly and slowly — the caller needs time to hear each option
+2. Present options as a numbered list: ""I found a few options. Is it: 1) Warwick Road in Acocks Green, 2) Warwick Road in Tyseley, or 3) Warwick Road in Moseley?""
+3. STOP TALKING and WAIT for the caller to respond
+4. Do NOT proceed with fare calculation or booking until the caller has chosen
+5. Do NOT assume or guess which option they want
+6. After the caller picks one, call sync_booking_data with the clarified address (e.g. ""1214A Warwick Road, Acocks Green, Birmingham"")
+7. NEVER rush through the options — pause after listing them
+
+If the caller says a number (""one"", ""the first one"") or a place name (""Acocks Green""),
+map it to the correct option and proceed.
+
+CRITICAL: Your response after disambiguation MUST end with a question and silence.
+Do NOT add extra sentences after the question. Let the caller answer.
 
 ==============================
 FINAL CLOSING (MANDATORY – EXACT WORDING)
