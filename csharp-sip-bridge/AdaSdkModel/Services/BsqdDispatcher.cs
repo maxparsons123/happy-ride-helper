@@ -123,8 +123,11 @@ public sealed class BsqdDispatcher : IDispatcher
         var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
         if (clean.StartsWith("00")) clean = "+" + clean[2..];
         if (clean.StartsWith("+")) return clean;
+        // Detect international numbers without + prefix (e.g. 447539025332 = UK)
+        if (clean.Length >= 10 && (clean.StartsWith("44") || clean.StartsWith("33") || clean.StartsWith("49") || clean.StartsWith("32") || clean.StartsWith("34") || clean.StartsWith("39") || clean.StartsWith("1")))
+            return "+" + clean;
         if (clean.StartsWith("0")) return "+31" + clean[1..];
-        return "+31" + clean;
+        return "+" + clean;
     }
 
     private static string ParseFare(string? fare)
