@@ -82,9 +82,8 @@ partial class MainForm
             BackColor = bgDark,
             BorderStyle = BorderStyle.None,
             FixedPanel = FixedPanel.Panel2,
-            Panel1MinSize = 400,
-            Panel2MinSize = 340,
-            SplitterDistance = 900
+            Panel1MinSize = 100,
+            Panel2MinSize = 100
         };
 
         // ══════════════════════════════════════════════════
@@ -114,7 +113,8 @@ partial class MainForm
             BackColor = bgDark,
             BorderStyle = BorderStyle.None,
             FixedPanel = FixedPanel.Panel2,
-            Panel2MinSize = 200
+            Panel1MinSize = 100,
+            Panel2MinSize = 100
         };
 
         // ┌─────────────────────────────────────────┐
