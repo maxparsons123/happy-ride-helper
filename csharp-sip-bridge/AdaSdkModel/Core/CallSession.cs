@@ -133,6 +133,7 @@ public sealed class CallSession : ICallSession
         return name switch
         {
             "sync_booking_data" => HandleSyncBookingData(args),
+            "clarify_address" => HandleClarifyAddress(args),
             "book_taxi" => await HandleBookTaxiAsync(args),
             "end_call" => HandleEndCall(args),
             _ => new { error = $"Unknown tool: {name}" }
@@ -365,8 +366,92 @@ public sealed class CallSession : ICallSession
     }
 
     // =========================
-    // BOOK TAXI
+    // CLARIFY ADDRESS
     // =========================
+    private object HandleClarifyAddress(Dictionary<string, object?> args)
+    {
+        var target = args.TryGetValue("target", out var t) ? t?.ToString() : null;
+        var selected = args.TryGetValue("selected", out var s) ? s?.ToString() : null;
+
+        if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(selected))
+            return new { success = false, error = "Missing target or selected address" };
+
+        if (target == "pickup")
+        {
+            _booking.Pickup = selected;
+            _booking.PickupLat = _booking.PickupLon = null;
+            _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+            _pickupDisambiguated = true;
+            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+            
+            _logger.LogInformation("[{SessionId}] ✅ Pickup clarified: {Pickup}", SessionId, selected);
+
+            // If we have pending dest alternatives, show those next
+            if (_pendingDestAlternatives != null && _pendingDestAlternatives.Length > 0)
+            {
+                var altsList = string.Join(", ", _pendingDestAlternatives);
+                _ = _aiClient.InjectMessageAndRespondAsync(
+                    $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
+                    "Ask the caller ONLY about the DESTINATION location. " +
+                    "Present the destination options clearly, then STOP and WAIT for their answer.");
+                _pendingDestAlternatives = null;
+                _pendingDestClarificationMessage = null;
+            }
+            else
+            {
+                // Re-trigger fare calculation now that pickup is clarified
+                _ = TriggerFareCalculationAsync();
+            }
+        }
+        else if (target == "destination")
+        {
+            _booking.Destination = selected;
+            _booking.DestLat = _booking.DestLon = null;
+            _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+            _destDisambiguated = true;
+            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+
+            _logger.LogInformation("[{SessionId}] ✅ Destination clarified: {Destination}", SessionId, selected);
+
+            // Re-trigger fare calculation now that destination is clarified
+            _ = TriggerFareCalculationAsync();
+        }
+
+        OnBookingUpdated?.Invoke(_booking.Clone());
+        return new { success = true, message = "Address clarified. Proceeding with booking flow." };
+    }
+
+    private async Task TriggerFareCalculationAsync()
+    {
+        if (_booking.Pickup == null || _booking.Destination == null)
+            return;
+
+        var pickup = _booking.Pickup;
+        var destination = _booking.Destination;
+        var callerId = CallerId;
+        var sessionId = SessionId;
+
+        try
+        {
+            _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after clarification", sessionId);
+            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+            
+            _booking.Fare = result.Fare;
+            _booking.Eta = result.Eta;
+            OnBookingUpdated?.Invoke(_booking.Clone());
+
+            if (_aiClient is OpenAiSdkClient sdk)
+                await sdk.InjectMessageAndRespondAsync(
+                    $"[FARE RESULT] Your pickup is {result.PickupFormatted ?? pickup} going to {result.DestFormatted ?? destination}. " +
+                    $"The fare is {result.Fare} with an estimated arrival in {result.Eta}. " +
+                    "Read back these details and ask the caller to confirm.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Fare re-calculation failed", sessionId);
+        }
+    }
+
     private async Task<object> HandleBookTaxiAsync(Dictionary<string, object?> args)
     {
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;

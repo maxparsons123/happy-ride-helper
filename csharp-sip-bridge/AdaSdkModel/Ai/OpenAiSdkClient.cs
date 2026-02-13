@@ -223,6 +223,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             };
 
             options.Tools.Add(BuildSyncBookingDataTool());
+            options.Tools.Add(BuildClarifyAddressTool());
             options.Tools.Add(BuildBookTaxiTool());
             options.Tools.Add(BuildEndCallTool());
 
@@ -824,6 +825,22 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
+    private static ConversationFunctionTool BuildClarifyAddressTool() => new("clarify_address")
+    {
+        Description = "User has selected a clarified address from disambiguation alternatives. " +
+                      "Call this after the user chooses one of the presented options.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                target = new { type = "string", @enum = new[] { "pickup", "destination" }, description = "Which location is being clarified" },
+                selected = new { type = "string", description = "The address the user selected (must match one of the presented alternatives)" }
+            },
+            required = new[] { "target", "selected" }
+        }))
+    };
+
     private static ConversationFunctionTool BuildEndCallTool() => new("end_call")
     {
         Description = "End the call after speaking the closing script. " +
@@ -947,36 +964,30 @@ If you call book_taxi before the user confirms, the booking is INVALID and harmf
 If the user says NO to ""anything else"":
 You MUST perform the FINAL CLOSING and then call end_call.
 
-IMPORTANT: If sync_booking_data returns needs_clarification=true,
-you MUST ask the user to clarify which location they mean before continuing.
-Present the alternatives naturally (e.g. ""Did you mean School Road in Hall Green
-or School Road in Moseley?"").
+IMPORTANT: When address ambiguity is detected, the system will INJECT a disambiguation message.
 
-==============================
-ADDRESS DISAMBIGUATION (CRITICAL)
-==============================
+⚠️ NEW: Use clarify_address tool for disambiguation ⚠️
 
-The system resolves ambiguous addresses ONE AT A TIME — pickup first, then destination.
+When the user chooses a clarified address (after you present alternatives):
+Call clarify_address(target="pickup"|"destination", selected="[address they chose]")
 
-When you receive a [PICKUP DISAMBIGUATION] message:
-1. CANCEL any interjection you were about to say (e.g., ""Let me check those addresses..."")
-2. Ask ONLY about the PICKUP location — do NOT mention the destination at all
-3. Present the pickup options clearly: ""I found a few pickup options. Is it: 1) School Road in Hall Green, or 2) School Road in Moseley?""
-4. STOP TALKING and WAIT for the caller to respond
-5. After they choose, call sync_booking_data with the clarified pickup address
+This replaces the manual sync_booking_data approach for disambiguation.
+The bridge will automatically re-trigger fare calculation after clarification.
 
-When you receive a [DESTINATION DISAMBIGUATION] message:
-1. Ask ONLY about the DESTINATION location
-2. Present the destination options clearly
-3. STOP TALKING and WAIT for the caller to respond
-4. After they choose, call sync_booking_data with the clarified destination address
+Example flow:
+1. System detects ambiguous "Warwick Road"
+2. You ask: ""Which Warwick Road: Acocks Green or Kings Heath?""
+3. User: ""Acocks Green""
+4. You call: clarify_address(target="destination", selected="Warwick Road, Acocks Green")
+5. System re-calculates fare and injects result
+6. You receive [FARE RESULT] and proceed normally
 
 RULES FOR ALL DISAMBIGUATION:
 - Do NOT mention both pickup and destination ambiguity at the same time
 - Do NOT assume or guess which option they want
 - NEVER rush through the options — pause after listing them
-- Do NOT repeat the same clarification question multiple times (this creates a loop)
-- After the caller picks one, call sync_booking_data with the clarified address (include area, e.g. ""1214A Warwick Road, Acocks Green, Birmingham"")
+- Call clarify_address IMMEDIATELY after user selects (do NOT call sync_booking_data for disambiguation)
+- After clarify_address, the system will inject the next step automatically
 
 If the caller says a number (""one"", ""the first one"") or a place name (""Acocks Green""),
 map it to the correct option and proceed.
