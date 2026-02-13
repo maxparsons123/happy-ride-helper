@@ -855,7 +855,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 pickup = new { type = "string", description = "Pickup address (verbatim from caller)" },
                 destination = new { type = "string", description = "Destination address (verbatim from caller)" },
                 passengers = new { type = "integer", description = "Number of passengers" },
-                pickup_time = new { type = "string", description = "Requested pickup time" }
+                pickup_time = new { type = "string", description = "Requested pickup time" },
+                vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers (1-4=Saloon, 5-6=Estate, 7+=Minibus). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." }
             }
         }))
     };

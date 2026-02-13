@@ -187,13 +187,20 @@ public sealed class CallSession : ICallSession
         }
         
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
+        {
             _booking.Passengers = pn;
+            // Auto-recommend vehicle type based on passenger count (unless explicitly set)
+            if (!args.ContainsKey("vehicle_type"))
+                _booking.VehicleType = BookingState.RecommendVehicle(pn);
+        }
         if (args.TryGetValue("pickup_time", out var pt))
             _booking.PickupTime = pt?.ToString();
+        if (args.TryGetValue("vehicle_type", out var vt) && !string.IsNullOrWhiteSpace(vt?.ToString()))
+            _booking.VehicleType = vt.ToString()!;
         
-        _logger.LogInformation("[{SessionId}] ⚡ Sync: Name={Name}, Pickup={Pickup}, Dest={Dest}, Pax={Pax}, Time={Time}",
+        _logger.LogInformation("[{SessionId}] ⚡ Sync: Name={Name}, Pickup={Pickup}, Dest={Dest}, Pax={Pax}, Time={Time}, Vehicle={Vehicle}",
             SessionId, _booking.Name ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?",
-            _booking.Passengers, _booking.PickupTime ?? "?");
+            _booking.Passengers, _booking.PickupTime ?? "?", _booking.VehicleType);
         
         OnBookingUpdated?.Invoke(_booking.Clone());
         return new { success = true };
