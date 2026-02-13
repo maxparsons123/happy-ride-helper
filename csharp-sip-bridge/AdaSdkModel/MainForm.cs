@@ -135,6 +135,17 @@ public partial class MainForm : Form
     {
         var idx = cmbSipAccount.SelectedIndex;
         if (idx < 0 || idx >= _settings.SipAccounts.Count) return;
+
+        // Sync the PREVIOUS account's UI edits before switching away
+        var prevIdx = _settings.SelectedSipAccountIndex;
+        if (prevIdx >= 0 && prevIdx < _settings.SipAccounts.Count && prevIdx != idx)
+        {
+            ReadSipFromUi();
+            var prevLabel = _settings.SipAccounts[prevIdx].Label;
+            _settings.SipAccounts[prevIdx].FromSipSettings(_settings.Sip, prevLabel);
+        }
+
+        // Now load the newly selected account
         var acct = _settings.SipAccounts[idx];
         _settings.Sip = acct.ToSipSettings();
         _settings.SelectedSipAccountIndex = idx;
