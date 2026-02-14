@@ -87,6 +87,18 @@ public sealed class SipServer : IAsyncDisposable
             }, TaskScheduler.Default);
         };
 
+        if (_settings.IsGammaTrunk)
+        {
+            // Gamma TCP trunk: no registration, just listen for inbound INVITEs
+            _isRunning = true;
+            IsRegistered = true;
+            Log("🟢 Gamma TCP trunk mode — listening for inbound INVITEs (no registration)");
+            Log($"➡ DDI: {_settings.EffectiveDdi}");
+            Log($"➡ Gamma SBC: {_settings.Server}:{_settings.Port}");
+            OnRegistered?.Invoke($"Gamma TCP: {_settings.EffectiveDdi}@{_settings.Server}");
+            return;
+        }
+
         InitializeRegistration();
 
         if (_regAgent == null)
@@ -137,11 +149,11 @@ public sealed class SipServer : IAsyncDisposable
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
         var transportType = _settings.Transport.ToUpperInvariant();
-        if (transportType == "TCP")
+        if (transportType == "TCP_GAMMA" || transportType == "TCP")
         {
-            var tcpChannel = new SIPTCPChannel(new IPEndPoint(_localIp!, 0));
+            var tcpChannel = new SIPTCPChannel(new IPEndPoint(_localIp!, transportType == "TCP_GAMMA" ? 5060 : 0));
             _transport.AddSIPChannel(tcpChannel);
-            Log($"📡 TCP channel on port {(tcpChannel.ListeningEndPoint as IPEndPoint)?.Port}");
+            Log($"📡 TCP channel on port {(tcpChannel.ListeningEndPoint as IPEndPoint)?.Port ?? 5060}");
         }
         else
         {
@@ -151,18 +163,15 @@ public sealed class SipServer : IAsyncDisposable
 
     private void InitializeRegistration()
     {
-        var serverAddr = _settings.Server.Trim();
-        var registrarHostWithPort = _settings.Port == 5060
-            ? serverAddr
-            : $"{serverAddr}:{_settings.Port}";
-
+        var authUser = _settings.EffectiveAuthUser;
+        string serverAddr = _settings.Server.Trim();
         bool isHostname = !IPAddress.TryParse(serverAddr, out _);
 
         if (isHostname)
         {
-            // Resolve hostname to IP for outbound proxy routing,
-            // but keep hostname in SIP headers for domain matching.
-            Log($"🔍 Resolving hostname '{serverAddr}'…");
+            // Hostname-based registration: preserve hostname in SIP headers,
+            // resolve IP only for outbound proxy routing.
+            Log($"🔍 Resolving hostname '{serverAddr}' to IP for routing…");
             IPAddress? resolvedIp;
             try
             {
@@ -181,6 +190,12 @@ public sealed class SipServer : IAsyncDisposable
                 return;
             }
 
+            // IMPORTANT: Use HOSTNAME in SIP headers (AOR, registrar) for correct domain matching.
+            // Use resolved IP only for the outbound proxy (transport routing).
+            var registrarHostWithPort = _settings.Port == 5060
+                ? serverAddr
+                : $"{serverAddr}:{_settings.Port}";
+
             var protocol = _settings.Transport.ToUpperInvariant() switch
             {
                 "TCP" => SIPProtocolsEnum.tcp,
@@ -195,7 +210,7 @@ public sealed class SipServer : IAsyncDisposable
                 sipTransport: _transport,
                 outboundProxy: outboundProxy,
                 sipAccountAOR: sipAccountAor,
-                authUsername: _settings.Username,
+                authUsername: authUser,
                 password: _settings.Password,
                 realm: null,
                 registrarHost: registrarHostWithPort,
@@ -203,15 +218,18 @@ public sealed class SipServer : IAsyncDisposable
                 expiry: 120,
                 customHeaders: null);
 
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (routed via {resolvedIp})");
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser}, routed via {resolvedIp})");
         }
         else
         {
-            // Direct IP registration
+            // IP-based registration: simple path for legacy PBXes
+            var registrarHostWithPort = _settings.Port == 5060
+                ? serverAddr
+                : $"{serverAddr}:{_settings.Port}";
+
             _regAgent = new SIPRegistrationUserAgent(
                 _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort}");
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
         }
 
         WireRegistrationEvents();
@@ -312,8 +330,24 @@ public sealed class SipServer : IAsyncDisposable
         if (_transport == null) throw new InvalidOperationException("SIP transport not started");
 
         var serverAddr = _settings.Server.Trim();
+        if (!IPAddress.TryParse(serverAddr, out _))
+        {
+            var resolved = Dns.GetHostAddresses(serverAddr)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+            if (resolved != null) serverAddr = resolved.ToString();
+        }
         var portPart = _settings.Port == 5060 ? "" : $":{_settings.Port}";
-        var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}");
+        var transportParam = _settings.IsGammaTrunk ? ";transport=tcp" : "";
+        var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}{transportParam}");
+
+        // Gamma trunk: add P-Asserted-Identity header
+        string[]? customHeaders = null;
+        if (_settings.IsGammaTrunk)
+        {
+            var ddi = _settings.EffectiveDdi;
+            customHeaders = new[] { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
+            Log($"📡 Gamma outbound: DDI={ddi}, dest={destination}");
+        }
 
         var callAgent = new SIPUserAgent(_transport, null);
         var audioEncoder = new AudioEncoder();
@@ -328,8 +362,9 @@ public sealed class SipServer : IAsyncDisposable
 
         var sessionId = $"out-{Guid.NewGuid().ToString("N")[..8]}";
 
-        Log($"📞 Dialling {destination} via {serverAddr}{portPart}…");
-        var result = await callAgent.Call(destUri.ToString(), null, null, rtpSession);
+        Log($"📞 Dialling {destination} via {serverAddr}{portPart}{transportParam}…");
+        var fromHeader = _settings.IsGammaTrunk ? $"<sip:{_settings.EffectiveDdi}@{serverAddr}>" : null;
+        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession);
         if (!result)
         {
             Log($"❌ Outbound call to {destination} failed.");
