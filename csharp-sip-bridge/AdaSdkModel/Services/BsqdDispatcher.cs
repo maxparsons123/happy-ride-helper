@@ -17,8 +17,15 @@ public sealed class BsqdDispatcher : IDispatcher
     private readonly ILogger<BsqdDispatcher> _logger;
     private readonly DispatchSettings _settings;
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _geocodeClient;
     private IMqttClient? _mqttClient;
     private readonly SemaphoreSlim _mqttLock = new(1, 1);
+
+    // UK bounding box validation
+    private const double MIN_LAT = 49.5;
+    private const double MAX_LAT = 61.0;
+    private const double MIN_LNG = -8.5;
+    private const double MAX_LNG = 2.0;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
@@ -28,6 +35,8 @@ public sealed class BsqdDispatcher : IDispatcher
         _logger = logger;
         _settings = settings;
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        _geocodeClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        _geocodeClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkDispatch/1.0 (maxparsons123@gmail.com)");
     }
 
     public async Task<bool> DispatchAsync(BookingState booking, string phoneNumber)
@@ -86,37 +95,148 @@ public sealed class BsqdDispatcher : IDispatcher
             }
             finally { _mqttLock.Release(); }
 
-            // Normalize coordinates with fallback to Coventry city center
-            var pickupLat = booking.PickupLat ?? 52.4062;
-            var pickupLng = booking.PickupLon ?? -1.5045;
-            var destLat = booking.DestLat ?? pickupLat;
-            var destLng = booking.DestLon ?? pickupLng;
+            var jobId = booking.BookingRef ?? "UNKNOWN_JOB";
+            var pickupAddress = booking.PickupFormatted ?? booking.Pickup ?? "Unknown Location";
+            var dropoffAddress = booking.DestFormatted ?? booking.Destination ?? "Not specified";
 
-            _logger.LogInformation("MQTT payload coords: PickupLat={PLat}, PickupLon={PLon}, DestLat={DLat}, DestLon={DLon}, Formatted={PF}, DestFmt={DF}",
-                pickupLat, pickupLng, destLat, destLng, booking.PickupFormatted, booking.DestFormatted);
+            // Validate and fix pickup coordinates
+            var pickupLat = booking.PickupLat ?? 0;
+            var pickupLng = booking.PickupLon ?? 0;
+            if (!IsValidCoordinate(pickupLat, pickupLng))
+            {
+                _logger.LogWarning("Invalid pickup coordinates ({PLat}, {PLng}) for job {JobId}. Attempting geocoding...", pickupLat, pickupLng, jobId);
+                var pickupCoords = await GeocodeAddressAsync(pickupAddress, "pickup");
+                if (pickupCoords != null)
+                {
+                    pickupLat = pickupCoords.Value.Lat;
+                    pickupLng = pickupCoords.Value.Lng;
+                    _logger.LogInformation("Fixed pickup coordinates for {JobId}: {Lat}, {Lng}", jobId, pickupLat, pickupLng);
+                }
+                else
+                {
+                    pickupLat = 52.4068;
+                    pickupLng = -1.5197;
+                    _logger.LogWarning("Could not geocode pickup address. Using Coventry center coordinates.");
+                }
+            }
 
-              var payload = JsonSerializer.Serialize(new
-              {
-                  jobId = booking.BookingRef ?? "UNKNOWN_JOB",
-                  pickupLat = pickupLat,
-                  pickupLng = pickupLng,
-                  pickup = booking.PickupFormatted ?? booking.Pickup ?? $"{pickupLat},{pickupLng}",
-                  dropoff = booking.DestFormatted ?? booking.Destination ?? "Not specified",
-                  dropoffLat = destLat,
-                  dropoffLng = destLng,
-                  passengers = booking.Passengers?.ToString() ?? "1",
-                  fare = ParseFare(booking.Fare),
-                  notes = booking.PickupTime ?? "None",
-                  customerName = booking.Name ?? "Customer",
-                  customerPhone = FormatE164(phoneNumber),
-                  biddingWindowSec = 45
-              });
-            var msg = new MqttApplicationMessageBuilder().WithTopic("taxi/bookings").WithPayload(payload)
+            // Validate and fix dropoff coordinates
+            var dropoffLat = booking.DestLat ?? 0;
+            var dropoffLng = booking.DestLon ?? 0;
+            if (!IsValidCoordinate(dropoffLat, dropoffLng))
+            {
+                _logger.LogWarning("Invalid dropoff coordinates ({DLat}, {DLng}) for job {JobId}. Attempting geocoding...", dropoffLat, dropoffLng, jobId);
+                var dropoffCoords = await GeocodeAddressAsync(dropoffAddress, "dropoff");
+                if (dropoffCoords != null)
+                {
+                    dropoffLat = dropoffCoords.Value.Lat;
+                    dropoffLng = dropoffCoords.Value.Lng;
+                    _logger.LogInformation("Fixed dropoff coordinates for {JobId}: {Lat}, {Lng}", jobId, dropoffLat, dropoffLng);
+                }
+                else
+                {
+                    dropoffLat = 52.4531;
+                    dropoffLng = -1.7475;
+                    _logger.LogWarning("Could not geocode dropoff address. Using Birmingham Airport coordinates.");
+                }
+            }
+
+            _logger.LogInformation("MQTT payload coords: PickupLat={PLat}, PickupLng={PLng}, DropoffLat={DLat}, DropoffLng={DLng}, Pickup={PF}, Dropoff={DF}",
+                pickupLat, pickupLng, dropoffLat, dropoffLng, pickupAddress, dropoffAddress);
+
+            var fareStr = ParseFare(booking.Fare);
+
+            // CRITICAL: Send BOTH new and old field names for maximum driver app compatibility
+            var payload = JsonSerializer.Serialize(new
+            {
+                // Core job fields (both formats)
+                job = jobId,
+                jobId = jobId,
+
+                // Pickup coordinates (both formats)
+                lat = Math.Round(pickupLat, 6),
+                lng = Math.Round(pickupLng, 6),
+                pickupLat = Math.Round(pickupLat, 6),
+                pickupLng = Math.Round(pickupLng, 6),
+
+                // Pickup address (both formats)
+                pickupAddress = pickupAddress,
+                pickup = pickupAddress,
+                pubName = pickupAddress,
+
+                // Dropoff fields (both formats)
+                dropoff = dropoffAddress,
+                dropoffName = dropoffAddress,
+                dropoffLat = Math.Round(dropoffLat, 6),
+                dropoffLng = Math.Round(dropoffLng, 6),
+
+                // Passenger & bidding
+                passengers = booking.Passengers?.ToString() ?? "1",
+                biddingWindowSec = booking.BiddingWindowSec ?? 45,
+
+                // Customer info (both formats)
+                customerName = booking.Name ?? "Customer",
+                customerPhone = FormatE164(phoneNumber),
+                callerName = booking.Name ?? "Customer",
+                callerPhone = FormatE164(phoneNumber),
+
+                // Fare & notes (both formats)
+                fare = fareStr,
+                estimatedFare = fareStr,
+                notes = booking.PickupTime ?? "None",
+                specialRequirements = booking.PickupTime ?? "None",
+
+                // Temp fields for future expansion
+                temp1 = "",
+                temp2 = "",
+                temp3 = "",
+
+                // Metadata
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                dispatcherId = "adasdk",
+                version = "11.9.2"
+            });
+
+            var topic = $"pubs/requests/{jobId}";
+            var msg = new MqttApplicationMessageBuilder().WithTopic(topic).WithPayload(payload)
                 .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build();
             await _mqttClient!.PublishAsync(msg);
+            _logger.LogInformation("MQTT dispatched to {Topic}", topic);
             return true;
         }
         catch (Exception ex) { _logger.LogError(ex, "MQTT error"); return false; }
+    }
+
+    // ===== COORDINATE VALIDATION =====
+    private static bool IsValidCoordinate(double lat, double lng)
+    {
+        if (Math.Abs(lat) < 0.001 || Math.Abs(lng) < 0.001) return false;
+        if (lat < MIN_LAT || lat > MAX_LAT || lng < MIN_LNG || lng > MAX_LNG) return false;
+        return true;
+    }
+
+    private async Task<(double Lat, double Lng)?> GeocodeAddressAsync(string address, string type)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return null;
+        try
+        {
+            var encoded = Uri.EscapeDataString(address);
+            var url = $"https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1&countrycodes=gb";
+            _logger.LogInformation("Geocoding {Type} address: {Address}", type, address);
+
+            using var response = await _geocodeClient.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.GetArrayLength() == 0) { _logger.LogWarning("No geocoding results for {Type}: {Address}", type, address); return null; }
+
+            var result = doc.RootElement[0];
+            if (!result.TryGetProperty("lat", out var latEl) || !result.TryGetProperty("lon", out var lonEl)) return null;
+            if (!double.TryParse(latEl.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var lat) ||
+                !double.TryParse(lonEl.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var lng)) return null;
+            return (lat, lng);
+        }
+        catch (Exception ex) { _logger.LogError(ex, "Geocoding failed for {Type} '{Address}'", type, address); return null; }
     }
 
     public async Task<bool> SendWhatsAppAsync(string phoneNumber)
@@ -139,7 +259,6 @@ public sealed class BsqdDispatcher : IDispatcher
         var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
         if (clean.StartsWith("00")) clean = "+" + clean[2..];
         if (clean.StartsWith("+")) return clean;
-        // Detect international numbers without + prefix (e.g. 447539025332 = UK)
         if (clean.Length >= 10 && (clean.StartsWith("44") || clean.StartsWith("33") || clean.StartsWith("49") || clean.StartsWith("32") || clean.StartsWith("34") || clean.StartsWith("39") || clean.StartsWith("1")))
             return "+" + clean;
         if (clean.StartsWith("0")) return "+31" + clean[1..];
