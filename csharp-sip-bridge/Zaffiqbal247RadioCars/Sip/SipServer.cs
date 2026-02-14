@@ -161,7 +161,8 @@ public sealed class SipServer : IAsyncDisposable
 
     private void InitializeRegistration()
     {
-        var registrarUri = $"{HW_DOMAIN};transport=tcp";
+        // Bare domain — TCP routing handled by channel (no UDP channel exists)
+        var registrarUri = HW_DOMAIN;
 
         Log($"📡 HARDWIRED registration: {HW_USER}@{registrarUri}");
 
