@@ -11,17 +11,16 @@ using SIPSorceryMedia.Abstractions;
 namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
-/// PURE A-LAW PASSTHROUGH playout engine v8.5 — choppy/robotic audio fixes.
+/// PURE A-LAW PASSTHROUGH playout engine v8.5 — based on proven v7.4 timing.
 /// 
-/// ✅ Nanosecond-based timing with Stopwatch.Frequency calibration
-/// ✅ 3-tier hybrid wait (Sleep, Yield, SpinWait) for sub-millisecond precision
+/// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
 /// ✅ Fixed 100ms jitter buffer (absorbs OpenAI burst delivery)
-/// ✅ RTP marker bit on silence→audio transitions (decoder resync)
+/// ✅ RTP marker bit on silence→audio transitions (decoder resync — fixes robotic sound)
 /// ✅ Queue depth monitoring with adaptive drain (prevents latency buildup)
+/// ✅ Re-buffering only on complete underrun (threshold=1, prevents micro-stutter)
 /// ✅ Instant silence transitions (NO fade-out = no G.711 warbling)
-/// ✅ Gentle drift correction (only resets if >100ms behind)
 /// ✅ NAT keepalives (reliability without audio impact)
-/// ✅ Windows multimedia timer for 1ms Sleep baseline
+/// ✅ Windows multimedia timer for 1ms precision
 /// 
 /// Architecture: Pure passthrough - NO DSP, NO resampling, NO conversions.
 /// </summary>
@@ -42,11 +41,8 @@ public sealed class ALawRtpPlayout : IDisposable
     // FIXED 100ms buffer (5 frames) - absorbs OpenAI burst delivery
     private const int JITTER_BUFFER_FRAMES = 5;
     private const int REBUFFER_THRESHOLD = 1;    // Re-buffer only on complete underrun
-    private const int MAX_QUEUE_FRAMES = 500;    // ~10s safety cap (tighter = less latency buildup)
-    private const int DRAIN_THRESHOLD = 50;      // ~1s — if queue exceeds this, skip frames to catch up
-
-    // Nanosecond conversion for ultra-precise timing
-    private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
+    private const int MAX_QUEUE_FRAMES = 500;    // ~10s safety cap
+    private const int DRAIN_THRESHOLD = 50;      // ~1s — skip old frames to reduce latency
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
@@ -64,7 +60,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private System.Threading.Timer? _natKeepaliveTimer;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
-    private int _disposed;
+    private volatile int _disposed;
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
@@ -73,6 +69,8 @@ public sealed class ALawRtpPlayout : IDisposable
     // NAT state
     private IPEndPoint? _lastRemoteEndpoint;
     private volatile bool _natBindingEstablished;
+
+    // Playout state
     private bool _wasPlaying;
 
     public event Action<string>? OnLog;
@@ -198,50 +196,37 @@ public sealed class ALawRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// ULTRA-SMOOTH TIMING LOOP: Nanosecond-based scheduling with 3-tier hybrid wait.
-    /// 
-    /// Tier 1 (>2ms): Thread.Sleep(1) — lets OS schedule other threads
-    /// Tier 2 (0.5-2ms): Thread.Yield() — shares CPU time, reduces latency jitter
-    /// Tier 3 (<0.5ms): Thread.SpinWait(20) — busy-wait for final sub-millisecond precision
-    /// 
-    /// Result: Stable 20ms frames with <1ms jitter on typical hardware.
+    /// SMOOTH TIMING LOOP: Simple wall-clock sync from proven v7.4.
+    /// Aggressive drift correction causes micro-stutters → use gentle snap only.
     /// </summary>
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
-        long nextFrameNs = (long)(sw.ElapsedTicks * TicksToNs);
+        long nextFrameNs = sw.ElapsedTicks * 100; // 100ns units
 
         while (_running && Volatile.Read(ref _disposed) == 0)
         {
-            long nowNs = (long)(sw.ElapsedTicks * TicksToNs);
+            long nowNs = sw.ElapsedTicks * 100;
 
-            // If we're early, wait smoothly
+            // Smooth wait: sleep most of the time, spin only for final precision
             if (nowNs < nextFrameNs)
             {
-                long remainNs = nextFrameNs - nowNs;
-
-                // Tier 1: >2ms away → sleep (lets OS do other work)
-                if (remainNs > 2_000_000)
-                    Thread.Sleep(1);
-                // Tier 2: 0.5ms-2ms → yield (less OS overhead)
-                else if (remainNs > 500_000)
-                    Thread.Yield();
-                // Tier 3: <0.5ms → spin (sub-millisecond precision)
-                else
-                    Thread.SpinWait(20);
-
+                long waitNs = nextFrameNs - nowNs;
+                if (waitNs > 2_000_000) // >2ms
+                    Thread.Sleep((int)(waitNs / 1_000_000) - 1);
+                else if (waitNs > 100_000) // >0.1ms
+                    Thread.SpinWait(50);
                 continue;
             }
 
-            // Time to send a frame
             SendNextFrame();
 
-            // Schedule next frame: 20ms in nanoseconds
-            nextFrameNs += 20_000_000;
+            // Schedule next frame based on WALL CLOCK (no accumulation)
+            nextFrameNs += 20_000_000; // 20ms in 100ns units
 
-            // Gentle drift correction: only reset if >100ms behind
-            long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
-            if (currentNs - nextFrameNs > 100_000_000)
+            // Gentle drift correction: only snap if >100ms behind (prevents micro-stutters)
+            long currentNs = sw.ElapsedTicks * 100;
+            if (currentNs - nextFrameNs > 100_000_000) // >100ms behind
                 nextFrameNs = currentNs + 20_000_000;
         }
     }
