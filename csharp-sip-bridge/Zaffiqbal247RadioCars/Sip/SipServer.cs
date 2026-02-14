@@ -185,14 +185,14 @@ public sealed class SipServer : IAsyncDisposable
         if (transportType == "TCP" || transportType == "TCP_GAMMA")
             registrarHostWithPort += ";transport=tcp";
 
-        Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
+        Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort}");
 
         _regAgent = new SIPRegistrationUserAgent(
             _transport,
-            authUser,
+            _settings.Username,
             _settings.Password,
             registrarHostWithPort,
-            120);
+            3600);
 
         WireRegistrationEvents();
     }
