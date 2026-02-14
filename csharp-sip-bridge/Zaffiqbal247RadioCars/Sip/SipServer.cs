@@ -184,7 +184,7 @@ public sealed class SipServer : IAsyncDisposable
 
         _regAgent = new SIPRegistrationUserAgent(
             _transport,
-            _settings.Username,
+            authUser,
             _settings.Password,
             registrarHostWithPort,
             120);
