@@ -135,7 +135,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         _logger = logger;
         _settings = settings;
-        _systemPrompt = systemPrompt ?? GetDefaultSystemPrompt();
+        _systemPrompt = systemPrompt ?? GetDefaultSystemPromptStatic();
     }
 
     // =========================
@@ -237,12 +237,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                         silenceDuration: TimeSpan.FromMilliseconds(900))   // Responsive: quick for short answers
             };
 
-            options.Tools.Add(BuildSyncBookingDataTool());
-            options.Tools.Add(BuildClarifyAddressTool());
-            options.Tools.Add(BuildBookTaxiTool());
-            options.Tools.Add(BuildCreateBookingTool());
-            options.Tools.Add(BuildFindLocalEventsTool());
-            options.Tools.Add(BuildEndCallTool());
+            options.Tools.Add(BuildSyncBookingDataToolStatic());
+            options.Tools.Add(BuildClarifyAddressToolStatic());
+            options.Tools.Add(BuildBookTaxiToolStatic());
+            options.Tools.Add(BuildCreateBookingToolStatic());
+            options.Tools.Add(BuildFindLocalEventsToolStatic());
+            options.Tools.Add(BuildEndCallToolStatic());
 
             await _session.ConfigureSessionAsync(options);
 
@@ -699,9 +699,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            var lang = DetectLanguage(_callerId);
-            var langName = GetLanguageName(lang);
-            var localizedGreeting = GetLocalizedGreeting(lang);
+            var lang = DetectLanguageStatic(_callerId);
+            var langName = GetLanguageNameStatic(lang);
+            var localizedGreeting = GetLocalizedGreetingStatic(lang);
 
             var greeting = $"[SYSTEM] [LANG: {langName}] A new caller has connected (ID: {_callerId}). " +
                            $"Greet them in {langName}. Say: \"{localizedGreeting}\"";
@@ -719,7 +719,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // LANGUAGE DETECTION
     // =========================
-    private static string DetectLanguage(string? phone)
+    public static string DetectLanguageStatic(string? phone)
     {
         if (string.IsNullOrEmpty(phone)) return "en";
         var clean = phone.Replace(" ", "").Replace("-", "");
@@ -740,7 +740,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         return "en";
     }
 
-    private static string GetLanguageName(string lang) => lang switch
+    public static string GetLanguageNameStatic(string lang) => lang switch
     {
         "nl" => "Dutch",
         "fr" => "French",
@@ -752,7 +752,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         _ => "English"
     };
 
-    private static string GetLocalizedGreeting(string lang) => lang switch
+    public static string GetLocalizedGreetingStatic(string lang) => lang switch
     {
         "nl" => "Hallo, welkom bij Taxibot. Ik ben Ada. Wat is uw naam?",
         "fr" => "Bonjour, bienvenue chez Taxibot. Je suis Ada. Quel est votre nom?",
@@ -861,9 +861,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     }
 
     // =========================
-    // TOOL DEFINITIONS
+    // TOOL DEFINITIONS (public static for reuse by HighSample variant)
     // =========================
-    private static ConversationFunctionTool BuildSyncBookingDataTool() => new("sync_booking_data")
+    public static ConversationFunctionTool BuildSyncBookingDataToolStatic() => new("sync_booking_data")
     {
         Description = "MANDATORY: Persist booking data as collected from the caller. " +
                       "Must be called BEFORE generating any text response when user provides or amends booking details. " +
@@ -885,7 +885,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
-    private static ConversationFunctionTool BuildBookTaxiTool() => new("book_taxi")
+    public static ConversationFunctionTool BuildBookTaxiToolStatic() => new("book_taxi")
     {
         Description = "Request a fare quote or confirm a booking. " +
                       "action='request_quote' for quotes, 'confirmed' for finalized bookings. " +
@@ -907,7 +907,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
-    private static ConversationFunctionTool BuildClarifyAddressTool() => new("clarify_address")
+    public static ConversationFunctionTool BuildClarifyAddressToolStatic() => new("clarify_address")
     {
         Description = "User has selected a clarified address from disambiguation alternatives. " +
                       "Call this after the user chooses one of the presented options.",
@@ -923,7 +923,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
-    private static ConversationFunctionTool BuildCreateBookingTool() => new("create_booking")
+    public static ConversationFunctionTool BuildCreateBookingToolStatic() => new("create_booking")
     {
         Description = "Create a booking with AI-powered address extraction. " +
                       "Use when you have pickup and optionally destination. Handles geocoding and fare calculation automatically.",
@@ -940,7 +940,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
-    private static ConversationFunctionTool BuildFindLocalEventsTool() => new("find_local_events")
+    public static ConversationFunctionTool BuildFindLocalEventsToolStatic() => new("find_local_events")
     {
         Description = "Search for local events (concerts, sports, theatre, etc.) near a location. " +
                       "Use when the caller asks about events happening nearby or wants a taxi to an event.",
@@ -956,7 +956,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }))
     };
 
-    private static ConversationFunctionTool BuildEndCallTool() => new("end_call")
+    public static ConversationFunctionTool BuildEndCallToolStatic() => new("end_call")
     {
         Description = "End the call after speaking the closing script. " +
                       "Only call after the farewell message has been fully spoken.",
@@ -987,7 +987,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // SYSTEM PROMPT
     // =========================
-    private string GetDefaultSystemPrompt() =>
+    public static string GetDefaultSystemPromptStatic() =>
 @"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.9.
 
 ==============================
