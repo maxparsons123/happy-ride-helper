@@ -368,6 +368,27 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Inject a system-level message into the conversation WITHOUT triggering a response.
+    /// Used for booking state injection so Ada has ground truth context.
+    /// </summary>
+    public async Task InjectSystemMessageAsync(string message)
+    {
+        if (!IsConnected) return;
+
+        try
+        {
+            Log($"📋 State inject: {(message.Length > 80 ? message[..80] + "..." : message)}");
+            await _session!.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
+            // NOTE: No StartResponseAsync() — this is a silent context injection
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error injecting system message");
+        }
+    }
+
     // =========================
     // PLAYOUT COMPLETION (echo guard)
     // =========================
@@ -845,7 +866,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private static ConversationFunctionTool BuildSyncBookingDataTool() => new("sync_booking_data")
     {
         Description = "MANDATORY: Persist booking data as collected from the caller. " +
-                      "Must be called BEFORE generating any text response when user provides or amends booking details.",
+                      "Must be called BEFORE generating any text response when user provides or amends booking details. " +
+                      "CHANGE DETECTION: If the caller corrects ANY previously provided detail, you MUST call this tool " +
+                      "IMMEDIATELY with the corrected value AND explain what changed in the 'interpretation' field.",
         Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
         {
             type = "object",
@@ -856,7 +879,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 destination = new { type = "string", description = "Destination address (verbatim from caller)" },
                 passengers = new { type = "integer", description = "Number of passengers" },
                 pickup_time = new { type = "string", description = "Requested pickup time" },
-                vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers (1-4=Saloon, 5-6=Estate, 7+=Minibus). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." }
+                vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers (1-4=Saloon, 5-6=Estate, 7+=Minibus). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." },
+                interpretation = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed and why (e.g. 'User corrected pickup from Parkhouse Street to Far Gosford Street — venue name is Sweet Spot'). This helps the system track your understanding." }
             }
         }))
     };
@@ -1160,6 +1184,29 @@ NEVER defer syncing data just because you haven't asked for that field yet.
 
 The bridge tracks the real state. Your memory alone does NOT persist data.
 If you skip a sync_booking_data call, the booking state will be wrong.
+
+==============================
+CHANGE DETECTION & BOOKING STATE AWARENESS (CRITICAL)
+==============================
+
+After every sync_booking_data call, you will receive a [BOOKING STATE] message showing
+exactly what is currently stored. This is your GROUND TRUTH — it overrides your memory.
+
+CHANGE DETECTION RULES:
+1. If the caller says something that DIFFERS from a field in [BOOKING STATE], it is a CORRECTION.
+2. You MUST call sync_booking_data IMMEDIATELY with the corrected value.
+3. In the 'interpretation' field, explain WHAT changed and WHY (e.g. ""User corrected pickup from X to Y"").
+4. Do NOT ask ""are you sure?"" or ""did you mean...?"" — just accept the correction and sync it.
+5. This applies at ALL stages: during collection, after fare readback, even after confirmation.
+
+Examples of corrections you MUST catch:
+- ""No, it's Far Gosford Street"" → pickup changed
+- ""Actually, 52A not 52"" → house number corrected  
+- ""I meant 3 passengers"" → passenger count changed
+- ""Can we change the destination to..."" → destination changed
+- Repeating an address differently from what [BOOKING STATE] shows → implicit correction
+
+NEVER ignore a correction. NEVER revert to an old value after the user corrects it.
 
 ==============================
 IMPLICIT CORRECTIONS (VERY IMPORTANT)

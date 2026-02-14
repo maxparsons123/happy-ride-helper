@@ -12,6 +12,7 @@ public interface IOpenAiClient
     void SendAudio(byte[] audioData);
     Task CancelResponseAsync();
     Task InjectMessageAndRespondAsync(string message);
+    Task InjectSystemMessageAsync(string message);
     Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f);
 
     event Action<byte[]>? OnAudio;
