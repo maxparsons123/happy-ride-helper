@@ -1,5 +1,14 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using MQTTnet;
 using MQTTnet.Client;
 using MQTTnet.Protocol;
@@ -9,12 +18,15 @@ namespace DispatchSystem.Mqtt;
 
 /// <summary>
 /// MQTT client for dispatch: receives driver GPS, bookings, and publishes job allocations.
-/// Compatible with the existing MqttTaxiClient topic structure.
+/// Enhanced with driver app v11.9.2+ compatibility, coordinate validation, and geocoding fallback.
 /// </summary>
 public sealed class MqttDispatchClient : IDisposable
 {
     private readonly IMqttClient _client;
     private readonly MqttClientOptions _options;
+    private readonly HttpClient _httpClient;
+    private readonly Geocoder _geocoder;
+    private readonly string _dispatcherId;
 
     public event Action<string>? OnLog;
     public event Action<string, double, double, string?>? OnDriverGps;      // driverId, lat, lng, status
@@ -25,16 +37,27 @@ public sealed class MqttDispatchClient : IDisposable
 
     public bool IsConnected => _client?.IsConnected ?? false;
 
-    public MqttDispatchClient(string brokerUrl = "wss://broker.hivemq.com:8884/mqtt")
+    public MqttDispatchClient(string dispatcherId = "dispatch-default", string brokerUrl = "wss://broker.hivemq.com:8884/mqtt")
     {
+        _dispatcherId = dispatcherId;
         var factory = new MqttFactory();
         _client = factory.CreateMqttClient();
 
         _options = new MqttClientOptionsBuilder()
-            .WithClientId("dispatch-" + Guid.NewGuid().ToString("N")[..8])
+            .WithClientId($"dispatch-{dispatcherId}-{Guid.NewGuid().ToString("N")[..8]}")
             .WithWebSocketServer(o => o.WithUri(brokerUrl))
             .WithCleanSession()
             .Build();
+
+        // Initialize HTTP client for geocoding with proper Nominatim compliance
+        _httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(5),
+            DefaultRequestHeaders = { { "User-Agent", $"BlackCabUniteDispatch/1.0 ({dispatcherId})" } }
+        };
+
+        // Initialize geocoder
+        _geocoder = new Geocoder(_httpClient, OnLog);
 
         _client.ApplicationMessageReceivedAsync += HandleMessage;
 
@@ -59,7 +82,7 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.ConnectAsync(_options);
     }
 
-    private async Task Subscribe()
+    public async Task Subscribe()
     {
         await _client.SubscribeAsync("drivers/+/location");
         await _client.SubscribeAsync("drivers/+/status");
@@ -127,8 +150,8 @@ public sealed class MqttDispatchClient : IDisposable
                     if (fare == null && !string.IsNullOrEmpty(booking.fare))
                     {
                         var cleaned = booking.fare.Replace("£", "").Replace("$", "").Trim();
-                        if (decimal.TryParse(cleaned, System.Globalization.NumberStyles.Any,
-                            System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+                        if (decimal.TryParse(cleaned, NumberStyles.Any,
+                            CultureInfo.InvariantCulture, out var parsed))
                             fare = parsed;
                     }
 
@@ -143,7 +166,7 @@ public sealed class MqttDispatchClient : IDisposable
                     {
                         paxDetails = booking.passengersText;
                         // Extract leading digit(s) as count
-                        var match = System.Text.RegularExpressions.Regex.Match(booking.passengersText, @"^(\d+)");
+                        var match = Regex.Match(booking.passengersText, @"^(\d+)");
                         if (match.Success)
                             paxCount = int.Parse(match.Groups[1].Value);
                     }
@@ -233,111 +256,126 @@ public sealed class MqttDispatchClient : IDisposable
         return Task.CompletedTask;
     }
 
-    public async Task PublishJobAllocation(string jobId, string driverId, Job job)
+    /// <summary>
+    /// Publish bid request to specific drivers for a job with FULL driver app compatibility.
+    /// Fixes invalid coordinates and sends payload in BOTH old and new field formats.
+    /// </summary>
+    public async Task PublishBidRequest(Job job, List<string> driverIds, CancellationToken cancellationToken = default)
     {
-        var pickupDropoff = $"{job.Pickup}\ndropoff\n{job.Dropoff}";
-        var fareStr = job.EstimatedFare?.ToString("0.00") ?? "";
+        // Validate and fix coordinates BEFORE publishing
+        var fixedJob = await FixInvalidCoordinatesAsync(job, cancellationToken);
 
-        // Full job payload matching the generic stanza
-        object BuildFullPayload(string? result = null) => new
+        // Create driver-compatible payload (with BOTH old and new field names)
+        var payload = CreateDriverCompatiblePayload(fixedJob);
+        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
         {
-            jobId = jobId,
-            result = result ?? (string?)null,
-            status = "allocated",
-            driver = driverId,
-            pickupLat = job.PickupLat,
-            pickupLng = job.PickupLng,
-            pickup = job.Pickup,
-            dropoff = job.Dropoff,
-            dropoffLat = job.DropoffLat,
-            dropoffLng = job.DropoffLng,
-            customerName = job.CallerName ?? "Customer",
-            customerPhone = job.CallerPhone ?? "",
-            passengers = job.PassengerDetails ?? job.Passengers.ToString(),
-            fare = fareStr,
-            notes = job.SpecialRequirements ?? "",
-            biddingWindowSec = job.BiddingWindowSec ?? 20,
-            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        };
-
-        var allocationPayload = JsonSerializer.Serialize(BuildFullPayload());
-
-        OnLog?.Invoke($"📤 PAYLOAD: {allocationPayload[..Math.Min(allocationPayload.Length, 500)]}");
-
-        await PublishAsync($"drivers/{driverId}/jobs", allocationPayload);
-        await PublishAsync($"jobs/{jobId}/allocated", allocationPayload);
-        await PublishAsync($"jobs/{jobId}/status", allocationPayload);
-
-        // Winner result on jobs/{jobId}/result/{driverId}
-        var wonPayload = JsonSerializer.Serialize(BuildFullPayload("won"));
-        await PublishAsync($"jobs/{jobId}/result/{driverId}", wonPayload);
-
-        OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId} | {job.Pickup} → {job.Dropoff}");
-    }
-
-    /// <summary>Publish bid request to specific drivers for a job.</summary>
-    public async Task PublishBidRequest(Job job, List<string> driverIds)
-    {
-        var window = job.BiddingWindowSec ?? 20;
-        var payload = JsonSerializer.Serialize(new
-        {
-            jobId = job.Id,
-            pickup = job.Pickup,
-            dropoff = job.Dropoff,
-            pickupLat = job.PickupLat,
-            pickupLng = job.PickupLng,
-            dropoffLat = job.DropoffLat,
-            dropoffLng = job.DropoffLng,
-            passengers = job.PassengerDetails ?? job.Passengers.ToString(),
-            fare = job.EstimatedFare?.ToString("0.00") ?? "",
-            notes = job.SpecialRequirements ?? "",
-            customerName = job.CallerName ?? "Customer",
-            customerPhone = job.CallerPhone ?? "",
-            biddingWindowSec = window
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
         });
 
+        OnLog?.Invoke($"📤 Bid payload for {job.Id}:\n{json}");
+
+        // Publish to individual drivers (OLD FORMAT - for legacy drivers)
         foreach (var driverId in driverIds)
-            await PublishAsync($"drivers/{driverId}/bid-request", payload);
+        {
+            await PublishAsync($"drivers/{driverId}/bid-request", json, cancellationToken);
+            OnLog?.Invoke($"📤 Bid request sent to driver {driverId} (topic: drivers/{driverId}/bid-request)");
+        }
 
-        await PublishAsync($"jobs/{job.Id}/bid-request", payload);
-        OnLog?.Invoke($"📤 Bid request for {job.Id} sent to {driverIds.Count} drivers (window={window}s, priority={job.Priority ?? "normal"})");
+        // Publish to broadcast topic (NEW FORMAT - for v11.9.2+ drivers)
+        await PublishAsync($"pubs/requests/{job.Id}", json, cancellationToken);
+        OnLog?.Invoke($"✅ Bid request for {job.Id} sent to {driverIds.Count} drivers via pubs/requests/{job.Id}");
     }
 
-    /// <summary>Publish bid result (winner/loser) to drivers.</summary>
-    public async Task PublishBidResult(string jobId, string driverId, string result, Job? job = null)
+    /// <summary>
+    /// Publish job allocation to a specific driver with FULL driver app compatibility.
+    /// </summary>
+    public async Task PublishJobAllocation(string jobId, string driverId, Job job, CancellationToken cancellationToken = default)
     {
-        var payload = JsonSerializer.Serialize(new
+        // Validate and fix coordinates BEFORE publishing
+        var fixedJob = await FixInvalidCoordinatesAsync(job, cancellationToken);
+
+        // Create driver-compatible payload (with BOTH old and new field names)
+        var payload = CreateDriverCompatiblePayload(fixedJob, status: "allocated");
+        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
         {
-            jobId = jobId,
-            driver = driverId,
-            result,
-            pickupLat = job?.PickupLat ?? 0,
-            pickupLng = job?.PickupLng ?? 0,
-            pickup = job?.Pickup ?? "",
-            dropoff = job?.Dropoff ?? "",
-            dropoffLat = job?.DropoffLat ?? 0,
-            dropoffLng = job?.DropoffLng ?? 0,
-            customerName = job?.CallerName ?? "",
-            customerPhone = job?.CallerPhone ?? "",
-            passengers = job?.PassengerDetails ?? (job?.Passengers ?? 0).ToString(),
-            fare = job?.EstimatedFare?.ToString("0.00") ?? "",
-            notes = job?.SpecialRequirements ?? "",
-            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
         });
 
-        await PublishAsync($"jobs/{jobId}/result/{driverId}", payload);
-        await PublishAsync($"jobs/{jobId}/status", payload);
+        OnLog?.Invoke($"📤 Allocation payload for {jobId}:\n{json}");
+
+        // Publish to driver-specific topic (OLD FORMAT)
+        await PublishAsync($"drivers/{driverId}/jobs", json, cancellationToken);
+
+        // Publish to job status topics (NEW FORMAT)
+        await PublishAsync($"jobs/{jobId}/allocated", json, cancellationToken);
+        await PublishAsync($"jobs/{jobId}/status", json, cancellationToken);
+
+        // Publish winner result to driver-specific result topic (NEW FORMAT)
+        var wonPayload = CreateDriverCompatiblePayload(fixedJob, status: "allocated", result: "won");
+        var wonJson = JsonSerializer.Serialize(wonPayload, new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
+        });
+        await PublishAsync($"jobs/{jobId}/result/{driverId}", wonJson, cancellationToken);
+
+        OnLog?.Invoke($"✅ Job {jobId} allocated to driver {driverId} | {fixedJob.Pickup} → {fixedJob.Dropoff}");
     }
 
-    public async Task PublishAsync(string topic, string payload)
+    /// <summary>
+    /// Publish bid result (winner/loser) to drivers with FULL driver app compatibility.
+    /// </summary>
+    public async Task PublishBidResult(string jobId, string driverId, string result, Job? job = null, CancellationToken cancellationToken = default)
     {
-        if (!_client.IsConnected) return;
+        if (job == null)
+        {
+            OnLog?.Invoke($"⚠️ Cannot publish bid result for {jobId} - job is null");
+            return;
+        }
+
+        // Validate and fix coordinates BEFORE publishing
+        var fixedJob = await FixInvalidCoordinatesAsync(job, cancellationToken);
+
+        // Create driver-compatible payload (with BOTH old and new field names)
+        var payload = CreateDriverCompatiblePayload(fixedJob, status: result, result: result);
+        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
+        });
+
+        OnLog?.Invoke($"📤 Bid result payload for {jobId} ({result}):\n{json}");
+
+        // Publish to result topic (NEW FORMAT)
+        await PublishAsync($"jobs/{jobId}/result/{driverId}", json, cancellationToken);
+
+        // Publish to status topic (for job history)
+        await PublishAsync($"jobs/{jobId}/status", json, cancellationToken);
+
+        OnLog?.Invoke($"✅ Bid result '{result}' published for job {jobId} to driver {driverId}");
+    }
+
+    public async Task PublishAsync(string topic, string payload, CancellationToken cancellationToken = default)
+    {
+        if (!_client.IsConnected)
+        {
+            OnLog?.Invoke($"⚠️ Cannot publish to {topic} - MQTT client not connected");
+            return;
+        }
+
         var msg = new MqttApplicationMessageBuilder()
             .WithTopic(topic)
             .WithPayload(payload)
             .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
             .Build();
-        await _client.PublishAsync(msg);
+
+        await _client.PublishAsync(msg, cancellationToken);
     }
 
     public async Task DisconnectAsync()
@@ -346,7 +384,240 @@ public sealed class MqttDispatchClient : IDisposable
             await _client.DisconnectAsync();
     }
 
-    public void Dispose() => _client?.Dispose();
+    public void Dispose()
+    {
+        _client?.Dispose();
+        _httpClient?.Dispose();
+    }
+
+    // ── CORE ENHANCEMENTS ──
+
+    /// <summary>
+    /// Fixes invalid coordinates (0,0 or outside UK bounds) using geocoding fallback.
+    /// Returns a new Job object with fixed coordinates.
+    /// </summary>
+    private async Task<Job> FixInvalidCoordinatesAsync(Job job, CancellationToken cancellationToken)
+    {
+        var fixedJob = new Job
+        {
+            Id = job.Id,
+            Pickup = job.Pickup,
+            Dropoff = job.Dropoff,
+            Passengers = job.Passengers,
+            PassengerDetails = job.PassengerDetails,
+            VehicleRequired = job.VehicleRequired,
+            VehicleOverride = job.VehicleOverride,
+            SpecialRequirements = job.SpecialRequirements,
+            EstimatedFare = job.EstimatedFare,
+            CallerPhone = job.CallerPhone,
+            CallerName = job.CallerName,
+            Priority = job.Priority,
+            PaymentMethod = job.PaymentMethod,
+            BiddingWindowSec = job.BiddingWindowSec,
+            CreatedAt = job.CreatedAt
+        };
+
+        // Fix pickup coordinates if invalid
+        if (!IsValidCoordinate(job.PickupLat, job.PickupLng))
+        {
+            OnLog?.Invoke($"⚠️ Invalid pickup coordinates ({job.PickupLat}, {job.PickupLng}) for job {job.Id}. Attempting geocoding...");
+
+            var coords = await _geocoder.GeocodeAddressAsync(job.Pickup, "pickup", cancellationToken);
+            if (coords.HasValue)
+            {
+                fixedJob.PickupLat = coords.Value.Latitude;
+                fixedJob.PickupLng = coords.Value.Longitude;
+                OnLog?.Invoke($"✅ Fixed pickup coordinates for {job.Id}: {fixedJob.PickupLat}, {fixedJob.PickupLng}");
+            }
+            else
+            {
+                // Fallback to Coventry center
+                fixedJob.PickupLat = 52.4068;
+                fixedJob.PickupLng = -1.5197;
+                OnLog?.Invoke($"⚠️ Could not geocode pickup address '{job.Pickup}'. Using Coventry center coordinates.");
+            }
+        }
+        else
+        {
+            fixedJob.PickupLat = job.PickupLat;
+            fixedJob.PickupLng = job.PickupLng;
+        }
+
+        // Fix dropoff coordinates if invalid
+        if (!IsValidCoordinate(job.DropoffLat, job.DropoffLng))
+        {
+            OnLog?.Invoke($"⚠️ Invalid dropoff coordinates ({job.DropoffLat}, {job.DropoffLng}) for job {job.Id}. Attempting geocoding...");
+
+            var coords = await _geocoder.GeocodeAddressAsync(job.Dropoff, "dropoff", cancellationToken);
+            if (coords.HasValue)
+            {
+                fixedJob.DropoffLat = coords.Value.Latitude;
+                fixedJob.DropoffLng = coords.Value.Longitude;
+                OnLog?.Invoke($"✅ Fixed dropoff coordinates for {job.Id}: {fixedJob.DropoffLat}, {fixedJob.DropoffLng}");
+            }
+            else
+            {
+                // Fallback to Birmingham Airport
+                fixedJob.DropoffLat = 52.4531;
+                fixedJob.DropoffLng = -1.7475;
+                OnLog?.Invoke($"⚠️ Could not geocode dropoff address '{job.Dropoff}'. Using Birmingham Airport coordinates.");
+            }
+        }
+        else
+        {
+            fixedJob.DropoffLat = job.DropoffLat;
+            fixedJob.DropoffLng = job.DropoffLng;
+        }
+
+        return fixedJob;
+    }
+
+    private bool IsValidCoordinate(double lat, double lng)
+    {
+        // Check for zero or near-zero values (invalid)
+        if (Math.Abs(lat) < 0.001 || Math.Abs(lng) < 0.001)
+            return false;
+
+        // UK bounding box validation (rough)
+        if (lat < 49.5 || lat > 61.0 || lng < -8.5 || lng > 2.0)
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Creates a payload compatible with driver app v11.9.2+ AND legacy drivers.
+    /// Includes BOTH old field names (jobId, pickupLat) AND new field names (job, lat).
+    /// </summary>
+    private object CreateDriverCompatiblePayload(Job job, string? status = null, string? result = null)
+    {
+        var fareStr = job.EstimatedFare?.ToString("0.00", CultureInfo.InvariantCulture) ?? "";
+        var passengersStr = job.PassengerDetails ?? job.Passengers.ToString();
+        var windowSec = job.BiddingWindowSec ?? 30;
+
+        // CRITICAL: Send BOTH new and old field names for maximum compatibility
+        return new
+        {
+            // ===== CORE JOB FIELDS (BOTH FORMATS) =====
+            job = job.Id,                    // NEW: Standard field (driver app v11.9.2+)
+            jobId = job.Id,                  // OLD: Legacy field (your current format)
+
+            // ===== PICKUP COORDINATES (BOTH FORMATS) =====
+            lat = Math.Round(job.PickupLat, 6), // NEW: Standard field
+            lng = Math.Round(job.PickupLng, 6), // NEW: Standard field
+            pickupLat = Math.Round(job.PickupLat, 6), // OLD: Your current field
+            pickupLng = Math.Round(job.PickupLng, 6), // OLD: Your current field
+
+            // ===== PICKUP ADDRESS (BOTH FORMATS) =====
+            pickupAddress = job.Pickup,      // NEW: Standard field
+            pickup = job.Pickup,             // OLD: Your current field
+            pubName = job.Pickup,            // LEGACY: Very old field
+
+            // ===== DROPOFF FIELDS (BOTH FORMATS) =====
+            dropoff = job.Dropoff,           // NEW: Standard field
+            dropoffName = job.Dropoff,       // OLD: Your current field
+            dropoffLat = Math.Round(job.DropoffLat, 6), // NEW: Standard field
+            dropoffLng = Math.Round(job.DropoffLng, 6), // NEW: Standard field
+
+            // ===== PASSENGER & BIDDING =====
+            passengers = passengersStr,      // NEW: Standard field
+            biddingWindowSec = windowSec,    // NEW: Standard field
+
+            // ===== CUSTOMER INFO =====
+            customerName = job.CallerName ?? "Customer", // NEW: Standard field
+            customerPhone = job.CallerPhone ?? "",       // NEW: Standard field
+            callerName = job.CallerName ?? "Customer",   // OLD: Your current field
+            callerPhone = job.CallerPhone ?? "",         // OLD: Your current field
+
+            // ===== FARE & NOTES =====
+            fare = fareStr,                  // NEW: Standard field (string)
+            estimatedFare = fareStr,         // OLD: Your current field
+            notes = job.SpecialRequirements ?? "None", // NEW: Standard field
+            specialRequirements = job.SpecialRequirements ?? "None", // OLD: Your current field
+
+            // ===== JOB STATUS =====
+            status = status ?? "queued",     // Current job status
+            result = result,                 // Result for bid responses ("won", "lost")
+
+            // ===== TEMP FIELDS (FOR FUTURE EXPANSION) =====
+            temp1 = job.Priority ?? "",      // Priority field (e.g., "high")
+            temp2 = job.VehicleOverride ?? "", // Vehicle override (e.g., "wheelchair")
+            temp3 = job.PaymentMethod ?? "", // Payment method (e.g., "corporate")
+
+            // ===== METADATA =====
+            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            dispatcherId = _dispatcherId,
+            version = "11.9.2"
+        };
+    }
+
+    // ── GEOCODER CLASS (Nominatim Integration) ──
+    private class Geocoder
+    {
+        private readonly HttpClient _httpClient;
+        private readonly Action<string>? _logger;
+        private const string NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
+
+        public Geocoder(HttpClient httpClient, Action<string>? logger)
+        {
+            _httpClient = httpClient;
+            _logger = logger;
+        }
+
+        public async Task<(double Latitude, double Longitude)?> GeocodeAddressAsync(string address, string type, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(address))
+                return null;
+
+            try
+            {
+                // URL encode the address and add UK filter
+                var encodedAddress = Uri.EscapeDataString(address);
+                var url = $"{NOMINATIM_URL}?q={encodedAddress}&format=json&limit=1&countrycodes=gb";
+
+                _logger?.Invoke($"📍 Geocoding {type} address: {address}");
+
+                using var response = await _httpClient.GetAsync(url, cancellationToken);
+                response.EnsureSuccessStatusCode();
+
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.GetArrayLength() == 0)
+                {
+                    _logger?.Invoke($"⚠️ No geocoding results found for {type} address: {address}");
+                    return null;
+                }
+
+                var resultEl = doc.RootElement[0];
+                if (!resultEl.TryGetProperty("lat", out var latElement) ||
+                    !resultEl.TryGetProperty("lon", out var lonElement))
+                {
+                    _logger?.Invoke($"⚠️ Invalid geocoding response for {type} address: {address}");
+                    return null;
+                }
+
+                if (!double.TryParse(latElement.GetString(), CultureInfo.InvariantCulture, out var lat) ||
+                    !double.TryParse(lonElement.GetString(), CultureInfo.InvariantCulture, out var lon))
+                {
+                    _logger?.Invoke($"⚠️ Could not parse coordinates for {type} address: {address}");
+                    return null;
+                }
+
+                return (lat, lon);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger?.Invoke($"⚠️ Geocoding timeout for {type} address: {address}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger?.Invoke($"❌ Geocoding failed for {type} address '{address}': {ex.Message}");
+                return null;
+            }
+        }
+    }
 
     // ── Message DTOs ──
 
