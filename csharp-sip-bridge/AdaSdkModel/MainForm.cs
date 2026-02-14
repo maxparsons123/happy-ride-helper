@@ -313,14 +313,6 @@ public partial class MainForm : Form
                 lblCallInfo.ForeColor = Color.Orange;
                 btnAnswer.Enabled = true;
                 btnReject.Enabled = true;
-
-                // Open booking form immediately when call rings in operator mode
-                if (_operatorMode)
-                {
-                    var phoneMatch = Regex.Match(callerId, @"[\+\d]{6,}");
-                    var phone = phoneMatch.Success ? phoneMatch.Value : null;
-                    _ = Task.Run(() => Invoke(() => OpenBookingForm(phone, null)));
-                }
             });
 
             _sipServer.OnOperatorCallerAudio += alawFrame =>
@@ -460,6 +452,7 @@ public partial class MainForm : Form
                 StartAudioMonitor();
                 StartMicrophone();
                 Log("🎤 Operator mic active — speak normally");
+                _ = Task.Run(() => Invoke(() => OpenBookingForm(phone, null)));
             }
         }
         else
