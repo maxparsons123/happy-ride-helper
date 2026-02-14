@@ -1247,6 +1247,21 @@ public sealed class CallSession : ICallSession
     {
         var dest = _booking.Destination ?? "";
 
+        // Debug logging: trace exactly what the bypass check sees
+        _logger.LogDebug("[{SessionId}] 🔍 IsFareSane: count={Count}, dest='{Dest}', lastDest='{LastDest}'",
+            SessionId, _fareSanityAlertCount, dest, _lastSanityAlertDestination ?? "(null)");
+
+        // HARD BYPASS: After 2+ sanity alerts, let it through regardless — user clearly wants this destination
+        if (_fareSanityAlertCount >= 2)
+        {
+            _logger.LogInformation("[{SessionId}] ✅ Fare sanity FORCE BYPASSED — {Count} alerts already shown, allowing through",
+                SessionId, _fareSanityAlertCount);
+            _fareSanityAlertCount = 0;
+            _lastSanityAlertDestination = null;
+            _fareSanityActive = false;
+            return true;
+        }
+
         // If the user re-confirmed the SAME destination after a sanity alert, allow it through
         if (_fareSanityAlertCount > 0 && !string.IsNullOrWhiteSpace(_lastSanityAlertDestination)
             && string.Equals(dest.Trim(), _lastSanityAlertDestination.Trim(), StringComparison.OrdinalIgnoreCase))
