@@ -42,7 +42,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int JITTER_BUFFER_FRAMES = 5;
     private const int REBUFFER_THRESHOLD = 1;    // Re-buffer only on complete underrun
     private const int MAX_QUEUE_FRAMES = 500;    // ~10s safety cap
-    private const int DRAIN_THRESHOLD = 50;      // ~1s — skip old frames to reduce latency
+    private const int DRAIN_THRESHOLD = 150;     // ~3s — only drain genuine backlog, not normal bursts
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
