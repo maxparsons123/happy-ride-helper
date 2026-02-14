@@ -61,7 +61,7 @@ partial class MainForm
         {
             Text = "📞 SIP Registration",
             Location = new Point(12, 30),
-            Size = new Size(560, 195),
+            Size = new Size(560, 228),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -90,25 +90,25 @@ partial class MainForm
         btnNewAccount.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
 
         // Row 1: Server / Port / Transport
-        grpSip.Controls.Add(MakeLabel("Server:", 15, 55));
-        txtSipServer = MakeTextBox(85, 52, 190, bgInput, fgLight);
+        grpSip.Controls.Add(MakeLabel("SIP Server:", 15, 55));
+        txtSipServer = MakeTextBox(95, 52, 180, bgInput, fgLight);
         txtSipServer.PlaceholderText = "sip.example.com";
 
         grpSip.Controls.Add(MakeLabel("Port:", 290, 55));
-        txtSipPort = MakeTextBox(330, 52, 60, bgInput, fgLight);
+        txtSipPort = MakeTextBox(330, 52, 55, bgInput, fgLight);
         txtSipPort.Text = "5060";
 
-        grpSip.Controls.Add(MakeLabel("Transport:", 405, 55));
-        cmbTransport = new ComboBox { Location = new Point(475, 52), Size = new Size(70, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
+        grpSip.Controls.Add(MakeLabel("Transport:", 395, 55));
+        cmbTransport = new ComboBox { Location = new Point(465, 52), Size = new Size(85, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
         cmbTransport.Items.AddRange(new object[] { "UDP", "TCP", "TCP_GAMMA" });
         cmbTransport.SelectedIndex = 0;
 
         // Row 2: Extension / Auth ID / Password
         grpSip.Controls.Add(MakeLabel("Extension:", 15, 88));
-        txtSipUser = MakeTextBox(85, 85, 80, bgInput, fgLight);
+        txtSipUser = MakeTextBox(95, 85, 80, bgInput, fgLight);
 
-        grpSip.Controls.Add(MakeLabel("Auth ID:", 180, 88));
-        txtAuthId = MakeTextBox(240, 85, 100, bgInput, fgLight);
+        grpSip.Controls.Add(MakeLabel("Auth ID:", 190, 88));
+        txtAuthId = MakeTextBox(250, 85, 90, bgInput, fgLight);
         txtAuthId.PlaceholderText = "(optional)";
 
         grpSip.Controls.Add(MakeLabel("Password:", 355, 88));
@@ -117,30 +117,39 @@ partial class MainForm
 
         // Row 3: Domain / Display Name / Auto-Answer
         grpSip.Controls.Add(MakeLabel("Domain:", 15, 121));
-        txtDomain = MakeTextBox(85, 118, 140, bgInput, fgLight);
+        txtDomain = MakeTextBox(95, 118, 140, bgInput, fgLight);
         txtDomain.PlaceholderText = "(optional override)";
 
-        grpSip.Controls.Add(MakeLabel("Display Name:", 240, 121));
-        txtDisplayName = MakeTextBox(335, 118, 120, bgInput, fgLight);
+        grpSip.Controls.Add(MakeLabel("Display Name:", 250, 121));
+        txtDisplayName = MakeTextBox(345, 118, 110, bgInput, fgLight);
         txtDisplayName.PlaceholderText = "(e.g. Ai Agent)";
 
         chkAutoAnswer = new CheckBox { Text = "Auto-Answer", Location = new Point(470, 120), Size = new Size(110, 23), ForeColor = fgLight, Checked = true };
 
-        // Row 4: Connect / Disconnect
-        btnConnect = MakeButton("▶ Connect", 15, 152, 120, 32, green);
+        // Row 4: DDI (Gamma trunk E.164 number)
+        grpSip.Controls.Add(MakeLabel("DDI (E.164):", 15, 154));
+        txtDdi = MakeTextBox(95, 151, 150, bgInput, fgLight);
+        txtDdi.PlaceholderText = "+441234567890";
+
+        var lblDdiHint = new Label { Text = "← Gamma trunk: your inbound DID number", Location = new Point(255, 154), AutoSize = true, ForeColor = Color.FromArgb(140, 140, 140), Font = new Font("Segoe UI", 8F, FontStyle.Italic) };
+        grpSip.Controls.Add(lblDdiHint);
+
+        // Row 5: Connect / Disconnect
+        btnConnect = MakeButton("▶ Connect", 15, 185, 120, 32, green);
         btnConnect.Click += btnConnect_Click;
 
-        btnDisconnect = MakeButton("■ Disconnect", 145, 152, 120, 32, red);
+        btnDisconnect = MakeButton("■ Disconnect", 145, 185, 120, 32, red);
         btnDisconnect.Enabled = false;
         btnDisconnect.Click += btnDisconnect_Click;
 
-        lblSipStatus = new Label { Text = "● Disconnected", Location = new Point(280, 158), Size = new Size(260, 20), ForeColor = Color.Gray, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
+        lblSipStatus = new Label { Text = "● Disconnected", Location = new Point(280, 191), Size = new Size(260, 20), ForeColor = Color.Gray, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
 
         grpSip.Controls.AddRange(new Control[] {
             cmbSipAccount, btnSaveAccount, btnDeleteAccount, btnNewAccount,
             txtSipServer, txtSipPort, cmbTransport,
             txtSipUser, txtAuthId, txtSipPassword,
             txtDomain, txtDisplayName, chkAutoAnswer,
+            txtDdi,
             btnConnect, btnDisconnect, lblSipStatus
         });
 
@@ -150,7 +159,7 @@ partial class MainForm
         grpCall = new GroupBox
         {
             Text = "🎧 Call Controls",
-            Location = new Point(12, 230),
+            Location = new Point(12, 263),
             Size = new Size(560, 95),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
@@ -233,8 +242,8 @@ partial class MainForm
         grpLogs = new GroupBox
         {
             Text = "📋 Logs & Transcripts",
-            Location = new Point(12, 332),
-            Size = new Size(880, 388),
+            Location = new Point(12, 365),
+            Size = new Size(880, 355),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -316,7 +325,7 @@ partial class MainForm
     private GroupBox grpSip;
     private ComboBox cmbSipAccount;
     private Button btnSaveAccount, btnDeleteAccount, btnNewAccount;
-    private TextBox txtSipServer, txtSipPort, txtSipUser, txtAuthId, txtSipPassword, txtDomain, txtDisplayName;
+    private TextBox txtSipServer, txtSipPort, txtSipUser, txtAuthId, txtSipPassword, txtDomain, txtDisplayName, txtDdi;
     private ComboBox cmbTransport;
     private CheckBox chkAutoAnswer;
     private Button btnConnect, btnDisconnect;

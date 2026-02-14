@@ -121,6 +121,7 @@ public partial class MainForm : Form
         txtSipPassword.Text = sip.Password;
         txtDomain.Text = sip.Domain ?? "";
         txtDisplayName.Text = sip.DisplayName ?? "";
+        txtDdi.Text = sip.Ddi ?? "";
         chkAutoAnswer.Checked = sip.AutoAnswer;
         var idx = cmbTransport.Items.IndexOf(sip.Transport.ToUpperInvariant());
         cmbTransport.SelectedIndex = idx >= 0 ? idx : 0;
@@ -222,6 +223,7 @@ public partial class MainForm : Form
         _settings.Sip.Password = txtSipPassword.Text;
         _settings.Sip.Domain = string.IsNullOrWhiteSpace(txtDomain.Text) ? null : txtDomain.Text.Trim();
         _settings.Sip.DisplayName = string.IsNullOrWhiteSpace(txtDisplayName.Text) ? null : txtDisplayName.Text.Trim();
+        _settings.Sip.Ddi = string.IsNullOrWhiteSpace(txtDdi.Text) ? null : txtDdi.Text.Trim();
         _settings.Sip.Transport = cmbTransport.SelectedItem?.ToString() ?? "UDP";
         _settings.Sip.AutoAnswer = chkAutoAnswer.Checked;
     }
