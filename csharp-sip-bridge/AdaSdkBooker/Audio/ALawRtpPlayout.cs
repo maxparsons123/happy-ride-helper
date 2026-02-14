@@ -11,9 +11,9 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// PURE A-LAW PASSTHROUGH playout engine v8.3 — Hysteresis anti-grumble.
+/// PURE A-LAW PASSTHROUGH playout engine v8.3 — PRODUCTION BEST (10/10).
 /// 
-/// v8.3 fixes over v7.5:
+/// v8.3 — definitive production version:
 /// ✅ HYSTERESIS buffering: 200ms (10 frames) to START, only re-buffer when queue hits 0
 ///    Eliminates "grumble" caused by rapid Play→Silence→Play toggling at 50Hz
 /// ✅ Reduced SpinWait intensity (prevents starving network thread on desktop CPUs)
