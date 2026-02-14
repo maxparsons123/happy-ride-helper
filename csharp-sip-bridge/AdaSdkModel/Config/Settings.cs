@@ -65,6 +65,15 @@ public sealed class OpenAiSettings
     public string ApiKey { get; set; } = "";
     public string Model { get; set; } = "gpt-4o-mini-realtime-preview-2024-12-17";
     public string Voice { get; set; } = "alloy";
+
+    /// <summary>Use PCM16 24kHz (HighSample) instead of G.711 A-law passthrough.</summary>
+    public bool UseHighSample { get; set; } = false;
+
+    /// <summary>Ingress gain (caller→AI). Applied in PCM domain when UseHighSample=true.</summary>
+    public double IngressGain { get; set; } = 4.0;
+
+    /// <summary>Egress gain (AI→caller). Applied in PCM domain when UseHighSample=true.</summary>
+    public double EgressGain { get; set; } = 1.0;
 }
 
 public sealed class AudioSettings
