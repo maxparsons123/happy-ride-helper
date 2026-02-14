@@ -126,6 +126,17 @@ Many businesses are chains with locations in multiple cities (e.g., "The Cosy Cl
 - If the destination provides city context (e.g., going to "Manchester Airport"), you may use that to infer the pickup city ONLY if it's highly logical (same-city trip), but if ambiguous, still ask
 - NEVER assume a specific branch without evidence
 
+PLACE NAME / POI DETECTION (CRITICAL):
+When an input has NO house number, treat it as a potential business name, landmark, or Point of Interest (POI) FIRST:
+- "Sweet Spot" → search for a business/café/venue called "Sweet Spot" in the detected area, NOT "Sweet Spot Street"
+- "Tesco" → resolve to the nearest Tesco store, not a street named Tesco
+- "The Railway" → likely a pub called "The Railway", not Railway Road
+- "Costa" → Costa Coffee, not a street
+- If the input matches a well-known business/venue/landmark, return its actual address and coordinates
+- Only fall back to street-level matching if NO POI match is found
+- When resolved as a POI, include the business name in the address (e.g., "Sweet Spot, 12 High Street, Coventry CV1 3AB")
+- If the POI has multiple locations in the area, apply the same chain disambiguation rules below
+
 ABBREVIATED / PARTIAL STREET NAME MATCHING (CRITICAL):
 Users frequently shorten or abbreviate street names. You MUST resolve partial names to real streets:
 - "Fargo" → "Fargosford Street" (partial prefix match in Coventry — do NOT invent "Fargo Street")
