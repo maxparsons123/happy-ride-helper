@@ -148,63 +148,69 @@ public sealed class SipServer : IAsyncDisposable
         _transport.SIPRequestInTraceEvent += (ep, src, req) =>
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
-        var transportType = _settings.Transport.ToUpperInvariant();
-        if (transportType == "TCP_GAMMA" || transportType == "TCP")
+        switch (_settings.Transport.ToUpperInvariant())
         {
-            var tcpChannel = new SIPTCPChannel(new IPEndPoint(_localIp!, transportType == "TCP_GAMMA" ? 5060 : 0));
-            _transport.AddSIPChannel(tcpChannel);
-            Log($"📡 TCP channel on port {(tcpChannel.ListeningEndPoint as IPEndPoint)?.Port ?? 5060}");
-        }
-        else
-        {
-            _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(_localIp!, 0)));
+            case "TCP_GAMMA":
+                var gammaTcp = new SIPTCPChannel(new IPEndPoint(_localIp!, 5060));
+                _transport.AddSIPChannel(gammaTcp);
+                Log($"📡 TCP channel on port {(gammaTcp.ListeningEndPoint as IPEndPoint)?.Port ?? 5060}");
+                break;
+            case "TCP":
+                var tcpChannel = new SIPTCPChannel(new IPEndPoint(_localIp!, 0));
+                _transport.AddSIPChannel(tcpChannel);
+                Log("📡 Using TCP transport");
+                break;
+            case "TLS":
+                var tlsChannel = new SIPTLSChannel(new IPEndPoint(_localIp!, 0));
+                _transport.AddSIPChannel(tlsChannel);
+                Log("🔒 Using TLS transport");
+                break;
+            default:
+                _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(_localIp!, 0)));
+                Log("📡 Using UDP transport (default)");
+                break;
         }
     }
 
     private void InitializeRegistration()
     {
         var authUser = _settings.EffectiveAuthUser;
-        string serverAddr = _settings.Server.Trim();
-        bool isHostname = !IPAddress.TryParse(serverAddr, out _);
+        var resolvedHost = ResolveDns(_settings.Server);
+        var registrarHostWithPort = _settings.Port == 5060
+            ? resolvedHost
+            : $"{resolvedHost}:{_settings.Port}";
 
-        if (isHostname)
+        if (authUser != _settings.Username)
         {
-            // Hostname-based registration: preserve hostname in SIP headers,
-            // resolve IP only for outbound proxy routing.
-            Log($"🔍 Resolving hostname '{serverAddr}' to IP for routing…");
-            IPAddress? resolvedIp;
-            try
+            // Separate AuthId — need full registration constructor with outbound proxy
+            if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
             {
-                resolvedIp = Dns.GetHostAddresses(serverAddr)
-                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
-                if (resolvedIp == null)
+                try
                 {
-                    Log("⚠️ Could not resolve hostname to IPv4; cannot register.");
+                    registrarIp = Dns.GetHostAddresses(resolvedHost)
+                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
+                }
+                catch
+                {
+                    Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
+                    _regAgent = new SIPRegistrationUserAgent(
+                        _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
+                    WireRegistrationEvents();
                     return;
                 }
-                Log($"✅ Resolved '{serverAddr}' → {resolvedIp}");
             }
-            catch (Exception ex)
-            {
-                Log($"⚠️ DNS resolution failed: {ex.Message}");
-                return;
-            }
-
-            // IMPORTANT: Use HOSTNAME in SIP headers (AOR, registrar) for correct domain matching.
-            // Use resolved IP only for the outbound proxy (transport routing).
-            var registrarHostWithPort = _settings.Port == 5060
-                ? serverAddr
-                : $"{serverAddr}:{_settings.Port}";
 
             var protocol = _settings.Transport.ToUpperInvariant() switch
             {
-                "TCP" => SIPProtocolsEnum.tcp,
+                "TCP" or "TCP_GAMMA" => SIPProtocolsEnum.tcp,
                 "TLS" => SIPProtocolsEnum.tls,
                 _ => SIPProtocolsEnum.udp
             };
-            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(resolvedIp, _settings.Port));
+            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _settings.Port));
             var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
             var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
+
+            Log($"🔐 Auth: AOR={sipAccountAor}, AuthUser={authUser}");
 
             _regAgent = new SIPRegistrationUserAgent(
                 sipTransport: _transport,
@@ -218,18 +224,14 @@ public sealed class SipServer : IAsyncDisposable
                 expiry: 120,
                 customHeaders: null);
 
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser}, routed via {resolvedIp})");
+            Log($"➡ Using separate Auth ID: {authUser}, Registrar: {registrarHostWithPort} (routed via {resolvedHost})");
         }
         else
         {
-            // IP-based registration: simple path for legacy PBXes
-            var registrarHostWithPort = _settings.Port == 5060
-                ? serverAddr
-                : $"{serverAddr}:{_settings.Port}";
-
+            // Simple registration — same username for identity and auth
             _regAgent = new SIPRegistrationUserAgent(
                 _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort}");
         }
 
         WireRegistrationEvents();
