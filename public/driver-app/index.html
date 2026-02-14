@@ -555,6 +555,26 @@
       }
     }
 
+    // ===== JOB DATA BUILDER — single source of truth for field mapping =====
+    function buildJobData(jobId, data) {
+      return {
+        job: jobId,
+        pickup: data.pickup || data.pubName || '',
+        pubName: data.pickup || data.pubName || '',
+        dropoff: data.dropoff || data.destination || '',
+        customerName: data.customerName || '',
+        customerPhone: data.customerPhone || '',
+        lat: data.pickupLat || data.lat || 0,
+        lng: data.pickupLng || data.lng || 0,
+        dropoffLat: data.dropoffLat || 0,
+        dropoffLng: data.dropoffLng || 0,
+        passengers: data.passengers || '1',
+        fare: data.fare || null,
+        notes: data.notes || '',
+        biddingWindowSec: data.biddingWindowSec || 30
+      };
+    }
+
     // ===== JOB SYSTEM =====
     function cleanupJob() {
       if (state.jobTimerInterval) clearInterval(state.jobTimerInterval);
@@ -1047,12 +1067,13 @@
     }
 
     function handleMqttMessage(topic, data) {
+      console.log('📨 MQTT [' + topic + ']:', JSON.stringify(data).substring(0, 500));
+
       // Driver GPS updates (other drivers)
       if (topic.startsWith('drivers/') && topic.endsWith('/location')) {
         const driverId = topic.split('/')[1];
         if (driverId !== state.DRIVER_ID) {
           state.otherDrivers[driverId] = { lat: data.lat, lng: data.lng, status: data.status, ts: data.ts };
-          // Update driver marker on map
           updateOtherDriverMarker(driverId, data);
         }
         return;
@@ -1071,23 +1092,11 @@
       // Bid request — show job panel
       if (topic === `drivers/${state.DRIVER_ID}/bid-request`) {
         const jobId = data.jobId || data.job;
+        console.log('🎯 BID-REQUEST jobId=' + jobId, 'pickup=' + data.pickup, 'dropoff=' + data.dropoff, 'fare=' + data.fare);
         if (!jobId || state.seenJobIds.has(jobId)) return;
         state.seenJobIds.add(jobId);
-        const jobData = {
-          job: jobId,
-          pubName: data.pickup || data.pubName || '',
-          pickup: data.pickup || data.pubName || '',
-          dropoff: data.dropoff || data.destination || '',
-          customerName: data.customerName || '',
-          customerPhone: data.customerPhone || '',
-          lat: data.pickupLat || data.lat || 0,
-          lng: data.pickupLng || data.lng || 0,
-          dropoffLat: data.dropoffLat || 0,
-          dropoffLng: data.dropoffLng || 0,
-          passengers: data.passengers || 1,
-          fare: data.fare || data.estimatedFare || null,
-          notes: data.notes || data.specialRequests || '',
-        };
+        const jobData = buildJobData(jobId, data);
+        console.log('📋 Parsed jobData:', JSON.stringify(jobData));
         if (!state.isJobActive) {
           showJobPanel(jobData);
         } else {
@@ -1105,24 +1114,10 @@
 
         // If this is an allocation for THIS driver, show it
         if (status === 'allocated' && data.driver === state.DRIVER_ID) {
-          const jobData = {
-            job: jobId,
-            pubName: data.pubName || data.pickup || '',
-            pickup: data.pickup || data.pubName || '',
-            dropoff: data.dropoff || data.destination || '',
-            pickupDropoff: data.pickupDropoff || '',
-            customerName: data.customerName || '',
-            customerPhone: data.customerPhone || '',
-            lat: data.lat || data.pickupLat || 0,
-            lng: data.lng || data.pickupLng || 0,
-            dropoffLat: data.dropoffLat || 0,
-            dropoffLng: data.dropoffLng || 0,
-            passengers: data.passengers || 1,
-            fare: data.fare || null,
-            notes: data.notes || data.specialRequests || '',
-          };
+          console.log('✅ ALLOCATED for me:', JSON.stringify(data).substring(0, 500));
+          const jobData = buildJobData(jobId, data);
+          console.log('📋 Allocated jobData:', JSON.stringify(jobData));
           addJobToHistory(jobData, 'allocated');
-          // Show "won" modal if not already showing job panel for this
           if (!state.isJobActive || (state.currentJob && state.currentJob.job !== jobId)) {
             state.els.jobWonModal.style.display = 'flex';
             setTimeout(() => { state.els.jobWonModal.style.display = 'none'; }, 3000);
@@ -1137,21 +1132,8 @@
         if (status === 'bidding') {
           if (state.seenJobIds.has(jobId)) return;
           state.seenJobIds.add(jobId);
-          const jobData = {
-            job: jobId,
-            pubName: data.pubName || data.pickup || '',
-            pickup: data.pickup || data.pubName || '',
-            dropoff: data.dropoff || data.destination || '',
-            customerName: data.customerName || '',
-            customerPhone: data.customerPhone || '',
-            lat: data.lat || data.pickupLat || 0,
-            lng: data.lng || data.pickupLng || 0,
-            dropoffLat: data.dropoffLat || 0,
-            dropoffLng: data.dropoffLng || 0,
-            passengers: data.passengers || 1,
-            fare: data.fare || null,
-            notes: data.notes || data.specialRequests || '',
-          };
+          console.log('🔔 BIDDING broadcast:', JSON.stringify(data).substring(0, 500));
+          const jobData = buildJobData(jobId, data);
           if (!state.isJobActive) {
             showJobPanel(jobData);
           } else {
@@ -1187,22 +1169,9 @@
       if (topic.startsWith('jobs/') && topic.includes('/result/')) {
         const jobId = topic.split('/')[1];
         if (data.result === 'won') {
-          const jobData = {
-            job: jobId,
-            pubName: data.pubName || data.pickup || '',
-            pickup: data.pickup || data.pubName || '',
-            dropoff: data.dropoff || data.destination || '',
-            pickupDropoff: data.pickupDropoff || '',
-            customerName: data.customerName || '',
-            customerPhone: data.customerPhone || '',
-            lat: data.lat || data.pickupLat || 0,
-            lng: data.lng || data.pickupLng || 0,
-            dropoffLat: data.dropoffLat || 0,
-            dropoffLng: data.dropoffLng || 0,
-            passengers: data.passengers || 1,
-            fare: data.fare || null,
-            notes: data.notes || data.specialRequests || '',
-          };
+          console.log('🏆 WON job:', JSON.stringify(data).substring(0, 500));
+          const jobData = buildJobData(jobId, data);
+          console.log('📋 Won jobData:', JSON.stringify(jobData));
           addJobToHistory(jobData, 'allocated');
           state.els.jobWonModal.style.display = 'flex';
           speakFeedback(`You won the job! Pickup at ${jobData.pickup}. Going to ${jobData.dropoff}.`);
@@ -1214,24 +1183,17 @@
         return;
       }
 
-      // Legacy: direct job allocation
+      // Direct job allocation (from dispatcher)
       if (topic === `drivers/${state.DRIVER_ID}/jobs`) {
-        const jobData = {
-          job: data.jobId || data.job,
-          pubName: data.pubName || data.pickup || '',
-          pickup: data.pickup || data.pubName || '',
-          dropoff: data.dropoff || data.destination || '',
-          customerName: data.customerName || '',
-          customerPhone: data.customerPhone || '',
-          lat: data.pickupLat || data.lat || 0,
-          lng: data.pickupLng || data.lng || 0,
-          dropoffLat: data.dropoffLat || 0,
-          dropoffLng: data.dropoffLng || 0,
-          passengers: data.passengers || 1,
-          fare: data.fare || null,
-          notes: data.notes || data.specialRequests || '',
-        };
+        const jobId = data.jobId || data.job;
+        console.log('📦 DIRECT ALLOCATION:', JSON.stringify(data).substring(0, 500));
+        const jobData = buildJobData(jobId, data);
+        console.log('📋 Direct jobData:', JSON.stringify(jobData));
         addJobToHistory(jobData, 'allocated');
+        // Also show the job panel so driver sees it immediately
+        if (!state.isJobActive) {
+          showJobPanel(jobData);
+        }
         return;
       }
 
