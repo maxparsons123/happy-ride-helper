@@ -301,7 +301,8 @@ public partial class MainForm : Form
                 SetInCall(true);
                 statusCallId.Text = $"{callerId} [{sessionId}]";
                 StartAudioMonitor();
-                _ = ConnectSimliAsync();
+                if (!_operatorMode)
+                    _ = ConnectSimliAsync();
             });
 
             _sipServer.OnCallRinging += (pendingId, callerId) => Invoke(() =>
