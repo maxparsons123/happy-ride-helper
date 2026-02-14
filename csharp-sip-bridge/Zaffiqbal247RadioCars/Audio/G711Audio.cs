@@ -1,4 +1,4 @@
-namespace AdaSdkModel.Audio;
+namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
 /// Applies volume boost to G.711 A-law audio in-place.
