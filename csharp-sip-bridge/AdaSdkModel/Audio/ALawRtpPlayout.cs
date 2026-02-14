@@ -70,7 +70,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // This prevents the "grumble" from rapid Play→Silence→Play toggling
     private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms to start/resume
     private const int MAX_QUEUE_FRAMES = 2000;            // ~40s safety cap
-    private const int MAX_LATENCY_FRAMES = 50;            // 1s max playout latency — trim excess
+    private const int MAX_LATENCY_FRAMES = 150;            // 3s max playout latency — trim excess
 
     // Accumulator safety: cap at 64KB to prevent unbounded growth from burst audio
     private const int MAX_ACCUMULATOR_SIZE = 65536;
