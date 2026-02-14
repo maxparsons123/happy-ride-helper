@@ -113,6 +113,55 @@ public sealed class CallSession : ICallSession
             sdkClient.NotifyPlayoutComplete();
     }
 
+    // =========================
+    // BOOKING STATE INJECTION
+    // =========================
+    private async Task InjectBookingStateAsync(string? interpretation = null)
+    {
+        if (_aiClient is not OpenAiSdkClient sdk) return;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("[BOOKING STATE] Current booking data (ground truth):");
+        sb.AppendLine($"  Name: {(_booking.Name != null ? $"{_booking.Name} ✓" : "(not yet collected)")}");
+        sb.AppendLine($"  Pickup: {(_booking.Pickup != null ? $"{_booking.Pickup} ✓" : "(not yet collected)")}");
+        sb.AppendLine($"  Destination: {(_booking.Destination != null ? $"{_booking.Destination} ✓" : "(not yet collected)")}");
+        sb.AppendLine($"  Passengers: {(_booking.Passengers.HasValue ? $"{_booking.Passengers} ✓" : "(not yet collected)")}");
+        sb.AppendLine($"  Time: {(_booking.PickupTime != null ? $"{_booking.PickupTime} ✓" : "(not yet collected)")}");
+        sb.AppendLine($"  Vehicle: {_booking.VehicleType}");
+
+        if (_booking.Fare != null)
+            sb.AppendLine($"  Fare: {_booking.Fare}");
+        if (_booking.Eta != null)
+            sb.AppendLine($"  ETA: {_booking.Eta}");
+
+        if (!string.IsNullOrWhiteSpace(interpretation))
+            sb.AppendLine($"  Last interpretation: {interpretation}");
+
+        int missing = 0;
+        if (_booking.Name == null) missing++;
+        if (_booking.Pickup == null) missing++;
+        if (_booking.Destination == null) missing++;
+        if (!_booking.Passengers.HasValue) missing++;
+        if (_booking.PickupTime == null) missing++;
+
+        if (missing > 0)
+            sb.AppendLine($"  ⚠️ {missing} field(s) still needed before fare calculation.");
+        else
+            sb.AppendLine("  ✅ All fields collected — fare calculation will trigger automatically.");
+
+        sb.AppendLine("IMPORTANT: If the caller corrects ANY field, update it immediately via sync_booking_data. The LATEST value is always the truth.");
+
+        try
+        {
+            await sdk.InjectSystemMessageAsync(sb.ToString());
+            _logger.LogDebug("[{SessionId}] 📋 Booking state injected", SessionId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("[{SessionId}] ⚠️ Failed to inject booking state: {Error}", SessionId, ex.Message);
+        }
+    }
+
     private void HandleAiAudio(byte[] alawFrame)
     {
         // 1. Volume boost
@@ -248,10 +297,21 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("vehicle_type", out var vt) && !string.IsNullOrWhiteSpace(vt?.ToString()))
             _booking.VehicleType = vt.ToString()!;
 
+        // Extract interpretation if provided
+        string? interpretation = null;
+        if (args.TryGetValue("interpretation", out var interp))
+            interpretation = interp?.ToString();
+
         _logger.LogInformation("[{SessionId}] ⚡ Sync: Name={Name}, Pickup={Pickup}, Dest={Dest}, Pax={Pax}, Vehicle={Vehicle}",
             SessionId, _booking.Name ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?", _booking.Passengers, _booking.VehicleType);
+        if (!string.IsNullOrWhiteSpace(interpretation))
+            _logger.LogInformation("[{SessionId}] 💭 Interpretation: {Interpretation}", SessionId, interpretation);
 
         OnBookingUpdated?.Invoke(_booking.Clone());
+
+        // ── BOOKING STATE INJECTION ──
+        // Inject current booking state into conversation so Ada always has ground truth
+        _ = InjectBookingStateAsync(interpretation);
 
         // If transcript mismatch was detected, return warning to Ada
         if (mismatchWarning != null)
