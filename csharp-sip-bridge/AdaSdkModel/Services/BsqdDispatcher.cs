@@ -146,55 +146,28 @@ public sealed class BsqdDispatcher : IDispatcher
 
             var fareStr = ParseFare(booking.Fare);
 
-            // CRITICAL: Send BOTH new and old field names for maximum driver app compatibility
             var payload = JsonSerializer.Serialize(new
             {
-                // Core job fields (both formats)
-                job = jobId,
                 jobId = jobId,
-
-                // Pickup coordinates (both formats)
-                lat = Math.Round(pickupLat, 6),
-                lng = Math.Round(pickupLng, 6),
-                pickupLat = Math.Round(pickupLat, 6),
-                pickupLng = Math.Round(pickupLng, 6),
-
-                // Pickup address (both formats)
+                lat = pickupLat,
+                lng = pickupLng,
                 pickupAddress = pickupAddress,
                 pickup = pickupAddress,
-                pubName = pickupAddress,
-
-                // Dropoff fields (both formats)
                 dropoff = dropoffAddress,
                 dropoffName = dropoffAddress,
-                dropoffLat = Math.Round(dropoffLat, 6),
-                dropoffLng = Math.Round(dropoffLng, 6),
-
-                // Passenger & bidding
-                passengers = booking.Passengers?.ToString() ?? "1",
-                biddingWindowSec = booking.BiddingWindowSec ?? 45,
-
-                // Customer info (both formats)
+                dropoffLat = dropoffLat,
+                dropoffLng = dropoffLng,
                 customerName = booking.Name ?? "Customer",
                 customerPhone = FormatE164(phoneNumber),
                 callerName = booking.Name ?? "Customer",
                 callerPhone = FormatE164(phoneNumber),
-
-                // Fare & notes (both formats)
                 fare = fareStr,
                 estimatedFare = fareStr,
                 notes = booking.PickupTime ?? "None",
                 specialRequirements = booking.PickupTime ?? "None",
-
-                // Temp fields for future expansion
-                temp1 = "",
-                temp2 = "",
-                temp3 = "",
-
-                // Metadata
-                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                dispatcherId = "adasdk",
-                version = "11.9.2"
+                biddingWindowSec = booking.BiddingWindowSec ?? 30,
+                passengers = booking.Passengers?.ToString() ?? "1",
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             });
 
             var topic = $"pubs/requests/{jobId}";
