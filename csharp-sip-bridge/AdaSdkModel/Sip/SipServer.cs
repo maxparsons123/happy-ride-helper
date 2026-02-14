@@ -156,10 +156,63 @@ public sealed class SipServer : IAsyncDisposable
             ? serverAddr
             : $"{serverAddr}:{_settings.Port}";
 
-        _regAgent = new SIPRegistrationUserAgent(
-            _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
+        bool isHostname = !IPAddress.TryParse(serverAddr, out _);
 
-        Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort}");
+        if (isHostname)
+        {
+            // Resolve hostname to IP for outbound proxy routing,
+            // but keep hostname in SIP headers for domain matching.
+            Log($"🔍 Resolving hostname '{serverAddr}'…");
+            IPAddress? resolvedIp;
+            try
+            {
+                resolvedIp = Dns.GetHostAddresses(serverAddr)
+                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                if (resolvedIp == null)
+                {
+                    Log("⚠️ Could not resolve hostname to IPv4; cannot register.");
+                    return;
+                }
+                Log($"✅ Resolved '{serverAddr}' → {resolvedIp}");
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ DNS resolution failed: {ex.Message}");
+                return;
+            }
+
+            var protocol = _settings.Transport.ToUpperInvariant() switch
+            {
+                "TCP" => SIPProtocolsEnum.tcp,
+                "TLS" => SIPProtocolsEnum.tls,
+                _ => SIPProtocolsEnum.udp
+            };
+            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(resolvedIp, _settings.Port));
+            var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
+            var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
+
+            _regAgent = new SIPRegistrationUserAgent(
+                sipTransport: _transport,
+                outboundProxy: outboundProxy,
+                sipAccountAOR: sipAccountAor,
+                authUsername: _settings.Username,
+                password: _settings.Password,
+                realm: null,
+                registrarHost: registrarHostWithPort,
+                contactURI: contactUri,
+                expiry: 120,
+                customHeaders: null);
+
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (routed via {resolvedIp})");
+        }
+        else
+        {
+            // Direct IP registration
+            _regAgent = new SIPRegistrationUserAgent(
+                _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
+
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort}");
+        }
 
         WireRegistrationEvents();
     }
