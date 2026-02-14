@@ -61,8 +61,7 @@ public partial class MainForm : Form
     // ══════════════════════════════════════
 
     private static string SettingsPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "AdaSdkModel", "appsettings.json");
+        AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
 
     private static AppSettings LoadSettings()
     {
