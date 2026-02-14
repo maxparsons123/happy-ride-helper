@@ -332,7 +332,7 @@ public class MainForm : Form
             _bidding.OnBidLost += (job, losingDriverId) =>
             {
                 if (_mqtt == null) return;
-                _ = _mqtt.PublishBidResult(job.Id, losingDriverId, "lost");
+                _ = _mqtt.PublishBidResult(job.Id, losingDriverId, "lost", job);
                 if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange));
                 else _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange);
             };
@@ -753,7 +753,7 @@ public class MainForm : Form
             _bidding.OnBidLost += (job, losingDriverId) =>
             {
                 if (_mqtt == null) return;
-                _ = _mqtt.PublishBidResult(job.Id, losingDriverId, "lost");
+                _ = _mqtt.PublishBidResult(job.Id, losingDriverId, "lost", job);
                 if (InvokeRequired) BeginInvoke(() => _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange));
                 else _logPanel.AppendLog($"📤 Bid lost → {losingDriverId} for {job.Id}", Color.DarkOrange);
             };

@@ -235,74 +235,47 @@ public sealed class MqttDispatchClient : IDisposable
 
     public async Task PublishJobAllocation(string jobId, string driverId, Job job)
     {
-        var payload = JsonSerializer.Serialize(new
-        {
-            jobId,
-            driverId,
-            pickup = job.Pickup,
-            dropoff = job.Dropoff,
-            dropoffName = job.Dropoff,
-            pickupLat = job.PickupLat,
-            pickupLng = job.PickupLng,
-            dropoffLat = job.DropoffLat,
-            dropoffLng = job.DropoffLng,
-            passengers = job.Passengers,
-            fare = job.EstimatedFare,
-            notes = job.SpecialRequirements ?? "",
-            customerName = job.CallerName ?? "Customer",
-            customerPhone = job.CallerPhone ?? ""
-        });
-
-        await PublishAsync($"drivers/{driverId}/jobs", payload);
-        await PublishAsync($"jobs/{jobId}/allocated", payload);
-        
-        // Notify driver app and pub app via jobs/{jobId}/status topic
-        // Driver app subscribes to jobs/+/status — include full job details
         var pickupDropoff = $"{job.Pickup}\ndropoff\n{job.Dropoff}";
-        var statusPayload = JsonSerializer.Serialize(new
+        var fareStr = job.EstimatedFare?.ToString("0.00") ?? "";
+
+        // Full job payload matching the generic stanza
+        object BuildFullPayload(string? result = null) => new
         {
             job = jobId,
-            status = "allocated",
+            result = result ?? (string?)null,
+            status = result == "won" ? "allocated" : (string?)null,
             driver = driverId,
+            lat = job.PickupLat,
+            lng = job.PickupLng,
             pickupAddress = job.Pickup,
             pickup = job.Pickup,
             dropoff = job.Dropoff,
             dropoffName = job.Dropoff,
-            pickupDropoff,
-            customerName = job.CallerName ?? "Customer",
-            customerPhone = job.CallerPhone ?? "",
-            lat = job.PickupLat,
-            lng = job.PickupLng,
             dropoffLat = job.DropoffLat,
             dropoffLng = job.DropoffLng,
-            passengers = job.Passengers,
-            fare = job.EstimatedFare,
-            notes = job.SpecialRequirements ?? "",
-            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        });
-        await PublishAsync($"jobs/{jobId}/status", statusPayload);
-        
-        // Driver app listens on jobs/{jobId}/result/{driverId} for bid outcome
-        var resultPayload = JsonSerializer.Serialize(new
-        {
-            result = "won",
-            job = jobId,
-            pickup = job.Pickup,
-            dropoff = job.Dropoff,
-            dropoffName = job.Dropoff,
             pickupDropoff,
             customerName = job.CallerName ?? "Customer",
             customerPhone = job.CallerPhone ?? "",
             passengers = job.Passengers,
-            fare = job.EstimatedFare,
+            passengersText = job.PassengerDetails ?? "",
+            fare = fareStr,
             notes = job.SpecialRequirements ?? "",
-            lat = job.PickupLat,
-            lng = job.PickupLng,
-            dropoffLat = job.DropoffLat,
-            dropoffLng = job.DropoffLng
-        });
-        await PublishAsync($"jobs/{jobId}/result/{driverId}", resultPayload);
-        
+            priority = job.Priority ?? "normal",
+            vehicleOverride = job.VehicleOverride ?? "",
+            paymentMethod = job.PaymentMethod ?? "",
+            biddingWindowSec = job.BiddingWindowSec ?? 20,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+
+        var allocationPayload = JsonSerializer.Serialize(BuildFullPayload());
+
+        await PublishAsync($"drivers/{driverId}/jobs", allocationPayload);
+        await PublishAsync($"jobs/{jobId}/allocated", allocationPayload);
+        await PublishAsync($"jobs/{jobId}/status", JsonSerializer.Serialize(BuildFullPayload()));
+
+        // Winner result on jobs/{jobId}/result/{driverId}
+        await PublishAsync($"jobs/{jobId}/result/{driverId}", JsonSerializer.Serialize(BuildFullPayload("won")));
+
         OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId} | {job.Pickup} → {job.Dropoff}");
     }
 
@@ -340,13 +313,26 @@ public sealed class MqttDispatchClient : IDisposable
     }
 
     /// <summary>Publish bid result (winner/loser) to drivers.</summary>
-    public async Task PublishBidResult(string jobId, string driverId, string result)
+    public async Task PublishBidResult(string jobId, string driverId, string result, Job? job = null)
     {
         var payload = JsonSerializer.Serialize(new
         {
             job = jobId,
             driver = driverId,
             result,
+            pickupAddress = job?.Pickup ?? "",
+            pickup = job?.Pickup ?? "",
+            dropoff = job?.Dropoff ?? "",
+            dropoffName = job?.Dropoff ?? "",
+            lat = job?.PickupLat ?? 0,
+            lng = job?.PickupLng ?? 0,
+            dropoffLat = job?.DropoffLat ?? 0,
+            dropoffLng = job?.DropoffLng ?? 0,
+            customerName = job?.CallerName ?? "",
+            customerPhone = job?.CallerPhone ?? "",
+            passengers = job?.Passengers ?? 0,
+            fare = job?.EstimatedFare?.ToString("0.00") ?? "",
+            notes = job?.SpecialRequirements ?? "",
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
 
