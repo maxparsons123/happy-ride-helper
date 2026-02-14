@@ -268,7 +268,7 @@ public sealed class SipServer : IAsyncDisposable
         await AnswerAndWireCallAsync(req, caller);
     }
 
-    /// <summary>Answer the pending call in operator mode.</summary>
+    /// <summary>Answer the pending call in operator mode — NO AI, pure two-way audio.</summary>
     public async Task<bool> AnswerOperatorCallAsync()
     {
         PendingCall? pending;
@@ -279,9 +279,72 @@ public sealed class SipServer : IAsyncDisposable
         }
         if (pending == null) { Log("⚠ No pending call to answer"); return false; }
 
-        Log($"✅ Answering pending call from {pending.CallerId}…");
-        await AnswerAndWireCallAsync(pending.Request, pending.CallerId, isOperator: true);
+        Log($"✅ Answering pending call from {pending.CallerId} (operator mode — no AI)…");
+        await AnswerOperatorCallDirectAsync(pending.Request, pending.CallerId);
         return true;
+    }
+
+    /// <summary>
+    /// Answer a call in pure operator mode: SIP + RTP only, no AI session.
+    /// Caller audio → local speakers, operator mic → caller via playout.
+    /// </summary>
+    private async Task AnswerOperatorCallDirectAsync(SIPRequest req, string caller)
+    {
+        var callAgent = new SIPUserAgent(_transport, null);
+        var audioEncoder = new AudioEncoder();
+        var audioSource = new AudioExtrasSource(audioEncoder, new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
+        audioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
+
+        var rtpSession = new VoIPMediaSession(new MediaEndPoints { AudioSource = audioSource });
+        rtpSession.AcceptRtpFromAny = true;
+
+        AudioCodecsEnum negotiatedCodec = AudioCodecsEnum.PCMA;
+        rtpSession.OnAudioFormatsNegotiated += formats => negotiatedCodec = formats.FirstOrDefault().Codec;
+
+        var serverUa = callAgent.AcceptCall(req);
+        await Task.Delay(200);
+
+        if (!await callAgent.Answer(serverUa, rtpSession))
+        {
+            Log("❌ Failed to answer operator call"); return;
+        }
+
+        await rtpSession.Start();
+
+        var sessionId = Guid.NewGuid().ToString("N")[..12];
+        var activeCall = new ActiveCall { SessionId = sessionId, Session = null, RtpSession = rtpSession, CallAgent = callAgent };
+
+        if (!_activeCalls.TryAdd(sessionId, activeCall))
+        {
+            callAgent.Hangup(); rtpSession.Close("dup"); return;
+        }
+
+        var playout = new ALawRtpPlayout(rtpSession);
+        playout.OnLog += msg => Log($"[{sessionId}] {msg}");
+        activeCall.Playout = playout;
+
+        // Wire caller audio → local speakers only (no AI processing)
+        rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
+        {
+            if (mediaType != SDPMediaTypesEnum.audio) return;
+            var payload = rtpPacket.Payload;
+            if (payload == null || payload.Length == 0) return;
+
+            byte[] g711 = negotiatedCodec == AudioCodecsEnum.PCMU ? G711Transcode.MuLawToALaw(payload) : payload;
+            OnOperatorCallerAudio?.Invoke(g711);
+        };
+
+        playout.Start();
+
+        callAgent.OnCallHungup += async (d) =>
+        {
+            if (_activeCalls.TryRemove(sessionId, out var c))
+                await CleanupCallAsync(c, "remote_hangup");
+            OnCallEnded?.Invoke(sessionId, "remote_hangup");
+        };
+
+        OnCallStarted?.Invoke(sessionId, caller);
+        Log($"📞 Operator call {sessionId} active for {caller} (no AI, total: {_activeCalls.Count})");
     }
 
     /// <summary>Reject the pending call.</summary>
@@ -585,7 +648,7 @@ public sealed class SipServer : IAsyncDisposable
     private async Task CleanupCallAsync(ActiveCall call, string reason)
     {
         if (Interlocked.Exchange(ref call.CleanupDone, 1) == 1) return;
-        try { await call.Session.EndAsync(reason); } catch { }
+        if (call.Session != null) { try { await call.Session.EndAsync(reason); } catch { } }
         try { call.CallAgent.Hangup(); } catch { }
         try { call.RtpSession.Close(reason); } catch { }
         try { call.Playout?.Dispose(); } catch { }
@@ -638,7 +701,7 @@ public sealed class SipServer : IAsyncDisposable
     private sealed class ActiveCall
     {
         public required string SessionId { get; init; }
-        public required ICallSession Session { get; init; }
+        public ICallSession? Session { get; init; }        // null in operator mode (no AI)
         public required VoIPMediaSession RtpSession { get; init; }
         public required SIPUserAgent CallAgent { get; init; }
         public ALawRtpPlayout? Playout { get; set; }
