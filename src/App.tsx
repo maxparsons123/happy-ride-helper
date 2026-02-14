@@ -17,6 +17,7 @@ import DualBrainTest from "./pages/DualBrainTest";
 import CallFlowDebugger from "./pages/CallFlowDebugger";
 import VaxVoIPTest from "./pages/VaxVoIPTest";
 import Diagnostics from "./pages/Diagnostics";
+import DriverApp from "./pages/DriverApp";
 
 const queryClient = new QueryClient();
 
@@ -40,6 +41,7 @@ const App = () => (
           <Route path="/dual-brain" element={<DualBrainTest />} />
           <Route path="/call-flow" element={<CallFlowDebugger />} />
           <Route path="/diagnostics" element={<Diagnostics />} />
+          <Route path="/driver" element={<DriverApp />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
