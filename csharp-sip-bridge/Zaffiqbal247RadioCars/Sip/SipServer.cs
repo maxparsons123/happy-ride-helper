@@ -168,8 +168,7 @@ public sealed class SipServer : IAsyncDisposable
 
     private void InitializeRegistration()
     {
-        // Just the bare domain — SIPSorcery will use TCP since it's the only channel
-        var registrarUri = HW_DOMAIN;
+        var registrarUri = $"{HW_DOMAIN};transport=tcp";
 
         Log($"📡 HARDWIRED registration: {HW_USER}@{registrarUri}");
 
