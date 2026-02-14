@@ -340,13 +340,9 @@ public sealed class SipServer : IAsyncDisposable
         var transportParam = _settings.IsGammaTrunk ? ";transport=tcp" : "";
         var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}{transportParam}");
 
-        // Gamma trunk: add P-Asserted-Identity header
-        string[]? customHeaders = null;
         if (_settings.IsGammaTrunk)
         {
-            var ddi = _settings.EffectiveDdi;
-            customHeaders = new[] { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
-            Log($"📡 Gamma outbound: DDI={ddi}, dest={destination}");
+            Log($"📡 Gamma outbound: DDI={_settings.EffectiveDdi}, dest={destination}");
         }
 
         var callAgent = new SIPUserAgent(_transport, null);
@@ -364,7 +360,7 @@ public sealed class SipServer : IAsyncDisposable
 
         Log($"📞 Dialling {destination} via {serverAddr}{portPart}{transportParam}…");
         var fromHeader = _settings.IsGammaTrunk ? $"<sip:{_settings.EffectiveDdi}@{serverAddr}>" : null;
-        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession, customHeaders: customHeaders);
+        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession);
         if (!result)
         {
             Log($"❌ Outbound call to {destination} failed.");
