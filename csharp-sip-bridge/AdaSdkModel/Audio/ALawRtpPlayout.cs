@@ -11,16 +11,15 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// PURE A-LAW PASSTHROUGH playout engine v8.5 — based on proven v7.4 timing.
+/// PURE A-LAW PASSTHROUGH playout engine — ported from TaxiSipBridge ALawRtpPlayout v7.4.
 /// 
-/// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
 /// ✅ Fixed 100ms jitter buffer (absorbs OpenAI burst delivery)
-/// ✅ RTP marker bit on silence→audio transitions (decoder resync — fixes robotic sound)
-/// ✅ Queue depth monitoring with adaptive drain (prevents latency buildup)
-/// ✅ Re-buffering only on complete underrun (threshold=1, prevents micro-stutter)
+/// ✅ Re-buffering on underrun (prevents fast→slow pacing artifacts)
+/// ✅ Simple wall-clock timing (no aggressive drift correction = no micro-stutters)
 /// ✅ Instant silence transitions (NO fade-out = no G.711 warbling)
 /// ✅ NAT keepalives (reliability without audio impact)
 /// ✅ Windows multimedia timer for 1ms precision
+/// ✅ Minimal logging (zero hot-path overhead)
 /// 
 /// Architecture: Pure passthrough - NO DSP, NO resampling, NO conversions.
 /// </summary>
@@ -40,9 +39,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     // FIXED 100ms buffer (5 frames) - absorbs OpenAI burst delivery
     private const int JITTER_BUFFER_FRAMES = 5;
-    private const int REBUFFER_THRESHOLD = 1;    // Re-buffer only on complete underrun
-    private const int MAX_QUEUE_FRAMES = 500;    // ~10s safety cap
-    private const int DRAIN_THRESHOLD = 150;     // ~3s — only drain genuine backlog, not normal bursts
+    private const int REBUFFER_THRESHOLD = 2;    // Re-buffer if queue drops below this
+    private const int MAX_QUEUE_FRAMES = 1500;   // ~30s safety cap
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
@@ -177,11 +175,11 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v8.5"
+            Name = "ALawPlayout"
         };
 
         _playoutThread.Start();
-        SafeLog($"[RTP] Started (pure A-law v8.5, {JITTER_BUFFER_FRAMES * FRAME_MS}ms buffer, marker-bit, drain@{DRAIN_THRESHOLD})");
+        SafeLog($"[RTP] Started (pure A-law, {JITTER_BUFFER_FRAMES * 20}ms fixed buffer)");
     }
 
     public void Stop()
@@ -196,8 +194,8 @@ public sealed class ALawRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// SMOOTH TIMING LOOP: Simple wall-clock sync from proven v7.4.
-    /// Aggressive drift correction causes micro-stutters → use gentle snap only.
+    /// SMOOTH TIMING LOOP: Simple wall-clock sync without aggressive correction.
+    /// Aggressive drift correction causes micro-stutters → perceived as jitter.
     /// </summary>
     private void PlayoutLoop()
     {
@@ -235,22 +233,8 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         int queueCount = Volatile.Read(ref _queueCount);
 
-        // ── Queue drain: if backlog exceeds threshold, skip old frames to reduce latency ──
-        if (queueCount > DRAIN_THRESHOLD)
-        {
-            int toDrain = queueCount - JITTER_BUFFER_FRAMES;
-            int drained = 0;
-            while (drained < toDrain && _frameQueue.TryDequeue(out _))
-            {
-                Interlocked.Decrement(ref _queueCount);
-                drained++;
-            }
-            SafeLog($"[RTP] ⚠ Drained {drained} frames (queue was {queueCount}, now {Volatile.Read(ref _queueCount)})");
-            queueCount = Volatile.Read(ref _queueCount);
-        }
-
-        // Re-buffer only on complete underrun (threshold=1 prevents micro-stutter)
-        if (!_isBuffering && queueCount < REBUFFER_THRESHOLD)
+        // Re-buffer if queue gets too low (prevents burst→slow pacing)
+        if (!_isBuffering && queueCount < REBUFFER_THRESHOLD && queueCount > 0)
         {
             _isBuffering = true;
         }
@@ -268,10 +252,7 @@ public sealed class ALawRtpPlayout : IDisposable
         if (_frameQueue.TryDequeue(out var frame))
         {
             Interlocked.Decrement(ref _queueCount);
-
-            // Set RTP marker bit on first audio frame after silence → decoder resyncs cleanly
-            bool marker = !_wasPlaying;
-            SendRtpFrame(frame, marker);
+            SendRtpFrame(frame, false);
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
         }
