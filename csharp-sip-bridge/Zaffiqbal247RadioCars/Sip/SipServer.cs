@@ -138,7 +138,7 @@ public sealed class SipServer : IAsyncDisposable
     {
         _transport = new SIPTransport();
 
-        // SIP trace logging for debugging registration/call issues
+        // SIP trace logging
         _transport.SIPRequestOutTraceEvent += (ep, dst, req) =>
             Log($"📤 SIP OUT → {dst}: {req.Method} {req.URI}");
         _transport.SIPResponseInTraceEvent += (ep, src, resp) =>
@@ -148,17 +148,10 @@ public sealed class SipServer : IAsyncDisposable
         _transport.SIPRequestInTraceEvent += (ep, src, req) =>
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
-        var transportType = _settings.Transport.ToUpperInvariant();
-        if (transportType == "TCP_GAMMA" || transportType == "TCP")
-        {
-            var tcpChannel = new SIPTCPChannel(new IPEndPoint(_localIp!, transportType == "TCP_GAMMA" ? 5060 : 0));
-            _transport.AddSIPChannel(tcpChannel);
-            Log($"📡 TCP channel on port {(tcpChannel.ListeningEndPoint as IPEndPoint)?.Port ?? 5060}");
-        }
-        else
-        {
-            _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(_localIp!, 0)));
-        }
+        // HARDWIRED: TCP only — no UDP channel at all
+        var tcpChannel = new SIPTCPChannel(IPAddress.Any, 0);
+        _transport.AddSIPChannel(tcpChannel);
+        Log($"📡 TCP channel on port {(tcpChannel.ListeningEndPoint as IPEndPoint)?.Port ?? 0}");
     }
 
     // === HARD-WIRED CREDENTIALS FOR TESTING ===
