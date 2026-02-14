@@ -6,6 +6,13 @@ namespace AdaVaxVoIP.Config;
 public sealed class AppSettings
 {
     public SipSettings Sip { get; set; } = new();
+
+    /// <summary>Named SIP accounts for quick switching.</summary>
+    public List<SipAccount> SipAccounts { get; set; } = new();
+
+    /// <summary>Index of the currently selected SIP account (-1 = use inline Sip settings).</summary>
+    public int SelectedSipAccountIndex { get; set; } = -1;
+
     public OpenAiSettings OpenAi { get; set; } = new();
     public AudioSettings Audio { get; set; } = new();
     public DispatchSettings Dispatch { get; set; } = new();
@@ -97,4 +104,41 @@ public sealed class TaxiBookingSettings
 {
     public string CompanyName { get; set; } = "Ada Taxi";
     public bool AutoAnswer { get; set; } = true;
+}
+
+/// <summary>
+/// A named SIP account that can be saved and recalled from a dropdown.
+/// </summary>
+public sealed class SipAccount
+{
+    public string Label { get; set; } = "New Account";
+    public string Server { get; set; } = "";
+    public int Port { get; set; } = 5060;
+    public string Transport { get; set; } = "UDP";
+    public string Username { get; set; } = "";
+    public string Password { get; set; } = "";
+    public string? AuthId { get; set; }
+    public string? Domain { get; set; }
+    public bool AutoAnswer { get; set; } = true;
+    public bool EnableStun { get; set; } = true;
+    public string StunServer { get; set; } = "stun.l.google.com";
+    public int StunPort { get; set; } = 19302;
+
+    public SipSettings ToSipSettings() => new()
+    {
+        Server = Server, Port = Port, Transport = Transport,
+        Username = Username, Password = Password, AuthId = AuthId,
+        Domain = Domain, AutoAnswer = AutoAnswer,
+        EnableStun = EnableStun, StunServer = StunServer, StunPort = StunPort
+    };
+
+    public void FromSipSettings(SipSettings s, string label)
+    {
+        Label = label; Server = s.Server; Port = s.Port; Transport = s.Transport;
+        Username = s.Username; Password = s.Password; AuthId = s.AuthId;
+        Domain = s.Domain; AutoAnswer = s.AutoAnswer;
+        EnableStun = s.EnableStun; StunServer = s.StunServer; StunPort = s.StunPort;
+    }
+
+    public override string ToString() => $"{Label} ({Username}@{Server})";
 }
