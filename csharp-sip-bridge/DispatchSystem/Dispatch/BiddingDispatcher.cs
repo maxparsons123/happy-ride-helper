@@ -81,13 +81,15 @@ public sealed class BiddingDispatcher : IDisposable
 
             var driverList = eligible.Select(x => x.Driver).ToList();
             var driverNames = string.Join(", ", driverList.Select(d => d.Name));
-            OnLog?.Invoke($"📢 Bidding started for job {job.Id} → {eligible.Count} drivers ({driverNames}) — {_biddingWindowMs / 1000}s window");
+            // Use per-job bidding window if provided, otherwise system default
+            var windowMs = job.BiddingWindowSec.HasValue ? job.BiddingWindowSec.Value * 1000 : _biddingWindowMs;
+            OnLog?.Invoke($"📢 Bidding started for job {job.Id} → {eligible.Count} drivers ({driverNames}) — {windowMs / 1000}s window");
 
             // Notify via event so MainForm can publish MQTT
             OnBidRequestSent?.Invoke(job, driverList);
 
             // Start countdown timer
-            var timer = new System.Threading.Timer(_ => FinalizeBidding(job.Id), null, _biddingWindowMs, Timeout.Infinite);
+            var timer = new System.Threading.Timer(_ => FinalizeBidding(job.Id), null, windowMs, Timeout.Infinite);
             _timers[job.Id] = timer;
 
             return true;

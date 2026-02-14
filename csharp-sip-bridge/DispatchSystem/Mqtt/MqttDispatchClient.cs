@@ -132,13 +132,56 @@ public sealed class MqttDispatchClient : IDisposable
                             fare = parsed;
                     }
 
+                    // Parse passengers: can be int OR descriptive string like "2 adults, 1 child with wheelchair"
+                    int paxCount = 1;
+                    string? paxDetails = null;
+                    if (booking.passengers > 0)
+                    {
+                        paxCount = booking.passengers;
+                    }
+                    if (!string.IsNullOrEmpty(booking.passengersText))
+                    {
+                        paxDetails = booking.passengersText;
+                        // Extract leading digit(s) as count
+                        var match = System.Text.RegularExpressions.Regex.Match(booking.passengersText, @"^(\d+)");
+                        if (match.Success)
+                            paxCount = int.Parse(match.Groups[1].Value);
+                    }
+
+                    // Parse temp expansion fields (key:value format)
+                    string? priority = null, vehicleOverride = null, paymentMethod = null;
+                    if (!string.IsNullOrEmpty(booking.temp1))
+                    {
+                        var val = booking.temp1.Contains(':') ? booking.temp1.Split(':')[1].Trim() : booking.temp1;
+                        priority = val;
+                    }
+                    if (!string.IsNullOrEmpty(booking.temp2))
+                    {
+                        var val = booking.temp2.Contains(':') ? booking.temp2.Split(':')[1].Trim() : booking.temp2;
+                        vehicleOverride = val;
+                    }
+                    if (!string.IsNullOrEmpty(booking.temp3))
+                    {
+                        var val = booking.temp3.Contains(':') ? booking.temp3.Split(':')[1].Trim() : booking.temp3;
+                        paymentMethod = val;
+                    }
+
+                    // Vehicle type: prefer explicit vehicleType, then temp2 override
+                    var vehicleType = VehicleType.Saloon;
+                    if (Enum.TryParse<VehicleType>(booking.vehicleType, true, out var vt))
+                        vehicleType = vt;
+                    else if (!string.IsNullOrEmpty(vehicleOverride) && Enum.TryParse<VehicleType>(vehicleOverride, true, out var vt2))
+                        vehicleType = vt2;
+
                     var job = new Job
                     {
                         Id = booking.job ?? booking.bookingRef ?? Guid.NewGuid().ToString("N")[..12],
                         Pickup = pickupText,
                         Dropoff = dropoffText,
-                        Passengers = booking.passengers > 0 ? booking.passengers : 1,
-                        VehicleRequired = Enum.TryParse<VehicleType>(booking.vehicleType, true, out var vt) ? vt : VehicleType.Saloon,
+                        Passengers = paxCount,
+                        PassengerDetails = paxDetails,
+                        VehicleRequired = vehicleType,
+                        VehicleOverride = vehicleOverride,
                         SpecialRequirements = booking.notes ?? booking.specialRequirements,
                         EstimatedFare = fare,
                         PickupLat = pLat,
@@ -147,11 +190,14 @@ public sealed class MqttDispatchClient : IDisposable
                         DropoffLng = dLng,
                         CallerPhone = booking.callerPhone ?? booking.customerPhone ?? "",
                         CallerName = booking.callerName ?? booking.customerName ?? "Customer",
+                        Priority = priority,
+                        PaymentMethod = paymentMethod,
+                        BiddingWindowSec = booking.biddingWindowSec > 0 ? booking.biddingWindowSec : null,
                         CreatedAt = booking.timestamp > 0
                             ? DateTimeOffset.FromUnixTimeMilliseconds(booking.timestamp).UtcDateTime
                             : DateTime.UtcNow
                     };
-                    OnLog?.Invoke($"✅ Booking parsed: {job.Pickup} → {job.Dropoff}, {job.Passengers} pax, fare={fare?.ToString("F2") ?? "n/a"}");
+                    OnLog?.Invoke($"✅ Booking parsed: {job.Pickup} → {job.Dropoff}, {job.Passengers} pax ({paxDetails ?? "n/a"}), fare={fare?.ToString("F2") ?? "n/a"}, priority={priority ?? "normal"}");
                     OnBookingReceived?.Invoke(job);
                 }
             }
@@ -263,6 +309,7 @@ public sealed class MqttDispatchClient : IDisposable
     /// <summary>Publish bid request to specific drivers for a job.</summary>
     public async Task PublishBidRequest(Job job, List<string> driverIds)
     {
+        var window = job.BiddingWindowSec ?? 20;
         var payload = JsonSerializer.Serialize(new
         {
             jobId = job.Id,
@@ -274,18 +321,22 @@ public sealed class MqttDispatchClient : IDisposable
             dropoffLat = job.DropoffLat,
             dropoffLng = job.DropoffLng,
             passengers = job.Passengers,
+            passengersText = job.PassengerDetails ?? "",
             fare = job.EstimatedFare,
             notes = job.SpecialRequirements ?? "",
             customerName = job.CallerName ?? "Customer",
             customerPhone = job.CallerPhone ?? "",
-            biddingWindowSec = 20
+            priority = job.Priority ?? "normal",
+            vehicleOverride = job.VehicleOverride ?? "",
+            paymentMethod = job.PaymentMethod ?? "",
+            biddingWindowSec = window
         });
 
         foreach (var driverId in driverIds)
             await PublishAsync($"drivers/{driverId}/bid-request", payload);
 
         await PublishAsync($"jobs/{job.Id}/bid-request", payload);
-        OnLog?.Invoke($"📤 Bid request for {job.Id} sent to {driverIds.Count} drivers");
+        OnLog?.Invoke($"📤 Bid request for {job.Id} sent to {driverIds.Count} drivers (window={window}s, priority={job.Priority ?? "normal"})");
     }
 
     /// <summary>Publish bid result (winner/loser) to drivers.</summary>
@@ -357,7 +408,7 @@ public sealed class MqttDispatchClient : IDisposable
         public string? callerName { get; set; }
         public string? bookingRef { get; set; }
 
-        // ── Pub app / dispatcher format ──
+        // ── Pub app / dispatcher / generic format ──
         public string? job { get; set; }            // job ID
         public string? pickupAddress { get; set; }   // dispatcher format: pickup address
         public string? customerName { get; set; }    // maps to CallerName
@@ -370,6 +421,13 @@ public sealed class MqttDispatchClient : IDisposable
         public string? fare { get; set; }            // string like "£12.50"
         public string? notes { get; set; }           // special requirements / notes
         public long timestamp { get; set; }          // epoch ms
+
+        // ── Generic payload extensions ──
+        public string? passengersText { get; set; }  // descriptive string e.g. "2 adults, 1 child"
+        public int biddingWindowSec { get; set; }    // bidding window override (seconds)
+        public string? temp1 { get; set; }           // expansion: priority:high
+        public string? temp2 { get; set; }           // expansion: vehicle:accessible
+        public string? temp3 { get; set; }           // expansion: payment:corporate
     }
 
     private class JobStatusMsg
