@@ -68,4 +68,16 @@ public class Job
     public DateTime? CompletedAt { get; set; }
     public double? DriverDistanceKm { get; set; }
     public int? DriverEtaMinutes { get; set; }
+
+    // Generic payload extensions
+    /// <summary>Human-readable passenger description, e.g. "2 adults, 1 child with wheelchair"</summary>
+    public string? PassengerDetails { get; set; }
+    /// <summary>Priority level from temp1, e.g. "high", "normal"</summary>
+    public string? Priority { get; set; }
+    /// <summary>Vehicle override from temp2, e.g. "accessible", "executive"</summary>
+    public string? VehicleOverride { get; set; }
+    /// <summary>Payment method from temp3, e.g. "corporate", "cash", "card"</summary>
+    public string? PaymentMethod { get; set; }
+    /// <summary>Bidding window in seconds from payload; null = use system default (20s)</summary>
+    public int? BiddingWindowSec { get; set; }
 }
