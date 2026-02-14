@@ -121,7 +121,7 @@ public partial class MainForm : Form
         txtSipPassword.Text = sip.Password;
         txtDomain.Text = sip.Domain ?? "";
         txtDisplayName.Text = sip.DisplayName ?? "";
-        txtDdi.Text = sip.Ddi ?? "";
+        // txtDdi removed — Gamma support removed
         chkAutoAnswer.Checked = sip.AutoAnswer;
         var idx = cmbTransport.Items.IndexOf(sip.Transport.ToUpperInvariant());
         cmbTransport.SelectedIndex = idx >= 0 ? idx : 0;
@@ -218,22 +218,7 @@ public partial class MainForm : Form
 
     private void cmbTransport_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        var isGamma = cmbTransport.SelectedItem?.ToString() == "TCP_GAMMA";
-        txtAuthId.Enabled = !isGamma;
-        txtSipPassword.Enabled = !isGamma;
-        txtDdi.Enabled = isGamma || true; // DDI always enabled but highlight when Gamma
-        if (isGamma)
-        {
-            txtAuthId.Text = "";
-            txtSipPassword.Text = "";
-            txtAuthId.PlaceholderText = "(IP auth — not needed)";
-            txtSipPassword.PlaceholderText = "(IP auth — not needed)";
-        }
-        else
-        {
-            txtAuthId.PlaceholderText = "(optional)";
-            txtSipPassword.PlaceholderText = "";
-        }
+        // No special handling needed — UDP and TCP both use standard credentials
     }
 
     private void ReadSipFromUi()
@@ -245,7 +230,7 @@ public partial class MainForm : Form
         _settings.Sip.Password = txtSipPassword.Text;
         _settings.Sip.Domain = string.IsNullOrWhiteSpace(txtDomain.Text) ? null : txtDomain.Text.Trim();
         _settings.Sip.DisplayName = string.IsNullOrWhiteSpace(txtDisplayName.Text) ? null : txtDisplayName.Text.Trim();
-        _settings.Sip.Ddi = string.IsNullOrWhiteSpace(txtDdi.Text) ? null : txtDdi.Text.Trim();
+        // Ddi removed — no longer used
         _settings.Sip.Transport = cmbTransport.SelectedItem?.ToString() ?? "UDP";
         _settings.Sip.AutoAnswer = chkAutoAnswer.Checked;
     }
