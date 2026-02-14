@@ -97,25 +97,19 @@ public sealed class BsqdDispatcher : IDispatcher
 
               var payload = JsonSerializer.Serialize(new
               {
-                  job = booking.BookingRef ?? "UNKNOWN_JOB",
                   jobId = booking.BookingRef ?? "UNKNOWN_JOB",
-                  status = "allocated",
-                  lat = pickupLat,
-                  lng = pickupLng,
-                  pickupAddress = booking.PickupFormatted ?? booking.Pickup ?? $"{pickupLat},{pickupLng}",
+                  pickupLat = pickupLat,
+                  pickupLng = pickupLng,
+                  pickup = booking.PickupFormatted ?? booking.Pickup ?? $"{pickupLat},{pickupLng}",
                   dropoff = booking.DestFormatted ?? booking.Destination ?? "Not specified",
                   dropoffLat = destLat,
                   dropoffLng = destLng,
+                  passengers = booking.Passengers?.ToString() ?? "1",
                   fare = ParseFare(booking.Fare),
+                  notes = booking.PickupTime ?? "None",
                   customerName = booking.Name ?? "Customer",
                   customerPhone = FormatE164(phoneNumber),
-                  vehicleType = booking.VehicleType ?? "Saloon",
-                  notes = booking.PickupTime ?? "None",
-                  passengers = booking.Passengers ?? 1,
-                  biddingWindowSec = 45,
-                  temp1 = "",
-                  temp2 = "",
-                  temp3 = ""
+                  biddingWindowSec = 45
               });
             var msg = new MqttApplicationMessageBuilder().WithTopic("taxi/bookings").WithPayload(payload)
                 .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build();
