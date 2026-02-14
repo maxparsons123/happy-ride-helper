@@ -11,7 +11,7 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// PURE A-LAW PASSTHROUGH playout engine v8.3 — PRODUCTION BEST (10/10).
+/// PURE A-LAW PASSTHROUGH playout engine v8.4 — PRODUCTION BEST.
 /// 
 /// v8.3 — definitive production version:
 /// ✅ HYSTERESIS buffering: 200ms (10 frames) to START, only re-buffer when queue hits 0
@@ -70,6 +70,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // This prevents the "grumble" from rapid Play→Silence→Play toggling
     private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms to start/resume
     private const int MAX_QUEUE_FRAMES = 2000;            // ~40s safety cap
+    private const int MAX_LATENCY_FRAMES = 50;            // 1s max playout latency — trim excess
 
     // Accumulator safety: cap at 64KB to prevent unbounded growth from burst audio
     private const int MAX_ACCUMULATOR_SIZE = 65536;
@@ -391,6 +392,21 @@ public sealed class ALawRtpPlayout : IDisposable
         // Track queue size for statistics (lightweight)
         Interlocked.Add(ref _statsQueueSizeSum, queueCount);
         Interlocked.Increment(ref _statsQueueSizeSamples);
+
+        // ── LATENCY TRIM (v8.4) ──
+        // If queue exceeds 1 second, drop oldest frames to prevent garbled/laggy audio
+        if (queueCount > MAX_LATENCY_FRAMES)
+        {
+            int toDrop = queueCount - MAX_LATENCY_FRAMES;
+            int dropped = 0;
+            while (dropped < toDrop && _frameQueue.TryDequeue(out _))
+            {
+                Interlocked.Decrement(ref _queueCount);
+                dropped++;
+            }
+            queueCount = Volatile.Read(ref _queueCount);
+            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap 1s)");
+        }
 
         // ── HYSTERESIS LOGIC (v8.3) ──
         // If buffering, wait for a full 200ms pillow before starting playout.

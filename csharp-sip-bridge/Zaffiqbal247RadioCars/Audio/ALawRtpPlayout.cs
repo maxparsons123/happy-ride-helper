@@ -41,6 +41,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int JITTER_BUFFER_FRAMES = 5;
     private const int REBUFFER_THRESHOLD = 2;    // Re-buffer if queue drops below this
     private const int MAX_QUEUE_FRAMES = 1500;   // ~30s safety cap
+    private const int MAX_LATENCY_FRAMES = 50;   // 1s max playout latency — trim excess
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
@@ -232,6 +233,21 @@ public sealed class ALawRtpPlayout : IDisposable
     private void SendNextFrame()
     {
         int queueCount = Volatile.Read(ref _queueCount);
+
+        // ── LATENCY TRIM ──
+        // If queue exceeds 1 second, drop oldest frames to prevent garbled/laggy audio
+        if (queueCount > MAX_LATENCY_FRAMES)
+        {
+            int toDrop = queueCount - MAX_LATENCY_FRAMES;
+            int dropped = 0;
+            while (dropped < toDrop && _frameQueue.TryDequeue(out _))
+            {
+                Interlocked.Decrement(ref _queueCount);
+                dropped++;
+            }
+            queueCount = Volatile.Read(ref _queueCount);
+            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap 1s)");
+        }
 
         // Re-buffer if queue gets too low (prevents burst→slow pacing)
         if (!_isBuffering && queueCount < REBUFFER_THRESHOLD && queueCount > 0)
