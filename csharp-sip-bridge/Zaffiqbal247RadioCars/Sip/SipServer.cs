@@ -148,10 +148,11 @@ public sealed class SipServer : IAsyncDisposable
         _transport.SIPRequestInTraceEvent += (ep, src, req) =>
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
-        // HARDWIRED: TCP only — no UDP channel at all
-        var tcpChannel = new SIPTCPChannel(IPAddress.Any, 0);
+        // TCP on port 5060 — matches Linphone behaviour so the Contact header
+        // advertises a stable endpoint the PBX can route INVITEs to.
+        var tcpChannel = new SIPTCPChannel(IPAddress.Any, 5060);
         _transport.AddSIPChannel(tcpChannel);
-        Log($"📡 TCP channel on port {(tcpChannel.ListeningEndPoint as IPEndPoint)?.Port ?? 0}");
+        Log($"📡 TCP channel on port 5060");
     }
 
     // === HARD-WIRED CREDENTIALS FOR TESTING ===
