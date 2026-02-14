@@ -100,7 +100,7 @@ partial class MainForm
 
         grpSip.Controls.Add(MakeLabel("Transport:", 405, 55));
         cmbTransport = new ComboBox { Location = new Point(475, 52), Size = new Size(70, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
-        cmbTransport.Items.AddRange(new object[] { "UDP", "TCP" });
+        cmbTransport.Items.AddRange(new object[] { "UDP", "TCP", "TCP_GAMMA" });
         cmbTransport.SelectedIndex = 0;
 
         // Row 2: Extension / Auth ID / Password
