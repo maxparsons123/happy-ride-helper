@@ -180,6 +180,11 @@ public sealed class SipServer : IAsyncDisposable
             ? registrarDomain
             : $"{registrarDomain}:{_settings.Port}";
 
+        // Force TCP transport in the URI so SIPSorcery uses the TCP channel
+        var transportType = _settings.Transport.ToUpperInvariant();
+        if (transportType == "TCP" || transportType == "TCP_GAMMA")
+            registrarHostWithPort += ";transport=tcp";
+
         Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
 
         _regAgent = new SIPRegistrationUserAgent(
