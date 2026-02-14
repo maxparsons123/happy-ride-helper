@@ -41,7 +41,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int JITTER_BUFFER_FRAMES = 5;
     private const int REBUFFER_THRESHOLD = 2;    // Re-buffer if queue drops below this
     private const int MAX_QUEUE_FRAMES = 1500;   // ~30s safety cap
-    private const int MAX_LATENCY_FRAMES = 50;   // 1s max playout latency — trim excess
+    private const int MAX_LATENCY_FRAMES = 150;   // 3s max playout latency — trim excess
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
