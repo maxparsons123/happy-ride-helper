@@ -181,6 +181,22 @@ public sealed class DispatchDb : IDisposable
             VALUES ($id, $pu, $do, $plat, $plng, $dlat, $dlng,
                 $pax, $vr, $sr, $fare, $phone, $name, $ref,
                 $status, $did, $cat, $aat, $coat, $dkm, $eta)
+            ON CONFLICT(id) DO UPDATE SET
+                pickup = excluded.pickup,
+                dropoff = excluded.dropoff,
+                pickup_lat = excluded.pickup_lat,
+                pickup_lng = excluded.pickup_lng,
+                dropoff_lat = excluded.dropoff_lat,
+                dropoff_lng = excluded.dropoff_lng,
+                passengers = excluded.passengers,
+                vehicle_required = excluded.vehicle_required,
+                special_requirements = excluded.special_requirements,
+                estimated_fare = excluded.estimated_fare,
+                caller_phone = excluded.caller_phone,
+                caller_name = excluded.caller_name,
+                booking_ref = excluded.booking_ref,
+                driver_distance_km = excluded.driver_distance_km,
+                driver_eta_minutes = excluded.driver_eta_minutes
         """;
         cmd.Parameters.AddWithValue("$id", j.Id);
         cmd.Parameters.AddWithValue("$pu", j.Pickup);
