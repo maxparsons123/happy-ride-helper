@@ -161,37 +161,22 @@ public sealed class SipServer : IAsyncDisposable
         }
     }
 
+    // === HARD-WIRED CREDENTIALS FOR TESTING ===
+    private const string HW_USER = "217201";
+    private const string HW_PASS = "oaraV733L_N4_3yL";
+    private const string HW_DOMAIN = "78.110.160.199";
+
     private void InitializeRegistration()
     {
-        var authUser = _settings.EffectiveAuthUser;
+        var registrarUri = $"{HW_DOMAIN};transport=tcp";
 
-        // Resolve the registrar IP:
-        // 1. Use Domain field if it's a valid IP (e.g. "78.110.160.199")
-        // 2. If Domain is a hostname, resolve it via DNS
-        // 3. Fall back to Server field (resolve via DNS if hostname)
-        string registrarDomain = ResolveRegistrarIp();
-        if (string.IsNullOrEmpty(registrarDomain))
-        {
-            Log("❌ Could not resolve any registrar IP — check Domain/Server settings.");
-            return;
-        }
-
-        var registrarHostWithPort = _settings.Port == 5060
-            ? registrarDomain
-            : $"{registrarDomain}:{_settings.Port}";
-
-        // Force TCP transport in the URI so SIPSorcery uses the TCP channel
-        var transportType = _settings.Transport.ToUpperInvariant();
-        if (transportType == "TCP" || transportType == "TCP_GAMMA")
-            registrarHostWithPort += ";transport=tcp";
-
-        Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort}");
+        Log($"📡 HARDWIRED registration: {HW_USER}@{registrarUri}");
 
         _regAgent = new SIPRegistrationUserAgent(
             _transport,
-            _settings.Username,
-            _settings.Password,
-            registrarHostWithPort,
+            HW_USER,
+            HW_PASS,
+            registrarUri,
             3600);
 
         WireRegistrationEvents();
