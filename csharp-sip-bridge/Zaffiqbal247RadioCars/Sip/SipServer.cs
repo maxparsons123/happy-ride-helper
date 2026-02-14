@@ -164,75 +164,97 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeRegistration()
     {
         var authUser = _settings.EffectiveAuthUser;
-        string serverAddr = _settings.Server.Trim();
-        bool isHostname = !IPAddress.TryParse(serverAddr, out _);
 
-        if (isHostname)
+        // Resolve the registrar IP:
+        // 1. Use Domain field if it's a valid IP (e.g. "78.110.160.199")
+        // 2. If Domain is a hostname, resolve it via DNS
+        // 3. Fall back to Server field (resolve via DNS if hostname)
+        string registrarDomain = ResolveRegistrarIp();
+        if (string.IsNullOrEmpty(registrarDomain))
         {
-            // Hostname-based registration: preserve hostname in SIP headers,
-            // resolve IP only for outbound proxy routing.
-            Log($"🔍 Resolving hostname '{serverAddr}' to IP for routing…");
-            IPAddress? resolvedIp;
-            try
-            {
-                resolvedIp = Dns.GetHostAddresses(serverAddr)
-                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
-                if (resolvedIp == null)
-                {
-                    Log("⚠️ Could not resolve hostname to IPv4; cannot register.");
-                    return;
-                }
-                Log($"✅ Resolved '{serverAddr}' → {resolvedIp}");
-            }
-            catch (Exception ex)
-            {
-                Log($"⚠️ DNS resolution failed: {ex.Message}");
-                return;
-            }
-
-            // IMPORTANT: Use HOSTNAME in SIP headers (AOR, registrar) for correct domain matching.
-            // Use resolved IP only for the outbound proxy (transport routing).
-            var registrarHostWithPort = _settings.Port == 5060
-                ? serverAddr
-                : $"{serverAddr}:{_settings.Port}";
-
-            var protocol = _settings.Transport.ToUpperInvariant() switch
-            {
-                "TCP" => SIPProtocolsEnum.tcp,
-                "TLS" => SIPProtocolsEnum.tls,
-                _ => SIPProtocolsEnum.udp
-            };
-            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(resolvedIp, _settings.Port));
-            var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
-            var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
-
-            _regAgent = new SIPRegistrationUserAgent(
-                sipTransport: _transport,
-                outboundProxy: outboundProxy,
-                sipAccountAOR: sipAccountAor,
-                authUsername: authUser,
-                password: _settings.Password,
-                realm: null,
-                registrarHost: registrarHostWithPort,
-                contactURI: contactUri,
-                expiry: 120,
-                customHeaders: null);
-
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser}, routed via {resolvedIp})");
+            Log("❌ Could not resolve any registrar IP — check Domain/Server settings.");
+            return;
         }
-        else
-        {
-            // IP-based registration: simple path for legacy PBXes
-            var registrarHostWithPort = _settings.Port == 5060
-                ? serverAddr
-                : $"{serverAddr}:{_settings.Port}";
 
-            _regAgent = new SIPRegistrationUserAgent(
-                _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
-        }
+        var registrarHostWithPort = _settings.Port == 5060
+            ? registrarDomain
+            : $"{registrarDomain}:{_settings.Port}";
+
+        Log($"📡 Simple registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
+
+        _regAgent = new SIPRegistrationUserAgent(
+            _transport,
+            _settings.Username,
+            _settings.Password,
+            registrarHostWithPort,
+            120);
 
         WireRegistrationEvents();
+    }
+
+    /// <summary>
+    /// Resolves the registrar IP address, preferring Domain over Server.
+    /// Handles both raw IPs and hostnames (via DNS resolution).
+    /// </summary>
+    private string ResolveRegistrarIp()
+    {
+        // Try Domain field first
+        var domain = _settings.Domain?.Trim();
+        if (!string.IsNullOrEmpty(domain))
+        {
+            if (IPAddress.TryParse(domain, out _))
+            {
+                Log($"📡 Using Domain IP directly: {domain}");
+                return domain;
+            }
+
+            // Domain is a hostname — resolve it
+            var resolved = ResolveDns(domain);
+            if (!string.IsNullOrEmpty(resolved))
+                return resolved;
+
+            Log($"⚠️ Could not resolve Domain '{domain}', falling back to Server…");
+        }
+
+        // Fall back to Server field
+        var server = _settings.Server.Trim();
+        if (IPAddress.TryParse(server, out _))
+        {
+            Log($"📡 Using Server IP directly: {server}");
+            return server;
+        }
+
+        // Server is a hostname — resolve it
+        var resolvedServer = ResolveDns(server);
+        if (!string.IsNullOrEmpty(resolvedServer))
+            return resolvedServer;
+
+        Log($"❌ Could not resolve Server '{server}' to an IPv4 address.");
+        return "";
+    }
+
+    /// <summary>
+    /// Resolves a hostname to its primary IPv4 address via DNS.
+    /// </summary>
+    private string ResolveDns(string hostname)
+    {
+        try
+        {
+            Log($"🔍 Resolving '{hostname}' via DNS…");
+            var ipv4 = Dns.GetHostAddresses(hostname)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+            if (ipv4 != null)
+            {
+                Log($"✅ Resolved '{hostname}' → {ipv4}");
+                return ipv4.ToString();
+            }
+            Log($"⚠️ No IPv4 address found for '{hostname}'");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ DNS resolution failed for '{hostname}': {ex.Message}");
+        }
+        return "";
     }
 
     private void WireRegistrationEvents()
