@@ -100,7 +100,7 @@ partial class MainForm
 
         grpSip.Controls.Add(MakeLabel("Transport:", 395, 55));
         cmbTransport = new ComboBox { Location = new Point(465, 52), Size = new Size(85, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
-        cmbTransport.Items.AddRange(new object[] { "UDP", "TCP", "TCP_GAMMA" });
+        cmbTransport.Items.AddRange(new object[] { "UDP", "TCP" });
         cmbTransport.SelectedIndex = 0;
         cmbTransport.SelectedIndexChanged += cmbTransport_SelectedIndexChanged;
 
@@ -127,13 +127,7 @@ partial class MainForm
 
         chkAutoAnswer = new CheckBox { Text = "Auto-Answer", Location = new Point(470, 120), Size = new Size(110, 23), ForeColor = fgLight, Checked = true };
 
-        // Row 4: DDI (Gamma trunk E.164 number)
-        grpSip.Controls.Add(MakeLabel("DDI (E.164):", 15, 154));
-        txtDdi = MakeTextBox(95, 151, 150, bgInput, fgLight);
-        txtDdi.PlaceholderText = "+441234567890";
-
-        var lblDdiHint = new Label { Text = "← Gamma trunk: your inbound DID number", Location = new Point(255, 154), AutoSize = true, ForeColor = Color.FromArgb(140, 140, 140), Font = new Font("Segoe UI", 8F, FontStyle.Italic) };
-        grpSip.Controls.Add(lblDdiHint);
+        // Row 4: (DDI removed — Gamma support removed)
 
         // Row 5: Connect / Disconnect
         btnConnect = MakeButton("▶ Connect", 15, 185, 120, 32, green);
@@ -150,7 +144,6 @@ partial class MainForm
             txtSipServer, txtSipPort, cmbTransport,
             txtSipUser, txtAuthId, txtSipPassword,
             txtDomain, txtDisplayName, chkAutoAnswer,
-            txtDdi,
             btnConnect, btnDisconnect, lblSipStatus
         });
 
@@ -326,7 +319,7 @@ partial class MainForm
     private GroupBox grpSip;
     private ComboBox cmbSipAccount;
     private Button btnSaveAccount, btnDeleteAccount, btnNewAccount;
-    private TextBox txtSipServer, txtSipPort, txtSipUser, txtAuthId, txtSipPassword, txtDomain, txtDisplayName, txtDdi;
+    private TextBox txtSipServer, txtSipPort, txtSipUser, txtAuthId, txtSipPassword, txtDomain, txtDisplayName;
     private ComboBox cmbTransport;
     private CheckBox chkAutoAnswer;
     private Button btnConnect, btnDisconnect;
