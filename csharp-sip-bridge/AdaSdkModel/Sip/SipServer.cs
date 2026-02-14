@@ -87,18 +87,6 @@ public sealed class SipServer : IAsyncDisposable
             }, TaskScheduler.Default);
         };
 
-        if (_settings.IsGammaTrunk)
-        {
-            // Gamma TCP trunk: no registration, just listen for inbound INVITEs
-            _isRunning = true;
-            IsRegistered = true;
-            Log("🟢 Gamma TCP trunk mode — listening for inbound INVITEs (no registration)");
-            Log($"➡ DDI: {_settings.EffectiveDdi}");
-            Log($"➡ Gamma SBC: {_settings.Server}:{_settings.Port}");
-            OnRegistered?.Invoke($"Gamma TCP: {_settings.EffectiveDdi}@{_settings.Server}");
-            return;
-        }
-
         InitializeRegistration();
 
         if (_regAgent == null)
@@ -150,11 +138,6 @@ public sealed class SipServer : IAsyncDisposable
 
         switch (_settings.Transport.ToUpperInvariant())
         {
-            case "TCP_GAMMA":
-                var gammaTcp = new SIPTCPChannel(new IPEndPoint(_localIp!, 5060));
-                _transport.AddSIPChannel(gammaTcp);
-                Log($"📡 TCP channel on port {(gammaTcp.ListeningEndPoint as IPEndPoint)?.Port ?? 5060}");
-                break;
             case "TCP":
                 var tcpChannel = new SIPTCPChannel(new IPEndPoint(_localIp!, 0));
                 _transport.AddSIPChannel(tcpChannel);
@@ -204,7 +187,7 @@ public sealed class SipServer : IAsyncDisposable
 
             var protocol = _settings.Transport.ToUpperInvariant() switch
             {
-                "TCP" or "TCP_GAMMA" => SIPProtocolsEnum.tcp,
+                "TCP" => SIPProtocolsEnum.tcp,
                 "TLS" => SIPProtocolsEnum.tls,
                 _ => SIPProtocolsEnum.udp
             };
@@ -343,17 +326,7 @@ public sealed class SipServer : IAsyncDisposable
             if (resolved != null) serverAddr = resolved.ToString();
         }
         var portPart = _settings.Port == 5060 ? "" : $":{_settings.Port}";
-        var transportParam = _settings.IsGammaTrunk ? ";transport=tcp" : "";
-        var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}{transportParam}");
-
-        // Gamma trunk: add P-Asserted-Identity header
-        string[]? customHeaders = null;
-        if (_settings.IsGammaTrunk)
-        {
-            var ddi = _settings.EffectiveDdi;
-            customHeaders = new[] { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
-            Log($"📡 Gamma outbound: DDI={ddi}, dest={destination}");
-        }
+        var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}");
 
         var callAgent = new SIPUserAgent(_transport, null);
         var audioEncoder = new AudioEncoder();
@@ -368,9 +341,8 @@ public sealed class SipServer : IAsyncDisposable
 
         var sessionId = $"out-{Guid.NewGuid().ToString("N")[..8]}";
 
-        Log($"📞 Dialling {destination} via {serverAddr}{portPart}{transportParam}…");
-        var fromHeader = _settings.IsGammaTrunk ? $"<sip:{_settings.EffectiveDdi}@{serverAddr}>" : null;
-        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession);
+        Log($"📞 Dialling {destination} via {serverAddr}{portPart}…");
+        var result = await callAgent.Call(destUri.ToString(), null, null, rtpSession);
         if (!result)
         {
             Log($"❌ Outbound call to {destination} failed.");
