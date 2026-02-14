@@ -175,42 +175,47 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeRegistration()
     {
         var authUser = _settings.EffectiveAuthUser;
-        var resolvedHost = ResolveDns(_settings.Server);
-        var registrarHostWithPort = _settings.Port == 5060
-            ? resolvedHost
-            : $"{resolvedHost}:{_settings.Port}";
+        string serverAddr = _settings.Server.Trim();
+        bool isHostname = !IPAddress.TryParse(serverAddr, out _);
 
-        if (authUser != _settings.Username)
+        if (isHostname)
         {
-            // Separate AuthId — need full registration constructor with outbound proxy
-            if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
+            // Hostname-based registration: preserve hostname in SIP headers,
+            // resolve IP only for outbound proxy routing.
+            Log($"🔍 Resolving hostname '{serverAddr}' to IP for routing…");
+            IPAddress? resolvedIp;
+            try
             {
-                try
+                resolvedIp = Dns.GetHostAddresses(serverAddr)
+                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                if (resolvedIp == null)
                 {
-                    registrarIp = Dns.GetHostAddresses(resolvedHost)
-                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
-                }
-                catch
-                {
-                    Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
-                    _regAgent = new SIPRegistrationUserAgent(
-                        _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-                    WireRegistrationEvents();
+                    Log("⚠️ Could not resolve hostname to IPv4; cannot register.");
                     return;
                 }
+                Log($"✅ Resolved '{serverAddr}' → {resolvedIp}");
             }
+            catch (Exception ex)
+            {
+                Log($"⚠️ DNS resolution failed: {ex.Message}");
+                return;
+            }
+
+            // IMPORTANT: Use HOSTNAME in SIP headers (AOR, registrar) for correct domain matching.
+            // Use resolved IP only for the outbound proxy (transport routing).
+            var registrarHostWithPort = _settings.Port == 5060
+                ? serverAddr
+                : $"{serverAddr}:{_settings.Port}";
 
             var protocol = _settings.Transport.ToUpperInvariant() switch
             {
-                "TCP" or "TCP_GAMMA" => SIPProtocolsEnum.tcp,
+                "TCP" => SIPProtocolsEnum.tcp,
                 "TLS" => SIPProtocolsEnum.tls,
                 _ => SIPProtocolsEnum.udp
             };
-            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _settings.Port));
+            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(resolvedIp, _settings.Port));
             var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
             var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
-
-            Log($"🔐 Auth: AOR={sipAccountAor}, AuthUser={authUser}");
 
             _regAgent = new SIPRegistrationUserAgent(
                 sipTransport: _transport,
@@ -224,14 +229,18 @@ public sealed class SipServer : IAsyncDisposable
                 expiry: 120,
                 customHeaders: null);
 
-            Log($"➡ Using separate Auth ID: {authUser}, Registrar: {registrarHostWithPort} (routed via {resolvedHost})");
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser}, routed via {resolvedIp})");
         }
         else
         {
-            // Simple registration — same username for identity and auth
+            // IP-based registration: simple path for legacy PBXes
+            var registrarHostWithPort = _settings.Port == 5060
+                ? serverAddr
+                : $"{serverAddr}:{_settings.Port}";
+
             _regAgent = new SIPRegistrationUserAgent(
                 _transport, _settings.Username, _settings.Password, registrarHostWithPort, 120);
-            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort}");
+            Log($"📡 Registration: {_settings.Username}@{registrarHostWithPort} (AuthUser={authUser})");
         }
 
         WireRegistrationEvents();
