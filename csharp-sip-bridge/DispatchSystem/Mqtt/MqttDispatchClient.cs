@@ -235,62 +235,29 @@ public sealed class MqttDispatchClient : IDisposable
 
     public async Task PublishJobAllocation(string jobId, string driverId, Job job)
     {
-        var fareStr = job.EstimatedFare?.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) ?? "";
-        var paxStr = job.PassengerDetails ?? job.Passengers.ToString();
+        var pickupDropoff = $"{job.Pickup}\ndropoff\n{job.Dropoff}";
+        var fareStr = job.EstimatedFare?.ToString("0.00") ?? "";
 
-        // CRITICAL: Send BOTH new and old field names for driver app v11.9.2+ compatibility
+        // Full job payload matching the generic stanza
         object BuildFullPayload(string? result = null) => new
         {
-            // Core job fields (both formats)
-            job = jobId,
             jobId = jobId,
             result = result ?? (string?)null,
             status = "allocated",
             driver = driverId,
-
-            // Pickup coordinates (both formats)
-            lat = Math.Round(job.PickupLat, 6),
-            lng = Math.Round(job.PickupLng, 6),
-            pickupLat = Math.Round(job.PickupLat, 6),
-            pickupLng = Math.Round(job.PickupLng, 6),
-
-            // Pickup address (both formats)
-            pickupAddress = job.Pickup,
+            pickupLat = job.PickupLat,
+            pickupLng = job.PickupLng,
             pickup = job.Pickup,
-            pubName = job.Pickup,
-
-            // Dropoff fields (both formats)
             dropoff = job.Dropoff,
-            dropoffName = job.Dropoff,
-            dropoffLat = Math.Round(job.DropoffLat, 6),
-            dropoffLng = Math.Round(job.DropoffLng, 6),
-
-            // Passenger & bidding
-            passengers = paxStr,
-            biddingWindowSec = job.BiddingWindowSec ?? 20,
-
-            // Customer info (both formats)
+            dropoffLat = job.DropoffLat,
+            dropoffLng = job.DropoffLng,
             customerName = job.CallerName ?? "Customer",
             customerPhone = job.CallerPhone ?? "",
-            callerName = job.CallerName ?? "Customer",
-            callerPhone = job.CallerPhone ?? "",
-
-            // Fare & notes (both formats)
+            passengers = job.PassengerDetails ?? job.Passengers.ToString(),
             fare = fareStr,
-            estimatedFare = fareStr,
             notes = job.SpecialRequirements ?? "",
-            specialRequirements = job.SpecialRequirements ?? "",
-
-            // Temp fields
-            temp1 = job.Priority ?? "",
-            temp2 = job.VehicleOverride ?? "",
-            temp3 = job.PaymentMethod ?? "",
-
-            // Metadata
-            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            dispatcherId = "dispatch-system",
-            version = "11.9.2"
+            biddingWindowSec = job.BiddingWindowSec ?? 20,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         };
 
         var allocationPayload = JsonSerializer.Serialize(BuildFullPayload());
@@ -312,57 +279,21 @@ public sealed class MqttDispatchClient : IDisposable
     public async Task PublishBidRequest(Job job, List<string> driverIds)
     {
         var window = job.BiddingWindowSec ?? 20;
-        var fareStr = job.EstimatedFare?.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) ?? "";
-        var paxStr = job.PassengerDetails ?? job.Passengers.ToString();
-
         var payload = JsonSerializer.Serialize(new
         {
-            // Core job fields (both formats)
-            job = job.Id,
             jobId = job.Id,
-
-            // Pickup coordinates (both formats)
-            lat = Math.Round(job.PickupLat, 6),
-            lng = Math.Round(job.PickupLng, 6),
-            pickupLat = Math.Round(job.PickupLat, 6),
-            pickupLng = Math.Round(job.PickupLng, 6),
-
-            // Pickup address (both formats)
-            pickupAddress = job.Pickup,
             pickup = job.Pickup,
-            pubName = job.Pickup,
-
-            // Dropoff fields (both formats)
             dropoff = job.Dropoff,
-            dropoffName = job.Dropoff,
-            dropoffLat = Math.Round(job.DropoffLat, 6),
-            dropoffLng = Math.Round(job.DropoffLng, 6),
-
-            // Passenger & bidding
-            passengers = paxStr,
-            biddingWindowSec = window,
-
-            // Customer info (both formats)
+            pickupLat = job.PickupLat,
+            pickupLng = job.PickupLng,
+            dropoffLat = job.DropoffLat,
+            dropoffLng = job.DropoffLng,
+            passengers = job.PassengerDetails ?? job.Passengers.ToString(),
+            fare = job.EstimatedFare?.ToString("0.00") ?? "",
+            notes = job.SpecialRequirements ?? "",
             customerName = job.CallerName ?? "Customer",
             customerPhone = job.CallerPhone ?? "",
-            callerName = job.CallerName ?? "Customer",
-            callerPhone = job.CallerPhone ?? "",
-
-            // Fare & notes (both formats)
-            fare = fareStr,
-            estimatedFare = fareStr,
-            notes = job.SpecialRequirements ?? "",
-            specialRequirements = job.SpecialRequirements ?? "",
-
-            // Temp fields
-            temp1 = job.Priority ?? "",
-            temp2 = job.VehicleOverride ?? "",
-            temp3 = job.PaymentMethod ?? "",
-
-            // Metadata
-            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            dispatcherId = "dispatch-system",
-            version = "11.9.2"
+            biddingWindowSec = window
         });
 
         foreach (var driverId in driverIds)
@@ -375,58 +306,23 @@ public sealed class MqttDispatchClient : IDisposable
     /// <summary>Publish bid result (winner/loser) to drivers.</summary>
     public async Task PublishBidResult(string jobId, string driverId, string result, Job? job = null)
     {
-        var fareStr = job?.EstimatedFare?.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) ?? "";
-        var paxStr = job?.PassengerDetails ?? (job?.Passengers ?? 0).ToString();
-
         var payload = JsonSerializer.Serialize(new
         {
-            // Core job fields (both formats)
-            job = jobId,
             jobId = jobId,
             driver = driverId,
             result,
-
-            // Pickup coordinates (both formats)
-            lat = Math.Round(job?.PickupLat ?? 0, 6),
-            lng = Math.Round(job?.PickupLng ?? 0, 6),
-            pickupLat = Math.Round(job?.PickupLat ?? 0, 6),
-            pickupLng = Math.Round(job?.PickupLng ?? 0, 6),
-
-            // Pickup address (both formats)
-            pickupAddress = job?.Pickup ?? "",
+            pickupLat = job?.PickupLat ?? 0,
+            pickupLng = job?.PickupLng ?? 0,
             pickup = job?.Pickup ?? "",
-            pubName = job?.Pickup ?? "",
-
-            // Dropoff fields (both formats)
             dropoff = job?.Dropoff ?? "",
-            dropoffName = job?.Dropoff ?? "",
-            dropoffLat = Math.Round(job?.DropoffLat ?? 0, 6),
-            dropoffLng = Math.Round(job?.DropoffLng ?? 0, 6),
-
-            // Passenger & bidding
-            passengers = paxStr,
-
-            // Customer info (both formats)
+            dropoffLat = job?.DropoffLat ?? 0,
+            dropoffLng = job?.DropoffLng ?? 0,
             customerName = job?.CallerName ?? "",
             customerPhone = job?.CallerPhone ?? "",
-            callerName = job?.CallerName ?? "",
-            callerPhone = job?.CallerPhone ?? "",
-
-            // Fare & notes (both formats)
-            fare = fareStr,
-            estimatedFare = fareStr,
+            passengers = job?.PassengerDetails ?? (job?.Passengers ?? 0).ToString(),
+            fare = job?.EstimatedFare?.ToString("0.00") ?? "",
             notes = job?.SpecialRequirements ?? "",
-            specialRequirements = job?.SpecialRequirements ?? "",
-
-            // Temp fields
-            temp1 = job?.Priority ?? "",
-            temp2 = job?.VehicleOverride ?? "",
-            temp3 = job?.PaymentMethod ?? "",
-
-            // Metadata
-            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            version = "11.9.2"
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
 
         await PublishAsync($"jobs/{jobId}/result/{driverId}", payload);
