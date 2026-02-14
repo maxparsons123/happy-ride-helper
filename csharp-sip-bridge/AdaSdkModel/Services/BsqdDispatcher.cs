@@ -86,33 +86,43 @@ public sealed class BsqdDispatcher : IDispatcher
             }
             finally { _mqttLock.Release(); }
 
+            // Normalize coordinates with fallback to Coventry city center
+            var pickupLat = booking.PickupLat ?? 52.4062;
+            var pickupLng = booking.PickupLon ?? -1.5045;
+            var destLat = booking.DestLat ?? pickupLat;
+            var destLng = booking.DestLon ?? pickupLng;
+
             _logger.LogInformation("MQTT payload coords: PickupLat={PLat}, PickupLon={PLon}, DestLat={DLat}, DestLon={DLon}, Formatted={PF}, DestFmt={DF}",
-                booking.PickupLat, booking.PickupLon, booking.DestLat, booking.DestLon, booking.PickupFormatted, booking.DestFormatted);
-            var payload = JsonSerializer.Serialize(new
-            {
-                job = booking.BookingRef ?? "",
-                jobId = booking.BookingRef ?? "",
-                bookingRef = booking.BookingRef ?? "",
-                status = "pending",
-                lat = booking.PickupLat ?? 0,
-                lng = booking.PickupLon ?? 0,
-                pickupAddress = booking.PickupFormatted ?? booking.Pickup ?? "",
-                pickup = booking.PickupFormatted ?? booking.Pickup ?? "",
-                dropoff = booking.DestFormatted ?? booking.Destination ?? "",
-                dropoffName = booking.DestFormatted ?? booking.Destination ?? "",
-                dropoffLat = booking.DestLat ?? 0,
-                dropoffLng = booking.DestLon ?? 0,
-                passengers = booking.Passengers ?? 1,
-                passengersText = $"{booking.Passengers ?? 1} passenger{((booking.Passengers ?? 1) > 1 ? "s" : "")}",
-                fare = ParseFare(booking.Fare),
-                customerPhone = FormatE164(phoneNumber),
-                callerPhone = FormatE164(phoneNumber),
-                customerName = booking.Name ?? "Customer",
-                callerName = booking.Name ?? "Customer",
-                vehicleType = booking.VehicleType ?? "Saloon",
-                specialRequirements = "",
-                biddingWindowSec = 45
-            });
+                pickupLat, pickupLng, destLat, destLng, booking.PickupFormatted, booking.DestFormatted);
+
+             var payload = JsonSerializer.Serialize(new
+             {
+                 job = booking.BookingRef ?? "UNKNOWN_JOB",
+                 jobId = booking.BookingRef ?? "UNKNOWN_JOB",
+                 status = "allocated",
+                 lat = pickupLat,
+                 lng = pickupLng,
+                 pickupAddress = booking.PickupFormatted ?? booking.Pickup ?? $"{pickupLat},{pickupLng}",
+                 pickup = booking.PickupFormatted ?? booking.Pickup ?? $"{pickupLat},{pickupLng}",
+                 dropoff = booking.DestFormatted ?? booking.Destination ?? "Not specified",
+                 dropoffName = booking.DestFormatted ?? booking.Destination ?? "Not specified",
+                 dropoffLat = destLat,
+                 dropoffLng = destLng,
+                 passengers = booking.Passengers ?? 1,
+                 passengersText = $"{booking.Passengers ?? 1} passenger{((booking.Passengers ?? 1) > 1 ? "s" : "")}",
+                 fare = ParseFare(booking.Fare),
+                 customerPhone = FormatE164(phoneNumber),
+                 callerPhone = FormatE164(phoneNumber),
+                 customerName = booking.Name ?? "Customer",
+                 callerName = booking.Name ?? "Customer",
+                 vehicleType = booking.VehicleType ?? "Saloon",
+                 notes = booking.PickupTime ?? "None",
+                 specialRequirements = booking.PickupTime ?? "",
+                 biddingWindowSec = 45,
+                 temp1 = "",
+                 temp2 = "",
+                 temp3 = ""
+             });
             var msg = new MqttApplicationMessageBuilder().WithTopic("taxi/bookings").WithPayload(payload)
                 .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build();
             await _mqttClient!.PublishAsync(msg);
