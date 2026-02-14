@@ -77,7 +77,16 @@ public sealed class SipServer : IAsyncDisposable
         Log($"➡ Local IP: {_localIp}");
 
         InitializeSipTransport();
-        InitializeRegistration();
+        
+        if (!_settings.IsGammaTrunk)
+        {
+            InitializeRegistration();
+            _regAgent!.Start();
+        }
+        else
+        {
+            Log("🟢 Gamma TCP trunk mode — no registration required");
+        }
 
         _listenerAgent = new SIPUserAgent(_transport, null);
         _listenerAgent.OnIncomingCall += (ua, req) =>
@@ -88,9 +97,8 @@ public sealed class SipServer : IAsyncDisposable
             }, TaskScheduler.Default);
         };
 
-        _regAgent!.Start();
         _isRunning = true;
-        Log("🟢 Waiting for SIP registration...");
+        Log("🟢 Waiting for incoming calls...");
     }
 
     public async Task StopAsync()
@@ -119,11 +127,20 @@ public sealed class SipServer : IAsyncDisposable
     private void InitializeSipTransport()
     {
         _transport = new SIPTransport();
-        _transport.AddSIPChannel(_settings.Transport.ToUpperInvariant() switch
+        if (_settings.IsGammaTrunk)
         {
-            "TCP" => (SIPChannel)new SIPTCPChannel(new IPEndPoint(_localIp!, 0)),
-            _ => new SIPUDPChannel(new IPEndPoint(_localIp!, 0))
-        });
+            // Gamma TCP trunk: bind to port 5060 specifically
+            _transport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(_localIp!, 5060)));
+            Log("📡 Gamma TCP trunk listening on port 5060");
+        }
+        else
+        {
+            _transport.AddSIPChannel(_settings.Transport.ToUpperInvariant() switch
+            {
+                "TCP" => (SIPChannel)new SIPTCPChannel(new IPEndPoint(_localIp!, 0)),
+                _ => new SIPUDPChannel(new IPEndPoint(_localIp!, 0))
+            });
+        }
     }
 
     private void InitializeRegistration()
@@ -290,7 +307,8 @@ public sealed class SipServer : IAsyncDisposable
             if (resolved != null) serverAddr = resolved.ToString();
         }
         var portPart = _settings.Port == 5060 ? "" : $":{_settings.Port}";
-        var destUri = SIPURI.ParseSIPURI($"sip:{destination}@{serverAddr}{portPart}");
+        var uriPart = _settings.IsGammaTrunk ? $"sip:{destination}@{serverAddr}{portPart};transport=tcp" : $"sip:{destination}@{serverAddr}{portPart}";
+        var destUri = SIPURI.ParseSIPURI(uriPart);
 
         var callAgent = new SIPUserAgent(_transport, null);
         var audioEncoder = new AudioEncoder();
@@ -306,7 +324,17 @@ public sealed class SipServer : IAsyncDisposable
         var sessionId = $"out-{Guid.NewGuid().ToString("N")[..8]}";
 
         Log($"📞 Dialling {destination} via {serverAddr}{portPart}…");
-        var result = await callAgent.Call(destUri.ToString(), null, null, rtpSession);
+        
+        string? fromHeader = null;
+        string[]? customHeaders = null;
+        if (_settings.IsGammaTrunk)
+        {
+            var ddi = _settings.EffectiveDdi;
+            fromHeader = $"<sip:{ddi}@{serverAddr}>";
+            customHeaders = new[] { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
+        }
+        
+        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession, customHeaders: customHeaders);
         if (!result)
         {
             Log($"❌ Outbound call to {destination} failed.");
