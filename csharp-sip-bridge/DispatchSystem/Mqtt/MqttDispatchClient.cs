@@ -242,8 +242,9 @@ public sealed class MqttDispatchClient : IDisposable
         object BuildFullPayload(string? result = null) => new
         {
             job = jobId,
+            jobId = jobId,
             result = result ?? (string?)null,
-            status = result == "won" ? "allocated" : (string?)null,
+            status = "allocated",
             driver = driverId,
             lat = job.PickupLat,
             lng = job.PickupLng,
@@ -269,12 +270,15 @@ public sealed class MqttDispatchClient : IDisposable
 
         var allocationPayload = JsonSerializer.Serialize(BuildFullPayload());
 
+        OnLog?.Invoke($"📤 PAYLOAD: {allocationPayload[..Math.Min(allocationPayload.Length, 500)]}");
+
         await PublishAsync($"drivers/{driverId}/jobs", allocationPayload);
         await PublishAsync($"jobs/{jobId}/allocated", allocationPayload);
-        await PublishAsync($"jobs/{jobId}/status", JsonSerializer.Serialize(BuildFullPayload()));
+        await PublishAsync($"jobs/{jobId}/status", allocationPayload);
 
         // Winner result on jobs/{jobId}/result/{driverId}
-        await PublishAsync($"jobs/{jobId}/result/{driverId}", JsonSerializer.Serialize(BuildFullPayload("won")));
+        var wonPayload = JsonSerializer.Serialize(BuildFullPayload("won"));
+        await PublishAsync($"jobs/{jobId}/result/{driverId}", wonPayload);
 
         OnLog?.Invoke($"📤 Job {jobId} dispatched to driver {driverId} | {job.Pickup} → {job.Dropoff}");
     }
