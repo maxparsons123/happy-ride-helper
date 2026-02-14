@@ -649,12 +649,6 @@ public sealed class SipServer : IAsyncDisposable
     }
     private static short ALawDecode(byte alaw) => ALawDecodeTable[alaw];
 
-    private string ResolveDns(string host)
-    {
-        if (IPAddress.TryParse(host, out _)) return host;
-        try { return Dns.GetHostAddresses(host).First(a => a.AddressFamily == AddressFamily.InterNetwork).ToString(); }
-        catch { return host; }
-    }
 
     private IPAddress GetLocalIp()
     {

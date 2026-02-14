@@ -8,7 +8,7 @@ using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
-namespace AdaSdkModel.Audio;
+namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
 /// PURE A-LAW PASSTHROUGH playout engine v8.4 — ultra-low-jitter timing.

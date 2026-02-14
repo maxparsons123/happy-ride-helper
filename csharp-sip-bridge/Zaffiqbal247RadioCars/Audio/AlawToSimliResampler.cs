@@ -1,4 +1,4 @@
-namespace AdaSdkModel.Audio;
+namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
 /// Converts G.711 A-law (8kHz) frames to PCM16 (16kHz) for Simli avatar lip-sync.

@@ -1,4 +1,4 @@
-namespace AdaSdkModel.Audio;
+namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
 /// 1st-order High-Pass Filter for G.711 A-law audio.
