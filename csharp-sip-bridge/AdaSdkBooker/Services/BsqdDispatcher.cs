@@ -86,14 +86,27 @@ public sealed class BsqdDispatcher : IDispatcher
             }
             finally { _mqttLock.Release(); }
 
+            // Normalize coordinates with fallback to Coventry city center
+            var pickupLat = booking.PickupLat ?? 52.4062;
+            var pickupLng = booking.PickupLon ?? -1.5045;
+            var destLat = booking.DestLat ?? pickupLat;
+            var destLng = booking.DestLon ?? pickupLng;
+
             var payload = JsonSerializer.Serialize(new
             {
-                pickup = booking.PickupFormatted ?? booking.Pickup ?? "",
-                dropoff = booking.DestFormatted ?? booking.Destination ?? "",
-                passengers = booking.Passengers ?? 1,
-                callerPhone = FormatE164(phoneNumber),
-                callerName = booking.Name ?? "Customer",
-                bookingRef = booking.BookingRef ?? ""
+                jobId = booking.BookingRef ?? "UNKNOWN_JOB",
+                pickupLat = pickupLat,
+                pickupLng = pickupLng,
+                pickup = booking.PickupFormatted ?? booking.Pickup ?? $"{pickupLat},{pickupLng}",
+                dropoff = booking.DestFormatted ?? booking.Destination ?? "Not specified",
+                dropoffLat = destLat,
+                dropoffLng = destLng,
+                passengers = booking.Passengers?.ToString() ?? "1",
+                fare = ParseFare(booking.Fare),
+                notes = booking.PickupTime ?? "None",
+                customerName = booking.Name ?? "Customer",
+                customerPhone = FormatE164(phoneNumber),
+                biddingWindowSec = 45
             });
             var msg = new MqttApplicationMessageBuilder().WithTopic("taxi/bookings").WithPayload(payload)
                 .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce).Build();
