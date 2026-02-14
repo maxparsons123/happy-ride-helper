@@ -86,6 +86,8 @@ public sealed class BsqdDispatcher : IDispatcher
             }
             finally { _mqttLock.Release(); }
 
+            _logger.LogInformation("MQTT payload coords: PickupLat={PLat}, PickupLon={PLon}, DestLat={DLat}, DestLon={DLon}, Formatted={PF}, DestFmt={DF}",
+                booking.PickupLat, booking.PickupLon, booking.DestLat, booking.DestLon, booking.PickupFormatted, booking.DestFormatted);
             var payload = JsonSerializer.Serialize(new
             {
                 job = booking.BookingRef ?? "",
