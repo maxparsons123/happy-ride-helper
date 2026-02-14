@@ -205,6 +205,11 @@ public sealed class CallSession : ICallSession
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
 
+    // Fare sanity guard: track retries so legitimate long-distance trips aren't blocked forever
+    private int _fareSanityAlertCount;
+    private string? _lastSanityAlertDestination;
+    private volatile bool _fareSanityActive; // blocks book_taxi while sanity alert is shown
+
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
         // Name validation guard — reject placeholder names
@@ -972,6 +977,13 @@ public sealed class CallSession : ICallSession
 
         if (action == "confirmed")
         {
+            // Block confirmation while fare sanity alert is active (race condition guard)
+            if (_fareSanityActive)
+            {
+                _logger.LogWarning("[{SessionId}] ⛔ book_taxi(confirmed) BLOCKED — fare sanity alert is active, waiting for user to re-confirm destination", SessionId);
+                return new { success = false, error = "Cannot confirm yet — the fare seems unusually high and the caller needs to verify their destination first. Wait for their response." };
+            }
+
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
                 return new { success = false, error = "Cannot confirm: missing pickup or destination." };
 
@@ -1293,6 +1305,20 @@ public sealed class CallSession : ICallSession
     /// </summary>
     private bool IsFareSane(FareResult result)
     {
+        var dest = _booking.Destination ?? "";
+
+        // If the user re-confirmed the SAME destination after a sanity alert, allow it through
+        if (_fareSanityAlertCount > 0 && !string.IsNullOrWhiteSpace(_lastSanityAlertDestination)
+            && string.Equals(dest.Trim(), _lastSanityAlertDestination.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("[{SessionId}] ✅ Fare sanity BYPASSED — user re-confirmed same destination '{Dest}' (attempt {Count})",
+                SessionId, dest, _fareSanityAlertCount + 1);
+            _fareSanityAlertCount = 0;
+            _lastSanityAlertDestination = null;
+            _fareSanityActive = false;
+            return true;
+        }
+
         // Parse fare amount
         var fareStr = result.Fare?.Replace("£", "").Replace("€", "").Replace("$", "").Trim();
         if (decimal.TryParse(fareStr, System.Globalization.NumberStyles.Any,
@@ -1301,6 +1327,9 @@ public sealed class CallSession : ICallSession
             if (fareAmount > MAX_SANE_FARE)
             {
                 _logger.LogWarning("[{SessionId}] 🚨 INSANE FARE detected: {Fare} (max={Max})", SessionId, result.Fare, MAX_SANE_FARE);
+                _fareSanityAlertCount++;
+                _lastSanityAlertDestination = dest;
+                _fareSanityActive = true;
                 return false;
             }
         }
@@ -1312,10 +1341,17 @@ public sealed class CallSession : ICallSession
             if (etaMinutes > MAX_SANE_ETA_MINUTES)
             {
                 _logger.LogWarning("[{SessionId}] 🚨 INSANE ETA detected: {Eta} (max={Max} min)", SessionId, result.Eta, MAX_SANE_ETA_MINUTES);
+                _fareSanityAlertCount++;
+                _lastSanityAlertDestination = dest;
+                _fareSanityActive = true;
                 return false;
             }
         }
 
+        // Fare is sane — reset sanity state
+        _fareSanityAlertCount = 0;
+        _lastSanityAlertDestination = null;
+        _fareSanityActive = false;
         return true;
     }
 
