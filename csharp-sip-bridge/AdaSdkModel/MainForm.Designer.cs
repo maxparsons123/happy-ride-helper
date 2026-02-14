@@ -102,6 +102,7 @@ partial class MainForm
         cmbTransport = new ComboBox { Location = new Point(465, 52), Size = new Size(85, 23), DropDownStyle = ComboBoxStyle.DropDownList, BackColor = bgInput, ForeColor = fgLight };
         cmbTransport.Items.AddRange(new object[] { "UDP", "TCP", "TCP_GAMMA" });
         cmbTransport.SelectedIndex = 0;
+        cmbTransport.SelectedIndexChanged += cmbTransport_SelectedIndexChanged;
 
         // Row 2: Extension / Auth ID / Password
         grpSip.Controls.Add(MakeLabel("Extension:", 15, 88));

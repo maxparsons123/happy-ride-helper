@@ -125,6 +125,8 @@ public partial class MainForm : Form
         chkAutoAnswer.Checked = sip.AutoAnswer;
         var idx = cmbTransport.Items.IndexOf(sip.Transport.ToUpperInvariant());
         cmbTransport.SelectedIndex = idx >= 0 ? idx : 0;
+        // Update field enable/disable state based on transport
+        cmbTransport_SelectedIndexChanged(cmbTransport, EventArgs.Empty);
     }
 
     // ══════════════════════════════════════
@@ -212,6 +214,26 @@ public partial class MainForm : Form
         ApplySipSettingsToFields(new SipSettings());
         cmbSipAccount.SelectedIndex = -1;
         Log("📞 New account — fill in details and click Save");
+    }
+
+    private void cmbTransport_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        var isGamma = cmbTransport.SelectedItem?.ToString() == "TCP_GAMMA";
+        txtAuthId.Enabled = !isGamma;
+        txtSipPassword.Enabled = !isGamma;
+        txtDdi.Enabled = isGamma || true; // DDI always enabled but highlight when Gamma
+        if (isGamma)
+        {
+            txtAuthId.Text = "";
+            txtSipPassword.Text = "";
+            txtAuthId.PlaceholderText = "(IP auth — not needed)";
+            txtSipPassword.PlaceholderText = "(IP auth — not needed)";
+        }
+        else
+        {
+            txtAuthId.PlaceholderText = "(optional)";
+            txtSipPassword.PlaceholderText = "";
+        }
     }
 
     private void ReadSipFromUi()
