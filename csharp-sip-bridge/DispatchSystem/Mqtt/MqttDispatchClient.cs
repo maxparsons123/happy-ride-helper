@@ -289,7 +289,7 @@ public sealed class MqttDispatchClient : IDisposable
             dropoffLat = job.DropoffLat,
             dropoffLng = job.DropoffLng,
             passengers = job.PassengerDetails ?? job.Passengers.ToString(),
-            fare = job.EstimatedFare,
+            fare = job.EstimatedFare?.ToString("0.00") ?? "",
             notes = job.SpecialRequirements ?? "",
             customerName = job.CallerName ?? "Customer",
             customerPhone = job.CallerPhone ?? "",
