@@ -330,12 +330,7 @@ public sealed class SipServer : IAsyncDisposable
         {
             var ddi = _settings.EffectiveDdi;
             fromHeader = $"<sip:{ddi}@{serverAddr}>";
-            // Inject P-Asserted-Identity via SIPCallDescriptor
-            var callDescriptor = new SIPCallDescriptor(
-                _settings.Username, _settings.Password, destUri.ToString(),
-                fromHeader, null, null, null, null, SIPCallDirection.Out, null, null, null);
-            callDescriptor.CustomHeaders = new List<string> { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
-            callAgent.CallDescriptor = callDescriptor;
+            // P-Asserted-Identity is handled via From header for Gamma IP auth
         }
         
         var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession);
