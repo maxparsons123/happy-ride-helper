@@ -48,6 +48,7 @@ public sealed class SipSettings
     public string Password { get; set; } = "";
     public string? AuthId { get; set; }
     public string? Domain { get; set; }
+    public string? Ddi { get; set; }
 
     /// <summary>SIP display name shown in From header (e.g. "Ai Agent"). Cosmetic only — not used for auth.</summary>
     public string? DisplayName { get; set; }
@@ -58,6 +59,8 @@ public sealed class SipSettings
     public int StunPort { get; set; } = 19302;
 
     public string EffectiveAuthUser => string.IsNullOrWhiteSpace(AuthId) ? Username : AuthId;
+    public bool IsGammaTrunk => Transport?.Equals("TCP_GAMMA", StringComparison.OrdinalIgnoreCase) ?? false;
+    public string EffectiveDdi => Ddi ?? Username;
 }
 
 public sealed class OpenAiSettings
@@ -115,6 +118,7 @@ public sealed class SipAccount
     public string Password { get; set; } = "";
     public string? AuthId { get; set; }
     public string? Domain { get; set; }
+    public string? Ddi { get; set; }
     public string? DisplayName { get; set; }
     public bool AutoAnswer { get; set; } = true;
     public bool EnableStun { get; set; } = true;
@@ -125,7 +129,7 @@ public sealed class SipAccount
     {
         Server = Server, Port = Port, Transport = Transport,
         Username = Username, Password = Password, AuthId = AuthId,
-        Domain = Domain, DisplayName = DisplayName, AutoAnswer = AutoAnswer,
+        Domain = Domain, Ddi = Ddi, DisplayName = DisplayName, AutoAnswer = AutoAnswer,
         EnableStun = EnableStun, StunServer = StunServer, StunPort = StunPort
     };
 
@@ -133,7 +137,7 @@ public sealed class SipAccount
     {
         Label = label; Server = s.Server; Port = s.Port; Transport = s.Transport;
         Username = s.Username; Password = s.Password; AuthId = s.AuthId;
-        Domain = s.Domain; DisplayName = s.DisplayName; AutoAnswer = s.AutoAnswer;
+        Domain = s.Domain; Ddi = s.Ddi; DisplayName = s.DisplayName; AutoAnswer = s.AutoAnswer;
         EnableStun = s.EnableStun; StunServer = s.StunServer; StunPort = s.StunPort;
     }
 
