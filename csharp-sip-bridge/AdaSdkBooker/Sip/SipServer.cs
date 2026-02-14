@@ -326,15 +326,19 @@ public sealed class SipServer : IAsyncDisposable
         Log($"📞 Dialling {destination} via {serverAddr}{portPart}…");
         
         string? fromHeader = null;
-        string[]? customHeaders = null;
         if (_settings.IsGammaTrunk)
         {
             var ddi = _settings.EffectiveDdi;
             fromHeader = $"<sip:{ddi}@{serverAddr}>";
-            customHeaders = new[] { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
+            // Inject P-Asserted-Identity via SIPCallDescriptor
+            var callDescriptor = new SIPCallDescriptor(
+                _settings.Username, _settings.Password, destUri.ToString(),
+                fromHeader, null, null, null, null, SIPCallDirection.Out, null, null, null);
+            callDescriptor.CustomHeaders = new List<string> { $"P-Asserted-Identity: <sip:{ddi}@{serverAddr}>" };
+            callAgent.CallDescriptor = callDescriptor;
         }
         
-        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession, customHeaders: customHeaders);
+        var result = await callAgent.Call(destUri.ToString(), fromHeader, null, rtpSession);
         if (!result)
         {
             Log($"❌ Outbound call to {destination} failed.");
