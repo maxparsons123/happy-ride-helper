@@ -63,6 +63,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
+    private volatile bool _trimCooldown; // Suppress repeated trims during burst delivery
     private DateTime _lastRtpSendTime = DateTime.UtcNow;
 
     // NAT state
@@ -235,8 +236,13 @@ public sealed class ALawRtpPlayout : IDisposable
         int queueCount = Volatile.Read(ref _queueCount);
 
         // ── LATENCY TRIM ──
-        // If queue exceeds 1 second, drop oldest frames to prevent garbled/laggy audio
-        if (queueCount > MAX_LATENCY_FRAMES)
+        // Trim once when queue exceeds cap, then suppress until queue drains below half-cap.
+        if (_trimCooldown)
+        {
+            if (queueCount <= MAX_LATENCY_FRAMES / 2)
+                _trimCooldown = false;
+        }
+        else if (queueCount > MAX_LATENCY_FRAMES)
         {
             int toDrop = queueCount - MAX_LATENCY_FRAMES;
             int dropped = 0;
@@ -246,7 +252,8 @@ public sealed class ALawRtpPlayout : IDisposable
                 dropped++;
             }
             queueCount = Volatile.Read(ref _queueCount);
-            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap 1s)");
+            _trimCooldown = true;
+            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap {MAX_LATENCY_FRAMES * 20}ms)");
         }
 
         // Re-buffer if queue gets too low (prevents burst→slow pacing)

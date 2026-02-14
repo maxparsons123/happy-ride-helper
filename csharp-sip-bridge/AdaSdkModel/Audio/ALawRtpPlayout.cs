@@ -98,6 +98,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
+    private volatile bool _trimCooldown; // Suppress repeated trims during burst delivery
     private int _consecutiveSendErrors;
     private DateTime _lastErrorLog;
     private DateTime _lastRtpSendTime = DateTime.UtcNow;
@@ -394,8 +395,15 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Increment(ref _statsQueueSizeSamples);
 
         // ── LATENCY TRIM (v8.4) ──
-        // If queue exceeds 1 second, drop oldest frames to prevent garbled/laggy audio
-        if (queueCount > MAX_LATENCY_FRAMES)
+        // Trim once when queue exceeds cap, then suppress until queue drains below half-cap.
+        // This prevents repeated trimming during OpenAI burst delivery (which shreds audio).
+        if (_trimCooldown)
+        {
+            // Exit cooldown once queue has naturally drained
+            if (queueCount <= MAX_LATENCY_FRAMES / 2)
+                _trimCooldown = false;
+        }
+        else if (queueCount > MAX_LATENCY_FRAMES)
         {
             int toDrop = queueCount - MAX_LATENCY_FRAMES;
             int dropped = 0;
@@ -405,7 +413,8 @@ public sealed class ALawRtpPlayout : IDisposable
                 dropped++;
             }
             queueCount = Volatile.Read(ref _queueCount);
-            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap 1s)");
+            _trimCooldown = true; // Suppress further trims until queue drains
+            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap {MAX_LATENCY_FRAMES * 20}ms)");
         }
 
         // ── HYSTERESIS LOGIC (v8.3) ──
