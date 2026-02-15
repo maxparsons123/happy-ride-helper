@@ -73,10 +73,7 @@ public sealed class CallSession : ICallSession
         _aiClient.OnEnded += reason => _ = EndAsync(reason);
         _aiClient.OnTranscript += (role, text) => OnTranscript?.Invoke(role, text);
 
-        if (_aiClient is OpenAiSdkClient sdkClient)
-        {
-            sdkClient.OnBargeIn += () => OnBargeIn?.Invoke();
-        }
+        _aiClient.OnBargeIn += () => OnBargeIn?.Invoke();
     }
 
     public async Task StartAsync(CancellationToken ct = default)
@@ -109,8 +106,7 @@ public sealed class CallSession : ICallSession
     public void NotifyPlayoutComplete()
     {
         Volatile.Write(ref _lastAdaFinishedAt, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        if (_aiClient is OpenAiSdkClient sdkClient)
-            sdkClient.NotifyPlayoutComplete();
+        _aiClient.NotifyPlayoutComplete();
     }
 
     // =========================
@@ -118,7 +114,7 @@ public sealed class CallSession : ICallSession
     // =========================
     private async Task InjectBookingStateAsync(string? interpretation = null)
     {
-        if (_aiClient is not OpenAiSdkClient sdk) return;
+        var sdk = _aiClient;
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("[BOOKING STATE] Current booking data (ground truth):");
@@ -228,9 +224,9 @@ public sealed class CallSession : ICallSession
         // that significantly differs from Ada's interpretation.
         // Skip entirely when Whisper produces garbage (non-Latin, very short, etc.)
         string? mismatchWarning = null;
-        if (_aiClient is OpenAiSdkClient sdkTranscript && !string.IsNullOrWhiteSpace(sdkTranscript.LastUserTranscript))
+        if (!string.IsNullOrWhiteSpace(_aiClient.LastUserTranscript))
         {
-            var sttText = sdkTranscript.LastUserTranscript;
+            var sttText = _aiClient.LastUserTranscript;
             
             // Only run mismatch detection if Whisper produced intelligible English text
             if (IsIntelligibleEnglish(sttText))
@@ -378,11 +374,9 @@ public sealed class CallSession : ICallSession
                                 _activePickupAlternatives = pickupAlts;
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: PICKUP disambiguation needed: {Alts}", sessionId, string.Join("|", pickupAlts));
                                 // Switch to semantic VAD for disambiguation (caller choosing from options)
-                                if (_aiClient is OpenAiSdkClient sdkVad1)
-                                    await sdkVad1.SetVadModeAsync(useSemantic: true, eagerness: 0.5f);
+                                await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.5f);
 
-                                if (_aiClient is OpenAiSdkClient sdkClarif)
-                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                await _aiClient.InjectMessageAndRespondAsync(
                                         $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=pickup, " +
                                         $"options=[{string.Join(", ", pickupAlts)}]. " +
                                         "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination. " +
@@ -397,8 +391,7 @@ public sealed class CallSession : ICallSession
                                 _activeDestAlternatives = destAlts;
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: DESTINATION disambiguation needed: {Alts}", sessionId, string.Join("|", destAlts));
 
-                                if (_aiClient is OpenAiSdkClient sdkClarif)
-                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                await _aiClient.InjectMessageAndRespondAsync(
                                         $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=destination, " +
                                         $"options=[{string.Join(", ", destAlts)}]. " +
                                         "Pickup is confirmed. Now ask the caller ONLY about the DESTINATION. " +
@@ -415,17 +408,14 @@ public sealed class CallSession : ICallSession
                                 // absurd fares like £106.50), ask the caller to specify the city/area.
                                 _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
 
-                                if (_aiClient is OpenAiSdkClient sdkAskArea)
-                                {
-                                    var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
-                                        ? result.ClarificationMessage
-                                        : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
+                                var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
+                                    ? result.ClarificationMessage
+                                    : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
 
-                                    await sdkAskArea.InjectMessageAndRespondAsync(
-                                        $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
-                                        $"Ask the caller: \"{clarMsg}\" " +
-                                        "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
-                                }
+                                await _aiClient.InjectMessageAndRespondAsync(
+                                    $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
+                                    $"Ask the caller: \"{clarMsg}\" " +
+                                    "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
 
                                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                                 return;
@@ -444,8 +434,7 @@ public sealed class CallSession : ICallSession
                             var destAltsList = string.Join(", ", _pendingDestAlternatives);
                             _logger.LogInformation("[{SessionId}] 🔄 Now resolving pending destination disambiguation: {Alts}", sessionId, destAltsList);
 
-                            if (_aiClient is OpenAiSdkClient sdkDestClarif)
-                                await sdkDestClarif.InjectMessageAndRespondAsync(
+                            await _aiClient.InjectMessageAndRespondAsync(
                                     $"[DESTINATION DISAMBIGUATION] Good, the pickup is confirmed. Now the DESTINATION address is ambiguous. The options are: {destAltsList}. " +
                                     "Ask the caller ONLY about the DESTINATION location. " +
                                     "Present the destination options clearly, then STOP and WAIT for their answer. " +
@@ -476,8 +465,7 @@ public sealed class CallSession : ICallSession
                         _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED — asking user to verify destination", sessionId);
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
-                        if (_aiClient is OpenAiSdkClient sdkSanity)
-                            await sdkSanity.InjectMessageAndRespondAsync(
+                        await _aiClient.InjectMessageAndRespondAsync(
                                 "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
                                 "Ask the caller to confirm or repeat their DESTINATION address. " +
                                 "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
@@ -487,13 +475,9 @@ public sealed class CallSession : ICallSession
 
                     ApplyFareResult(result);
 
-            if (_aiClient is OpenAiSdkClient sdk)
-            {
-                sdk.SetAwaitingConfirmation(true);
-                // Switch to server VAD for fast yes/no confirmation response
-                await sdk.SetVadModeAsync(useSemantic: false);
-                _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no)", sessionId);
-            }
+            _aiClient.SetAwaitingConfirmation(true);
+            await _aiClient.SetVadModeAsync(useSemantic: false);
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no)", sessionId);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -504,8 +488,7 @@ public sealed class CallSession : ICallSession
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
-                    if (_aiClient is OpenAiSdkClient sdkInject)
-                        await sdkInject.InjectMessageAndRespondAsync(
+                    await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
                             $"estimated time of arrival is {_booking.Eta}. " +
                             $"Read back the VERIFIED addresses and fare to the caller and ask them to confirm the booking.");
@@ -517,8 +500,7 @@ public sealed class CallSession : ICallSession
                     _booking.Eta = "8 minutes";
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
-                    if (_aiClient is OpenAiSdkClient sdkFallback)
-                        await sdkFallback.InjectMessageAndRespondAsync(
+                    await _aiClient.InjectMessageAndRespondAsync(
                             "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
                             "Read back the details to the caller and ask them to confirm.");
                 }
@@ -542,7 +524,7 @@ public sealed class CallSession : ICallSession
     /// </summary>
     private async Task AutoSwitchVadForNextStepAsync()
     {
-        if (_aiClient is not OpenAiSdkClient sdk) return;
+        if (!_aiClient.IsConnected) return;
 
         // Determine the next missing field
         bool needsPickup = string.IsNullOrWhiteSpace(_booking.Pickup);
@@ -555,19 +537,19 @@ public sealed class CallSession : ICallSession
         if (needsPickup || needsDest)
         {
             _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting address)", SessionId);
-            await sdk.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
+            await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
         }
         // Short-answer fields (name, passengers, time) → server VAD (fast response)
         else if (needsName || needsPax || needsTime)
         {
             _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (collecting short answer)", SessionId);
-            await sdk.SetVadModeAsync(useSemantic: false);
+            await _aiClient.SetVadModeAsync(useSemantic: false);
         }
         // All fields filled → fare calculating, then confirmation → server VAD (yes/no)
         else
         {
             _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (awaiting confirmation)", SessionId);
-            await sdk.SetVadModeAsync(useSemantic: false);
+            await _aiClient.SetVadModeAsync(useSemantic: false);
         }
     }
 
@@ -730,8 +712,7 @@ public sealed class CallSession : ICallSession
                 if (pickupAlts.Length > 0)
                 {
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                    if (_aiClient is OpenAiSdkClient sdk)
-                        await sdk.InjectMessageAndRespondAsync(
+                    await _aiClient.InjectMessageAndRespondAsync(
                             $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=pickup, " +
                             $"options=[{string.Join(", ", pickupAlts)}]. " +
                             "Ask the caller to clarify the PICKUP. Present options with numbers, then WAIT.");
@@ -740,8 +721,7 @@ public sealed class CallSession : ICallSession
                 if (destAlts.Length > 0)
                 {
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                    if (_aiClient is OpenAiSdkClient sdk)
-                        await sdk.InjectMessageAndRespondAsync(
+                    await _aiClient.InjectMessageAndRespondAsync(
                             $"[ADDRESS DISAMBIGUATION] needs_disambiguation=true, target=destination, " +
                             $"options=[{string.Join(", ", destAlts)}]. " +
                             "Ask the caller to clarify the DESTINATION. Present options with numbers, then WAIT.");
@@ -755,8 +735,7 @@ public sealed class CallSession : ICallSession
                 _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED after clarification — asking user to verify destination", sessionId);
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
-                if (_aiClient is OpenAiSdkClient sdkSanity)
-                    await sdkSanity.InjectMessageAndRespondAsync(
+                await _aiClient.InjectMessageAndRespondAsync(
                         "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
                         "Ask the caller to confirm or repeat their DESTINATION address. " +
                         "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
@@ -766,11 +745,8 @@ public sealed class CallSession : ICallSession
 
             ApplyFareResult(result);
 
-            if (_aiClient is OpenAiSdkClient sdkConf)
-            {
-                sdkConf.SetAwaitingConfirmation(true);
-                await sdkConf.SetVadModeAsync(useSemantic: false);
-            }
+            _aiClient.SetAwaitingConfirmation(true);
+            await _aiClient.SetVadModeAsync(useSemantic: false);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -781,8 +757,7 @@ public sealed class CallSession : ICallSession
             _logger.LogInformation("[{SessionId}] 💰 Fare ready after clarification: {Fare}, ETA: {Eta}",
                 sessionId, _booking.Fare, _booking.Eta);
 
-            if (_aiClient is OpenAiSdkClient sdkInject)
-                await sdkInject.InjectMessageAndRespondAsync(
+            await _aiClient.InjectMessageAndRespondAsync(
                     $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
                     $"estimated time of arrival is {_booking.Eta}. " +
                     "Read back the VERIFIED addresses and fare to the caller and ask them to confirm.");
@@ -794,8 +769,7 @@ public sealed class CallSession : ICallSession
             _booking.Eta = "8 minutes";
             OnBookingUpdated?.Invoke(_booking.Clone());
 
-            if (_aiClient is OpenAiSdkClient sdkFallback)
-                await sdkFallback.InjectMessageAndRespondAsync(
+            await _aiClient.InjectMessageAndRespondAsync(
                     "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
                     "Read back the details to the caller and ask them to confirm.");
         }
@@ -874,8 +848,7 @@ public sealed class CallSession : ICallSession
                                 var altsList = string.Join(", ", pickupAlts);
                                 _pickupDisambiguated = false;
 
-                                if (_aiClient is OpenAiSdkClient sdkClarif)
-                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                await _aiClient.InjectMessageAndRespondAsync(
                                         $"[PICKUP DISAMBIGUATION] The PICKUP address is ambiguous. The options are: {altsList}. " +
                                         "Ask the caller ONLY about the PICKUP location. Do NOT mention the destination yet. " +
                                         "Present the pickup options clearly, then STOP and WAIT for their answer.");
@@ -885,8 +858,7 @@ public sealed class CallSession : ICallSession
                                 var altsList = string.Join(", ", destAlts);
                                 _destDisambiguated = false;
 
-                                if (_aiClient is OpenAiSdkClient sdkClarif)
-                                    await sdkClarif.InjectMessageAndRespondAsync(
+                                await _aiClient.InjectMessageAndRespondAsync(
                                         $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
                                         "Ask the caller ONLY about the DESTINATION location. " +
                                         "Present the destination options clearly, then STOP and WAIT for their answer.");
@@ -901,8 +873,7 @@ public sealed class CallSession : ICallSession
                             var destAltsList = string.Join(", ", _pendingDestAlternatives);
                             _logger.LogInformation("[{SessionId}] 🔄 Now resolving pending destination disambiguation: {Alts}", sessionId, destAltsList);
 
-                            if (_aiClient is OpenAiSdkClient sdkDestClarif)
-                                await sdkDestClarif.InjectMessageAndRespondAsync(
+                            await _aiClient.InjectMessageAndRespondAsync(
                                     $"[DESTINATION DISAMBIGUATION] Good, the pickup is confirmed. Now the DESTINATION address is ambiguous. The options are: {destAltsList}. " +
                                     "Ask the caller ONLY about the DESTINATION location. " +
                                     "Present the destination options clearly, then STOP and WAIT for their answer.");
@@ -927,8 +898,7 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED (book_taxi path) — asking user to verify destination", sessionId);
 
-                        if (_aiClient is OpenAiSdkClient sdkSanity)
-                            await sdkSanity.InjectMessageAndRespondAsync(
+                        await _aiClient.InjectMessageAndRespondAsync(
                                 "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
                                 "Ask the caller to confirm or repeat their DESTINATION address. " +
                                 "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
@@ -938,11 +908,8 @@ public sealed class CallSession : ICallSession
 
                     ApplyFareResult(result);
 
-                    if (_aiClient is OpenAiSdkClient sdk)
-                    {
-                        sdk.SetAwaitingConfirmation(true);
-                        await sdk.SetVadModeAsync(useSemantic: false);
-                    }
+                    _aiClient.SetAwaitingConfirmation(true);
+                    await _aiClient.SetVadModeAsync(useSemantic: false);
 
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -954,8 +921,7 @@ public sealed class CallSession : ICallSession
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
                     // Inject fare result into conversation — Ada will read it back
-                    if (_aiClient is OpenAiSdkClient sdkInject)
-                        await sdkInject.InjectMessageAndRespondAsync(
+                    await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
                             $"estimated time of arrival is {_booking.Eta}. " +
                             $"Read back these details to the caller and ask them to confirm the booking.");
@@ -967,8 +933,7 @@ public sealed class CallSession : ICallSession
                     _booking.Eta = "8 minutes";
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
-                    if (_aiClient is OpenAiSdkClient sdkFallback)
-                        await sdkFallback.InjectMessageAndRespondAsync(
+                    await _aiClient.InjectMessageAndRespondAsync(
                             "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
                             "Read back these details to the caller and ask them to confirm.");
                 }
@@ -1019,8 +984,7 @@ public sealed class CallSession : ICallSession
             _booking.Confirmed = true;
             _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
 
-            if (_aiClient is OpenAiSdkClient sdk)
-                sdk.SetAwaitingConfirmation(false);
+            _aiClient.SetAwaitingConfirmation(false);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
             _logger.LogInformation("[{SessionId}] ✅ Booked: {Ref}", SessionId, _booking.BookingRef);
@@ -1031,11 +995,8 @@ public sealed class CallSession : ICallSession
 
             _ = Task.Run(async () =>
             {
-                if (_aiClient is OpenAiSdkClient sdkWait)
-                {
-                    for (int i = 0; i < 50 && sdkWait.IsResponseActive; i++)
-                        await Task.Delay(100);
-                }
+                for (int i = 0; i < 50 && _aiClient.IsResponseActive; i++)
+                    await Task.Delay(100);
 
                 await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
                 await _dispatcher.SendWhatsAppAsync(callerId);
@@ -1161,12 +1122,9 @@ public sealed class CallSession : ICallSession
         {
             await Task.Delay(15000);
             if (!IsActive) return;
-            if (_aiClient is OpenAiSdkClient sdk)
-            {
-                if (!sdk.IsConnected) return;
-                sdk.CancelDeferredResponse();
-                _logger.LogInformation("[{SessionId}] ⏰ Post-booking timeout - requesting farewell", SessionId);
-            }
+            if (!_aiClient.IsConnected) return;
+            _aiClient.CancelDeferredResponse();
+            _logger.LogInformation("[{SessionId}] ⏰ Post-booking timeout - requesting farewell", SessionId);
         });
 
         var fareSpoken = FormatFareForSpeech(_booking.Fare);
@@ -1234,31 +1192,24 @@ public sealed class CallSession : ICallSession
 
         _ = Task.Run(async () =>
         {
-            if (_aiClient is OpenAiSdkClient sdk)
+            var streamStart = Environment.TickCount64;
+            while (_aiClient.IsResponseActive && Environment.TickCount64 - streamStart < 15000)
+                await Task.Delay(200);
+
+            var enqueueStart = Environment.TickCount64;
+            while ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0 && Environment.TickCount64 - enqueueStart < 5000)
+                await Task.Delay(100);
+
+            await Task.Delay(2000);
+
+            var drainStart = Environment.TickCount64;
+            while (Environment.TickCount64 - drainStart < 20000)
             {
-                var streamStart = Environment.TickCount64;
-                while (sdk.IsResponseActive && Environment.TickCount64 - streamStart < 15000)
-                    await Task.Delay(200);
-
-                var enqueueStart = Environment.TickCount64;
-                while ((sdk.GetQueuedFrames?.Invoke() ?? 0) == 0 && Environment.TickCount64 - enqueueStart < 5000)
-                    await Task.Delay(100);
-
-                await Task.Delay(2000);
-
-                var drainStart = Environment.TickCount64;
-                while (Environment.TickCount64 - drainStart < 20000)
-                {
-                    if ((sdk.GetQueuedFrames?.Invoke() ?? 0) == 0) break;
-                    await Task.Delay(100);
-                }
-
-                await Task.Delay(1000);
+                if ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0) break;
+                await Task.Delay(100);
             }
-            else
-            {
-                await Task.Delay(5000);
-            }
+
+            await Task.Delay(1000);
 
             await EndAsync("end_call tool");
         });
