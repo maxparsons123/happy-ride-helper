@@ -354,7 +354,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 Log("🛑 Cancelling active response before critical injection");
                 await _session!.CancelResponseAsync();
                 Interlocked.Exchange(ref _responseActive, 0);
-                await Task.Delay(100);
+                // Wait for the response to actually clear (poll with timeout instead of blind delay)
+                for (int i = 0; i < 10; i++)
+                {
+                    await Task.Delay(50);
+                    if (Volatile.Read(ref _responseActive) == 0) break;
+                }
             }
 
             Log($"💉 Injecting: {(message.Length > 80 ? message[..80] + "..." : message)}");

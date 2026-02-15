@@ -827,6 +827,14 @@ public sealed class CallSession : ICallSession
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
                 return new { success = false, error = "Missing pickup or destination." };
 
+            // GUARD: If sync_booking_data already auto-triggered fare calculation, don't spawn a duplicate.
+            // Return a silent "already calculating" result so Ada doesn't double-speak an interjection.
+            if (Volatile.Read(ref _fareAutoTriggered) == 1)
+            {
+                _logger.LogInformation("[{SessionId}] ⏳ book_taxi(request_quote) skipped — fare already in flight from auto-trigger", SessionId);
+                return new { success = true, status = "calculating", message = "I'm checking the fare now. Tell the caller you're just looking into it and will have the details shortly. Do NOT repeat any interjection — one is already in progress." };
+            }
+
             // NON-BLOCKING: return immediately so Ada speaks an interjection,
             // then inject the fare result asynchronously when ready.
             var pickup = _booking.Pickup;
