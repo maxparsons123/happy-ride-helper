@@ -252,27 +252,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private void SendNextFrame()
     {
         int queueCount = Volatile.Read(ref _queueCount);
-
-        // ── LATENCY TRIM ──
-        if (_trimCooldown)
-        {
-            if (queueCount <= MAX_LATENCY_FRAMES / 2)
-                _trimCooldown = false;
-        }
-        else if (queueCount > MAX_LATENCY_FRAMES)
-        {
-            int toDrop = queueCount - MAX_LATENCY_FRAMES;
-            int dropped = 0;
-            while (dropped < toDrop && _frameQueue.TryDequeue(out var discarded))
-            {
-                Interlocked.Decrement(ref _queueCount);
-                ReturnFrame(discarded);  // #6: Return to pool
-                dropped++;
-            }
-            queueCount = Volatile.Read(ref _queueCount);
-            _trimCooldown = true;
-            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap {MAX_LATENCY_FRAMES * 20}ms)");
-        }
+        // ── LATENCY TRIM removed — let the full audio play out naturally ──
 
         // Re-buffer if queue gets too low (prevents burst→slow pacing)
         if (!_isBuffering && queueCount < REBUFFER_THRESHOLD && queueCount > 0)
