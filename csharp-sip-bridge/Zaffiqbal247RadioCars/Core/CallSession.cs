@@ -1375,15 +1375,23 @@ public sealed class CallSession : ICallSession
         }
 
         // If the user re-confirmed the SAME destination after a sanity alert, allow it through
-        if (_fareSanityAlertCount > 0 && !string.IsNullOrWhiteSpace(_lastSanityAlertDestination)
-            && string.Equals(dest.Trim(), _lastSanityAlertDestination.Trim(), StringComparison.OrdinalIgnoreCase))
+        // Use fuzzy contains-match — the destination string may change slightly between passes
+        // (e.g. "Manchester" vs "Manchester, UK" or geocoded version with postcode)
+        if (_fareSanityAlertCount > 0 && !string.IsNullOrWhiteSpace(_lastSanityAlertDestination))
         {
-            _logger.LogInformation("[{SessionId}] ✅ Fare sanity BYPASSED — user re-confirmed same destination '{Dest}' (attempt {Count})",
-                SessionId, dest, _fareSanityAlertCount + 1);
-            _fareSanityAlertCount = 0;
-            _lastSanityAlertDestination = null;
-            _fareSanityActive = false;
-            return true;
+            var d = dest.Trim();
+            var last = _lastSanityAlertDestination.Trim();
+            if (string.Equals(d, last, StringComparison.OrdinalIgnoreCase)
+                || d.Contains(last, StringComparison.OrdinalIgnoreCase)
+                || last.Contains(d, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("[{SessionId}] ✅ Fare sanity BYPASSED — user re-confirmed destination '{Dest}' ≈ '{Last}' (attempt {Count})",
+                    SessionId, dest, _lastSanityAlertDestination, _fareSanityAlertCount + 1);
+                _fareSanityAlertCount = 0;
+                _lastSanityAlertDestination = null;
+                _fareSanityActive = false;
+                return true;
+            }
         }
 
         // Parse fare amount
