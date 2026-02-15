@@ -433,26 +433,30 @@ public sealed class CallSession : ICallSession
                             }
                             else
                             {
-                                // NeedsClarification=true but no alternatives provided — 
-                                // The edge function couldn't resolve the addresses but also couldn't suggest alternatives.
-                                // Instead of falling back to Nominatim (which can geocode to wrong cities and produce
-                                // absurd fares like £106.50), ask the caller to specify the city/area.
-                                _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
-
-                                if (_aiClient is OpenAiSdkClient sdkAskArea)
+                                if (_fareSanityAlertCount > 0)
                                 {
-                                    var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
-                                        ? result.ClarificationMessage
-                                        : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
-
-                                    await sdkAskArea.InjectMessageAndRespondAsync(
-                                        $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
-                                        $"Ask the caller: \"{clarMsg}\" " +
-                                        "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
+                                    _logger.LogInformation("[{SessionId}] ⚡ Post-sanity re-calc: skipping disambiguation, using Nominatim fallback", sessionId);
+                                    result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
                                 }
+                                else
+                                {
+                                    _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
 
-                                Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                                return;
+                                    if (_aiClient is OpenAiSdkClient sdkAskArea)
+                                    {
+                                        var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
+                                            ? result.ClarificationMessage
+                                            : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
+
+                                        await sdkAskArea.InjectMessageAndRespondAsync(
+                                            $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
+                                            $"Ask the caller: \"{clarMsg}\" " +
+                                            "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
+                                    }
+
+                                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                                    return;
+                                }
                             }
 
                             // Has disambiguation alternatives — already handled above, exit
@@ -502,10 +506,10 @@ public sealed class CallSession : ICallSession
 
                         if (_aiClient is OpenAiSdkClient sdkSanity)
                             await sdkSanity.InjectMessageAndRespondAsync(
-                                "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
-                                "Ask the caller to confirm or repeat their DESTINATION address. " +
-                                "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
-                                "When they respond, call sync_booking_data with the corrected destination.");
+                                "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard or the city could not be determined. " +
+                                "Ask the caller to confirm their DESTINATION address AND which city or area they are in. " +
+                                "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going, and which city you're in?\" " +
+                                "When they respond, call sync_booking_data with the destination INCLUDING the city name (e.g. '7 Russell Street, Coventry').");
                         return;
                     }
 
@@ -781,10 +785,10 @@ public sealed class CallSession : ICallSession
 
                 if (_aiClient is OpenAiSdkClient sdkSanity)
                     await sdkSanity.InjectMessageAndRespondAsync(
-                        "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
-                        "Ask the caller to confirm or repeat their DESTINATION address. " +
-                        "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
-                        "When they respond, call sync_booking_data with the corrected destination.");
+                        "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard or the city could not be determined. " +
+                        "Ask the caller to confirm their DESTINATION address AND which city or area they are in. " +
+                        "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going, and which city you're in?\" " +
+                        "When they respond, call sync_booking_data with the destination INCLUDING the city name (e.g. '7 Russell Street, Coventry').");
                 return;
             }
 
@@ -952,10 +956,10 @@ public sealed class CallSession : ICallSession
 
                         if (_aiClient is OpenAiSdkClient sdkSanity)
                             await sdkSanity.InjectMessageAndRespondAsync(
-                                "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard. " +
-                                "Ask the caller to confirm or repeat their DESTINATION address. " +
-                                "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going?\" " +
-                                "When they respond, call sync_booking_data with the corrected destination.");
+                                "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard or the city could not be determined. " +
+                                "Ask the caller to confirm their DESTINATION address AND which city or area they are in. " +
+                                "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going, and which city you're in?\" " +
+                                "When they respond, call sync_booking_data with the destination INCLUDING the city name (e.g. '7 Russell Street, Coventry').");
                         return;
                     }
 
