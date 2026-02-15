@@ -179,6 +179,9 @@ partial class MainForm
         chkManualMode = new CheckBox { Text = "🎤 Operator Mode", Location = new Point(15, 62), Size = new Size(140, 23), ForeColor = orange, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
         chkManualMode.CheckedChanged += chkManualMode_CheckedChanged;
 
+        chkHighSample = new CheckBox { Text = "🎧 24kHz Mode", Location = new Point(160, 62), Size = new Size(130, 23), ForeColor = Color.FromArgb(100, 200, 255), Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
+        chkHighSample.CheckedChanged += chkHighSample_CheckedChanged;
+
         lblOpVolume = new Label { Text = "🔊 Mic Vol:", Location = new Point(310, 62), Size = new Size(70, 20), ForeColor = fgLight, Font = new Font("Segoe UI", 8F) };
         trkOpVolume = new TrackBar
         {
@@ -196,7 +199,7 @@ partial class MainForm
 
         lblCallInfo = new Label { Text = "No active call", Location = new Point(170, 66), Size = new Size(130, 20), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F) };
 
-        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, lblOpVolume, trkOpVolume, lblOpVolumeVal, lblCallInfo });
+        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, chkHighSample, lblOpVolume, trkOpVolume, lblOpVolumeVal, lblCallInfo });
 
         // ══════════════════════════════════════
         //  SIMLI AVATAR
@@ -328,7 +331,7 @@ partial class MainForm
     // Call Controls
     private GroupBox grpCall;
     private Button btnAnswer, btnReject, btnHangUp, btnMute;
-    private CheckBox chkManualMode;
+    private CheckBox chkManualMode, chkHighSample;
     private Label lblCallInfo, lblOpVolume, lblOpVolumeVal;
     private TrackBar trkOpVolume;
 

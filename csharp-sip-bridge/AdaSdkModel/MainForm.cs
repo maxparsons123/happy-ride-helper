@@ -109,6 +109,7 @@ public partial class MainForm : Form
     {
         RefreshAccountDropdown();
         ApplySipSettingsToFields(_settings.Sip);
+        chkHighSample.Checked = _settings.OpenAi.UseHighSample;
     }
 
     private void ApplySipSettingsToFields(SipSettings sip)
@@ -350,7 +351,18 @@ public partial class MainForm : Form
     {
         var factory = GetLoggerFactory();
 
-        var aiClient = new OpenAiSdkClient(factory.CreateLogger<OpenAiSdkClient>(), _settings.OpenAi);
+        IOpenAiClient aiClient;
+        if (_settings.OpenAi.UseHighSample)
+        {
+            aiClient = new OpenAiSdkClientHighSample(factory.CreateLogger<OpenAiSdkClientHighSample>(), _settings.OpenAi);
+            Log("🎧 Using HighSampleAda (PCM16 24kHz)");
+        }
+        else
+        {
+            aiClient = new OpenAiSdkClient(factory.CreateLogger<OpenAiSdkClient>(), _settings.OpenAi);
+            Log("🔊 Using standard G.711 A-law passthrough");
+        }
+
         var fareCalculator = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 
@@ -497,6 +509,14 @@ public partial class MainForm : Form
             Log("🤖 Auto mode – AI will respond to calls");
             StopMicrophone();
         }
+    }
+
+    private void chkHighSample_CheckedChanged(object? sender, EventArgs e)
+    {
+        _settings.OpenAi.UseHighSample = chkHighSample.Checked;
+        SaveSettings();
+        var mode = chkHighSample.Checked ? "PCM16 24kHz (HighSample)" : "G.711 A-law passthrough";
+        Log($"🎧 Audio mode → {mode} (takes effect on next call)");
     }
 
     private void btnMute_Click(object? sender, EventArgs e)
