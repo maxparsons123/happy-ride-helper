@@ -437,8 +437,11 @@ public sealed class CallSession : ICallSession
             {
                 _booking.PickupLat = _booking.PickupLon = null;
                 _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
-                // Reset fare auto-trigger if address changed after previous fare
+                // Reset fare/booking state so stale data can't bypass guards
+                _booking.Fare = null;
+                _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             }
             _booking.Pickup = incoming;
         }
@@ -449,7 +452,11 @@ public sealed class CallSession : ICallSession
             {
                 _booking.DestLat = _booking.DestLon = null;
                 _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                // Reset fare/booking state so stale data can't bypass guards
+                _booking.Fare = null;
+                _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             }
             _booking.Destination = incoming;
         }
