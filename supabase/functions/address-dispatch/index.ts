@@ -470,6 +470,42 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       }
     }
 
+    // ── Post-processing: CLEAR disambiguation when user explicitly provided a city ──
+    // Gemini sometimes flags streets as ambiguous even when the caller said "David Road, Coventry".
+    // If the original input contains a known UK city name, trust it and clear the ambiguity.
+    const KNOWN_CITIES = [
+      "Coventry", "Birmingham", "London", "Manchester", "Leeds", "Sheffield",
+      "Nottingham", "Leicester", "Bristol", "Reading", "Liverpool", "Newcastle",
+      "Brighton", "Oxford", "Cambridge", "Wolverhampton", "Derby", "Stoke",
+      "Southampton", "Portsmouth", "Edinburgh", "Glasgow", "Cardiff", "Belfast",
+      "Warwick", "Kenilworth", "Solihull", "Sutton Coldfield", "Leamington",
+      "Rugby", "Nuneaton", "Bedworth", "Stratford", "Redditch",
+      "Amsterdam", "Rotterdam", "The Hague", "Utrecht", "Eindhoven",
+      "Gent", "Ghent", "Brussels", "Antwerp", "Bruges",
+    ];
+    
+    for (const side of ["pickup", "dropoff"] as const) {
+      const addr = parsed[side];
+      if (!addr || !addr.is_ambiguous) continue;
+      
+      const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
+      const inputLower = originalInput.toLowerCase();
+      
+      // Check if the original user input explicitly mentions a city
+      const explicitCity = KNOWN_CITIES.find(c => inputLower.includes(c.toLowerCase()));
+      if (explicitCity) {
+        console.log(`✅ User explicitly said "${explicitCity}" in "${originalInput}" — clearing disambiguation for ${side}`);
+        addr.is_ambiguous = false;
+        addr.alternatives = [];
+        // Recalculate status
+        const otherSide = side === "pickup" ? "dropoff" : "pickup";
+        if (!parsed[otherSide]?.is_ambiguous) {
+          parsed.status = "ready";
+          parsed.clarification_message = undefined;
+        }
+      }
+    }
+
     // ── Post-processing: enforce disambiguation for known multi-district streets ──
     // Gemini sometimes resolves ambiguous streets directly. This safety net catches those cases.
     const KNOWN_MULTI_DISTRICT_STREETS: Record<string, string[]> = {
