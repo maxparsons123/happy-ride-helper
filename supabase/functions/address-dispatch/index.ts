@@ -23,6 +23,15 @@ function haversineDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: 
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+/** Extract a normalized street key for fuzzy comparison: "52a david road" from "52A David Road, Coventry CV1 2BW" */
+function extractStreetKey(input: string): string {
+  return input
+    .replace(/\b[a-z]{1,2}\d{1,2}\s?\d[a-z]{2}\b/gi, "") // remove postcodes
+    .split(",")[0] // take first segment (street + number)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function calculateFare(distanceMiles: number, detectedCountry?: string): { fare: string; fare_spoken: string; eta: string; distance_miles: number } {
   const rawFare = Math.max(MIN_FARE, BASE_FARE + distanceMiles * PER_MILE);
   // Round to nearest 0.50
@@ -470,9 +479,8 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       }
     }
 
-    // ── Post-processing: CLEAR disambiguation when user explicitly provided a city ──
-    // Gemini sometimes flags streets as ambiguous even when the caller said "David Road, Coventry".
-    // If the original input contains a known UK city name, trust it and clear the ambiguity.
+    // ── Post-processing: CLEAR disambiguation via caller history OR explicit city ──
+    // Priority: 1) Caller history match  2) Explicit city in input
     const KNOWN_CITIES = [
       "Coventry", "Birmingham", "London", "Manchester", "Leeds", "Sheffield",
       "Nottingham", "Leicester", "Bristol", "Reading", "Liverpool", "Newcastle",
@@ -484,20 +492,57 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       "Gent", "Ghent", "Brussels", "Antwerp", "Bruges",
     ];
     
+    // Build a flat set of all caller history addresses for fuzzy matching
+    const historyAddresses: string[] = [];
+    if (callerHistory) {
+      const lines = callerHistory.split("\n").filter(l => /^\d+\.\s/.test(l.trim()));
+      for (const line of lines) {
+        const addr = line.replace(/^\d+\.\s*/, "").trim();
+        if (addr) historyAddresses.push(addr);
+      }
+    }
+
     for (const side of ["pickup", "dropoff"] as const) {
       const addr = parsed[side];
       if (!addr || !addr.is_ambiguous) continue;
       
       const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
-      const inputLower = originalInput.toLowerCase();
+      const inputLower = originalInput.toLowerCase().replace(/\s+/g, " ").trim();
       
-      // Check if the original user input explicitly mentions a city
+      // CHECK 1: Does the input fuzzy-match a caller history address?
+      if (historyAddresses.length > 0) {
+        const historyMatch = historyAddresses.find(h => {
+          const hLower = h.toLowerCase().replace(/\s+/g, " ").trim();
+          // Check if history contains the input or input contains key parts of history
+          return hLower.includes(inputLower) || inputLower.includes(hLower) ||
+            // Fuzzy: extract street+number from both and compare
+            extractStreetKey(inputLower) === extractStreetKey(hLower);
+        });
+        
+        if (historyMatch) {
+          console.log(`✅ Caller history match: "${originalInput}" → "${historyMatch}" — clearing disambiguation for ${side}`);
+          addr.is_ambiguous = false;
+          addr.alternatives = [];
+          addr.matched_from_history = true;
+          // Use the history address if Gemini's resolution looks wrong
+          if (!addr.address || addr.address.length < historyMatch.length) {
+            addr.address = historyMatch;
+          }
+          const otherSide = side === "pickup" ? "dropoff" : "pickup";
+          if (!parsed[otherSide]?.is_ambiguous) {
+            parsed.status = "ready";
+            parsed.clarification_message = undefined;
+          }
+          continue; // Skip city check — history is higher priority
+        }
+      }
+      
+      // CHECK 2: Does the input explicitly mention a city?
       const explicitCity = KNOWN_CITIES.find(c => inputLower.includes(c.toLowerCase()));
       if (explicitCity) {
         console.log(`✅ User explicitly said "${explicitCity}" in "${originalInput}" — clearing disambiguation for ${side}`);
         addr.is_ambiguous = false;
         addr.alternatives = [];
-        // Recalculate status
         const otherSide = side === "pickup" ? "dropoff" : "pickup";
         if (!parsed[otherSide]?.is_ambiguous) {
           parsed.status = "ready";
