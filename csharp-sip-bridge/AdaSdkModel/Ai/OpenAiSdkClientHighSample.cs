@@ -122,6 +122,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     public event Action<string, string>? OnTranscript;
     public event Action? OnBargeIn;
     public event Action? OnResponseCompleted;
+    public event Action? OnGoodbyeWithoutBooking;
 
     public Func<int>? GetQueuedFrames { get; set; }
 
@@ -791,6 +792,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         {
             Log("👋 Goodbye detected in Ada's speech");
             Interlocked.Exchange(ref _ignoreUserAudio, 1);
+            OnGoodbyeWithoutBooking?.Invoke();
         }
     }
 

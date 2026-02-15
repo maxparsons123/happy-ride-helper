@@ -119,6 +119,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
     /// <summary>Fired when AI response stream completes.</summary>
     public event Action? OnResponseCompleted;
+    public event Action? OnGoodbyeWithoutBooking;
 
     /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
     public Func<int>? GetQueuedFrames { get; set; }
@@ -850,6 +851,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         {
             Log("👋 Goodbye detected in Ada's speech");
             Interlocked.Exchange(ref _ignoreUserAudio, 1);
+            OnGoodbyeWithoutBooking?.Invoke();
         }
     }
 
