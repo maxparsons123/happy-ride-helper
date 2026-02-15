@@ -169,6 +169,11 @@ public class SipOpenAIBridge : IDisposable
         {
             await HandleIncomingCall(sipRequest);
         }
+        else if (sipRequest.Method == SIPMethodsEnum.OPTIONS)
+        {
+            var okResp = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+            await _sipTransport!.SendResponseAsync(okResp);
+        }
         else if (sipRequest.Method == SIPMethodsEnum.BYE)
         {
             Log("📕 BYE received");

@@ -148,6 +148,16 @@ public sealed class SipServer : IAsyncDisposable
         _transport.SIPRequestInTraceEvent += (ep, src, req) =>
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
+        // Respond to OPTIONS keepalives so the PBX knows we're alive
+        _transport.SIPTransportRequestReceived += async (localEp, remoteEp, req) =>
+        {
+            if (req.Method == SIPMethodsEnum.OPTIONS)
+            {
+                var okResp = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
+                await _transport.SendResponseAsync(okResp);
+            }
+        };
+
         // TCP on port 5060 — matches Linphone behaviour so the Contact header
         // advertises a stable endpoint the PBX can route INVITEs to.
         var tcpChannel = new SIPTCPChannel(IPAddress.Any, 5060);

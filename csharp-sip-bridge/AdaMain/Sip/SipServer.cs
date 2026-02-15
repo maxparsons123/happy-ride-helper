@@ -195,6 +195,16 @@ public sealed class SipServer : IAsyncDisposable
         _transport.SIPRequestInTraceEvent += (ep, src, req) =>
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
+        // Respond to OPTIONS keepalives so the PBX knows we're alive
+        _transport.SIPTransportRequestReceived += async (localEp, remoteEp, req) =>
+        {
+            if (req.Method == SIPMethodsEnum.OPTIONS)
+            {
+                var okResp = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
+                await _transport.SendResponseAsync(okResp);
+            }
+        };
+
         switch (_settings.Transport.ToUpperInvariant())
         {
             case "UDP":
