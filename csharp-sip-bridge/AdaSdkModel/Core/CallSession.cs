@@ -74,6 +74,56 @@ public sealed class CallSession : ICallSession
         _aiClient.OnTranscript += (role, text) => OnTranscript?.Invoke(role, text);
 
         _aiClient.OnBargeIn += () => OnBargeIn?.Invoke();
+
+        // SAFETY NET: if Ada says goodbye but book_taxi was never called, auto-dispatch
+        _aiClient.OnGoodbyeWithoutBooking += () =>
+        {
+            if (Volatile.Read(ref _bookTaxiCompleted) == 0
+                && _booking.Fare != null
+                && !string.IsNullOrWhiteSpace(_booking.Pickup)
+                && !string.IsNullOrWhiteSpace(_booking.Destination))
+            {
+                _logger.LogWarning("[{SessionId}] 🚨 SAFETY NET: Goodbye detected but book_taxi never called — auto-dispatching", SessionId);
+                _ = AutoDispatchOnGoodbyeAsync();
+            }
+        };
+    }
+
+    private async Task AutoDispatchOnGoodbyeAsync()
+    {
+        if (Interlocked.CompareExchange(ref _bookTaxiCompleted, 1, 0) == 1)
+            return; // Already booked by another path
+
+        _booking.Confirmed = true;
+        _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+        _aiClient.SetAwaitingConfirmation(false);
+        OnBookingUpdated?.Invoke(_booking.Clone());
+
+        _logger.LogInformation("[{SessionId}] ✅ SAFETY NET booked: {Ref} ({Pickup} → {Dest})",
+            SessionId, _booking.BookingRef, _booking.Pickup, _booking.Destination);
+
+        var bookingSnapshot = _booking.Clone();
+        var callerId = CallerId;
+        var sessionId = SessionId;
+
+        try
+        {
+            await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
+            await _dispatcher.SendWhatsAppAsync(callerId);
+
+            if (_icabbiEnabled && _icabbi != null)
+            {
+                var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
+                if (icabbiResult.Success)
+                    _logger.LogInformation("[{SessionId}] 🚕 iCabbi (safety net): {JourneyId}", sessionId, icabbiResult.JourneyId);
+                else
+                    _logger.LogWarning("[{SessionId}] ⚠️ iCabbi (safety net) failed: {Msg}", sessionId, icabbiResult.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Safety net dispatch error", sessionId);
+        }
     }
 
     public async Task StartAsync(CancellationToken ct = default)

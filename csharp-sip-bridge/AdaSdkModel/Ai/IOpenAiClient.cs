@@ -38,4 +38,7 @@ public interface IOpenAiClient
     event Action<string, string>? OnTranscript;
     event Action? OnBargeIn;
     event Action? OnResponseCompleted;
+
+    /// <summary>Fired when Ada says goodbye but book_taxi was never called — safety net for auto-dispatch.</summary>
+    event Action? OnGoodbyeWithoutBooking;
 }
