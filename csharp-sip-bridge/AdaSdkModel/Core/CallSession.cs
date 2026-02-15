@@ -29,6 +29,11 @@ public sealed class CallSession : ICallSession
     private int _bookTaxiCompleted;
     private long _lastAdaFinishedAt;
 
+    // ── STAGE-AWARE INTENT GUARD ──
+    private volatile BookingStage _currentStage = BookingStage.Greeting;
+    private string? _lastUserTranscript;
+    private int _intentGuardFiring; // prevents re-entrant guard execution
+
     public string SessionId { get; }
     public string CallerId { get; }
     public DateTime StartedAt { get; } = DateTime.UtcNow;
@@ -71,9 +76,31 @@ public sealed class CallSession : ICallSession
         _aiClient.OnAudio += HandleAiAudio;
         _aiClient.OnToolCall += HandleToolCallAsync;
         _aiClient.OnEnded += reason => _ = EndAsync(reason);
-        _aiClient.OnTranscript += (role, text) => OnTranscript?.Invoke(role, text);
+        _aiClient.OnTranscript += (role, text) =>
+        {
+            OnTranscript?.Invoke(role, text);
+
+            // Track user transcripts for intent guard
+            if (role == "user" && !string.IsNullOrWhiteSpace(text))
+            {
+                _lastUserTranscript = text;
+            }
+        };
 
         _aiClient.OnBargeIn += () => OnBargeIn?.Invoke();
+
+        // ── INTENT GUARD: After AI finishes a response, check if it missed a critical tool call ──
+        _aiClient.OnResponseCompleted += () =>
+        {
+            if (string.IsNullOrWhiteSpace(_lastUserTranscript)) return;
+
+            var intent = IntentGuard.Resolve(_currentStage, _lastUserTranscript);
+            if (intent == IntentGuard.ResolvedIntent.None) return;
+
+            // Only fire if the AI didn't already handle it via tool call
+            _ = EnforceIntentAsync(intent, _lastUserTranscript);
+            _lastUserTranscript = null; // Consume — don't fire twice
+        };
 
         // SAFETY NET: if Ada says goodbye but book_taxi was never called, auto-dispatch
         _aiClient.OnGoodbyeWithoutBooking += () =>
@@ -123,6 +150,94 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[{SessionId}] Safety net dispatch error", sessionId);
+        }
+    }
+
+    // =========================
+    // INTENT GUARD ENFORCEMENT
+    // =========================
+    /// <summary>
+    /// Called when the AI finishes a response but may have missed a critical tool call.
+    /// Checks if the resolved intent requires forced action.
+    /// </summary>
+    private async Task EnforceIntentAsync(IntentGuard.ResolvedIntent intent, string userText)
+    {
+        if (Interlocked.CompareExchange(ref _intentGuardFiring, 1, 0) == 1)
+            return; // Already firing
+
+        try
+        {
+            switch (intent)
+            {
+                case IntentGuard.ResolvedIntent.ConfirmBooking:
+                    // Only enforce if book_taxi hasn't been called yet
+                    if (Volatile.Read(ref _bookTaxiCompleted) == 0 && _booking.Fare != null)
+                    {
+                        _logger.LogWarning("[{SessionId}] 🛡️ INTENT GUARD: User confirmed fare but AI didn't call book_taxi — forcing confirmation",
+                            SessionId);
+
+                        // Wait briefly in case the AI is about to call book_taxi
+                        await Task.Delay(1500);
+                        if (Volatile.Read(ref _bookTaxiCompleted) == 1) break; // AI caught up
+
+                        var result = await HandleBookTaxiAsync(new Dictionary<string, object?>
+                        {
+                            ["action"] = "confirmed",
+                            ["caller_name"] = _booking.Name,
+                            ["pickup"] = _booking.Pickup,
+                            ["destination"] = _booking.Destination,
+                            ["passengers"] = _booking.Passengers,
+                        });
+
+                        _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: Forced book_taxi result: {Result}",
+                            SessionId, System.Text.Json.JsonSerializer.Serialize(result));
+
+                        // Tell Ada the booking is done — speak the closing script
+                        if (_booking.BookingRef != null)
+                        {
+                            _currentStage = BookingStage.AnythingElse;
+                            await _aiClient.InjectMessageAndRespondAsync(
+                                $"[BOOKING CONFIRMED BY SYSTEM] Reference: {_booking.BookingRef}. " +
+                                "Tell the caller their booking reference, then ask if they need anything else. " +
+                                "If they say no, say the FINAL CLOSING script and call end_call.");
+                        }
+                    }
+                    break;
+
+                case IntentGuard.ResolvedIntent.RejectFare:
+                    _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User rejected fare — staying in modification flow", SessionId);
+                    // AI should handle this naturally — just ensure stage stays at FarePresented
+                    // so next affirmative after re-quote triggers correctly
+                    break;
+
+                case IntentGuard.ResolvedIntent.EndCall:
+                    if (Volatile.Read(ref _bookTaxiCompleted) == 1)
+                    {
+                        _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User wants to end call after booking — ensuring goodbye", SessionId);
+                        _currentStage = BookingStage.Ending;
+                        // Let Ada say goodbye naturally, but if she doesn't call end_call,
+                        // the goodbye safety net will catch it
+                    }
+                    break;
+
+                case IntentGuard.ResolvedIntent.NewBooking:
+                    _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User wants another booking", SessionId);
+                    _currentStage = BookingStage.CollectingPickup;
+                    // Reset for new booking
+                    _booking.Reset();
+                    _booking.CallerPhone = CallerId;
+                    Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Intent guard error", SessionId);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _intentGuardFiring, 0);
         }
     }
 
@@ -383,7 +498,8 @@ public sealed class CallSession : ICallSession
 
         if (allFieldsFilled && Interlocked.CompareExchange(ref _fareAutoTriggered, 1, 0) == 0)
         {
-            _logger.LogInformation("[{SessionId}] 🚀 All fields filled — auto-triggering fare calculation", SessionId);
+            _currentStage = BookingStage.FareCalculating;
+            _logger.LogInformation("[{SessionId}] 🚀 All fields filled — auto-triggering fare calculation (stage→FareCalculating)", SessionId);
 
             var pickup = _booking.Pickup!;
             var destination = _booking.Destination!;
@@ -423,6 +539,7 @@ public sealed class CallSession : ICallSession
                                 _pickupDisambiguated = false;
                                 _activePickupAlternatives = pickupAlts;
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: PICKUP disambiguation needed: {Alts}", sessionId, string.Join("|", pickupAlts));
+                                _currentStage = BookingStage.Disambiguation;
                                 // Switch to semantic VAD for disambiguation (caller choosing from options)
                                 await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.5f);
 
@@ -526,8 +643,9 @@ public sealed class CallSession : ICallSession
                     ApplyFareResult(result);
 
             _aiClient.SetAwaitingConfirmation(true);
+            _currentStage = BookingStage.FarePresented;
             await _aiClient.SetVadModeAsync(useSemantic: false);
-            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no)", sessionId);
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no) (stage→FarePresented)", sessionId);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -584,15 +702,35 @@ public sealed class CallSession : ICallSession
         bool needsTime = string.IsNullOrWhiteSpace(_booking.PickupTime);
 
         // Address fields → semantic VAD (patient, waits for complete thoughts)
-        if (needsPickup || needsDest)
+        if (needsPickup)
         {
-            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting address)", SessionId);
+            _currentStage = BookingStage.CollectingPickup;
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting pickup) (stage→CollectingPickup)", SessionId);
+            await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
+        }
+        else if (needsDest)
+        {
+            _currentStage = BookingStage.CollectingDestination;
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting destination) (stage→CollectingDestination)", SessionId);
             await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
         }
         // Short-answer fields (name, passengers, time) → server VAD (fast response)
-        else if (needsName || needsPax || needsTime)
+        else if (needsName)
         {
-            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (collecting short answer)", SessionId);
+            _currentStage = BookingStage.Greeting;
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (collecting name) (stage→Greeting)", SessionId);
+            await _aiClient.SetVadModeAsync(useSemantic: false);
+        }
+        else if (needsPax)
+        {
+            _currentStage = BookingStage.CollectingPassengers;
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (collecting passengers) (stage→CollectingPassengers)", SessionId);
+            await _aiClient.SetVadModeAsync(useSemantic: false);
+        }
+        else if (needsTime)
+        {
+            _currentStage = BookingStage.CollectingTime;
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (collecting time) (stage→CollectingTime)", SessionId);
             await _aiClient.SetVadModeAsync(useSemantic: false);
         }
         // All fields filled → fare calculating, then confirmation → server VAD (yes/no)
@@ -796,6 +934,7 @@ public sealed class CallSession : ICallSession
             ApplyFareResult(result);
 
             _aiClient.SetAwaitingConfirmation(true);
+            _currentStage = BookingStage.FarePresented;
             await _aiClient.SetVadModeAsync(useSemantic: false);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
@@ -959,6 +1098,7 @@ public sealed class CallSession : ICallSession
                     ApplyFareResult(result);
 
                     _aiClient.SetAwaitingConfirmation(true);
+                    _currentStage = BookingStage.FarePresented;
                     await _aiClient.SetVadModeAsync(useSemantic: false);
 
                     OnBookingUpdated?.Invoke(_booking.Clone());
@@ -1069,6 +1209,7 @@ public sealed class CallSession : ICallSession
                 }
             });
 
+            _currentStage = BookingStage.AnythingElse;
             return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: Your booking reference is {_booking.BookingRef}. Then ask if they need anything else. If not, say the FINAL CLOSING script verbatim and call end_call." };
         }
 
@@ -1224,6 +1365,7 @@ public sealed class CallSession : ICallSession
     // =========================
     private object HandleEndCall(Dictionary<string, object?> args)
     {
+        _currentStage = BookingStage.Ending;
         // ── END-CALL GUARD: Block premature hangup if booking flow was started but never completed ──
         bool fareWasCalculated = !string.IsNullOrWhiteSpace(_booking.Fare);
         bool bookingCompleted = Volatile.Read(ref _bookTaxiCompleted) == 1;
