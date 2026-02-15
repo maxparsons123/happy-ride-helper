@@ -11,7 +11,7 @@ using SIPSorceryMedia.Abstractions;
 namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
-/// PURE A-LAW PASSTHROUGH playout engine — ported from TaxiSipBridge ALawRtpPlayout v7.4.
+/// PURE A-LAW PASSTHROUGH playout engine — ported from TaxiSipBridge ALawRtpPlayout v8.4.
 /// 
 /// ✅ Fixed 100ms jitter buffer (absorbs OpenAI burst delivery)
 /// ✅ Re-buffering on underrun (prevents fast→slow pacing artifacts)
@@ -20,6 +20,8 @@ namespace Zaffiqbal247RadioCars.Audio;
 /// ✅ NAT keepalives (reliability without audio impact)
 /// ✅ Windows multimedia timer for 1ms precision
 /// ✅ Minimal logging (zero hot-path overhead)
+/// ✅ Thread-safe Clear/Start (no negative _queueCount, no double-start)
+/// ✅ Frame pooling (reduces GC pressure on hot path)
 /// 
 /// Architecture: Pure passthrough - NO DSP, NO resampling, NO conversions.
 /// </summary>
@@ -41,9 +43,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int JITTER_BUFFER_FRAMES = 5;
     private const int REBUFFER_THRESHOLD = 2;    // Re-buffer if queue drops below this
     private const int MAX_QUEUE_FRAMES = 1500;   // ~30s safety cap
-    private const int MAX_LATENCY_FRAMES = 150;   // 3s max playout latency — trim excess
+    private const int MAX_LATENCY_FRAMES = 150;  // 3s max playout latency — trim excess
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
+    private readonly ConcurrentBag<byte[]> _framePool = new();  // #6: Frame pooling
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
 
     // Pre-allocated accumulator (avoids GC pressure → smoother audio)
@@ -60,11 +63,12 @@ public sealed class ALawRtpPlayout : IDisposable
     private volatile bool _running;
     private volatile bool _isBuffering = true;
     private volatile int _disposed;
+    private volatile int _started;              // #2: Atomic start guard
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
-    private volatile bool _trimCooldown; // Suppress repeated trims during burst delivery
-    private DateTime _lastRtpSendTime = DateTime.UtcNow;
+    private volatile bool _trimCooldown;
+    private long _lastRtpSendTimeTicks = DateTime.UtcNow.Ticks;  // #4: Atomic DateTime
 
     // NAT state
     private IPEndPoint? _lastRemoteEndpoint;
@@ -77,7 +81,7 @@ public sealed class ALawRtpPlayout : IDisposable
     public event Action? OnQueueEmpty;
 
     public int QueuedFrames => Volatile.Read(ref _queueCount);
-    public int FramesSent => _framesSent;
+    public int FramesSent => Volatile.Read(ref _framesSent);  // #3: Safe read
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
@@ -112,7 +116,9 @@ public sealed class ALawRtpPlayout : IDisposable
     private void KeepaliveNAT(object? state)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
-        if (_natBindingEstablished || (DateTime.UtcNow - _lastRtpSendTime).TotalSeconds < 20) return;
+        // #4: Atomic ticks read
+        var elapsed = DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastRtpSendTimeTicks);
+        if (_natBindingEstablished || elapsed < TimeSpan.TicksPerSecond * 20) return;
 
         try { SendRtpFrame(_silenceFrame, false); } catch { }
     }
@@ -127,16 +133,19 @@ public sealed class ALawRtpPlayout : IDisposable
 
         lock (_accLock)
         {
+            // #5: Track usable length without allocating
+            int usableLength = alawData.Length;
+
             // Append to pre-allocated buffer (reallocate only if truly needed)
-            if (_accCount + alawData.Length > _accumulator.Length)
+            if (_accCount + usableLength > _accumulator.Length)
             {
-                var newAcc = new byte[Math.Max(_accumulator.Length * 2, _accCount + alawData.Length)];
+                var newAcc = new byte[Math.Max(_accumulator.Length * 2, _accCount + usableLength)];
                 Buffer.BlockCopy(_accumulator, 0, newAcc, 0, _accCount);
                 _accumulator = newAcc;
             }
 
-            Buffer.BlockCopy(alawData, 0, _accumulator, _accCount, alawData.Length);
-            _accCount += alawData.Length;
+            Buffer.BlockCopy(alawData, 0, _accumulator, _accCount, usableLength);
+            _accCount += usableLength;
 
             // Extract complete frames
             while (_accCount >= FRAME_SIZE)
@@ -144,11 +153,14 @@ public sealed class ALawRtpPlayout : IDisposable
                 // Overflow protection
                 while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
                 {
-                    if (_frameQueue.TryDequeue(out _))
+                    if (_frameQueue.TryDequeue(out var discarded))
+                    {
                         Interlocked.Decrement(ref _queueCount);
+                        ReturnFrame(discarded);  // #6: Return to pool
+                    }
                 }
 
-                var frame = new byte[FRAME_SIZE];
+                var frame = RentFrame();  // #6: Pool instead of new byte[]
                 Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
                 _frameQueue.Enqueue(frame);
                 Interlocked.Increment(ref _queueCount);
@@ -163,7 +175,9 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Start()
     {
-        if (Volatile.Read(ref _disposed) != 0 || _running) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
+        // #2: Atomic start guard — prevents double playout threads
+        if (Interlocked.CompareExchange(ref _started, 1, 0) != 0) return;
 
         _running = true;
         _isBuffering = true;
@@ -193,6 +207,8 @@ public sealed class ALawRtpPlayout : IDisposable
         try { TimeEndPeriod(1); } catch { }
 
         while (_frameQueue.TryDequeue(out _)) { }
+        Volatile.Write(ref _queueCount, 0);  // #1: Reset atomically after drain
+        Volatile.Write(ref _started, 0);     // #2: Allow restart
     }
 
     /// <summary>
@@ -214,8 +230,10 @@ public sealed class ALawRtpPlayout : IDisposable
                 long waitNs = nextFrameNs - nowNs;
                 if (waitNs > 2_000_000) // >2ms
                     Thread.Sleep((int)(waitNs / 1_000_000) - 1);
+                else if (waitNs > 500_000) // >0.5ms — #8: Yield instead of burn
+                    Thread.Yield();
                 else if (waitNs > 100_000) // >0.1ms
-                    Thread.SpinWait(50);
+                    Thread.SpinWait(20);
                 continue;
             }
 
@@ -236,7 +254,6 @@ public sealed class ALawRtpPlayout : IDisposable
         int queueCount = Volatile.Read(ref _queueCount);
 
         // ── LATENCY TRIM ──
-        // Trim once when queue exceeds cap, then suppress until queue drains below half-cap.
         if (_trimCooldown)
         {
             if (queueCount <= MAX_LATENCY_FRAMES / 2)
@@ -246,9 +263,10 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             int toDrop = queueCount - MAX_LATENCY_FRAMES;
             int dropped = 0;
-            while (dropped < toDrop && _frameQueue.TryDequeue(out _))
+            while (dropped < toDrop && _frameQueue.TryDequeue(out var discarded))
             {
                 Interlocked.Decrement(ref _queueCount);
+                ReturnFrame(discarded);  // #6: Return to pool
                 dropped++;
             }
             queueCount = Volatile.Read(ref _queueCount);
@@ -277,6 +295,7 @@ public sealed class ALawRtpPlayout : IDisposable
             Interlocked.Decrement(ref _queueCount);
             SendRtpFrame(frame, false);
             Interlocked.Increment(ref _framesSent);
+            ReturnFrame(frame);  // #6: Return to pool after send
             _wasPlaying = true;
         }
         else
@@ -286,7 +305,8 @@ public sealed class ALawRtpPlayout : IDisposable
             {
                 _wasPlaying = false;
                 _isBuffering = true;
-                try { OnQueueEmpty?.Invoke(); } catch { }
+                // #7: Fire event off the timing-critical thread
+                try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
             }
         }
     }
@@ -304,24 +324,43 @@ public sealed class ALawRtpPlayout : IDisposable
             );
 
             _timestamp += FRAME_SIZE;
-            _lastRtpSendTime = DateTime.UtcNow;
+            // #4: Atomic ticks write
+            Interlocked.Exchange(ref _lastRtpSendTimeTicks, DateTime.UtcNow.Ticks);
         }
         catch { }
     }
 
+    /// <summary>
+    /// Clear all buffers — thread-safe against concurrent playout.
+    /// </summary>
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out _))
-            Interlocked.Decrement(ref _queueCount);
+        // #1: Drain queue then atomically reset count (no per-item decrement race)
+        while (_frameQueue.TryDequeue(out var discarded))
+            ReturnFrame(discarded);
+        Volatile.Write(ref _queueCount, 0);
 
         lock (_accLock)
         {
             _accCount = 0;
-            Array.Clear(_accumulator, 0, _accumulator.Length);
+            // #9: Removed unnecessary Array.Clear — stale bytes are never read
         }
 
         _isBuffering = true;
         _wasPlaying = false;
+    }
+
+    // #6: Frame pool helpers
+    private byte[] RentFrame()
+    {
+        if (_framePool.TryTake(out var f)) return f;
+        return new byte[FRAME_SIZE];
+    }
+
+    private void ReturnFrame(byte[] frame)
+    {
+        if (frame != null && frame.Length == FRAME_SIZE && frame != _silenceFrame)
+            _framePool.Add(frame);
     }
 
     private void SafeLog(string msg)
@@ -338,7 +377,5 @@ public sealed class ALawRtpPlayout : IDisposable
         _natKeepaliveTimer?.Dispose();
         _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp;
         Clear();
-
-        GC.SuppressFinalize(this);
     }
 }
