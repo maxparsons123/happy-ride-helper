@@ -151,8 +151,8 @@ public sealed class CallSession : ICallSession
     };
 
     private int _fareAutoTriggered;
-    private bool _pickupDisambiguated;
-    private bool _destDisambiguated;
+    private bool _pickupDisambiguated = true;  // true = no disambiguation needed (set to false when triggered)
+    private bool _destDisambiguated = true;    // true = no disambiguation needed (set to false when triggered)
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
 
@@ -917,11 +917,26 @@ public sealed class CallSession : ICallSession
 
         if (action == "confirmed")
         {
+            // IN-PROGRESS GUARD: Block confirmation while fare calculation is still in flight
+            if (Volatile.Read(ref _fareAutoTriggered) == 1 && _booking.Fare == null)
+            {
+                _logger.LogWarning("[{SessionId}] ⛔ book_taxi(confirmed) BLOCKED — fare calculation still in progress", SessionId);
+                return new { success = false, error = "Cannot confirm yet — the fare is still being calculated. Wait for the fare result before confirming." };
+            }
+
             // Block confirmation while fare sanity alert is active (race condition guard)
             if (_fareSanityActive)
             {
                 _logger.LogWarning("[{SessionId}] ⛔ book_taxi(confirmed) BLOCKED — fare sanity alert is active, waiting for user to re-confirm destination", SessionId);
                 return new { success = false, error = "Cannot confirm yet — the fare seems unusually high and the caller needs to verify their destination first. Wait for their response." };
+            }
+
+            // Block confirmation while disambiguation is in progress
+            if (!_pickupDisambiguated || !_destDisambiguated)
+            {
+                _logger.LogWarning("[{SessionId}] ⛔ book_taxi(confirmed) BLOCKED — address disambiguation in progress (pickup_resolved={Pickup}, dest_resolved={Dest})",
+                    SessionId, _pickupDisambiguated, _destDisambiguated);
+                return new { success = false, error = "Cannot confirm yet — address disambiguation is still in progress. Wait for the caller to choose their address before confirming." };
             }
 
             if (string.IsNullOrWhiteSpace(_booking.Pickup) || string.IsNullOrWhiteSpace(_booking.Destination))
