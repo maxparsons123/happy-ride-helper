@@ -54,6 +54,36 @@ const SYSTEM_PROMPT = `Role: Professional Taxi Dispatch Logic System for UK & Ne
 
 Objective: Extract, validate, and GEOCODE pickup and drop-off addresses from user messages, using phone number patterns to determine geographic bias.
 
+LOCALITY AWARENESS (HIGHEST PRIORITY — COMMONSENSE GEOGRAPHY):
+A taxi booking is a LOCAL journey. Both pickup and dropoff should be within a reasonable taxi distance (typically under 80 miles / 130 km). Apply these rules:
+
+1. INFER CUSTOMER LOCALITY: Use ALL available signals to determine where the customer is:
+   - Phone area code (strongest signal for landlines)
+   - Caller history (previous addresses reveal their area)
+   - Pickup address (if already resolved, dropoff should be local to it)
+   - Explicitly mentioned city/area names
+   - GPS coordinates if provided
+
+2. BIAS ALL ADDRESSES TO CUSTOMER LOCALITY:
+   - Once you determine the customer's likely area (e.g., Coventry from a 024 number), ALL address lookups should prefer results in or near that area.
+   - "High Street" from a Coventry caller → High Street, Coventry. NOT High Street, Edinburgh.
+   - "The Railway pub" from a Birmingham caller → search for The Railway in Birmingham area first.
+   - If the pickup is resolved to Coventry, the dropoff should default-search Coventry and surrounding areas (Warwickshire, West Midlands) BEFORE considering distant matches.
+
+3. CROSS-COUNTRY / ABSURD DISTANCE REJECTION:
+   - If your resolved pickup and dropoff are in DIFFERENT COUNTRIES (e.g., UK pickup, Belgium dropoff), flag this as implausible UNLESS the caller explicitly stated both locations.
+   - If the straight-line distance between pickup and dropoff exceeds 100 miles, set a warning: "distance_warning": "Pickup and dropoff are X miles apart — is this correct?"
+   - Journeys over 200 miles are almost certainly errors — set is_ambiguous=true on the more uncertain address and ask the caller to confirm.
+
+4. PICKUP-TO-DROPOFF PROXIMITY BIAS:
+   - When the pickup is already resolved with coordinates, use those coordinates as a CENTER POINT for dropoff search.
+   - Prefer dropoff matches within 30 miles of pickup. Accept up to 80 miles. Flag anything beyond.
+   - Example: Pickup at "12 Russell St, Coventry" → dropoff "Park Road" should resolve to Park Road in Coventry/Warwickshire, NOT Park Road in London.
+
+5. SAME-CITY DEFAULT:
+   - If only one address mentions a city and the other doesn't, assume both are in the SAME city unless evidence suggests otherwise.
+   - If pickup is "52 David Road, Coventry" and dropoff is "the train station", resolve to Coventry Railway Station, not London Euston.
+
 SPEECH-TO-TEXT MISHEARING AWARENESS (CRITICAL):
 Inputs come from live speech recognition and are often phonetically garbled. Apply phonetic reasoning:
 - If an input doesn't match a real street/venue, check if it's a mishearing of a well-known place (e.g., "Colesie Grove"→"Cosy Club", "The Globe"→"The Cosy Club", "Davies Road"→"David Road").
@@ -452,12 +482,54 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
         typeof dLat === "number" && typeof dLon === "number" &&
         pLat !== 0 && dLat !== 0) {
       const distMiles = haversineDistanceMiles(pLat, pLon, dLat, dLon);
-      const fareCalc = calculateFare(distMiles, detectedCountry);
-      parsed.fare = fareCalc;
-      console.log(`💰 Fare calculated: ${fareCalc.fare} (${fareCalc.distance_miles} miles, ETA ${fareCalc.eta})`);
+      
+      // ── LOCALITY SANITY CHECK: flag absurd distances ──
+      if (distMiles > 200) {
+        console.log(`🚨 ABSURD DISTANCE: ${distMiles.toFixed(1)} miles — almost certainly a resolution error`);
+        // Determine which address is less certain and flag it
+        const pickupHasHistory = parsed.pickup?.matched_from_history === true;
+        const dropoffHasHistory = parsed.dropoff?.matched_from_history === true;
+        const uncertainSide = pickupHasHistory ? "dropoff" : "pickup";
+        
+        parsed[uncertainSide].is_ambiguous = true;
+        parsed.status = "clarification_needed";
+        parsed.distance_warning = `Pickup and dropoff are ${Math.round(distMiles)} miles apart — this seems too far for a taxi. Please confirm the ${uncertainSide} address.`;
+        parsed.clarification_message = parsed.clarification_message || 
+          `The ${uncertainSide} address "${parsed[uncertainSide].address}" seems very far from the ${uncertainSide === "pickup" ? "dropoff" : "pickup"}. Could you confirm that's correct, or is it in a different area?`;
+        parsed.fare = null;
+        console.log(`⚠️ Flagged ${uncertainSide} as ambiguous due to absurd distance`);
+      } else if (distMiles > 100) {
+        console.log(`⚠️ LONG DISTANCE: ${distMiles.toFixed(1)} miles — adding warning`);
+        const fareCalc = calculateFare(distMiles, detectedCountry);
+        parsed.fare = fareCalc;
+        parsed.distance_warning = `Pickup and dropoff are ${Math.round(distMiles)} miles apart — please confirm this is correct.`;
+        console.log(`💰 Fare calculated with warning: ${fareCalc.fare} (${fareCalc.distance_miles} miles)`);
+      } else {
+        const fareCalc = calculateFare(distMiles, detectedCountry);
+        parsed.fare = fareCalc;
+        console.log(`💰 Fare calculated: ${fareCalc.fare} (${fareCalc.distance_miles} miles, ETA ${fareCalc.eta})`);
+      }
     } else {
       console.log(`⚠️ No valid coordinates for fare calculation`);
       parsed.fare = null;
+    }
+
+    // ── CROSS-COUNTRY CHECK: different countries is almost always wrong ──
+    const pickupCity = (parsed.pickup?.city || "").toLowerCase();
+    const dropoffCity = (parsed.dropoff?.city || "").toLowerCase();
+    const ukCities = ["london", "birmingham", "coventry", "manchester", "leeds", "sheffield", "nottingham", "leicester", "bristol", "reading"];
+    const nlCities = ["amsterdam", "rotterdam", "the hague", "utrecht", "eindhoven"];
+    const pickupIsUK = ukCities.some(c => pickupCity.includes(c)) || (typeof pLat === "number" && pLat >= 49.5 && pLat <= 61);
+    const dropoffIsUK = ukCities.some(c => dropoffCity.includes(c)) || (typeof dLat === "number" && dLat >= 49.5 && dLat <= 61);
+    const pickupIsNL = nlCities.some(c => pickupCity.includes(c)) || (typeof pLat === "number" && pLat >= 51 && pLat <= 53.5 && typeof pLon === "number" && pLon >= 3 && pLon <= 7.5);
+    const dropoffIsNL = nlCities.some(c => dropoffCity.includes(c)) || (typeof dLat === "number" && dLat >= 51 && dLat <= 53.5 && typeof dLon === "number" && dLon >= 3 && dLon <= 7.5);
+    
+    if ((pickupIsUK && dropoffIsNL) || (pickupIsNL && dropoffIsUK)) {
+      console.log(`🚨 CROSS-COUNTRY: pickup in ${pickupIsUK ? "UK" : "NL"}, dropoff in ${dropoffIsUK ? "UK" : "NL"} — flagging`);
+      parsed.status = "clarification_needed";
+      parsed.distance_warning = "Pickup and dropoff appear to be in different countries.";
+      parsed.clarification_message = parsed.clarification_message ||
+        `It looks like one address is in the UK and the other is in the Netherlands. Could you confirm both addresses are correct?`;
     }
 
     console.log(`✅ Address dispatch result: area=${parsed.detected_area}, status=${parsed.status}, fare=${parsed.fare?.fare || 'N/A'}`);
