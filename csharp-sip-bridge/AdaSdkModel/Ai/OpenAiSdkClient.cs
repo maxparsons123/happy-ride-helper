@@ -348,7 +348,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("DISAMBIGUATION");
+            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("DISAMBIGUATION") || message.Contains("[FARE SANITY ALERT]");
             if (isCritical && Volatile.Read(ref _responseActive) == 1)
             {
                 Log("🛑 Cancelling active response before critical injection");
