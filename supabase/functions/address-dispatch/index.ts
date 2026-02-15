@@ -167,6 +167,22 @@ When an input has NO house number, treat it as a potential business name, landma
 - When resolved as a POI, include the business name in the address (e.g., "Sweet Spot, 12 High Street, Coventry CV1 3AB")
 - If the POI has multiple locations in the area, apply the same chain disambiguation rules below
 
+"NEAREST X" / RELATIVE POI RESOLUTION (CRITICAL):
+When the user says "nearest", "closest", "the local", or similar relative terms before a type of place, you MUST:
+- Identify the CATEGORY of place requested (hospital, station, airport, supermarket, pharmacy, etc.)
+- Determine the caller's locality from: resolved pickup address > phone area code > caller history > GPS
+- Resolve to the ACTUAL NEAREST real-world instance of that category relative to the caller's location
+- Examples:
+  - Caller in Coventry says "nearest hospital" → University Hospital Coventry, Clifford Bridge Road, CV2 2DX
+  - Caller in Tile Hill, Coventry says "nearest station" → Tile Hill Railway Station, not Coventry Station (which is further)
+  - Caller in Birmingham says "drop me at the closest A&E" → Queen Elizabeth Hospital Birmingham, Mindelsohn Way, B15 2GW
+  - Caller says "take me to the nearest Tesco" with pickup in Earlsdon → Tesco Express, Earlsdon Street, Coventry
+- ALWAYS resolve to a REAL, NAMED place with its actual street address and coordinates
+- If the pickup is already resolved, use its coordinates as the center point for "nearest" calculations
+- If multiple options are roughly equidistant (within 0.5 miles), pick the most prominent/well-known one
+- NEVER respond with just a category like "Nearest Hospital" — always resolve to the actual place name and address
+- Set region_source to "nearest_poi" when resolving relative POI requests
+
 ABBREVIATED / PARTIAL STREET NAME MATCHING (CRITICAL):
 Users frequently shorten or abbreviate street names. You MUST resolve partial names to real streets:
 - "Fargo" → "Fargosford Street" (partial prefix match in Coventry — do NOT invent "Fargo Street")
@@ -320,12 +336,72 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
+        model: "google/gemini-3-flash-preview",
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userMessage },
         ],
         temperature: 0.1,
+        tools: [{
+          type: "function",
+          function: {
+            name: "resolve_addresses",
+            description: "Return the resolved pickup and dropoff addresses with coordinates and disambiguation info",
+            parameters: {
+              type: "object",
+              properties: {
+                detected_area: { type: "string" },
+                region_source: { type: "string", enum: ["caller_history", "landline_area_code", "text_mention", "landmark", "nearest_poi", "unknown"] },
+                phone_analysis: {
+                  type: "object",
+                  properties: {
+                    detected_country: { type: "string" },
+                    is_mobile: { type: "boolean" },
+                    landline_city: { type: "string" }
+                  },
+                  required: ["detected_country", "is_mobile"]
+                },
+                pickup: {
+                  type: "object",
+                  properties: {
+                    address: { type: "string" },
+                    lat: { type: "number" },
+                    lon: { type: "number" },
+                    street_name: { type: "string" },
+                    street_number: { type: "string" },
+                    postal_code: { type: "string" },
+                    city: { type: "string" },
+                    is_ambiguous: { type: "boolean" },
+                    alternatives: { type: "array", items: { type: "string" } },
+                    matched_from_history: { type: "boolean" }
+                  },
+                  required: ["address", "lat", "lon", "city", "is_ambiguous"]
+                },
+                dropoff: {
+                  type: "object",
+                  properties: {
+                    address: { type: "string" },
+                    lat: { type: "number" },
+                    lon: { type: "number" },
+                    street_name: { type: "string" },
+                    street_number: { type: "string" },
+                    postal_code: { type: "string" },
+                    city: { type: "string" },
+                    is_ambiguous: { type: "boolean" },
+                    alternatives: { type: "array", items: { type: "string" } },
+                    matched_from_history: { type: "boolean" }
+                  },
+                  required: ["address", "lat", "lon", "city", "is_ambiguous"]
+                },
+                status: { type: "string", enum: ["ready", "clarification_needed"] },
+                clarification_message: { type: "string" }
+              },
+              required: ["detected_area", "region_source", "phone_analysis", "pickup", "dropoff", "status"],
+              additionalProperties: false
+            }
+          }
+        }],
+        tool_choice: { type: "function", function: { name: "resolve_addresses" } },
       }),
     });
 
@@ -355,34 +431,43 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       console.error("Failed to parse AI gateway response:", parseErr);
       throw new Error("AI gateway returned invalid JSON");
     }
-    const content = aiResponse.choices?.[0]?.message?.content;
 
-    if (!content) {
-      throw new Error("No content in AI response");
-    }
-
-    // Parse the JSON response from AI (strip markdown code blocks if present)
+    // Parse structured tool call response (primary) or fallback to content parsing
     let parsed;
-    try {
-      let jsonStr = content.trim();
-      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) {
-        jsonStr = codeBlockMatch[1].trim();
+    const toolCall = aiResponse.choices?.[0]?.message?.tool_calls?.[0];
+    if (toolCall?.function?.arguments) {
+      try {
+        parsed = typeof toolCall.function.arguments === "string" 
+          ? JSON.parse(toolCall.function.arguments) 
+          : toolCall.function.arguments;
+        console.log("✅ Parsed structured tool call response");
+      } catch (parseErr) {
+        console.error("Failed to parse tool call arguments:", parseErr);
       }
-      parsed = JSON.parse(jsonStr);
-    } catch (parseErr) {
-      console.error("Failed to parse AI JSON:", content);
-      parsed = {
-        detected_area: "unknown",
-        phone_analysis: {
-          detected_country: "unknown",
-          is_mobile: false,
-          landline_city: null
-        },
-        pickup: { address: pickup || "", is_ambiguous: false, alternatives: [] },
-        dropoff: { address: destination || "", is_ambiguous: false, alternatives: [] },
-        status: "ready"
-      };
+    }
+    
+    // Fallback: parse from content if tool call didn't work
+    if (!parsed) {
+      const content = aiResponse.choices?.[0]?.message?.content;
+      if (!content) {
+        throw new Error("No content or tool call in AI response");
+      }
+      try {
+        let jsonStr = content.trim();
+        const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+        parsed = JSON.parse(jsonStr);
+        console.log("⚠️ Fell back to content parsing");
+      } catch (parseErr) {
+        console.error("Failed to parse AI JSON:", content);
+        parsed = {
+          detected_area: "unknown",
+          phone_analysis: { detected_country: "unknown", is_mobile: false, landline_city: null },
+          pickup: { address: pickup || "", is_ambiguous: false, alternatives: [] },
+          dropoff: { address: destination || "", is_ambiguous: false, alternatives: [] },
+          status: "ready"
+        };
+      }
     }
 
     // ── Post-processing: enforce disambiguation for known multi-district streets ──
