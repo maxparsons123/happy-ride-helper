@@ -2,11 +2,12 @@ namespace AdaSdkModel.Ai;
 
 /// <summary>
 /// Interface for OpenAI Realtime API client.
-/// Supports native G.711 A-law (8kHz) passthrough mode.
+/// Supports both G.711 A-law (8kHz) and PCM16 (24kHz) modes.
 /// </summary>
 public interface IOpenAiClient
 {
     bool IsConnected { get; }
+    bool IsResponseActive { get; }
     Task ConnectAsync(string callerId, CancellationToken ct = default);
     Task DisconnectAsync();
     void SendAudio(byte[] audioData);
@@ -15,9 +16,26 @@ public interface IOpenAiClient
     Task InjectSystemMessageAsync(string message);
     Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f);
 
+    /// <summary>Notify that playout has finished (for echo guard timing).</summary>
+    void NotifyPlayoutComplete();
+
+    /// <summary>Set whether the system is awaiting a yes/no confirmation.</summary>
+    void SetAwaitingConfirmation(bool awaiting);
+
+    /// <summary>Cancel any pending deferred response.</summary>
+    void CancelDeferredResponse();
+
+    /// <summary>Last Whisper STT transcript for mismatch comparison.</summary>
+    string? LastUserTranscript { get; }
+
+    /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
+    Func<int>? GetQueuedFrames { get; set; }
+
     event Action<byte[]>? OnAudio;
     event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     event Action<string>? OnEnded;
     event Action? OnPlayoutComplete;
     event Action<string, string>? OnTranscript;
+    event Action? OnBargeIn;
+    event Action? OnResponseCompleted;
 }
