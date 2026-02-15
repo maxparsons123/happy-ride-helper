@@ -75,6 +75,19 @@ public sealed class MapPanel : Panel
         await _webView.ExecuteScriptAsync($"removeJob('{Esc(jobId)}')");
     }
 
+    public async Task ZoomToLocation(double lat, double lng, int zoom = 16)
+    {
+        if (!_mapReady) return;
+        if (InvokeRequired)
+        {
+            await InvokeAsync(() => ZoomToLocation(lat, lng, zoom));
+            return;
+        }
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        await _webView.ExecuteScriptAsync(
+            $"map.setView([{lat.ToString(inv)}, {lng.ToString(inv)}], {zoom})");
+    }
+
     public async Task DrawAllocationLine(string jobId, double dLat, double dLng, double pLat, double pLng)
     {
         if (!_mapReady) return;

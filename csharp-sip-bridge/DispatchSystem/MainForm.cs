@@ -227,6 +227,23 @@ public class MainForm : Form
             _logModal.Hide();
         };
 
+        // Wire grid clicks to map zoom
+        _jobList.OnJobSelected += jobId =>
+        {
+            if (_db == null) return;
+            var job = _db.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
+            if (job != null && job.PickupLat != 0 && job.PickupLng != 0)
+                _ = _map.ZoomToLocation(job.PickupLat, job.PickupLng, 16);
+        };
+
+        _driverList.OnDriverSelected += driverId =>
+        {
+            if (_db == null) return;
+            var driver = _db.GetAllDrivers().FirstOrDefault(d => d.Id == driverId);
+            if (driver != null && driver.Lat != 0 && driver.Lng != 0)
+                _ = _map.ZoomToLocation(driver.Lat, driver.Lng, 16);
+        };
+
         // Context menu on job grid
         SetupJobContextMenu();
 
@@ -513,9 +530,27 @@ public class MainForm : Form
     {
         if (_db == null) return;
 
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => OnDriverJobResponse(jobId, driverId, accepted));
+            return;
+        }
+
         if (accepted)
         {
             _db.UpdateJobStatus(jobId, JobStatus.Accepted, driverId);
+            var drivers = _db.GetAllDrivers();
+            var driver = drivers.FirstOrDefault(d => d.Id == driverId);
+            if (driver != null)
+            {
+                driver.Status = DriverStatus.OnJob;
+                _db.UpsertDriver(driver);
+
+                // Trigger full allocation flow (WhatsApp, iCabbi, map line)
+                var job = _db.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
+                if (job != null)
+                    OnJobAllocated(job, driver);
+            }
             _logPanel.AppendLog($"✅ Driver {driverId} ACCEPTED job {jobId}", Color.LimeGreen);
         }
         else
@@ -672,16 +707,22 @@ public class MainForm : Form
         var distKm = AutoDispatcher.HaversineKm(job.PickupLat, job.PickupLng, driver.Lat, driver.Lng);
         var eta = (int)Math.Ceiling(distKm / 0.5);
 
-        _db.UpdateJobStatus(jobId, JobStatus.Allocated, driverId, distKm, eta);
-        driver.Status = DriverStatus.OnJob;
-        _db.UpsertDriver(driver);
-
+        // Send full job to driver as an OFFER (not yet allocated)
+        // Driver must accept before allocation completes
         job.AllocatedDriverId = driverId;
         job.DriverDistanceKm = distKm;
         job.DriverEtaMinutes = eta;
 
-        OnJobAllocated(job, driver);
-        _logPanel.AppendLog($"🎯 Manual dispatch: Job {jobId} → {driver.Name}", Color.Gold);
+        _db.UpdateJobStatus(jobId, JobStatus.Allocated, driverId, distKm, eta);
+
+        if (_mqtt != null)
+        {
+            // Publish full job details to driver for them to accept/reject
+            _ = _mqtt.PublishJobAllocation(jobId, driverId, job);
+        }
+
+        _logPanel.AppendLog($"🎯 Job {jobId} sent to {driver.Name} — awaiting acceptance...", Color.Gold);
+        RefreshUI();
     }
 
     private void BtnSettings_Click(object? sender, EventArgs e)
