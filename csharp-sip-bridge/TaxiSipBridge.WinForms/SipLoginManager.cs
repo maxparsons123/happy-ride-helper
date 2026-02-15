@@ -141,6 +141,16 @@ public class SipLoginManager : IDisposable
         _sipTransport.SIPRequestInTraceEvent += (ep, src, req) =>
             Log($"📥 SIP REQ ← {src}: {req.Method} {req.URI}");
 
+        // Respond to OPTIONS keepalives so the PBX knows we're alive
+        _sipTransport.SIPTransportRequestReceived += async (localEp, remoteEp, req) =>
+        {
+            if (req.Method == SIPMethodsEnum.OPTIONS)
+            {
+                var okResp = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
+                await _sipTransport.SendResponseAsync(okResp);
+            }
+        };
+
         switch (_config.Transport)
         {
             case SipTransportType.UDP:

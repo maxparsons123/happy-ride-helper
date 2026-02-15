@@ -77,8 +77,15 @@ public sealed class SipService : ISipService
         await Task.Delay(2000);
     }
 
-    private Task OnSipRequest(SIPEndPoint localEp, SIPEndPoint remoteEp, SIPRequest req)
+    private async Task OnSipRequest(SIPEndPoint localEp, SIPEndPoint remoteEp, SIPRequest req)
     {
+        if (req.Method == SIPMethodsEnum.OPTIONS)
+        {
+            var okResp = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
+            await _transport!.SendResponseAsync(okResp);
+            return;
+        }
+
         if (req.Method == SIPMethodsEnum.INVITE)
         {
             var caller = req.Header.From?.FromURI?.User ?? "Unknown";
