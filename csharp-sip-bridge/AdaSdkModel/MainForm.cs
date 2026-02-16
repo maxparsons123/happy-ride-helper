@@ -776,7 +776,8 @@ public partial class MainForm : Form
 
     public void Log(string message)
     {
-        if (InvokeRequired) { BeginInvoke(() => Log(message)); return; }
+        if (IsDisposed || !IsHandleCreated) return;
+        if (InvokeRequired) { try { BeginInvoke(() => Log(message)); } catch { } return; }
 
         txtLog.SelectionStart = txtLog.TextLength;
         txtLog.SelectionColor = message.Contains("❌") || message.Contains("Error") ? Color.Red
