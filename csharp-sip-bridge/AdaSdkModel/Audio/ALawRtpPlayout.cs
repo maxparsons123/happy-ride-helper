@@ -143,15 +143,15 @@ public sealed class ALawRtpPlayout : IDisposable
             int count = Volatile.Read(ref _queueCount);
             if (_isBuffering)
             {
-                int threshold = _hasPlayedAudio ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
-                if (count >= threshold)
+                // As soon as ANY real audio arrives, play it immediately — never let typing delay the response
+                if (count > 0)
                 {
                     _isBuffering = false;
                     _hasPlayedAudio = true;
                 }
                 else
                 {
-                    // Play typing sounds during any thinking/buffering pause
+                    // No audio yet — fill with typing sounds while waiting for Ada
                     var fillFrame = _typingSoundsEnabled
                         ? _typingSound.NextFrame()
                         : _silenceFrame;
