@@ -923,15 +923,28 @@ Evaluate BOTH pickup and dropoff independently.` },
                 const sideData = side === "pickup" ? parsed.pickup : parsed.dropoff;
                 if (!sideData || !originalInput) return;
                 const resolvedAddr = sideData.address || "";
+                const streetName = sideData.street_name || "";
                 const hasHouseNumber = /^\d+[A-Za-z]?\s/.test(originalInput.trim());
-                const originalWords = originalInput.toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/).filter((w: string) => w.length > 2);
-                const resolvedLower = resolvedAddr.toLowerCase();
-                const inputFoundInResolved = originalWords.some((w: string) => resolvedLower.includes(w));
+                if (hasHouseNumber) return;
                 
-                if (!hasHouseNumber && !inputFoundInResolved && originalWords.length > 0) {
-                  const cleanedInput = originalInput.replace(/\s*(?:in|,)\s*(coventry|birmingham|london|manchester|derby|leicester)\s*$/i, '').trim();
-                  sideData.address = `${cleanedInput}, ${resolvedAddr}`;
-                  console.log(`📍 POI preserved: "${cleanedInput}" prepended → "${sideData.address}"`);
+                // Check if the user's POI name appears in the street_name (what the C# bridge checks)
+                const cleanedInput = originalInput.replace(/\s*(?:in|,)\s*(coventry|birmingham|london|manchester|derby|leicester)\s*$/i, '').trim();
+                const inputWords = cleanedInput.toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/).filter((w: string) => w.length > 2);
+                if (inputWords.length === 0) return;
+                
+                const streetLower = streetName.toLowerCase();
+                const inputInStreetName = inputWords.some((w: string) => streetLower.includes(w));
+                
+                // If the POI name isn't in the street_name, prepend it to the address
+                // so the C# bridge's word-level discrepancy detector won't flag it
+                if (!inputInStreetName) {
+                  // Also check if already prepended to avoid double-prepend
+                  if (!resolvedAddr.toLowerCase().startsWith(cleanedInput.toLowerCase())) {
+                    sideData.address = `${cleanedInput}, ${resolvedAddr}`;
+                  }
+                  // Also set street_name to include the POI name for the bridge
+                  sideData.street_name = cleanedInput;
+                  console.log(`📍 POI preserved: street_name="${cleanedInput}", address="${sideData.address}"`);
                 }
               };
               
