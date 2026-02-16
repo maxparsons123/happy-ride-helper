@@ -1555,13 +1555,16 @@ public sealed class CallSession : ICallSession
     // =========================
     // FARE SANITY CHECK
     // =========================
+    // NOTE: ETA check removed — edge function now returns driver_eta (8-15 min) not trip duration.
+    // Only fare amount is checked. Once booking is confirmed, no further sanity checks run.
     private const decimal MAX_SANE_FARE = 100m;
-    private const int MAX_SANE_ETA_MINUTES = 120;
 
     /// <summary>
-    /// Returns true if the fare and ETA are within reasonable bounds.
+    /// Returns true if the fare is within reasonable bounds.
     /// Catches cases where STT mishears a destination (e.g. "Kochi" instead of "Coventry")
     /// resulting in absurd cross-country/international fares.
+    /// ETA is no longer checked — the edge function now returns driver arrival time (8-15 min),
+    /// not trip duration.
     /// </summary>
     private bool IsFareSane(FareResult result)
     {
@@ -1570,6 +1573,13 @@ public sealed class CallSession : ICallSession
         // Debug logging: trace exactly what the bypass check sees
         _logger.LogDebug("[{SessionId}] 🔍 IsFareSane: count={Count}, dest='{Dest}', lastDest='{LastDest}'",
             SessionId, _fareSanityAlertCount, dest, _lastSanityAlertDestination ?? "(null)");
+
+        // FINALIZATION GUARD: Once booking is confirmed, never run sanity checks again
+        if (Volatile.Read(ref _bookTaxiCompleted) == 1)
+        {
+            _logger.LogInformation("[{SessionId}] ✅ Fare sanity SKIPPED — booking already finalized", SessionId);
+            return true;
+        }
 
         // BYPASS: If disambiguation was just resolved, the user already confirmed the address — skip sanity
         if (_disambiguationPerformed)
@@ -1612,7 +1622,7 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Parse fare amount
+        // Parse fare amount — only check fare, NOT ETA
         var fareStr = result.Fare?.Replace("£", "").Replace("€", "").Replace("$", "").Trim();
         if (decimal.TryParse(fareStr, System.Globalization.NumberStyles.Any,
             System.Globalization.CultureInfo.InvariantCulture, out var fareAmount))
@@ -1627,19 +1637,9 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Parse ETA minutes
-        var etaStr = result.Eta?.Replace("minutes", "").Replace("minute", "").Trim();
-        if (int.TryParse(etaStr, out var etaMinutes))
-        {
-            if (etaMinutes > MAX_SANE_ETA_MINUTES)
-            {
-                _logger.LogWarning("[{SessionId}] 🚨 INSANE ETA detected: {Eta} (max={Max} min)", SessionId, result.Eta, MAX_SANE_ETA_MINUTES);
-                _fareSanityAlertCount++;
-                _lastSanityAlertDestination = dest;
-                _fareSanityActive = true;
-                return false;
-            }
-        }
+        // ETA check REMOVED — edge function now returns driver arrival time (8-15 min), not trip duration.
+        // Old code checked MAX_SANE_ETA_MINUTES (120) against trip duration, causing false positives
+        // for legitimate inter-city bookings (e.g. Coventry→Manchester = 246 min trip but 14 min driver ETA).
 
         // Fare is sane — reset sanity state
         _fareSanityAlertCount = 0;
