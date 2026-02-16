@@ -602,6 +602,17 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      fuzzy_match_street: {
+        Args: { p_city: string; p_limit?: number; p_street_name: string }
+        Returns: {
+          lat: number
+          lon: number
+          matched_city: string
+          matched_name: string
+          similarity_score: number
+          source: string
+        }[]
+      }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
     }
