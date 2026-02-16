@@ -572,16 +572,15 @@ public sealed class SipServer : IAsyncDisposable
             Interlocked.Exchange(ref isBotSpeaking, 0);
         };
 
-        if (session.AiClient is OpenAiSdkClient sdkClient)
+        // Flush partial accumulator on response end to prevent tail click
+        session.AiClient.OnResponseCompleted += () =>
         {
-            sdkClient.OnResponseCompleted += () =>
-            {
-                Interlocked.Exchange(ref isBotSpeaking, 0);
-                botStoppedSpeakingAt = DateTime.UtcNow;
-                if (playout.QueuedFrames == 0) sdkClient.NotifyPlayoutComplete();
-                else Interlocked.Exchange(ref watchdogPending, 1);
-            };
-        }
+            playout.Flush();
+            Interlocked.Exchange(ref isBotSpeaking, 0);
+            botStoppedSpeakingAt = DateTime.UtcNow;
+            if (playout.QueuedFrames == 0) session.NotifyPlayoutComplete();
+            else Interlocked.Exchange(ref watchdogPending, 1);
+        };
 
         playout.OnQueueEmpty += () =>
         {
