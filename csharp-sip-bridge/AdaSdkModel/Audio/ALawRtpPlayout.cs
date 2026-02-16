@@ -67,6 +67,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int START_THRESHOLD = 10;       // 200ms to start playout
     private const int REBUFFER_THRESHOLD = 2;     // proactive re-buffer before queue empties
     private const int MAX_QUEUE_FRAMES = 1500;    // ~30s safety cap
+    private const int MAX_LATENCY_FRAMES = 25;    // 500ms max playout latency — trim excess
     private const int MAX_ACCUMULATOR_SIZE = 65536;
 
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
@@ -333,6 +334,19 @@ public sealed class ALawRtpPlayout : IDisposable
         // Stats tracking (lightweight)
         Interlocked.Add(ref _statsQueueSizeSum, count);
         Interlocked.Increment(ref _statsQueueSizeSamples);
+
+        // Latency trim: discard oldest frames if queue exceeds 500ms
+        if (count > MAX_LATENCY_FRAMES)
+        {
+            int toDrop = count - MAX_LATENCY_FRAMES;
+            int dropped = 0;
+            while (dropped < toDrop && _frameQueue.TryDequeue(out _))
+            {
+                Interlocked.Decrement(ref _queueCount);
+                dropped++;
+            }
+            count = Volatile.Read(ref _queueCount);
+        }
 
         // Proactive re-buffer: catch low queue BEFORE it empties
         if (!_isBuffering && count <= REBUFFER_THRESHOLD && count > 0)
