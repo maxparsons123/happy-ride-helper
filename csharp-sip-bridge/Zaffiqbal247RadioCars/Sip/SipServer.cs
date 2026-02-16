@@ -158,31 +158,99 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
-        // TCP on port 5060 — matches Linphone behaviour so the Contact header
-        // advertises a stable endpoint the PBX can route INVITEs to.
-        var tcpChannel = new SIPTCPChannel(IPAddress.Any, 5060);
-        _transport.AddSIPChannel(tcpChannel);
-        Log($"📡 TCP channel on port 5060");
+        // Transport channel based on settings
+        switch (_settings.Transport.ToUpperInvariant())
+        {
+            case "TCP":
+            case "TCP_GAMMA":
+                // Fixed port 5060 for stable Contact header — critical for inbound INVITEs
+                var tcpChannel = new SIPTCPChannel(IPAddress.Any, 5060);
+                _transport.AddSIPChannel(tcpChannel);
+                Log("📡 Using TCP transport on port 5060");
+                break;
+            case "TLS":
+                var tlsChannel = new SIPTLSChannel(new IPEndPoint(_localIp!, 0));
+                _transport.AddSIPChannel(tlsChannel);
+                Log("🔒 Using TLS transport");
+                break;
+            default:
+                _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(_localIp!, 0)));
+                Log("📡 Using UDP transport (default)");
+                break;
+        }
     }
-
-    // === HARD-WIRED CREDENTIALS FOR TESTING ===
-    private const string HW_USER = "217201";
-    private const string HW_PASS = "oaraV733L_N4_3yL";
-    private const string HW_DOMAIN = "78.110.160.199";
 
     private void InitializeRegistration()
     {
-        // Bare domain — TCP routing handled by channel (no UDP channel exists)
-        var registrarUri = HW_DOMAIN;
+        var authUser = _settings.EffectiveAuthUser;
 
-        Log($"📡 HARDWIRED registration: {HW_USER}@{registrarUri}");
+        // Resolve the registrar IP — use Domain if set, else Server hostname
+        var resolvedHost = ResolveRegistrarIp();
+        if (string.IsNullOrEmpty(resolvedHost))
+        {
+            Log("❌ Could not resolve registrar address — registration aborted.");
+            return;
+        }
 
-        _regAgent = new SIPRegistrationUserAgent(
-            _transport,
-            HW_USER,
-            HW_PASS,
-            registrarUri,
-            3600);
+        var registrarHostWithPort = _settings.Port == 5060
+            ? resolvedHost
+            : $"{resolvedHost}:{_settings.Port}";
+
+        if (authUser != _settings.Username)
+        {
+            // Advanced registration: Auth ID differs from extension
+            if (!IPAddress.TryParse(resolvedHost, out var registrarIp))
+            {
+                try
+                {
+                    registrarIp = Dns.GetHostAddresses(resolvedHost)
+                        .First(a => a.AddressFamily == AddressFamily.InterNetwork);
+                }
+                catch
+                {
+                    Log("⚠️ Could not resolve registrar to IPv4; falling back to simple registration.");
+                    _regAgent = new SIPRegistrationUserAgent(
+                        _transport, _settings.Username, _settings.Password, registrarHostWithPort, 3600);
+                    WireRegistrationEvents();
+                    return;
+                }
+            }
+
+            var protocol = _settings.Transport.ToUpperInvariant() switch
+            {
+                "TCP" => SIPProtocolsEnum.tcp,
+                "TLS" => SIPProtocolsEnum.tls,
+                _ => SIPProtocolsEnum.udp
+            };
+            var outboundProxy = new SIPEndPoint(protocol, new IPEndPoint(registrarIp, _settings.Port));
+
+            // Hostname-preserving: use hostname in AOR, route via resolved IP
+            var sipAccountAor = new SIPURI(_settings.Username, registrarHostWithPort, null, SIPSchemesEnum.sip, protocol);
+            var contactUri = new SIPURI(sipAccountAor.Scheme, IPAddress.Any, 0) { User = _settings.Username };
+
+            Log($"🔐 Auth: AOR={sipAccountAor}, AuthUser={authUser}");
+
+            _regAgent = new SIPRegistrationUserAgent(
+                sipTransport: _transport,
+                outboundProxy: outboundProxy,
+                sipAccountAOR: sipAccountAor,
+                authUsername: authUser,
+                password: _settings.Password,
+                realm: null,
+                registrarHost: registrarHostWithPort,
+                contactURI: contactUri,
+                expiry: 3600,
+                customHeaders: null);
+
+            Log($"➡ Using separate Auth ID: {authUser}, Registrar: {registrarHostWithPort} (routed via {resolvedHost})");
+        }
+        else
+        {
+            // Standard registration: extension and auth username are the same
+            Log($"📡 Registering {_settings.Username}@{registrarHostWithPort}");
+            _regAgent = new SIPRegistrationUserAgent(
+                _transport, _settings.Username, _settings.Password, registrarHostWithPort, 3600);
+        }
 
         WireRegistrationEvents();
     }
