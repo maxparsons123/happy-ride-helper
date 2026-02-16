@@ -818,6 +818,16 @@ public partial class MainForm : Form
     //  FORM LIFECYCLE
     // ══════════════════════════════════════
 
+    protected override void WndProc(ref Message m)
+    {
+        try
+        {
+            base.WndProc(ref m);
+        }
+        catch (System.IO.IOException) { /* Handle invalidated during shutdown — safe to swallow */ }
+        catch (ObjectDisposedException) { }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         StopMicrophone();
