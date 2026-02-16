@@ -715,6 +715,294 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
         `It looks like one address is in the UK and the other is in the Netherlands. Could you confirm both addresses are correct?`;
     }
 
+    // ── STREET EXISTENCE CHECK: verify resolved streets exist in our DB ──
+    // If Gemini hallucinated a street (e.g., "Rossville Street, Coventry" when it doesn't exist),
+    // use fuzzy matching to find the real local street the caller likely meant
+    const supabaseUrl2 = Deno.env.get("SUPABASE_URL");
+    const supabaseKey2 = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    
+    if (supabaseUrl2 && supabaseKey2) {
+      const supabase2 = createClient(supabaseUrl2, supabaseKey2);
+      
+      for (const side of ["pickup", "dropoff"] as const) {
+        const addr = parsed[side];
+        if (!addr?.street_name || !addr?.city) continue;
+        if (addr.matched_from_history) continue;
+        
+        const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
+        const streetName = addr.street_name;
+        const city = addr.city;
+        
+        try {
+          const { data: fuzzyMatches } = await supabase2.rpc("fuzzy_match_street", {
+            p_street_name: streetName,
+            p_city: city,
+            p_limit: 5
+          });
+          
+          if (fuzzyMatches && fuzzyMatches.length > 0) {
+            const exactMatch = fuzzyMatches.find((m: any) => 
+              m.matched_name.toLowerCase().replace(/\s+/g, " ").trim() === streetName.toLowerCase().replace(/\s+/g, " ").trim()
+            );
+            
+            if (exactMatch) {
+              console.log(`✅ DB VERIFY: "${streetName}" exists in ${city}`);
+            } else {
+              const bestMatch = fuzzyMatches[0];
+              console.log(`⚠️ DB VERIFY: "${streetName}" NOT found in ${city}. Best match: "${bestMatch.matched_name}" (${(bestMatch.similarity_score * 100).toFixed(0)}%)`);
+              
+              if (bestMatch.similarity_score > 0.35 && bestMatch.lat && bestMatch.lon) {
+                const houseNumMatch = originalInput.match(/^(\d+[A-Za-z]?)\s*,?\s*/);
+                const houseNum = houseNumMatch ? houseNumMatch[1] + " " : (addr.street_number ? addr.street_number + " " : "");
+                
+                console.log(`🔄 DB AUTO-CORRECT: "${streetName}" → "${bestMatch.matched_name}" in ${city} (${(bestMatch.similarity_score * 100).toFixed(0)}% similarity)`);
+                addr.address = `${houseNum}${bestMatch.matched_name}, ${city}`;
+                addr.street_name = bestMatch.matched_name;
+                addr.lat = bestMatch.lat;
+                addr.lon = bestMatch.lon;
+                addr.is_ambiguous = false;
+                addr.alternatives = [];
+                parsed.sanity_corrected = parsed.sanity_corrected || {};
+                parsed.sanity_corrected[side] = {
+                  original_street: streetName,
+                  corrected_to: bestMatch.matched_name,
+                  similarity: bestMatch.similarity_score,
+                  source: "db_fuzzy_match"
+                };
+              } else if (fuzzyMatches.length > 1) {
+                console.log(`⚠️ DB: offering ${fuzzyMatches.length} alternatives for "${streetName}" in ${city}`);
+                addr.is_ambiguous = true;
+                addr.alternatives = fuzzyMatches
+                  .filter((m: any) => m.similarity_score > 0.2)
+                  .slice(0, 3)
+                  .map((m: any) => `${m.matched_name}, ${m.matched_city || city}`);
+                parsed.status = "clarification_needed";
+                parsed.clarification_message = `I couldn't find "${streetName}" in ${city}. Did you mean: ${addr.alternatives.join(", or ")}?`;
+              }
+            }
+          } else {
+            console.log(`ℹ️ DB VERIFY: no entries for "${streetName}" in ${city} (DB may not cover this area)`);
+          }
+        } catch (dbErr) {
+          console.warn(`⚠️ Street existence check error (non-fatal):`, dbErr);
+        }
+      }
+      
+      // Recalculate fare if addresses were auto-corrected
+      if (parsed.sanity_corrected) {
+        const cPLat = parsed.pickup?.lat;
+        const cPLon = parsed.pickup?.lon;
+        const cDLat = parsed.dropoff?.lat;
+        const cDLon = parsed.dropoff?.lon;
+        if (typeof cPLat === "number" && typeof cPLon === "number" && typeof cDLat === "number" && typeof cDLon === "number" && cPLat !== 0 && cDLat !== 0) {
+          const correctedDist = haversineDistanceMiles(cPLat, cPLon, cDLat, cDLon);
+          if (correctedDist < 100) {
+            parsed.fare = calculateFare(correctedDist, detectedCountry);
+            if (!parsed.pickup?.is_ambiguous && !parsed.dropoff?.is_ambiguous) {
+              parsed.status = "ready";
+            }
+            console.log(`💰 Fare recalculated after DB correction: ${parsed.fare.fare} (${correctedDist.toFixed(1)} miles)`);
+          }
+        }
+      }
+    }
+
+    // ── ADDRESS SANITY GUARD: second-pass Gemini check for impractical results ──
+    // Triggers when: clarification_needed with no alternatives, OR distance > 50 miles (after DB check)
+    const distMilesPost = (typeof parsed.pickup?.lat === "number" && typeof parsed.pickup?.lon === "number" && typeof parsed.dropoff?.lat === "number" && typeof parsed.dropoff?.lon === "number" && parsed.pickup.lat !== 0 && parsed.dropoff.lat !== 0)
+      ? haversineDistanceMiles(parsed.pickup.lat, parsed.pickup.lon, parsed.dropoff.lat, parsed.dropoff.lon) : null;
+    
+    // Check if STT input street names differ from geocoded results (catches hallucinated local streets)
+    const pickupInputStreet = extractStreetKey(pickup || "").toLowerCase();
+    const dropoffInputStreet = extractStreetKey(destination || "").toLowerCase();
+    const pickupResolvedStreet = (parsed.pickup?.street_name || "").toLowerCase();
+    const dropoffResolvedStreet = (parsed.dropoff?.street_name || "").toLowerCase();
+    const hasStreetNameMismatch = (
+      (dropoffInputStreet && dropoffResolvedStreet && !dropoffResolvedStreet.includes(dropoffInputStreet) && !dropoffInputStreet.includes(dropoffResolvedStreet)) ||
+      (pickupInputStreet && pickupResolvedStreet && !pickupResolvedStreet.includes(pickupInputStreet) && !pickupInputStreet.includes(pickupResolvedStreet))
+    );
+    
+    const needsSanityCheck = (
+      parsed.status === "clarification_needed" && 
+      (!parsed.pickup?.alternatives?.length && !parsed.dropoff?.alternatives?.length)
+    ) || (distMilesPost !== null && distMilesPost > 50)
+      || hasStreetNameMismatch;
+
+    if (needsSanityCheck && LOVABLE_API_KEY) {
+      console.log(`🛡️ SANITY GUARD: triggering (dist=${distMilesPost?.toFixed(1) || 'N/A'} miles, status=${parsed.status})`);
+      
+      try {
+        const contextCity = parsed.detected_area || parsed.pickup?.city || "";
+        const sanityUserMsg = `Context City: ${contextCity}
+Pickup STT Input: "${pickup || ''}"
+Pickup Geocoder Result: "${parsed.pickup?.address || ''}" (street: "${parsed.pickup?.street_name || ''}", city: ${parsed.pickup?.city || 'unknown'})
+Dropoff STT Input: "${destination || ''}"  
+Dropoff Geocoder Result: "${parsed.dropoff?.address || ''}" (street: "${parsed.dropoff?.street_name || ''}", city: ${parsed.dropoff?.city || 'unknown'})
+Distance: ${distMilesPost?.toFixed(1) || 'unknown'} miles
+Key question: Does the dropoff street name "${parsed.dropoff?.street_name || ''}" match what the user said "${destination || ''}"? Are they the SAME street or DIFFERENT streets?`;
+
+        const sanityResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${LOVABLE_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-3-flash-preview",
+            messages: [
+              { role: "system", content: `You are a "Taxi Address Sanity Guard." You compare User Input (STT) vs. Geocoder Results (GEO).
+
+CRITICAL: Compare the STREET NAME the user said vs the STREET NAME the geocoder returned. They may be in the same city but be DIFFERENT streets.
+
+Evaluation Criteria:
+1. Street Name Phonetic Match: Compare the street names character by character. "Russell" vs "Rossville" — these are DIFFERENT streets even though they share "R-s". "David" vs "Davies" — DIFFERENT streets. "528" vs "52A" — same address, just number confusion.
+2. Regional Bias: The user is in ${contextCity || 'an unknown city'}. If GEO returns a result in a city >20 miles away, it is a MISMATCH unless the user explicitly named that distant city.
+3. STT Artifacts: "NUX" might be "MAX", "Threw up" might be "72". But "Rossville" is NOT a mishearing of "Russell" — they are genuinely different street names.
+4. Fabrication Detection: If the geocoder returned a street name that is phonetically similar but NOT identical to the input, AND you're not confident that street actually exists in that city, mark as MISMATCH. The geocoder may have fabricated a local version of a distant street.
+
+Decision Rules:
+- If the street name's core identity changed (Russell→Rossville, David→Davies): MISMATCH. Suggest what the user likely meant.
+- If only the house number changed slightly (528→52A, letter/digit confusion): MATCH
+- If the city changed to a distant city: MISMATCH
+- IMPORTANT: Two streets in the SAME city can still be a MISMATCH if the street NAMES are different.
+
+Evaluate BOTH pickup and dropoff independently.` },
+              { role: "user", content: sanityUserMsg },
+            ],
+            temperature: 0.0,
+            tools: [{
+              type: "function",
+              function: {
+                name: "address_sanity_verdict",
+                description: "Return the sanity check verdict for the address pair",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    pickup_phonetic_similarity: { type: "number", description: "Score 0-1 of how similar the pickup STT input sounds to the geocoder result street name" },
+                    dropoff_phonetic_similarity: { type: "number", description: "Score 0-1 of how similar the dropoff STT input sounds to the geocoder result street name" },
+                    geographic_leap: { type: "boolean", description: "True if either result jumped to a different region or country from the context city" },
+                    reasoning: { type: "string", description: "Explanation of STT artifacts, phonetic analysis, and geographic context" },
+                    verdict: { type: "string", enum: ["MATCH", "MISMATCH", "UNCERTAIN"], description: "Overall verdict" },
+                    mismatch_side: { type: "string", enum: ["pickup", "dropoff", "both", "none"], description: "Which address has the mismatch" },
+                    suggested_correction: { type: "string", description: "If MISMATCH, what the user likely meant (e.g., 'Russell Street' instead of 'Rossville Street')" }
+                  },
+                  required: ["pickup_phonetic_similarity", "dropoff_phonetic_similarity", "geographic_leap", "reasoning", "verdict", "mismatch_side"],
+                  additionalProperties: false
+                }
+              }
+            }],
+            tool_choice: { type: "function", function: { name: "address_sanity_verdict" } },
+          }),
+        });
+
+        if (sanityResponse.ok) {
+          const sanityData = await sanityResponse.json();
+          const sanityToolCall = sanityData.choices?.[0]?.message?.tool_calls?.[0];
+          let sanityResult;
+          if (sanityToolCall?.function?.arguments) {
+            sanityResult = typeof sanityToolCall.function.arguments === "string"
+              ? JSON.parse(sanityToolCall.function.arguments)
+              : sanityToolCall.function.arguments;
+          }
+
+          if (sanityResult) {
+            console.log(`🛡️ SANITY VERDICT: ${sanityResult.verdict} (side: ${sanityResult.mismatch_side}, reasoning: ${sanityResult.reasoning})`);
+
+            if (sanityResult.verdict === "MISMATCH" && sanityResult.mismatch_side !== "none") {
+              const sides = sanityResult.mismatch_side === "both" ? ["pickup", "dropoff"] : [sanityResult.mismatch_side];
+              
+              for (const side of sides) {
+                const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
+                const suggestedName = sanityResult.suggested_correction || originalInput;
+                const searchCity = contextCity || parsed.pickup?.city || "";
+                
+                // Query database for fuzzy street matches
+                if (searchCity) {
+                  try {
+                    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+                    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+                    const supabase = createClient(supabaseUrl, supabaseKey);
+                    
+                    const { data: fuzzyMatches } = await supabase.rpc("fuzzy_match_street", {
+                      p_street_name: suggestedName,
+                      p_city: searchCity,
+                      p_limit: 5
+                    });
+
+                    if (fuzzyMatches && fuzzyMatches.length > 0) {
+                      console.log(`🔍 FUZZY MATCHES for "${suggestedName}" in ${searchCity}:`, fuzzyMatches.map((m: any) => `${m.matched_name} (${(m.similarity_score * 100).toFixed(0)}%)`));
+                      
+                      const bestMatch = fuzzyMatches[0];
+                      if (bestMatch.similarity_score > 0.4 && bestMatch.lat && bestMatch.lon) {
+                        // Auto-correct with high-confidence local match
+                        console.log(`✅ SANITY AUTO-CORRECT: "${originalInput}" → "${bestMatch.matched_name}" in ${searchCity} (${(bestMatch.similarity_score * 100).toFixed(0)}% match)`);
+                        
+                        // Extract house number from original input
+                        const houseNumMatch = originalInput.match(/^(\d+[A-Za-z]?)\s*,?\s*/);
+                        const houseNum = houseNumMatch ? houseNumMatch[1] + " " : "";
+                        
+                        parsed[side].address = `${houseNum}${bestMatch.matched_name}, ${searchCity}`;
+                        parsed[side].street_name = bestMatch.matched_name;
+                        parsed[side].city = searchCity;
+                        parsed[side].lat = bestMatch.lat;
+                        parsed[side].lon = bestMatch.lon;
+                        parsed[side].is_ambiguous = false;
+                        parsed[side].alternatives = [];
+                        parsed.sanity_corrected = parsed.sanity_corrected || {};
+                        parsed.sanity_corrected[side] = {
+                          original: originalInput,
+                          corrected_to: bestMatch.matched_name,
+                          similarity: bestMatch.similarity_score,
+                          reasoning: sanityResult.reasoning
+                        };
+                      } else {
+                        // Low confidence — provide as alternatives
+                        console.log(`⚠️ SANITY: fuzzy matches too weak, providing as alternatives`);
+                        parsed[side].is_ambiguous = true;
+                        parsed[side].alternatives = fuzzyMatches
+                          .filter((m: any) => m.similarity_score > 0.25)
+                          .map((m: any) => `${m.matched_name}, ${m.matched_city || searchCity}`);
+                        parsed.status = "clarification_needed";
+                        parsed.clarification_message = `I couldn't verify "${originalInput}" in ${searchCity}. Did you mean: ${parsed[side].alternatives.join(", or ")}?`;
+                      }
+                    } else {
+                      // No DB matches — flag with sanity reasoning
+                      console.log(`⚠️ SANITY: no fuzzy matches found for "${suggestedName}" in ${searchCity}`);
+                      parsed[side].is_ambiguous = true;
+                      parsed.status = "clarification_needed";
+                      parsed.clarification_message = `The ${side} address "${originalInput}" doesn't seem right for ${searchCity}. ${sanityResult.suggested_correction ? `Did you mean "${sanityResult.suggested_correction}"?` : "Could you repeat the street name?"}`;
+                    }
+                  } catch (dbErr) {
+                    console.warn(`⚠️ Fuzzy match DB error (non-fatal):`, dbErr);
+                  }
+                }
+              }
+              
+              // Recalculate fare if addresses were auto-corrected
+              if (parsed.sanity_corrected) {
+                const newPLat = parsed.pickup?.lat;
+                const newPLon = parsed.pickup?.lon;
+                const newDLat = parsed.dropoff?.lat;
+                const newDLon = parsed.dropoff?.lon;
+                if (typeof newPLat === "number" && typeof newPLon === "number" && typeof newDLat === "number" && typeof newDLon === "number" && newPLat !== 0 && newDLat !== 0) {
+                  const newDist = haversineDistanceMiles(newPLat, newPLon, newDLat, newDLon);
+                  if (newDist < 100) {
+                    parsed.fare = calculateFare(newDist, detectedCountry);
+                    parsed.status = parsed.pickup?.is_ambiguous || parsed.dropoff?.is_ambiguous ? "clarification_needed" : "ready";
+                    console.log(`💰 Fare recalculated after sanity correction: ${parsed.fare.fare} (${newDist.toFixed(1)} miles)`);
+                  }
+                }
+              }
+            }
+          }
+        } else {
+          console.warn(`⚠️ Sanity guard API error: ${sanityResponse.status}`);
+        }
+      } catch (sanityErr) {
+        console.warn(`⚠️ Sanity guard error (non-fatal):`, sanityErr);
+      }
+    }
+
     console.log(`✅ Address dispatch result: area=${parsed.detected_area}, status=${parsed.status}, fare=${parsed.fare?.fare || 'N/A'}`);
 
     return new Response(JSON.stringify(parsed), {
