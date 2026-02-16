@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX idx_callers_phone_number ON public.callers (phone_number);
