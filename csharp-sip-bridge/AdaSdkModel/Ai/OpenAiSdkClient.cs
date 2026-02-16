@@ -82,6 +82,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     /// <summary>Last Whisper STT transcript for mismatch comparison in tool calls.</summary>
     public string? LastUserTranscript => _lastUserTranscript;
 
+    /// <summary>
+    /// Optional callback that provides stage-aware context for the no-reply watchdog.
+    /// When set, the watchdog will inject contextual re-prompts instead of generic "[SILENCE]".
+    /// </summary>
+    public Func<string?>? NoReplyContextProvider { get; set; }
+
     // Caller state
     private string _callerId = "";
 
@@ -812,8 +818,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
             try
             {
+                // Use stage-aware context if available, otherwise generic re-prompt
+                var context = NoReplyContextProvider?.Invoke();
+                var message = !string.IsNullOrWhiteSpace(context)
+                    ? $"[SILENCE] {context}"
+                    : "[SILENCE] Hello? Are you still there?";
                 await _session!.AddItemAsync(
-                    ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart("[SILENCE] Hello? Are you still there?") }));
+                    ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
                 await _session.StartResponseAsync();
             }
             catch (Exception ex)
@@ -1072,6 +1083,18 @@ Example pattern (addresses here are FAKE — do NOT reuse them):
   User gives pickup → call sync_booking_data(..., pickup=WHAT_THEY_SAID) → THEN ask destination
   User gives destination → call sync_booking_data(..., destination=WHAT_THEY_SAID) → THEN ask passengers
 NEVER collect multiple fields without calling sync_booking_data between each.
+
+⚠️ COMPOUND UTTERANCE SPLITTING (CRITICAL):
+Callers often give MULTIPLE pieces of information in ONE sentence.
+Example: ""52A David Road, going to Coventry"" — this contains BOTH pickup AND destination.
+You MUST split these correctly:
+  - pickup = ""52A David Road""
+  - destination = ""Coventry""
+NEVER store ""going to [place]"" as part of the pickup address.
+If the caller says ""from X to Y"" or ""X going to Y"" or ""at X, destination Y"":
+  - The part BEFORE ""going to""/""to""/""destination"" is the PICKUP
+  - The part AFTER is the DESTINATION
+Call sync_booking_data with BOTH fields populated in the same call.
 
 When sync_booking_data is called with all 5 fields filled, the system will
 AUTOMATICALLY validate the addresses via our address verification system and

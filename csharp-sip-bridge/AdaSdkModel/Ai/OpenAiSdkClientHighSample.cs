@@ -84,6 +84,12 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
 
     public string? LastUserTranscript => _lastUserTranscript;
 
+    /// <summary>
+    /// Optional callback that provides stage-aware context for the no-reply watchdog.
+    /// When set, the watchdog will inject contextual re-prompts instead of generic "[SILENCE]".
+    /// </summary>
+    public Func<string?>? NoReplyContextProvider { get; set; }
+
     // Caller state
     private string _callerId = "";
 
@@ -753,8 +759,13 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
 
             try
             {
+                // Use stage-aware context if available, otherwise generic re-prompt
+                var context = NoReplyContextProvider?.Invoke();
+                var message = !string.IsNullOrWhiteSpace(context)
+                    ? $"[SILENCE] {context}"
+                    : "[SILENCE] Hello? Are you still there?";
                 await _session!.AddItemAsync(
-                    ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart("[SILENCE] Hello? Are you still there?") }));
+                    ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
                 await _session.StartResponseAsync();
             }
             catch (Exception ex)
