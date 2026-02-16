@@ -278,9 +278,9 @@ public partial class MainForm : Form
             _sipServer = new SipServer(factory.CreateLogger<SipServer>(), _settings.Sip, _settings.Audio, sessionManager);
             _sipServer.OperatorMode = _operatorMode;
 
-            _sipServer.OnLog += msg => Invoke(() => Log(msg));
+            _sipServer.OnLog += msg => SafeInvoke(() => Log(msg));
 
-            _sipServer.OnRegistered += msg => Invoke(() =>
+            _sipServer.OnRegistered += msg => SafeInvoke(() =>
             {
                 Log($"✅ SIP Registered: {msg}");
                 lblSipStatus.Text = "● Registered";
@@ -288,7 +288,7 @@ public partial class MainForm : Form
                 statusLabel.Text = "SIP Registered";
             });
 
-            _sipServer.OnRegistrationFailed += msg => Invoke(() =>
+            _sipServer.OnRegistrationFailed += msg => SafeInvoke(() =>
             {
                 Log($"❌ Registration failed: {msg}");
                 lblSipStatus.Text = "● Reg Failed";
@@ -296,7 +296,7 @@ public partial class MainForm : Form
                 statusLabel.Text = "Registration Failed";
             });
 
-            _sipServer.OnCallStarted += (sessionId, callerId) => Invoke(() =>
+            _sipServer.OnCallStarted += (sessionId, callerId) => SafeInvoke(() =>
             {
                 Log($"📞 Call active: {callerId} [{sessionId}]");
                 SetInCall(true);
@@ -306,7 +306,7 @@ public partial class MainForm : Form
                     _ = ConnectSimliAsync();
             });
 
-            _sipServer.OnCallRinging += (pendingId, callerId) => Invoke(() =>
+            _sipServer.OnCallRinging += (pendingId, callerId) => SafeInvoke(() =>
             {
                 Log($"📲 [{pendingId}] Call from {callerId} — RINGING (click Answer)");
                 statusCallId.Text = $"📞 {callerId} (ringing)";
@@ -321,7 +321,7 @@ public partial class MainForm : Form
                 _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             };
 
-            _sipServer.OnCallEnded += (sessionId, reason) => Invoke(() =>
+            _sipServer.OnCallEnded += (sessionId, reason) => SafeInvoke(() =>
             {
                 Log($"📴 Call {sessionId} ended: {reason}");
                 if (_currentSession?.SessionId == sessionId)
@@ -375,7 +375,7 @@ public partial class MainForm : Form
                 _settings.Icabbi.AppKey,
                 _settings.Icabbi.SecretKey,
                 tenantBase: _settings.Icabbi.TenantBase);
-            icabbi.OnLog += msg => Invoke(() => Log(msg));
+            icabbi.OnLog += msg => SafeInvoke(() => Log(msg));
             Log($"🚕 iCabbi enabled (tenant: {_settings.Icabbi.TenantBase})");
         }
         else if (icabbiEnabled)
@@ -389,7 +389,7 @@ public partial class MainForm : Form
             icabbi, icabbiEnabled);
 
         // Wire session events → UI
-        session.OnTranscript += (role, text) => Invoke(() => Log($"💬 {role}: {text}"));
+        session.OnTranscript += (role, text) => SafeInvoke(() => Log($"💬 {role}: {text}"));
 
         // Wire audio → Simli avatar OR monitor speakers (never both to avoid double audio)
         session.OnAudioOut += alawFrame =>
@@ -409,7 +409,7 @@ public partial class MainForm : Form
         // Wire barge-in → clear Simli buffer
         session.OnBargeIn += () => ClearSimliBuffer();
 
-        session.OnBookingUpdated += booking => Invoke(() =>
+        session.OnBookingUpdated += booking => SafeInvoke(() =>
         {
             var info = new List<string>();
             if (!string.IsNullOrEmpty(booking.Name)) info.Add($"Name: {booking.Name}");
@@ -421,7 +421,7 @@ public partial class MainForm : Form
             lblCallInfo.ForeColor = booking.Confirmed ? Color.LimeGreen : Color.Cyan;
         });
 
-        session.OnEnded += (s, reason) => Invoke(() =>
+        session.OnEnded += (s, reason) => SafeInvoke(() =>
         {
             Log($"📴 Call {s.SessionId} ended: {reason}");
             lblCallInfo.Text = "No active call";
@@ -464,7 +464,7 @@ public partial class MainForm : Form
                 StartAudioMonitor();
                 StartMicrophone();
                 Log("🎤 Operator mic active — speak normally");
-                _ = Task.Run(() => Invoke(() => OpenBookingForm(phone, null)));
+                _ = Task.Run(() => SafeInvoke(() => OpenBookingForm(phone, null)));
             }
         }
         else
@@ -768,6 +768,24 @@ public partial class MainForm : Form
             try { _micInput?.StopRecording(); _micInput?.Dispose(); } catch { }
             _micInput = null;
         }
+    }
+
+    // ══════════════════════════════════════
+    //  SAFE UI INVOKE (prevents shutdown crash)
+    // ══════════════════════════════════════
+
+    private void SafeInvoke(Action action)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            if (InvokeRequired)
+                BeginInvoke(action);
+            else
+                action();
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
     }
 
     // ══════════════════════════════════════
