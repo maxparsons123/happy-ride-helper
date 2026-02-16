@@ -916,6 +916,28 @@ Evaluate BOTH pickup and dropoff independently.` },
               parsed.status = "ready";
               parsed.clarification_message = undefined;
               
+              // ── POI NAME PRESERVATION ──
+              // When a landmark/POI resolves to an underlying street (e.g., "Cathedral Lanes" → "Broadgate"),
+              // prepend the original POI name so the C# bridge's discrepancy detector won't keep flagging it.
+              const preservePoiName = (side: string, originalInput: string) => {
+                const sideData = side === "pickup" ? parsed.pickup : parsed.dropoff;
+                if (!sideData || !originalInput) return;
+                const resolvedAddr = sideData.address || "";
+                const hasHouseNumber = /^\d+[A-Za-z]?\s/.test(originalInput.trim());
+                const originalWords = originalInput.toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/).filter((w: string) => w.length > 2);
+                const resolvedLower = resolvedAddr.toLowerCase();
+                const inputFoundInResolved = originalWords.some((w: string) => resolvedLower.includes(w));
+                
+                if (!hasHouseNumber && !inputFoundInResolved && originalWords.length > 0) {
+                  const cleanedInput = originalInput.replace(/\s*(?:in|,)\s*(coventry|birmingham|london|manchester|derby|leicester)\s*$/i, '').trim();
+                  sideData.address = `${cleanedInput}, ${resolvedAddr}`;
+                  console.log(`📍 POI preserved: "${cleanedInput}" prepended → "${sideData.address}"`);
+                }
+              };
+              
+              preservePoiName("pickup", pickup || "");
+              preservePoiName("dropoff", destination || "");
+              
               // Ensure fare is present
               if (!parsed.fare && distMilesPost !== null && distMilesPost < 200) {
                 parsed.fare = calculateFare(distMilesPost, detectedCountry);
