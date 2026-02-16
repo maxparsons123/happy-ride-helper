@@ -805,7 +805,7 @@ public sealed class CallSession : ICallSession
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 OnBookingUpdated?.Invoke(_booking.Clone());
                 _ = TriggerFareCalculationAsync();
-                return new { success = true, needs_disambiguation = false, message = $"Pickup updated to '{selected}'. Fare calculation in progress — wait for [FARE RESULT]." };
+                return new { success = true, needs_disambiguation = false, message = $"Pickup updated to '{selected}'. Fare calculation in progress — wait SILENTLY for [FARE RESULT]. Do NOT ask for confirmation yet." };
             }
 
             _booking.Pickup = selected;
@@ -840,7 +840,7 @@ public sealed class CallSession : ICallSession
             // Both locked — re-trigger fare
             OnBookingUpdated?.Invoke(_booking.Clone());
             _ = TriggerFareCalculationAsync();
-            return new { success = true, needs_disambiguation = false, message = "Pickup locked. Fare calculation in progress — wait for [FARE RESULT]." };
+            return new { success = true, needs_disambiguation = false, message = "Pickup locked. Fare calculation in progress — wait SILENTLY for [FARE RESULT]. Do NOT ask for confirmation yet." };
         }
 
         if (target == "destination")
@@ -863,7 +863,7 @@ public sealed class CallSession : ICallSession
 
             OnBookingUpdated?.Invoke(_booking.Clone());
             _ = TriggerFareCalculationAsync();
-            return new { success = true, needs_disambiguation = false, message = "Destination locked. Fare calculation in progress — wait for [FARE RESULT]." };
+            return new { success = true, needs_disambiguation = false, message = "Destination locked. Fare calculation in progress — wait SILENTLY for [FARE RESULT]. Do NOT ask for confirmation yet." };
         }
 
         return new { success = false, needs_disambiguation = false, error = $"Unknown target: {target}" };
