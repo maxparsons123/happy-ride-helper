@@ -64,11 +64,12 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5;      // ITU-T G.711 A-law silence
     private const byte PAYLOAD_TYPE_PCMA = 8;    // RTP payload type for A-law
 
-    // HYSTERESIS CALIBRATION (v8.3):
-    // Start threshold: require 200ms (10 frames) before first playout
-    // Stop threshold: only re-buffer when queue actually hits 0 (not 2)
-    // This prevents the "grumble" from rapid Play→Silence→Play toggling
-    private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms to start/resume
+    // HYSTERESIS CALIBRATION (v8.6):
+    // Initial start: 200ms (10 frames) for stable first playout
+    // Resume after underrun: 60ms (3 frames) for fast recovery between chunks
+    // This eliminates the jitter from forcing a full 200ms re-buffer at every gap
+    private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms initial start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 3;  // 60ms resume after underrun
     private const int MAX_QUEUE_FRAMES = 2000;            // ~40s safety cap
     private const int MAX_LATENCY_FRAMES = 150;            // 3s max playout latency — trim excess
 
@@ -94,7 +95,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private System.Threading.Timer? _natKeepaliveTimer;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
-    private volatile int _disposed;
+    private volatile bool _hasPlayedOnce;       // tracks if we've ever played audio
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
@@ -251,6 +252,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _running = true;
         _isBuffering = true;
+        _hasPlayedOnce = false;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
         _totalUnderruns = 0;
@@ -399,19 +401,21 @@ public sealed class ALawRtpPlayout : IDisposable
         // Let the queue drain naturally; the 40s safety cap prevents unbounded growth.
         // if (queueCount > MAX_LATENCY_FRAMES) { ... }
 
-        // ── HYSTERESIS LOGIC (v8.3) ──
-        // If buffering, wait for a full 200ms pillow before starting playout.
-        // This prevents the "grumble" from toggling Play→Silence→Play at 50Hz.
+        // ── TWO-TIER HYSTERESIS (v8.6) ──
+        // Initial start: wait for 200ms buffer for stable first playout.
+        // Resume after underrun: only wait 60ms for fast inter-chunk recovery.
         if (_isBuffering)
         {
-            if (queueCount < JITTER_BUFFER_START_THRESHOLD)
+            int threshold = _hasPlayedOnce ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
+            if (queueCount < threshold)
             {
                 SendRtpFrame(_silenceFrame, false);
                 return;
             }
 
-            _isBuffering = false; // We have enough audio — start playing
-            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
+            _isBuffering = false;
+            _hasPlayedOnce = true;
+            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames, threshold={threshold}), resuming playout");
         }
 
         // Try to get a real frame
@@ -518,6 +522,7 @@ public sealed class ALawRtpPlayout : IDisposable
         }
 
         _isBuffering = true;
+        _hasPlayedOnce = false;
         _wasPlaying = false;
     }
 
