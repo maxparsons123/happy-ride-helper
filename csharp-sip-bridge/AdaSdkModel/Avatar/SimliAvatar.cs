@@ -218,7 +218,7 @@ public sealed class SimliAvatar : UserControl
 
     private async Task ExecAsync(string script)
     {
-        if (IsDisposed) return;
+        if (IsDisposed || !IsHandleCreated) return;
 
         if (InvokeRequired)
         {
@@ -252,15 +252,16 @@ public sealed class SimliAvatar : UserControl
 
     private void SetStatus(string text, System.Drawing.Color color)
     {
-        if (InvokeRequired) { try { Invoke(() => SetStatus(text, color)); } catch { } return; }
+        if (IsDisposed || !IsHandleCreated) return;
+        if (InvokeRequired) { try { BeginInvoke(() => SetStatus(text, color)); } catch { } return; }
         _statusLabel.Text = text;
         _statusLabel.ForeColor = color;
     }
 
     private void SafeInvoke(Action action)
     {
-        if (IsDisposed) return;
-        if (InvokeRequired) { try { Invoke(action); } catch { } }
+        if (IsDisposed || !IsHandleCreated) return;
+        if (InvokeRequired) { try { BeginInvoke(action); } catch { } }
         else action();
     }
 
