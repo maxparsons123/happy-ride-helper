@@ -64,10 +64,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte PAYLOAD_TYPE_PCMA = 8;
 
     // ── Buffer Calibration ──
-    private const int START_THRESHOLD = 10;       // 200ms to start playout
+    private const int START_THRESHOLD = 6;        // 120ms to start playout (was 200ms)
     private const int REBUFFER_THRESHOLD = 2;     // proactive re-buffer before queue empties
     private const int MAX_QUEUE_FRAMES = 1500;    // ~30s safety cap
-    private const int MAX_LATENCY_FRAMES = 25;    // 500ms max playout latency — trim excess
+    private const int MAX_LATENCY_FRAMES = 15;    // 300ms max playout latency — trim excess (was 500ms)
     private const int MAX_ACCUMULATOR_SIZE = 65536;
 
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
