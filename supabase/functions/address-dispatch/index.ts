@@ -32,11 +32,22 @@ function extractStreetKey(input: string): string {
     .trim();
 }
 
-function calculateFare(distanceMiles: number, detectedCountry?: string): { fare: string; fare_spoken: string; eta: string; distance_miles: number } {
+// Driver ETA constants — how long for a driver to reach the passenger
+const DRIVER_ETA_MIN = 8;
+const DRIVER_ETA_MAX = 15;
+const DRIVER_ETA_DEFAULT = 10;
+
+function calculateFare(distanceMiles: number, detectedCountry?: string): { fare: string; fare_spoken: string; eta: string; driver_eta: string; driver_eta_minutes: number; trip_eta: string; trip_eta_minutes: number; distance_miles: number } {
   const rawFare = Math.max(MIN_FARE, BASE_FARE + distanceMiles * PER_MILE);
   // Round to nearest 0.50
   const fare = Math.round(rawFare * 2) / 2;
-  const etaMinutes = Math.ceil(distanceMiles / AVG_SPEED_MPH * 60) + BUFFER_MINUTES;
+  
+  // Trip ETA = how long the journey itself takes (for internal use / logging)
+  const tripEtaMinutes = Math.ceil(distanceMiles / AVG_SPEED_MPH * 60) + BUFFER_MINUTES;
+  
+  // Driver ETA = how long for a driver to reach the passenger (what we tell the caller)
+  // Scale slightly with distance: short trips get lower ETA, longer trips slightly higher
+  const driverEtaMinutes = Math.min(DRIVER_ETA_MAX, Math.max(DRIVER_ETA_MIN, DRIVER_ETA_DEFAULT + Math.floor(distanceMiles / 20)));
 
   // Currency based on detected country
   const isNL = detectedCountry === "NL";
@@ -54,7 +65,11 @@ function calculateFare(distanceMiles: number, detectedCountry?: string): { fare:
   return {
     fare: fareStr,
     fare_spoken: fareSpoken,
-    eta: `${etaMinutes} minutes`,
+    eta: `${driverEtaMinutes} minutes`,           // ← this is what Ada tells the caller
+    driver_eta: `${driverEtaMinutes} minutes`,     // explicit driver arrival time
+    driver_eta_minutes: driverEtaMinutes,
+    trip_eta: `${tripEtaMinutes} minutes`,         // full journey duration (internal)
+    trip_eta_minutes: tripEtaMinutes,
     distance_miles: Math.round(distanceMiles * 100) / 100,
   };
 }
