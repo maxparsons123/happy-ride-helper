@@ -26,7 +26,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
-    private const int JITTER_BUFFER_START_THRESHOLD = 15; // 300ms Anti-Burst Pillow
+    private const int JITTER_BUFFER_START_THRESHOLD = 12; // 240ms initial start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 4; // 80ms mid-speech resume
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
@@ -39,6 +40,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private Thread? _playoutThread;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
+    private volatile bool _hasPlayedAudio; // true after first playout — use lower resume threshold
     private uint _timestamp;
     private IntPtr _waitableTimer;
 
@@ -134,7 +136,13 @@ public sealed class ALawRtpPlayout : IDisposable
             int count = Volatile.Read(ref _queueCount);
             if (_isBuffering)
             {
-                if (count >= JITTER_BUFFER_START_THRESHOLD) _isBuffering = false;
+                // Use lower threshold for mid-speech resume to avoid 300ms gaps
+                int threshold = _hasPlayedAudio ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
+                if (count >= threshold)
+                {
+                    _isBuffering = false;
+                    _hasPlayedAudio = true;
+                }
                 _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, _silenceFrame, _timestamp, 0, 8);
             }
             else if (_frameQueue.TryDequeue(out var frame))
@@ -163,6 +171,7 @@ public sealed class ALawRtpPlayout : IDisposable
         while (_frameQueue.TryDequeue(out _)) Interlocked.Decrement(ref _queueCount);
         lock (_accLock) { _accCount = 0; Array.Clear(_accumulator, 0, _accumulator.Length); }
         _isBuffering = true;
+        _hasPlayedAudio = false; // Next response gets full 240ms initial buffer
     }
 
     public void Stop()
