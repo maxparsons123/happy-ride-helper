@@ -64,14 +64,12 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5;      // ITU-T G.711 A-law silence
     private const byte PAYLOAD_TYPE_PCMA = 8;    // RTP payload type for A-law
 
-    // HYSTERESIS CALIBRATION (v8.6):
-    // Initial start: 200ms (10 frames) for stable first playout
-    // Resume after underrun: 60ms (3 frames) for fast recovery between chunks
-    // This eliminates the jitter from forcing a full 200ms re-buffer at every gap
-    private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms initial start
-    private const int JITTER_BUFFER_RESUME_THRESHOLD = 3;  // 60ms resume after underrun
-    private const int MAX_QUEUE_FRAMES = 2000;            // ~40s safety cap
-    private const int MAX_LATENCY_FRAMES = 150;            // 3s max playout latency — trim excess
+    // BUFFER CALIBRATION (v8.7 — ported from v7.4 proven strategy):
+    // 100ms fixed buffer (5 frames) — matches v7.4 which had cleanest audio
+    // Proactive re-buffer at <2 frames — catches underruns BEFORE queue empties
+    private const int JITTER_BUFFER_FRAMES = 5;   // 100ms to start playout
+    private const int REBUFFER_THRESHOLD = 2;      // re-buffer before queue empties
+    private const int MAX_QUEUE_FRAMES = 2000;     // ~40s safety cap
 
     // Accumulator safety: cap at 64KB to prevent unbounded growth from burst audio
     private const int MAX_ACCUMULATOR_SIZE = 65536;
@@ -95,7 +93,6 @@ public sealed class ALawRtpPlayout : IDisposable
     private System.Threading.Timer? _natKeepaliveTimer;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
-    private volatile bool _hasPlayedOnce;       // tracks if we've ever played audio
     private int _queueCount;
     private int _framesSent;
     private uint _timestamp;
@@ -252,7 +249,6 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _running = true;
         _isBuffering = true;
-        _hasPlayedOnce = false;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
         _totalUnderruns = 0;
@@ -396,55 +392,44 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Add(ref _statsQueueSizeSum, queueCount);
         Interlocked.Increment(ref _statsQueueSizeSamples);
 
-        // ── LATENCY TRIM — DISABLED (v8.5) ──
-        // Trimming shreds speech during OpenAI burst delivery, causing audible jitter.
-        // Let the queue drain naturally; the 40s safety cap prevents unbounded growth.
-        // if (queueCount > MAX_LATENCY_FRAMES) { ... }
-
-        // ── TWO-TIER HYSTERESIS (v8.6) ──
-        // Initial start: wait for 200ms buffer for stable first playout.
-        // Resume after underrun: only wait 60ms for fast inter-chunk recovery.
-        if (_isBuffering)
+        // ── PROACTIVE RE-BUFFER (v8.7 — from v7.4) ──
+        // Re-buffer when queue drops below 2 (BEFORE it empties)
+        // This prevents the gap that occurs when waiting for queue to hit 0
+        if (!_isBuffering && queueCount < REBUFFER_THRESHOLD && queueCount > 0)
         {
-            int threshold = _hasPlayedOnce ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
-            if (queueCount < threshold)
-            {
-                SendRtpFrame(_silenceFrame, false);
-                return;
-            }
-
-            _isBuffering = false;
-            _hasPlayedOnce = true;
-            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames, threshold={threshold}), resuming playout");
+            _isBuffering = true;
         }
 
-        // Try to get a real frame
+        // Fixed jitter buffer: wait until we have enough frames
+        if (_isBuffering && queueCount < JITTER_BUFFER_FRAMES)
+        {
+            SendRtpFrame(_silenceFrame, false);
+            return;
+        }
+
+        if (_isBuffering)
+        {
+            _isBuffering = false;
+            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
+        }
+
+        // Get frame or send instant silence (NO fade-out → prevents G.711 warbling)
         if (_frameQueue.TryDequeue(out var frame))
         {
             Interlocked.Decrement(ref _queueCount);
             SendRtpFrame(frame, false);
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
-
-            // If we just played the last frame, immediately re-enter buffering mode
-            // to prevent the "grumble" of playing 1 frame then silence then 1 frame
-            if (Volatile.Read(ref _queueCount) == 0)
-            {
-                _isBuffering = true;
-                Interlocked.Increment(ref _totalUnderruns);
-                try { OnQueueEmpty?.Invoke(); } catch { }
-            }
         }
         else
         {
-            // Emergency fallback — queue was empty despite not being in buffering mode
-            _isBuffering = true;
             SendRtpFrame(_silenceFrame, false);
             Interlocked.Increment(ref _totalUnderruns);
 
             if (_wasPlaying)
             {
                 _wasPlaying = false;
+                _isBuffering = true;
                 try { OnQueueEmpty?.Invoke(); } catch { }
             }
         }
@@ -522,7 +507,6 @@ public sealed class ALawRtpPlayout : IDisposable
         }
 
         _isBuffering = true;
-        _hasPlayedOnce = false;
         _wasPlaying = false;
     }
 
