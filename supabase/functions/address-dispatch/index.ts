@@ -209,6 +209,7 @@ ADDRESS EXTRACTION RULES:
 4. For landmarks, resolve to actual street addresses if known
 5. ALWAYS include the postal code in the address field (e.g., "7 Russell Street, Coventry CV1 3BT")
 6. The postal_code field MUST be populated separately whenever determinable
+7. CRITICAL — INDEPENDENT POSTCODES: Each address (pickup AND dropoff) MUST have its OWN independently determined postal code. Different streets almost ALWAYS have different postcodes. NEVER copy the pickup's postal code to the dropoff or vice versa. If you cannot determine the exact postal code for an address, leave postal_code as an empty string rather than reusing the other address's postcode.
 
 INTRA-CITY DISTRICT DISAMBIGUATION (CRITICAL):
 Even when the CITY is known (e.g., Birmingham from landline 0121), many street names exist in MULTIPLE districts within that city.
@@ -678,6 +679,22 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
     } else {
       console.log(`⚠️ No valid coordinates for fare calculation`);
       parsed.fare = null;
+    }
+
+    // ── DUPLICATE POSTCODE CHECK: different streets should almost never share a postcode ──
+    const pickupPostal = (parsed.pickup?.postal_code || "").trim().toUpperCase();
+    const dropoffPostal = (parsed.dropoff?.postal_code || "").trim().toUpperCase();
+    const pickupStreet = (parsed.pickup?.street_name || "").toLowerCase();
+    const dropoffStreet = (parsed.dropoff?.street_name || "").toLowerCase();
+    
+    if (pickupPostal && dropoffPostal && pickupPostal === dropoffPostal && 
+        pickupStreet && dropoffStreet && pickupStreet !== dropoffStreet) {
+      console.log(`⚠️ DUPLICATE POSTCODE: pickup "${pickupStreet}" and dropoff "${dropoffStreet}" both have "${pickupPostal}" — clearing dropoff postcode (likely Gemini copy error)`);
+      parsed.dropoff.postal_code = "";
+      // Also strip the postcode from the dropoff address string if present
+      if (parsed.dropoff.address) {
+        parsed.dropoff.address = parsed.dropoff.address.replace(new RegExp(pickupPostal.replace(/\s+/g, '\\s*'), 'gi'), '').replace(/,\s*,/g, ',').replace(/,\s*$/, '').trim();
+      }
     }
 
     // ── CROSS-COUNTRY CHECK: different countries is almost always wrong ──
