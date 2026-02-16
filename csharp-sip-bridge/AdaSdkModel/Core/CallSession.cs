@@ -372,6 +372,7 @@ public sealed class CallSession : ICallSession
     private int _fareSanityAlertCount;
     private string? _lastSanityAlertDestination;
     private volatile bool _fareSanityActive; // blocks book_taxi while sanity alert is shown
+    private volatile bool _disambiguationPerformed; // skip fare sanity after disambiguation resolved
 
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
@@ -815,6 +816,7 @@ public sealed class CallSession : ICallSession
             _activePickupAlternatives = null;
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
+            _disambiguationPerformed = true;
             _logger.LogInformation("[{SessionId}] 🔒 Pickup LOCKED: {Pickup}", SessionId, selected);
 
             // Check if dest still needs disambiguation
@@ -859,6 +861,7 @@ public sealed class CallSession : ICallSession
             _activeDestAlternatives = null;
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
+            _disambiguationPerformed = true;
             _logger.LogInformation("[{SessionId}] 🔒 Destination LOCKED: {Destination}", SessionId, selected);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
@@ -1522,6 +1525,17 @@ public sealed class CallSession : ICallSession
         // Debug logging: trace exactly what the bypass check sees
         _logger.LogDebug("[{SessionId}] 🔍 IsFareSane: count={Count}, dest='{Dest}', lastDest='{LastDest}'",
             SessionId, _fareSanityAlertCount, dest, _lastSanityAlertDestination ?? "(null)");
+
+        // BYPASS: If disambiguation was just resolved, the user already confirmed the address — skip sanity
+        if (_disambiguationPerformed)
+        {
+            _logger.LogInformation("[{SessionId}] ✅ Fare sanity BYPASSED — disambiguation was resolved, addresses are user-confirmed", SessionId);
+            _disambiguationPerformed = false;
+            _fareSanityAlertCount = 0;
+            _lastSanityAlertDestination = null;
+            _fareSanityActive = false;
+            return true;
+        }
 
         // HARD BYPASS: After 2+ sanity alerts, let it through regardless — user clearly wants this destination
         if (_fareSanityAlertCount >= 2)
