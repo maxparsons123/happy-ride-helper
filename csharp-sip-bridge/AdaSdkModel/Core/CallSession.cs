@@ -522,8 +522,7 @@ public sealed class CallSession : ICallSession
             _currentStage = BookingStage.FareCalculating;
             _logger.LogInformation("[{SessionId}] 🚀 All fields filled — auto-triggering fare calculation (stage→FareCalculating)", SessionId);
 
-            var pickup = _booking.Pickup!;
-            var destination = _booking.Destination!;
+            var (pickup, destination) = GetEnrichedAddresses();
             var callerId = CallerId;
             var sessionId = SessionId;
 
@@ -921,13 +920,44 @@ public sealed class CallSession : ICallSession
         return first[idx..].Trim();
     }
 
+    /// <summary>
+    /// Enriches a raw address string with verified city context if geocoded data exists.
+    /// Prevents redundant clarification when only one address changes mid-flow.
+    /// </summary>
+    private string EnrichWithVerifiedCity(string raw, string? verifiedCity)
+    {
+        if (string.IsNullOrWhiteSpace(verifiedCity)) return raw;
+        // Don't append if the city is already in the raw string
+        if (raw.Contains(verifiedCity, StringComparison.OrdinalIgnoreCase)) return raw;
+        return $"{raw}, {verifiedCity}";
+    }
+
+    /// <summary>
+    /// Returns pickup/destination strings enriched with verified city context
+    /// so re-calculations don't lose locality for unchanged addresses.
+    /// </summary>
+    private (string pickup, string destination) GetEnrichedAddresses()
+    {
+        var pickup = _booking.Pickup!;
+        var destination = _booking.Destination!;
+
+        // If pickup has verified geocoded city, enrich the pickup string
+        if (_booking.PickupLat.HasValue && _booking.PickupLat != 0)
+            pickup = EnrichWithVerifiedCity(pickup, _booking.PickupCity);
+
+        // If destination has verified geocoded city, enrich the destination string
+        if (_booking.DestLat.HasValue && _booking.DestLat != 0)
+            destination = EnrichWithVerifiedCity(destination, _booking.DestCity);
+
+        return (pickup, destination);
+    }
+
     private async Task TriggerFareCalculationAsync()
     {
         if (_booking.Pickup == null || _booking.Destination == null)
             return;
 
-        var pickup = _booking.Pickup;
-        var destination = _booking.Destination;
+        var (pickup, destination) = GetEnrichedAddresses();
         var callerId = CallerId;
         var sessionId = SessionId;
 
@@ -1058,8 +1088,7 @@ public sealed class CallSession : ICallSession
 
             // NON-BLOCKING: return immediately so Ada speaks an interjection,
             // then inject the fare result asynchronously when ready.
-            var pickup = _booking.Pickup;
-            var destination = _booking.Destination;
+            var (pickup, destination) = GetEnrichedAddresses();
             var callerId = CallerId;
             var sessionId = SessionId;
 
@@ -1237,7 +1266,8 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
-                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
+                    var (ep, ed) = GetEnrichedAddresses();
+                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(ep, ed, CallerId);
                     ApplyFareResultNullSafe(result);
                 }
                 catch (Exception ex)
@@ -1309,8 +1339,12 @@ public sealed class CallSession : ICallSession
 
         try
         {
+            var enrichedPickup = EnrichWithVerifiedCity(_booking.Pickup!, _booking.PickupLat.HasValue && _booking.PickupLat != 0 ? _booking.PickupCity : null);
+            var enrichedDest = _booking.Destination != null 
+                ? EnrichWithVerifiedCity(_booking.Destination, _booking.DestLat.HasValue && _booking.DestLat != 0 ? _booking.DestCity : null)
+                : enrichedPickup;
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
-                _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId);
+                enrichedPickup, enrichedDest, CallerId);
             var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
             FareResult result;
@@ -1340,7 +1374,7 @@ public sealed class CallSession : ICallSession
             {
                 _logger.LogWarning("[{SessionId}] ⏱️ AI extraction timeout, using fallback", SessionId);
                 result = await _fareCalculator.CalculateAsync(
-                    _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId);
+                    enrichedPickup, enrichedDest, CallerId);
             }
 
             ApplyFareResult(result);
