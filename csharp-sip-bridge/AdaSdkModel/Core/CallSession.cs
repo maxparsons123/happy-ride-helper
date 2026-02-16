@@ -432,7 +432,7 @@ public sealed class CallSession : ICallSession
 
         if (args.TryGetValue("pickup", out var p))
         {
-            var incoming = p?.ToString();
+            var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
                 _booking.PickupLat = _booking.PickupLon = null;
@@ -447,7 +447,7 @@ public sealed class CallSession : ICallSession
         }
         if (args.TryGetValue("destination", out var d))
         {
-            var incoming = d?.ToString();
+            var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
             if (StreetNameChanged(_booking.Destination, incoming))
             {
                 _booking.DestLat = _booking.DestLon = null;
@@ -1614,6 +1614,49 @@ public sealed class CallSession : ICallSession
         string Normalize(string s) =>
             System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"\d|[^a-z ]", "").Trim();
         return Normalize(oldAddress) != Normalize(newAddress);
+    }
+
+    /// <summary>
+    /// Fix common STT house number confusions where letter suffixes are misheard as digits.
+    /// E.g. "52A" → heard as "528", "14B" → heard as "143", "7D" → heard as "74".
+    /// UK residential house numbers rarely exceed 200, so high numbers ending in 8/3/4
+    /// are likely letter suffixes (A/B-C/D).
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex _houseNumberFixRegex =
+        new(@"^(\d{1,3})(8|3|4)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private string? NormalizeHouseNumber(string? address, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return address;
+
+        var match = _houseNumberFixRegex.Match(address.Trim());
+        if (!match.Success) return address;
+
+        var baseNum = int.Parse(match.Groups[1].Value);
+        var trailingDigit = match.Groups[2].Value;
+
+        // Only apply if base number is plausible for UK residential (1-199)
+        if (baseNum < 1 || baseNum > 199) return address;
+
+        var letter = trailingDigit switch
+        {
+            "8" => "A",  // Most common: 'A' misheard as '8'
+            "3" => "B",  // 'B'/'C' misheard as '3'
+            "4" => "D",  // 'D' misheard as '4'
+            _ => null
+        };
+
+        if (letter == null) return address;
+
+        var corrected = address.Trim();
+        var original = match.Value; // e.g. "528"
+        var replacement = $"{baseNum}{letter}"; // e.g. "52A"
+        corrected = replacement + corrected[original.Length..];
+
+        _logger.LogInformation("[{SessionId}] 🔤 House number auto-corrected ({Field}): '{Original}' → '{Corrected}'",
+            SessionId, fieldName, original, replacement);
+
+        return corrected;
     }
 
     /// <summary>

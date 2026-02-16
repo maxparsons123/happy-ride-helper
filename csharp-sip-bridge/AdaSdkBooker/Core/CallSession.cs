@@ -304,12 +304,11 @@ public sealed class CallSession : ICallSession
 
         if (args.TryGetValue("pickup", out var p))
         {
-            var incoming = p?.ToString();
+            var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
                 _booking.PickupLat = _booking.PickupLon = null;
                 _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
-                // Reset fare/booking state so stale data can't bypass guards
                 _booking.Fare = null;
                 _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
@@ -319,12 +318,11 @@ public sealed class CallSession : ICallSession
         }
         if (args.TryGetValue("destination", out var d))
         {
-            var incoming = d?.ToString();
+            var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
             if (StreetNameChanged(_booking.Destination, incoming))
             {
                 _booking.DestLat = _booking.DestLon = null;
                 _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
-                // Reset fare/booking state so stale data can't bypass guards
                 _booking.Fare = null;
                 _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
@@ -1484,6 +1482,42 @@ public sealed class CallSession : ICallSession
         string Normalize(string s) =>
             System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"\d|[^a-z ]", "").Trim();
         return Normalize(oldAddress) != Normalize(newAddress);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex _houseNumberFixRegex =
+        new(@"^(\d{1,3})(8|3|4)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private string? NormalizeHouseNumber(string? address, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return address;
+
+        var match = _houseNumberFixRegex.Match(address.Trim());
+        if (!match.Success) return address;
+
+        var baseNum = int.Parse(match.Groups[1].Value);
+        var trailingDigit = match.Groups[2].Value;
+
+        if (baseNum < 1 || baseNum > 199) return address;
+
+        var letter = trailingDigit switch
+        {
+            "8" => "A",
+            "3" => "B",
+            "4" => "D",
+            _ => null
+        };
+
+        if (letter == null) return address;
+
+        var corrected = address.Trim();
+        var original = match.Value;
+        var replacement = $"{baseNum}{letter}";
+        corrected = replacement + corrected[original.Length..];
+
+        _logger.LogInformation("[{SessionId}] 🔤 House number auto-corrected ({Field}): '{Original}' → '{Corrected}'",
+            SessionId, fieldName, original, replacement);
+
+        return corrected;
     }
 
     /// <summary>
