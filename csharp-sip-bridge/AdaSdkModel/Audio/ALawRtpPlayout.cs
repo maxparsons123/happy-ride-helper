@@ -500,6 +500,33 @@ public sealed class ALawRtpPlayout : IDisposable
         }
     }
 
+    /// <summary>
+    /// Flush any partial frame remaining in the accumulator by padding with silence.
+    /// Call this when a response ends to prevent the "click" from truncated tail audio.
+    /// </summary>
+    public void Flush()
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        lock (_accLock)
+        {
+            if (_accCount > 0 && _accCount < FRAME_SIZE)
+            {
+                // Pad the partial frame with A-law silence to complete it
+                var frame = new byte[FRAME_SIZE];
+                Buffer.BlockCopy(_accumulator, 0, frame, 0, _accCount);
+                // Fill remainder with silence for a clean tail
+                for (int i = _accCount; i < FRAME_SIZE; i++)
+                    frame[i] = ALAW_SILENCE;
+
+                _frameQueue.Enqueue(frame);
+                Interlocked.Increment(ref _queueCount);
+                Interlocked.Increment(ref _totalFramesEnqueued);
+                _accCount = 0;
+            }
+        }
+    }
+
     public void Clear()
     {
         while (_frameQueue.TryDequeue(out _))
