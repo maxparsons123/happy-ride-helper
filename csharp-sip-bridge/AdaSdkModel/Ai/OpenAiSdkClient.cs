@@ -660,7 +660,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                     output: resultJson);
                 await _session!.AddItemAsync(outputItem);
 
-                if (Volatile.Read(ref _responseActive) == 1)
+                // Suppress response if fare calculation is in progress — the fare injection will trigger it
+                if (resultJson.Contains("\"fare_calculating\":true") || resultJson.Contains("wait SILENTLY"))
+                {
+                    Log("🔇 Suppressing response — fare calculation in progress, [FARE RESULT] will trigger response");
+                }
+                else if (Volatile.Read(ref _responseActive) == 1)
                 {
                     Interlocked.Exchange(ref _deferredResponsePending, 1);
                     Log("⏳ Response still active after tool — deferring");
