@@ -908,7 +908,20 @@ Evaluate BOTH pickup and dropoff independently.` },
           if (sanityResult) {
             console.log(`🛡️ SANITY VERDICT: ${sanityResult.verdict} (side: ${sanityResult.mismatch_side}, reasoning: ${sanityResult.reasoning})`);
 
-            if (sanityResult.verdict === "MISMATCH" && sanityResult.mismatch_side !== "none") {
+            // ── MATCH verdict: sanity guard confirmed addresses are correct — clear disambiguation ──
+            if (sanityResult.verdict === "MATCH") {
+              console.log(`✅ SANITY MATCH: clearing disambiguation — addresses verified as correct`);
+              if (parsed.pickup) { parsed.pickup.is_ambiguous = false; parsed.pickup.alternatives = []; }
+              if (parsed.dropoff) { parsed.dropoff.is_ambiguous = false; parsed.dropoff.alternatives = []; }
+              parsed.status = "ready";
+              parsed.clarification_message = undefined;
+              
+              // Ensure fare is present
+              if (!parsed.fare && distMilesPost !== null && distMilesPost < 200) {
+                parsed.fare = calculateFare(distMilesPost, detectedCountry);
+                console.log(`💰 Fare calculated after sanity MATCH: ${parsed.fare.fare}`);
+              }
+            } else if (sanityResult.verdict === "MISMATCH" && sanityResult.mismatch_side !== "none") {
               const sides = sanityResult.mismatch_side === "both" ? ["pickup", "dropoff"] : [sanityResult.mismatch_side];
               
               for (const side of sides) {
