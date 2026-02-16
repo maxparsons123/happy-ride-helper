@@ -327,14 +327,8 @@ public sealed class CallSession : ICallSession
 
     private void HandleAiAudio(byte[] alawFrame)
     {
-        // 1. Volume boost
-        var gain = (float)_settings.Audio.VolumeBoost;
-        if (gain > 1.01f || gain < 0.99f)
-            Audio.ALawVolumeBoost.ApplyInPlace(alawFrame, gain);
-
-        // 2. High-pass thinning filter (removes bass mud, crisper telephony voice)
-        _thinningFilter?.ApplyInPlace(alawFrame);
-
+        // Pure A-law passthrough — no filters, no gain manipulation on compressed bytes.
+        // OpenAI sends native G.711 A-law; any DSP on logarithmic bytes degrades quality.
         OnAudioOut?.Invoke(alawFrame);
     }
 
