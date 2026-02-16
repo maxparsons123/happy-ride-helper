@@ -17,6 +17,17 @@ public static class Program
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+
+        // Catch shutdown race: BeginInvoke callbacks processed after handle destruction
+        Application.ThreadException += (_, ex) =>
+        {
+            if (ex.Exception is System.IO.IOException ioe && ioe.HResult == unchecked((int)0x80070006))
+                return; // "The handle is invalid" — safe to swallow on shutdown
+            // Re-throw anything else
+            throw ex.Exception;
+        };
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
         Application.Run(new MainForm());
     }
 }
