@@ -230,7 +230,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                     ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.3f,
                         prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
-                        silenceDuration: TimeSpan.FromMilliseconds(1500))  // Patient: long silence for address thinking
+                        silenceDuration: TimeSpan.FromMilliseconds(2000))  // Patient: 2s silence for full address utterances
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
                         prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
@@ -412,7 +412,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                     ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.3f,
                         prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
-                        silenceDuration: TimeSpan.FromMilliseconds(1500))  // Patient mode
+                        silenceDuration: TimeSpan.FromMilliseconds(2000))  // Patient mode: 2s for full addresses
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
                         prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
@@ -1297,6 +1297,33 @@ RULES:
    treat the NEW value as FINAL and move to the next question immediately.
 
 ==============================
+INCOMPLETE ADDRESS GUARD (CRITICAL)
+==============================
+
+When collecting a PICKUP or DESTINATION address, do NOT call sync_booking_data
+until you have BOTH a house number AND a street name (or a recognizable place name).
+
+If the caller provides ONLY a house number (e.g. ""52"", ""7""), or ONLY a street name
+without a number, or a single word that could be part of a longer address:
+- Do NOT call any tool yet
+- Wait in SILENCE for 1-2 seconds — they are likely still thinking
+- If they don't continue, gently prompt: ""And what's the street name for that?""
+  or ""Could you give me the full address including the street?""
+
+NEVER store a bare number or single ambiguous word as an address.
+Examples of INCOMPLETE inputs (do NOT sync these):
+- ""52"" → wait for street name
+- ""Box"" → could be start of ""Box Lane"" — wait
+- ""7"" → wait for street name
+- ""David"" → could be ""David Road"" — wait
+
+Examples of COMPLETE inputs (OK to sync):
+- ""52A David Road"" ✓
+- ""7 Russell Street"" ✓
+- ""Pool Meadow Bus Station"" ✓ (recognizable place)
+- ""Coventry Train Station"" ✓ (recognizable place)
+
+
 SPELLING DETECTION (CRITICAL)
 ==============================
 
