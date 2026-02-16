@@ -524,6 +524,20 @@ public sealed class CallSession : ICallSession
                         return;
                     }
 
+                    // Address discrepancy check
+                    var discrepancy = DetectAddressDiscrepancy(result);
+                    if (discrepancy != null)
+                    {
+                        _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
+                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                        if (_aiClient is OpenAiSdkClient sdkDisc)
+                            await sdkDisc.InjectMessageAndRespondAsync(
+                                $"[ADDRESS DISCREPANCY] {discrepancy} " +
+                                "Ask the caller to confirm or repeat their address. " +
+                                "When they respond, call sync_booking_data with the corrected address.");
+                        return;
+                    }
+
                     ApplyFareResult(result);
 
             if (_aiClient is OpenAiSdkClient sdk)
@@ -1600,6 +1614,36 @@ public sealed class CallSession : ICallSession
         // If fewer than half of Ada's significant words appear in STT, flag it
         var matchCount = adaWords.Count(w => sttWords.Contains(w));
         return matchCount < adaWords.Length / 2.0;
+    }
+
+    private string? DetectAddressDiscrepancy(FareResult result)
+    {
+        var issues = new List<string>();
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
+        {
+            if (!AddressContainsStreet(_booking.Pickup, result.PickupStreet))
+                issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different location.");
+        }
+        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
+        {
+            if (!AddressContainsStreet(_booking.Destination, result.DestStreet))
+                issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different location.");
+        }
+        return issues.Count > 0 ? string.Join(" ", issues) : null;
+    }
+
+    private static bool AddressContainsStreet(string rawInput, string geocodedStreet)
+    {
+        static string Norm(string s) => System.Text.RegularExpressions.Regex
+            .Replace(s.ToLowerInvariant(), @"[^a-z ]", " ").Trim();
+        var rawNorm = Norm(rawInput);
+        var streetNorm = Norm(geocodedStreet);
+        if (rawNorm.Contains(streetNorm) || streetNorm.Contains(rawNorm)) return true;
+        var streetWords = streetNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(w => w.Length > 2).ToArray();
+        var rawWords = new HashSet<string>(rawNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (streetWords.Length == 0) return true;
+        var matchCount = streetWords.Count(w => rawWords.Contains(w));
+        return matchCount >= Math.Ceiling(streetWords.Length / 2.0);
     }
 
     public async ValueTask DisposeAsync()

@@ -275,6 +275,14 @@ public sealed class CallSession : ICallSession
                     result = await _fareCalculator.CalculateAsync(_booking.Pickup, _booking.Destination, CallerId);
                 }
                 
+                // Address discrepancy check
+                var discrepancy = DetectAddressDiscrepancy(result);
+                if (discrepancy != null)
+                {
+                    _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy: {Msg}", SessionId, discrepancy);
+                    return new { success = false, error = discrepancy, needs_correction = true };
+                }
+
                 // Store geocoded results
                 ApplyFareResult(result);
                 
@@ -685,6 +693,36 @@ public sealed class CallSession : ICallSession
         return new { success = true };
     }
     
+    private string? DetectAddressDiscrepancy(FareResult result)
+    {
+        var issues = new List<string>();
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
+        {
+            if (!AddressContainsStreet(_booking.Pickup, result.PickupStreet))
+                issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different location.");
+        }
+        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
+        {
+            if (!AddressContainsStreet(_booking.Destination, result.DestStreet))
+                issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different location.");
+        }
+        return issues.Count > 0 ? string.Join(" ", issues) : null;
+    }
+
+    private static bool AddressContainsStreet(string rawInput, string geocodedStreet)
+    {
+        static string Norm(string s) => System.Text.RegularExpressions.Regex
+            .Replace(s.ToLowerInvariant(), @"[^a-z ]", " ").Trim();
+        var rawNorm = Norm(rawInput);
+        var streetNorm = Norm(geocodedStreet);
+        if (rawNorm.Contains(streetNorm) || streetNorm.Contains(rawNorm)) return true;
+        var streetWords = streetNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(w => w.Length > 2).ToArray();
+        var rawWords = new HashSet<string>(rawNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (streetWords.Length == 0) return true;
+        var matchCount = streetWords.Count(w => rawWords.Contains(w));
+        return matchCount >= Math.Ceiling(streetWords.Length / 2.0);
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)

@@ -657,6 +657,20 @@ public sealed class CallSession : ICallSession
                         return;
                     }
 
+                    // ADDRESS DISCREPANCY CHECK: Verify geocoded result matches raw input
+                    var discrepancy = DetectAddressDiscrepancy(result);
+                    if (discrepancy != null)
+                    {
+                        _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
+                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+
+                        await _aiClient.InjectMessageAndRespondAsync(
+                            $"[ADDRESS DISCREPANCY] {discrepancy} " +
+                            "Ask the caller to confirm or repeat their address. " +
+                            "When they respond, call sync_booking_data with the corrected address.");
+                        return;
+                    }
+
                     ApplyFareResult(result);
 
             _aiClient.SetAwaitingConfirmation(true);
@@ -945,6 +959,19 @@ public sealed class CallSession : ICallSession
                         "Ask the caller to confirm their DESTINATION address AND which city or area they are in. " +
                         "Say something like: \"I want to make sure I have the right destination — could you repeat where you're going, and which city you're in?\" " +
                         "When they respond, call sync_booking_data with the destination INCLUDING the city name (e.g. '7 Russell Street, Coventry').");
+                return;
+            }
+
+            // Address discrepancy check (post-clarification)
+            var discrepancy2 = DetectAddressDiscrepancy(result);
+            if (discrepancy2 != null)
+            {
+                _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy after clarification: {Msg}", sessionId, discrepancy2);
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                await _aiClient.InjectMessageAndRespondAsync(
+                    $"[ADDRESS DISCREPANCY] {discrepancy2} " +
+                    "Ask the caller to confirm or repeat their address. " +
+                    "When they respond, call sync_booking_data with the corrected address.");
                 return;
             }
 
@@ -1730,6 +1757,63 @@ public sealed class CallSession : ICallSession
         // If fewer than half of Ada's significant words appear in STT, flag it
         var matchCount = adaWords.Count(w => sttWords.Contains(w));
         return matchCount < adaWords.Length / 2.0;
+    }
+
+    /// <summary>
+    /// Detect if the geocoded address is significantly different from the raw user input.
+    /// E.g. user said "Box" but geocoder returned "Burges" — the street names don't match.
+    /// Returns a descriptive message if discrepancy found, null if OK.
+    /// </summary>
+    private string? DetectAddressDiscrepancy(FareResult result)
+    {
+        var issues = new List<string>();
+
+        // Check pickup
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
+        {
+            if (!AddressContainsStreet(_booking.Pickup, result.PickupStreet))
+            {
+                issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different location.");
+            }
+        }
+
+        // Check destination
+        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
+        {
+            if (!AddressContainsStreet(_booking.Destination, result.DestStreet))
+            {
+                issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different location.");
+            }
+        }
+
+        return issues.Count > 0 ? string.Join(" ", issues) : null;
+    }
+
+    /// <summary>
+    /// Check if the raw address input contains the geocoded street name (or vice versa).
+    /// Uses word-level fuzzy matching to handle minor differences.
+    /// </summary>
+    private static bool AddressContainsStreet(string rawInput, string geocodedStreet)
+    {
+        static string Norm(string s) => System.Text.RegularExpressions.Regex
+            .Replace(s.ToLowerInvariant(), @"[^a-z ]", " ").Trim();
+
+        var rawNorm = Norm(rawInput);
+        var streetNorm = Norm(geocodedStreet);
+
+        // Direct containment
+        if (rawNorm.Contains(streetNorm) || streetNorm.Contains(rawNorm))
+            return true;
+
+        // Word overlap: if the significant words of the geocoded street appear in the raw input
+        var streetWords = streetNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length > 2).ToArray();
+        var rawWords = new HashSet<string>(rawNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+        if (streetWords.Length == 0) return true; // Nothing to compare
+
+        var matchCount = streetWords.Count(w => rawWords.Contains(w));
+        return matchCount >= Math.Ceiling(streetWords.Length / 2.0);
     }
 
     public async ValueTask DisposeAsync()
