@@ -68,7 +68,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // Start threshold: require 200ms (10 frames) before first playout
     // Stop threshold: only re-buffer when queue actually hits 0 (not 2)
     // This prevents the "grumble" from rapid Play→Silence→Play toggling
-    private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms to start/resume
+    private const int JITTER_BUFFER_START_THRESHOLD = 15; // 300ms anti-burst pillow
     private const int MAX_QUEUE_FRAMES = 2000;            // ~40s safety cap
 
     // Accumulator safety: cap at 64KB to prevent unbounded growth from burst audio
