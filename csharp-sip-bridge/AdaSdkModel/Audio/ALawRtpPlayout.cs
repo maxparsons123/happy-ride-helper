@@ -11,7 +11,7 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// Pure A-law RTP playout engine v9.8 — Anti-Burst/Anti-Jitter with safe shutdown.
+/// Pure A-law RTP playout engine — PERFECT EDITION. Anti-Burst/Anti-Jitter with safe shutdown.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
@@ -105,7 +105,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _playoutThread = new Thread(PlayoutLoop) { IsBackground = true, Priority = ThreadPriority.Highest };
         _playoutThread.Start();
-        OnLog?.Invoke("[RTP] v9.8 Started (Anti-Burst/Anti-Jitter Active)");
+        OnLog?.Invoke("[RTP] PERFECT EDITION Started (Anti-Burst/Anti-Jitter Active)");
     }
 
     private void PlayoutLoop()
