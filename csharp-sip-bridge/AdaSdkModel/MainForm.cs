@@ -805,14 +805,15 @@ public partial class MainForm : Form
         StopMicrophone();
         StopAudioMonitor();
 
-        // Disconnect and dispose Simli avatar
+        // Disconnect and dispose Simli avatar safely
         try
         {
-            if (_simliAvatar != null)
+            var avatar = _simliAvatar;
+            _simliAvatar = null;
+            if (avatar != null)
             {
-                _simliAvatar.DisconnectAsync().GetAwaiter().GetResult();
-                _simliAvatar.Dispose();
-                _simliAvatar = null;
+                try { avatar.DisconnectAsync().Wait(3000); } catch { }
+                try { avatar.Dispose(); } catch { }
             }
         }
         catch { }
@@ -821,10 +822,10 @@ public partial class MainForm : Form
         _currentSession = null;
         if (_sipServer != null)
         {
-            try { _sipServer.StopAsync().GetAwaiter().GetResult(); } catch { }
+            try { _sipServer.StopAsync().Wait(3000); } catch { }
             _sipServer = null;
         }
-        _loggerFactory?.Dispose();
+        try { _loggerFactory?.Dispose(); } catch { }
         _loggerFactory = null;
         base.OnFormClosing(e);
     }
