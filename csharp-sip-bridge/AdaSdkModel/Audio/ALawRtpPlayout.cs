@@ -394,28 +394,10 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Add(ref _statsQueueSizeSum, queueCount);
         Interlocked.Increment(ref _statsQueueSizeSamples);
 
-        // ── LATENCY TRIM (v8.4) ──
-        // Trim once when queue exceeds cap, then suppress until queue drains below half-cap.
-        // This prevents repeated trimming during OpenAI burst delivery (which shreds audio).
-        if (_trimCooldown)
-        {
-            // Exit cooldown once queue has naturally drained
-            if (queueCount <= MAX_LATENCY_FRAMES / 2)
-                _trimCooldown = false;
-        }
-        else if (queueCount > MAX_LATENCY_FRAMES)
-        {
-            int toDrop = queueCount - MAX_LATENCY_FRAMES;
-            int dropped = 0;
-            while (dropped < toDrop && _frameQueue.TryDequeue(out _))
-            {
-                Interlocked.Decrement(ref _queueCount);
-                dropped++;
-            }
-            queueCount = Volatile.Read(ref _queueCount);
-            _trimCooldown = true; // Suppress further trims until queue drains
-            SafeLog($"[RTP] ✂ Trimmed {dropped} frames (latency cap {MAX_LATENCY_FRAMES * 20}ms)");
-        }
+        // ── LATENCY TRIM — DISABLED (v8.5) ──
+        // Trimming shreds speech during OpenAI burst delivery, causing audible jitter.
+        // Let the queue drain naturally; the 40s safety cap prevents unbounded growth.
+        // if (queueCount > MAX_LATENCY_FRAMES) { ... }
 
         // ── HYSTERESIS LOGIC (v8.3) ──
         // If buffering, wait for a full 200ms pillow before starting playout.
