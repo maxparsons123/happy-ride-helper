@@ -94,7 +94,7 @@ public sealed class CallSession : ICallSession
         {
             return _currentStage switch
             {
-                BookingStage.CollectingName => "The caller has not provided their name yet. Ask again: What is your name?",
+                BookingStage.Greeting => "The caller has not provided their name yet. Ask again: What is your name?",
                 BookingStage.CollectingPickup => $"The pickup address has not been provided yet. Ask: Where would you like to be picked up from?",
                 BookingStage.CollectingDestination => $"The destination has NOT been provided yet. The pickup is '{_booking.Pickup ?? "unknown"}'. Ask: Where would you like to go? Do NOT mention any fare or price — the destination is still missing.",
                 BookingStage.CollectingPassengers => "The number of passengers has not been provided yet. Ask: How many passengers will be traveling?",
