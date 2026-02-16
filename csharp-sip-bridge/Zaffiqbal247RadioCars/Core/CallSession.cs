@@ -608,7 +608,7 @@ public sealed class CallSession : ICallSession
         if (needsPickup || needsDest)
         {
             _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting address)", SessionId);
-            await sdk.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
+            await sdk.SetVadModeAsync(useSemantic: true, eagerness: 0.2f);
         }
         // Short-answer fields (name, passengers, time) → server VAD (fast response)
         else if (needsName || needsPax || needsTime)
