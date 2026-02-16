@@ -299,7 +299,8 @@ public sealed class ALawRtpPlayout : IDisposable
     public void Stop()
     {
         _running = false;
-        _playoutThread?.Join(500);
+        // Wait for playout thread to fully exit BEFORE closing timer handle
+        try { _playoutThread?.Join(2000); } catch { }
         _playoutThread = null;
 
         if (IsWindows)
@@ -307,11 +308,13 @@ public sealed class ALawRtpPlayout : IDisposable
             try { TimeEndPeriod(1); } catch { }
         }
 
-        if (_waitableTimer != IntPtr.Zero)
+        // Safe to close now — thread is no longer using the handle
+        var timer = _waitableTimer;
+        _waitableTimer = IntPtr.Zero;
+        _useWaitableTimer = false;
+        if (timer != IntPtr.Zero)
         {
-            try { CloseHandle(_waitableTimer); } catch { }
-            _waitableTimer = IntPtr.Zero;
-            _useWaitableTimer = false;
+            try { CloseHandle(timer); } catch { }
         }
 
         while (_frameQueue.TryDequeue(out _)) { }
@@ -368,14 +371,17 @@ public sealed class ALawRtpPlayout : IDisposable
     /// </summary>
     private void WaitHighResolution(long waitNs)
     {
+        var timer = _waitableTimer;
+        if (timer == IntPtr.Zero) { Thread.Sleep(1); return; }
+
         // SetWaitableTimer uses 100ns units, negative = relative time
         long dueTime = -(waitNs / 100);
         if (dueTime >= 0) dueTime = -1; // Minimum 100ns wait
 
-        if (SetWaitableTimer(_waitableTimer, ref dueTime, 0,
+        if (SetWaitableTimer(timer, ref dueTime, 0,
                 IntPtr.Zero, IntPtr.Zero, false))
         {
-            WaitForSingleObject(_waitableTimer, 100); // 100ms max safety timeout
+            WaitForSingleObject(timer, 100); // 100ms max safety timeout
         }
     }
 
