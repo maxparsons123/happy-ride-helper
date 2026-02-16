@@ -31,6 +31,9 @@ public interface IOpenAiClient
     /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
     Func<int>? GetQueuedFrames { get; set; }
 
+    /// <summary>Stage-aware context provider for no-reply watchdog re-prompts.</summary>
+    Func<string?>? NoReplyContextProvider { get; set; }
+
     event Action<byte[]>? OnAudio;
     event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     event Action<string>? OnEnded;
