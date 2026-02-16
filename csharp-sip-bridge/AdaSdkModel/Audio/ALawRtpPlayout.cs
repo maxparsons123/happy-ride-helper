@@ -150,8 +150,8 @@ public sealed class ALawRtpPlayout : IDisposable
                     _hasPlayedAudio = true;
                     _typingSound.Reset();
                 }
-                // Play typing sounds during thinking pause (or silence if disabled)
-                var fillFrame = (_typingSoundsEnabled && _hasPlayedAudio == false)
+                // Play typing sounds during any thinking/buffering pause
+                var fillFrame = _typingSoundsEnabled
                     ? _typingSound.NextFrame()
                     : _silenceFrame;
                 _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, fillFrame, _timestamp, 0, 8);
