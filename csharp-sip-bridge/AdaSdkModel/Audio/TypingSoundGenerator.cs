@@ -81,7 +81,9 @@ public sealed class TypingSoundGenerator
             _frame[i] = LinearToALaw(pcm[i]);
         }
 
-        return _frame;
+        var copy = new byte[FRAME_SIZE];
+        Buffer.BlockCopy(_frame, 0, copy, 0, FRAME_SIZE);
+        return copy;
     }
 
     /// <summary>
