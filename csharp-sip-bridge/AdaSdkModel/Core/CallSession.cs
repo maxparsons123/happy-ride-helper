@@ -89,6 +89,23 @@ public sealed class CallSession : ICallSession
 
         _aiClient.OnBargeIn += () => OnBargeIn?.Invoke();
 
+        // ── STAGE-AWARE WATCHDOG: Provide contextual re-prompts instead of generic "[SILENCE]" ──
+        _aiClient.NoReplyContextProvider = () =>
+        {
+            return _currentStage switch
+            {
+                BookingStage.CollectingName => "The caller has not provided their name yet. Ask again: What is your name?",
+                BookingStage.CollectingPickup => $"The pickup address has not been provided yet. Ask: Where would you like to be picked up from?",
+                BookingStage.CollectingDestination => $"The destination has NOT been provided yet. The pickup is '{_booking.Pickup ?? "unknown"}'. Ask: Where would you like to go? Do NOT mention any fare or price — the destination is still missing.",
+                BookingStage.CollectingPassengers => "The number of passengers has not been provided yet. Ask: How many passengers will be traveling?",
+                BookingStage.CollectingTime => "The pickup time has not been provided yet. Ask: When would you like to be picked up?",
+                BookingStage.FareCalculating => "The fare is being calculated. Tell the caller: I'm still checking those addresses, please hold on a moment. Do NOT invent or guess any fare amount.",
+                BookingStage.FarePresented => "A fare has been presented. Ask the caller: Would you like me to go ahead and book that?",
+                BookingStage.Disambiguation => "We are waiting for the caller to choose from the address options. Repeat the options or ask: Which one was it?",
+                _ => null // Use default generic re-prompt
+            };
+        };
+
         // ── INTENT GUARD: After AI finishes a response, check if it missed a critical tool call ──
         _aiClient.OnResponseCompleted += () =>
         {
