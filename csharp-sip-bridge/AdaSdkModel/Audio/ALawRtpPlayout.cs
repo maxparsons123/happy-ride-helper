@@ -148,13 +148,15 @@ public sealed class ALawRtpPlayout : IDisposable
                 {
                     _isBuffering = false;
                     _hasPlayedAudio = true;
-                    _typingSound.Reset();
                 }
-                // Play typing sounds during any thinking/buffering pause
-                var fillFrame = _typingSoundsEnabled
-                    ? _typingSound.NextFrame()
-                    : _silenceFrame;
-                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, fillFrame, _timestamp, 0, 8);
+                else
+                {
+                    // Play typing sounds during any thinking/buffering pause
+                    var fillFrame = _typingSoundsEnabled
+                        ? _typingSound.NextFrame()
+                        : _silenceFrame;
+                    _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, fillFrame, _timestamp, 0, 8);
+                }
             }
             else if (_frameQueue.TryDequeue(out var frame))
             {
@@ -163,12 +165,14 @@ public sealed class ALawRtpPlayout : IDisposable
                 if (count == 1)
                 {
                     _isBuffering = true;
+                    _typingSound.Reset();
                     try { OnQueueEmpty?.Invoke(); } catch { }
                 }
             }
             else
             {
                 _isBuffering = true;
+                _typingSound.Reset();
                 _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, _silenceFrame, _timestamp, 0, 8);
             }
 

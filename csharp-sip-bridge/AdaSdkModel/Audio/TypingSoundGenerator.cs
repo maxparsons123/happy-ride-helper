@@ -35,7 +35,9 @@ public sealed class TypingSoundGenerator
 
     public TypingSoundGenerator()
     {
-        _framesUntilNextTap = 1; // Start with a tap quickly
+        _framesUntilNextTap = 0; // Immediate first tap
+        _tapSamplesRemaining = TAP_SAMPLES_MIN;
+        _tapCurrentAmplitude = TAP_AMPLITUDE;
     }
 
     /// <summary>
@@ -91,8 +93,9 @@ public sealed class TypingSoundGenerator
     /// </summary>
     public void Reset()
     {
-        _framesUntilNextTap = 1;
-        _tapSamplesRemaining = 0;
+        _framesUntilNextTap = 0;
+        _tapSamplesRemaining = TAP_SAMPLES_MIN;
+        _tapCurrentAmplitude = TAP_AMPLITUDE;
     }
 
     /// <summary>
