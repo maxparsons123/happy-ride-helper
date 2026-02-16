@@ -40,13 +40,20 @@ public sealed class ALawRtpPlayout : IDisposable
     private Thread? _playoutThread;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
-    private volatile bool _hasPlayedAudio; // true after first playout — use lower resume threshold
+    private volatile bool _hasPlayedAudio;
     private uint _timestamp;
     private IntPtr _waitableTimer;
+
+    // Typing sound effect — plays during "thinking" pauses
+    private readonly TypingSoundGenerator _typingSound = new();
+    private volatile bool _typingSoundsEnabled = true;
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
     public int QueuedFrames => Volatile.Read(ref _queueCount);
+
+    /// <summary>Enable/disable keyboard tapping sounds during thinking pauses.</summary>
+    public bool TypingSoundsEnabled { get => _typingSoundsEnabled; set => _typingSoundsEnabled = value; }
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
@@ -136,14 +143,18 @@ public sealed class ALawRtpPlayout : IDisposable
             int count = Volatile.Read(ref _queueCount);
             if (_isBuffering)
             {
-                // Use lower threshold for mid-speech resume to avoid 300ms gaps
                 int threshold = _hasPlayedAudio ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
                 if (count >= threshold)
                 {
                     _isBuffering = false;
                     _hasPlayedAudio = true;
+                    _typingSound.Reset();
                 }
-                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, _silenceFrame, _timestamp, 0, 8);
+                // Play typing sounds during thinking pause (or silence if disabled)
+                var fillFrame = (_typingSoundsEnabled && _hasPlayedAudio == false)
+                    ? _typingSound.NextFrame()
+                    : _silenceFrame;
+                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, fillFrame, _timestamp, 0, 8);
             }
             else if (_frameQueue.TryDequeue(out var frame))
             {
@@ -171,7 +182,8 @@ public sealed class ALawRtpPlayout : IDisposable
         while (_frameQueue.TryDequeue(out _)) Interlocked.Decrement(ref _queueCount);
         lock (_accLock) { _accCount = 0; Array.Clear(_accumulator, 0, _accumulator.Length); }
         _isBuffering = true;
-        _hasPlayedAudio = false; // Next response gets full 240ms initial buffer
+        _hasPlayedAudio = false;
+        _typingSound.Reset();
     }
 
     public void Stop()
