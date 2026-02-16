@@ -737,13 +737,13 @@ public sealed class CallSession : ICallSession
         {
             _currentStage = BookingStage.CollectingPickup;
             _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting pickup) (stage→CollectingPickup)", SessionId);
-            await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
+            await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.2f);
         }
         else if (needsDest)
         {
             _currentStage = BookingStage.CollectingDestination;
             _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (collecting destination) (stage→CollectingDestination)", SessionId);
-            await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.4f);
+            await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.2f);
         }
         // Short-answer fields (name, passengers, time) → server VAD (fast response)
         else if (needsName)
