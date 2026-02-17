@@ -1072,7 +1072,33 @@ Evaluate BOTH pickup and dropoff independently.` },
       }
     }
 
-    console.log(`✅ Address dispatch result: area=${parsed.detected_area}, status=${parsed.status}, fare=${parsed.fare?.fare || 'N/A'}`);
+    // ── Zone lookup: find which company zone the pickup falls in ──
+    const pickupLat = parsed.pickup?.lat;
+    const pickupLon = parsed.pickup?.lon;
+    if (typeof pickupLat === "number" && typeof pickupLon === "number" && pickupLat !== 0) {
+      try {
+        const { data: zoneHits } = await supabase.rpc("find_zone_for_point", {
+          p_lat: pickupLat,
+          p_lng: pickupLon,
+        });
+        if (zoneHits && zoneHits.length > 0) {
+          const bestZone = zoneHits[0]; // highest priority
+          parsed.matched_zone = {
+            zone_id: bestZone.zone_id,
+            zone_name: bestZone.zone_name,
+            company_id: bestZone.company_id,
+            priority: bestZone.priority,
+          };
+          console.log(`🗺️ Zone match: ${bestZone.zone_name} → company ${bestZone.company_id}`);
+        } else {
+          console.log(`🗺️ No zone match for pickup (${pickupLat}, ${pickupLon})`);
+        }
+      } catch (zoneErr) {
+        console.warn(`⚠️ Zone lookup error (non-fatal):`, zoneErr);
+      }
+    }
+
+    console.log(`✅ Address dispatch result: area=${parsed.detected_area}, status=${parsed.status}, fare=${parsed.fare?.fare || 'N/A'}, zone=${parsed.matched_zone?.zone_name || 'none'}`);
 
     return new Response(JSON.stringify(parsed), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
