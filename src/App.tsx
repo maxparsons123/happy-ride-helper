@@ -18,6 +18,7 @@ import CallFlowDebugger from "./pages/CallFlowDebugger";
 import VaxVoIPTest from "./pages/VaxVoIPTest";
 import Diagnostics from "./pages/Diagnostics";
 import DriverApp from "./pages/DriverApp";
+import ZoneEditor from "./pages/ZoneEditor";
 
 const queryClient = new QueryClient();
 
@@ -42,6 +43,7 @@ const App = () => (
           <Route path="/call-flow" element={<CallFlowDebugger />} />
           <Route path="/diagnostics" element={<Diagnostics />} />
           <Route path="/driver" element={<DriverApp />} />
+          <Route path="/zones" element={<ZoneEditor />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

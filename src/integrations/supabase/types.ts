@@ -385,6 +385,50 @@ export type Database = {
         }
         Relationships: []
       }
+      dispatch_zones: {
+        Row: {
+          color_hex: string
+          company_id: string | null
+          created_at: string
+          id: string
+          is_active: boolean
+          points: Json
+          priority: number
+          updated_at: string
+          zone_name: string
+        }
+        Insert: {
+          color_hex?: string
+          company_id?: string | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          points?: Json
+          priority?: number
+          updated_at?: string
+          zone_name: string
+        }
+        Update: {
+          color_hex?: string
+          company_id?: string | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          points?: Json
+          priority?: number
+          updated_at?: string
+          zone_name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "dispatch_zones_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       live_call_audio: {
         Row: {
           audio_chunk: string
@@ -602,6 +646,15 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      find_zone_for_point: {
+        Args: { p_lat: number; p_lng: number }
+        Returns: {
+          company_id: string
+          priority: number
+          zone_id: string
+          zone_name: string
+        }[]
+      }
       fuzzy_match_street: {
         Args: { p_city: string; p_limit?: number; p_street_name: string }
         Returns: {
