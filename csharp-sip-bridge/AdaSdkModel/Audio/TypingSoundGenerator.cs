@@ -16,14 +16,14 @@ public sealed class TypingSoundGenerator
     private const byte ALAW_SILENCE = 0xD5;
 
     // Tap characteristics
-    private const int TAP_SAMPLES_MIN = 24;   // 3ms minimum tap duration
-    private const int TAP_SAMPLES_MAX = 40;   // 5ms maximum tap duration
-    private const double TAP_AMPLITUDE = 24000; // Very loud taps (PCM16 range ±32767)
-    private const double DECAY_RATE = 0.85;    // Exponential decay per sample
+    private const int TAP_SAMPLES_MIN = 16;   // 2ms minimum tap duration (shorter click)
+    private const int TAP_SAMPLES_MAX = 28;   // 3.5ms maximum tap duration (shorter click)
+    private const double TAP_AMPLITUDE = 8000; // Subtle taps (was 24000 — reduced ~3x)
+    private const double DECAY_RATE = 0.80;    // Faster decay for crisper, shorter taps
 
-    // Timing: frames between taps (at 50fps → 60-180ms between keystrokes)
-    private const int MIN_FRAMES_BETWEEN_TAPS = 3;  // 60ms
-    private const int MAX_FRAMES_BETWEEN_TAPS = 9;  // 180ms
+    // Timing: frames between taps (at 50fps → 100-240ms between keystrokes, more spaced out)
+    private const int MIN_FRAMES_BETWEEN_TAPS = 5;  // 100ms
+    private const int MAX_FRAMES_BETWEEN_TAPS = 12; // 240ms
 
     private readonly Random _rng = new();
     private int _framesUntilNextTap;
