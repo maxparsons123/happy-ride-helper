@@ -740,8 +740,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         if (string.IsNullOrEmpty(phone)) return "en";
         var clean = phone.Replace(" ", "").Replace("-", "");
+        // Normalize: if no + prefix but starts with country code digits, add +
+        if (!clean.StartsWith("+") && !clean.StartsWith("0"))
+            clean = "+" + clean;
         if (clean.StartsWith("+31") || clean.StartsWith("0031") || clean.StartsWith("06"))
             return "nl";
+        if (clean.StartsWith("+32") || clean.StartsWith("0032"))
+            return "nl"; // Belgium (Dutch/French — default Dutch)
         if (clean.StartsWith("+33") || clean.StartsWith("0033"))
             return "fr";
         if (clean.StartsWith("+49") || clean.StartsWith("0049"))
