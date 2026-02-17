@@ -21,11 +21,23 @@ public sealed class BsqdDispatcher : IDispatcher
     private IMqttClient? _mqttClient;
     private readonly SemaphoreSlim _mqttLock = new(1, 1);
 
-    // Bounding box validation (covers UK + NL/BE/DE)
-    private const double MIN_LAT = 49.5;
-    private const double MAX_LAT = 61.0;
-    private const double MIN_LNG = -8.5;
-    private const double MAX_LNG = 10.0;
+    // Country bounding boxes for coordinate validation
+    private static readonly Dictionary<string, (double MinLat, double MaxLat, double MinLng, double MaxLng)> CountryBounds = new()
+    {
+        ["44"] = (49.5, 61.0, -8.5, 2.0),       // UK
+        ["31"] = (50.7, 53.6, 3.3, 7.3),         // Netherlands
+        ["32"] = (49.4, 51.6, 2.5, 6.5),         // Belgium
+        ["33"] = (41.3, 51.1, -5.2, 9.6),        // France
+        ["49"] = (47.2, 55.1, 5.8, 15.1),        // Germany
+        ["34"] = (35.9, 43.8, -9.4, 4.4),        // Spain
+        ["39"] = (36.6, 47.1, 6.6, 18.5),        // Italy
+        ["1"]  = (24.5, 71.5, -168.0, -52.0),    // US/Canada
+    };
+    // Fallback: wide Western Europe box
+    private const double FB_MIN_LAT = 35.0;
+    private const double FB_MAX_LAT = 72.0;
+    private const double FB_MIN_LNG = -25.0;
+    private const double FB_MAX_LNG = 45.0;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
@@ -75,6 +87,7 @@ public sealed class BsqdDispatcher : IDispatcher
 
     private async Task<bool> PublishMqttAsync(BookingState booking, string phoneNumber)
     {
+        var bounds = GetBoundsForPhone(phoneNumber);
         if (string.IsNullOrEmpty(_settings.MqttBrokerUrl)) return false;
         try
         {
@@ -102,7 +115,7 @@ public sealed class BsqdDispatcher : IDispatcher
             // Validate and fix pickup coordinates
             var pickupLat = booking.PickupLat ?? 0;
             var pickupLng = booking.PickupLon ?? 0;
-            if (!IsValidCoordinate(pickupLat, pickupLng))
+            if (!IsValidCoordinate(pickupLat, pickupLng, bounds))
             {
                 _logger.LogWarning("Invalid pickup coordinates ({PLat}, {PLng}) for job {JobId}. Attempting geocoding...", pickupLat, pickupLng, jobId);
                 var pickupCoords = await GeocodeAddressAsync(pickupAddress, "pickup");
@@ -123,7 +136,7 @@ public sealed class BsqdDispatcher : IDispatcher
             // Validate and fix dropoff coordinates
             var dropoffLat = booking.DestLat ?? 0;
             var dropoffLng = booking.DestLon ?? 0;
-            if (!IsValidCoordinate(dropoffLat, dropoffLng))
+            if (!IsValidCoordinate(dropoffLat, dropoffLng, bounds))
             {
                 _logger.LogWarning("Invalid dropoff coordinates ({DLat}, {DLng}) for job {JobId}. Attempting geocoding...", dropoffLat, dropoffLng, jobId);
                 var dropoffCoords = await GeocodeAddressAsync(dropoffAddress, "dropoff");
@@ -181,10 +194,23 @@ public sealed class BsqdDispatcher : IDispatcher
     }
 
     // ===== COORDINATE VALIDATION =====
-    private static bool IsValidCoordinate(double lat, double lng)
+    private static (double MinLat, double MaxLat, double MinLng, double MaxLng) GetBoundsForPhone(string? phone)
     {
-        if (Math.Abs(lat) < 0.001 || Math.Abs(lng) < 0.001) return false;
-        if (lat < MIN_LAT || lat > MAX_LAT || lng < MIN_LNG || lng > MAX_LNG) return false;
+        var e164 = FormatE164(phone);
+        if (e164.StartsWith("+"))
+        {
+            var digits = e164[1..];
+            // Try 2-digit prefix first, then 1-digit
+            if (digits.Length >= 2 && CountryBounds.TryGetValue(digits[..2], out var b2)) return b2;
+            if (digits.Length >= 1 && CountryBounds.TryGetValue(digits[..1], out var b1)) return b1;
+        }
+        return (FB_MIN_LAT, FB_MAX_LAT, FB_MIN_LNG, FB_MAX_LNG);
+    }
+
+    private static bool IsValidCoordinate(double lat, double lng, (double MinLat, double MaxLat, double MinLng, double MaxLng) bounds)
+    {
+        if (Math.Abs(lat) < 0.001 && Math.Abs(lng) < 0.001) return false;
+        if (lat < bounds.MinLat || lat > bounds.MaxLat || lng < bounds.MinLng || lng > bounds.MaxLng) return false;
         return true;
     }
 
