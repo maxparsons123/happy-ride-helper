@@ -411,6 +411,18 @@ public class MainForm : Form
             _mqtt.OnDriverBidReceived += (jobId, driverId, lat, lng) =>
             {
                 _bidding?.RecordBid(jobId, driverId, lat, lng);
+
+                // Treat bid as acceptance for manually offered jobs
+                BeginInvoke(() =>
+                {
+                    if (_db == null) return;
+                    var job = _db.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
+                    if (job != null && job.AllocatedDriverId == driverId && job.Status == JobStatus.Pending)
+                    {
+                        // Driver accepted the manual offer — complete allocation
+                        OnDriverJobResponse(jobId, driverId, accepted: true);
+                    }
+                });
             };
 
             await _mqtt.ConnectAsync();
@@ -726,15 +738,16 @@ public class MainForm : Form
         job.DriverDistanceKm = distKm;
         job.DriverEtaMinutes = eta;
 
-        _db.UpdateJobStatus(jobId, JobStatus.Allocated, driverId, distKm, eta);
+        // Set to Offered (not Allocated) — driver must accept first
+        _db.UpdateJobStatus(jobId, JobStatus.Pending, driverId, distKm, eta);
 
         if (_mqtt != null)
         {
-            // Publish full job details to driver for them to accept/reject
-            _ = _mqtt.PublishJobAllocation(jobId, driverId, job);
+            // Send job OFFER — driver sees full job details and can accept/reject
+            _ = _mqtt.PublishJobOffer(jobId, driverId, job);
         }
 
-        _logPanel.AppendLog($"🎯 Job {jobId} sent to {driver.Name} — awaiting acceptance...", Color.Gold);
+        _logPanel.AppendLog($"🎯 Job {jobId} offered to {driver.Name} — awaiting acceptance...", Color.Gold);
         RefreshUI();
     }
 

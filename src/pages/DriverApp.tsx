@@ -44,12 +44,20 @@ export default function DriverApp() {
   });
 
   const handleAccept = useCallback((job: JobData) => {
+    // Send bid (for bidding mode)
     mqtt.publish(`jobs/${job.jobId}/bids`, {
       driverId: driver.driverId,
       jobId: job.jobId,
       lat: gps.coords?.lat || 52.4068,
       lng: gps.coords?.lng || -1.5197,
       timestamp: Date.now(),
+    });
+    // Send explicit accept response (for manual dispatch mode)
+    mqtt.publish(`jobs/${job.jobId}/response`, {
+      driver: driver.driverId,
+      driverId: driver.driverId,
+      jobId: job.jobId,
+      accepted: true,
     });
     driver.updateJobStatus(job.jobId, 'allocated');
     driver.setPresence('busy');
@@ -58,9 +66,16 @@ export default function DriverApp() {
   }, [mqtt.publish, driver.driverId, gps.coords, driver.updateJobStatus, driver.setPresence]);
 
   const handleReject = useCallback((job: JobData) => {
+    // Notify dispatcher that job was rejected
+    mqtt.publish(`jobs/${job.jobId}/response`, {
+      driver: driver.driverId,
+      driverId: driver.driverId,
+      jobId: job.jobId,
+      accepted: false,
+    });
     driver.updateJobStatus(job.jobId, 'rejected');
     setActiveJobRequest(null);
-  }, [driver.updateJobStatus]);
+  }, [driver.updateJobStatus, driver.driverId, mqtt.publish]);
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-gray-100" style={{ touchAction: 'manipulation' }}>

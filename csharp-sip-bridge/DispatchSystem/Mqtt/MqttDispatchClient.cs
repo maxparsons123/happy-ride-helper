@@ -92,7 +92,8 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.SubscribeAsync("jobs/+/bidding");
         await _client.SubscribeAsync("jobs/+/response");
         await _client.SubscribeAsync("jobs/+/bid");
-        OnLog?.Invoke("📡 Subscribed to dispatch topics (incl. pubs/requests/+)");
+        await _client.SubscribeAsync("jobs/+/bids");      // Driver app publishes bids here
+        OnLog?.Invoke("📡 Subscribed to dispatch topics (incl. pubs/requests/+ and jobs/+/bids)");
     }
 
     private Task HandleMessage(MqttApplicationMessageReceivedEventArgs e)
@@ -255,13 +256,16 @@ public sealed class MqttDispatchClient : IDisposable
                 if (resp != null)
                     OnDriverJobResponse?.Invoke(jobId, resp.driver ?? "", resp.accepted);
             }
-            else if (topic.StartsWith("jobs/") && topic.EndsWith("/bid"))
+            else if (topic.StartsWith("jobs/") && (topic.EndsWith("/bid") || topic.EndsWith("/bids")))
             {
                 var parts = topic.Split('/');
                 var jobId = parts[1];
                 var bid = JsonSerializer.Deserialize<DriverBidMsg>(json);
                 if (bid != null)
-                    OnDriverBidReceived?.Invoke(jobId, bid.driver ?? "", bid.lat, bid.lng);
+                {
+                    var bidDriverId = bid.driverId ?? bid.driver ?? "";
+                    OnDriverBidReceived?.Invoke(jobId, bidDriverId, bid.lat, bid.lng);
+                }
             }
         }
         catch (Exception ex)
@@ -304,7 +308,34 @@ public sealed class MqttDispatchClient : IDisposable
     }
 
     /// <summary>
+    /// Publish a job OFFER to a specific driver — driver must accept/reject before allocation.
+    /// Does NOT send "won" result. Used for manual dispatch.
+    /// </summary>
+    public async Task PublishJobOffer(string jobId, string driverId, Job job, CancellationToken cancellationToken = default)
+    {
+        var fixedJob = await FixInvalidCoordinatesAsync(job, cancellationToken);
+
+        // Create payload WITHOUT result field — this is an offer, not an allocation
+        var payload = CreateDriverCompatiblePayload(fixedJob, status: "offered");
+        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = false
+        });
+
+        OnLog?.Invoke($"📤 Job OFFER payload for {jobId} to driver {driverId}:\n{json}");
+
+        // Publish to driver-specific topics so they see the JobPanel
+        await PublishAsync($"drivers/{driverId}/jobs", json, cancellationToken);
+        await PublishAsync($"drivers/{driverId}/bid-request", json, cancellationToken);
+
+        OnLog?.Invoke($"🎯 Job {jobId} OFFERED to driver {driverId} | {fixedJob.Pickup} → {fixedJob.Dropoff} — awaiting response");
+    }
+
+    /// <summary>
     /// Publish job allocation to a specific driver with FULL driver app compatibility.
+    /// Sends "won" result — used AFTER driver has accepted.
     /// </summary>
     public async Task PublishJobAllocation(string jobId, string driverId, Job job, CancellationToken cancellationToken = default)
     {
@@ -706,7 +737,10 @@ public sealed class MqttDispatchClient : IDisposable
     private class DriverBidMsg
     {
         public string? driver { get; set; }
+        public string? driverId { get; set; }  // Driver app sends "driverId"
+        public string? jobId { get; set; }
         public double lat { get; set; }
         public double lng { get; set; }
+        public long timestamp { get; set; }
     }
 }
