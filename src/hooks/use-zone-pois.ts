@@ -19,14 +19,25 @@ export function useZonePois(zoneId: string | null) {
     queryKey: ['zone-pois', zoneId],
     queryFn: async () => {
       if (!zoneId) return [];
-      const { data, error } = await supabase
-        .from('zone_pois')
-        .select('*')
-        .eq('zone_id', zoneId)
-        .order('poi_type')
-        .order('name');
-      if (error) throw error;
-      return data as ZonePoi[];
+      // Fetch all POIs (default limit is 1000, zones can have more)
+      const allRows: ZonePoi[] = [];
+      let from = 0;
+      const pageSize = 1000;
+      while (true) {
+        const { data: page, error } = await supabase
+          .from('zone_pois')
+          .select('*')
+          .eq('zone_id', zoneId)
+          .order('poi_type')
+          .order('name')
+          .range(from, from + pageSize - 1);
+        if (error) throw error;
+        if (!page || page.length === 0) break;
+        allRows.push(...(page as ZonePoi[]));
+        if (page.length < pageSize) break;
+        from += pageSize;
+      }
+      return allRows;
     },
     enabled: !!zoneId,
   });
