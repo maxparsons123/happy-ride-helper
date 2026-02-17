@@ -57,6 +57,24 @@ Deno.serve(async (req) => {
 out center tags;
 `;
 
+    // Also query for area/suburb boundaries to map POIs to areas
+    const areaQuery = `
+[out:json][timeout:15];
+(
+  relation["boundary"="administrative"]["admin_level"~"^(8|9|10|11)$"]["name"](${south},${west},${north},${east});
+  way["place"~"suburb|neighbourhood|quarter|village"]["name"](${south},${west},${north},${east});
+  node["place"~"suburb|neighbourhood|quarter|village"]["name"](${south},${west},${north},${east});
+);
+out center tags;
+`;
+
+    // Fetch areas in parallel
+    const areaResPromise = fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      body: `data=${encodeURIComponent(areaQuery)}`,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+
     console.log("Querying Overpass API for zone:", zone_id);
     const overpassRes = await fetch("https://overpass-api.de/api/interpreter", {
       method: "POST",
@@ -76,9 +94,42 @@ out center tags;
     const overpassData = await overpassRes.json();
     const elements = overpassData.elements || [];
 
+    // Parse area boundaries for locality mapping
+    interface Area { name: string; lat: number; lng: number }
+    const areas: Area[] = [];
+    try {
+      const areaRes = await areaResPromise;
+      if (areaRes.ok) {
+        const areaData = await areaRes.json();
+        for (const el of (areaData.elements || [])) {
+          const name = el.tags?.name;
+          if (!name) continue;
+          const lat = el.lat ?? el.center?.lat ?? 0;
+          const lng = el.lon ?? el.center?.lon ?? 0;
+          if (lat && lng) areas.push({ name, lat, lng });
+        }
+      }
+    } catch (e) {
+      console.warn("Area query failed, continuing without areas:", e);
+    }
+    console.log(`Found ${areas.length} area/suburb boundaries`);
+
+    // Helper: find nearest area for a lat/lng
+    function findArea(lat: number, lng: number): string | null {
+      if (areas.length === 0 || !lat || !lng) return null;
+      let best: Area | null = null;
+      let bestDist = Infinity;
+      for (const a of areas) {
+        const d = (a.lat - lat) ** 2 + (a.lng - lng) ** 2;
+        if (d < bestDist) { bestDist = d; best = a; }
+      }
+      // Only assign if within ~3km (rough threshold)
+      return best && bestDist < 0.001 ? best.name : null;
+    }
+
     // Deduplicate streets and businesses
-    const streets = new Map<string, { name: string; lat: number; lng: number; osm_id: number }>();
-    const businesses = new Map<string, { name: string; lat: number; lng: number; osm_id: number }>();
+    const streets = new Map<string, { name: string; lat: number; lng: number; osm_id: number; area: string | null }>();
+    const businesses = new Map<string, { name: string; lat: number; lng: number; osm_id: number; area: string | null }>();
 
     for (const el of elements) {
       const name = el.tags?.name;
@@ -87,18 +138,20 @@ out center tags;
       const lat = el.lat ?? el.center?.lat ?? 0;
       const lng = el.lon ?? el.center?.lon ?? 0;
       const osmId = el.id;
+      const area = findArea(lat, lng);
 
       const isStreet = el.tags?.highway != null;
 
       if (isStreet) {
-        if (!streets.has(name.toLowerCase())) {
-          streets.set(name.toLowerCase(), { name, lat, lng, osm_id: osmId });
+        // For streets, keep per area so same street in different areas shows separately
+        const key = `${name.toLowerCase()}_${area?.toLowerCase() || '_'}`;
+        if (!streets.has(key)) {
+          streets.set(key, { name, lat, lng, osm_id: osmId, area });
         }
       } else {
-        // Business / POI
         const key = `${name.toLowerCase()}_${osmId}`;
         if (!businesses.has(key)) {
-          businesses.set(key, { name, lat, lng, osm_id: osmId });
+          businesses.set(key, { name, lat, lng, osm_id: osmId, area });
         }
       }
     }
@@ -114,10 +167,10 @@ out center tags;
     // Prepare rows
     const rows: any[] = [];
     for (const s of streets.values()) {
-      rows.push({ zone_id, poi_type: "street", name: s.name, lat: s.lat, lng: s.lng, osm_id: s.osm_id });
+      rows.push({ zone_id, poi_type: "street", name: s.name, lat: s.lat, lng: s.lng, osm_id: s.osm_id, area: s.area });
     }
     for (const b of businesses.values()) {
-      rows.push({ zone_id, poi_type: "business", name: b.name, lat: b.lat, lng: b.lng, osm_id: b.osm_id });
+      rows.push({ zone_id, poi_type: "business", name: b.name, lat: b.lat, lng: b.lng, osm_id: b.osm_id, area: b.area });
     }
 
     if (rows.length > 0) {

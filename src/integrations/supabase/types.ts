@@ -655,6 +655,7 @@ export type Database = {
       }
       zone_pois: {
         Row: {
+          area: string | null
           created_at: string
           id: string
           lat: number | null
@@ -665,6 +666,7 @@ export type Database = {
           zone_id: string
         }
         Insert: {
+          area?: string | null
           created_at?: string
           id?: string
           lat?: number | null
@@ -675,6 +677,7 @@ export type Database = {
           zone_id: string
         }
         Update: {
+          area?: string | null
           created_at?: string
           id?: string
           lat?: number | null
