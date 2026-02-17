@@ -22,8 +22,14 @@ public sealed class MapPanel : Panel
     public async Task InitializeAsync()
     {
         await _webView.EnsureCoreWebView2Async();
+        var tcs = new TaskCompletionSource();
+        _webView.NavigationCompleted += (_, _) =>
+        {
+            _mapReady = true;
+            tcs.TrySetResult();
+        };
         _webView.CoreWebView2.NavigateToString(GetMapHtml());
-        _webView.NavigationCompleted += (_, _) => _mapReady = true;
+        await tcs.Task;
     }
 
     public async Task UpdateDriverMarker(string driverId, double lat, double lng, string status, string name, string registration = "")
