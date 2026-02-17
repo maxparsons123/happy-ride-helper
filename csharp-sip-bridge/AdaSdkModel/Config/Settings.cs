@@ -18,6 +18,7 @@ public sealed class AppSettings
     public DispatchSettings Dispatch { get; set; } = new();
     public GoogleMapsSettings GoogleMaps { get; set; } = new();
     public SupabaseSettings Supabase { get; set; } = new();
+    public GeminiSettings Gemini { get; set; } = new();
     public SimliSettings Simli { get; set; } = new();
     public IcabbiSettings Icabbi { get; set; } = new();
 }
@@ -103,6 +104,19 @@ public sealed class DispatchSettings
 public sealed class GoogleMapsSettings
 {
     public string ApiKey { get; set; } = "";
+}
+
+/// <summary>
+/// Settings for direct Google Gemini API calls (address geocoding/fare).
+/// Each desktop instance uses its own API key — no shared gateway limits.
+/// </summary>
+public sealed class GeminiSettings
+{
+    public string ApiKey { get; set; } = "";
+    public string Model { get; set; } = "gemini-2.0-flash";
+
+    /// <summary>When true, use local Gemini for address-dispatch instead of the edge function.</summary>
+    public bool Enabled { get; set; } = false;
 }
 
 public sealed class SupabaseSettings

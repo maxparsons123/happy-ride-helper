@@ -5,13 +5,14 @@ using Microsoft.Extensions.Logging;
 namespace AdaSdkModel.Services;
 
 /// <summary>
-/// Fare calculator with Google Maps geocoding + address-dispatch edge function.
+/// Fare calculator with local Gemini (preferred) + edge function fallback + Nominatim geocoding.
 /// </summary>
 public sealed class FareCalculator : IFareCalculator
 {
     private readonly ILogger<FareCalculator> _logger;
     private readonly GoogleMapsSettings _googleSettings;
     private readonly SupabaseSettings _supabaseSettings;
+    private readonly GeminiAddressClient? _geminiClient;
     private readonly HttpClient _httpClient;
 
     private const decimal BaseFare = 3.50m;
@@ -22,11 +23,16 @@ public sealed class FareCalculator : IFareCalculator
 
     private string EdgeFunctionUrl => $"{_supabaseSettings.Url}/functions/v1/address-dispatch";
 
-    public FareCalculator(ILogger<FareCalculator> logger, GoogleMapsSettings googleSettings, SupabaseSettings supabaseSettings)
+    public FareCalculator(
+        ILogger<FareCalculator> logger,
+        GoogleMapsSettings googleSettings,
+        SupabaseSettings supabaseSettings,
+        GeminiAddressClient? geminiClient = null)
     {
         _logger = logger;
         _googleSettings = googleSettings;
         _supabaseSettings = supabaseSettings;
+        _geminiClient = geminiClient;
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkModel/1.0");
     }
@@ -36,6 +42,26 @@ public sealed class FareCalculator : IFareCalculator
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
 
+        // ── Try local Gemini first (if enabled) ──
+        if (_geminiClient != null)
+        {
+            try
+            {
+                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber);
+                if (geminiResult.HasValue)
+                {
+                    _logger.LogDebug("✅ Using local Gemini for address dispatch");
+                    return ParseEdgeResponse(geminiResult.Value, pickup, destination, phoneNumber);
+                }
+                _logger.LogDebug("⚠️ Local Gemini returned null — falling back to edge function");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Local Gemini error — falling back to edge function");
+            }
+        }
+
+        // ── Fall back to edge function ──
         try
         {
             var requestBody = JsonSerializer.Serialize(new { pickup = pickup ?? "", destination = destination ?? "", phone = phoneNumber ?? "" });
@@ -58,102 +84,108 @@ public sealed class FareCalculator : IFareCalculator
             if (root.TryGetProperty("error", out _))
                 return await CalculateAsync(pickup, destination, phoneNumber);
 
-            var result = new FareResult();
-            string? detectedArea = root.TryGetProperty("detected_area", out var areaEl) ? areaEl.GetString() : null;
-
-            // Parse pickup
-            double? pickupLat = null, pickupLon = null;
-            string? pickupStreet = null, pickupNumber = null, pickupPostal = null, pickupCity = null;
-            string resolvedPickup = pickup ?? "";
-
-            if (root.TryGetProperty("pickup", out var pickupEl))
-            {
-                if (pickupEl.TryGetProperty("address", out var addr)) resolvedPickup = addr.GetString() ?? pickup ?? "";
-                if (pickupEl.TryGetProperty("lat", out var lat) && lat.ValueKind == JsonValueKind.Number) pickupLat = lat.GetDouble();
-                if (pickupEl.TryGetProperty("lon", out var lon) && lon.ValueKind == JsonValueKind.Number) pickupLon = lon.GetDouble();
-                if (pickupEl.TryGetProperty("street_name", out var st)) pickupStreet = st.GetString();
-                if (pickupEl.TryGetProperty("street_number", out var num)) pickupNumber = num.GetString();
-                if (pickupEl.TryGetProperty("postal_code", out var pc)) pickupPostal = pc.GetString();
-                if (pickupEl.TryGetProperty("city", out var city)) pickupCity = city.GetString();
-                if (pickupEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
-                {
-                    result.NeedsClarification = true;
-                    if (pickupEl.TryGetProperty("alternatives", out var alts))
-                        result.PickupAlternatives = alts.EnumerateArray().Select(a => a.GetString() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToArray();
-                }
-            }
-
-            // Parse dropoff
-            double? destLat = null, destLon = null;
-            string? destStreet = null, destNumber = null, destPostal = null, destCity = null;
-            string resolvedDest = destination ?? "";
-
-            if (root.TryGetProperty("dropoff", out var dropoffEl))
-            {
-                if (dropoffEl.TryGetProperty("address", out var addr)) resolvedDest = addr.GetString() ?? destination ?? "";
-                if (dropoffEl.TryGetProperty("lat", out var lat) && lat.ValueKind == JsonValueKind.Number) destLat = lat.GetDouble();
-                if (dropoffEl.TryGetProperty("lon", out var lon) && lon.ValueKind == JsonValueKind.Number) destLon = lon.GetDouble();
-                if (dropoffEl.TryGetProperty("street_name", out var st)) destStreet = st.GetString();
-                if (dropoffEl.TryGetProperty("street_number", out var num)) destNumber = num.GetString();
-                if (dropoffEl.TryGetProperty("postal_code", out var pc)) destPostal = pc.GetString();
-                if (dropoffEl.TryGetProperty("city", out var city)) destCity = city.GetString();
-                if (dropoffEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
-                {
-                    result.NeedsClarification = true;
-                    if (dropoffEl.TryGetProperty("alternatives", out var alts))
-                        result.DestAlternatives = alts.EnumerateArray().Select(a => a.GetString() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToArray();
-                }
-            }
-
-            if (root.TryGetProperty("status", out var statusEl) && statusEl.GetString() == "clarification_needed")
-                result.NeedsClarification = true;
-            if (root.TryGetProperty("clarification_message", out var clarifEl) && clarifEl.ValueKind == JsonValueKind.String)
-                result.ClarificationMessage = clarifEl.GetString();
-
-            // Edge fare
-            string? edgeFare = null, edgeEta = null;
-            if (root.TryGetProperty("fare", out var fareEl) && fareEl.ValueKind == JsonValueKind.Object)
-            {
-                if (fareEl.TryGetProperty("fare", out var fv)) edgeFare = fv.GetString();
-                if (fareEl.TryGetProperty("eta", out var ev)) edgeEta = ev.GetString();
-            }
-
-            // Only calculate fare if disambiguation is NOT needed
-            if (!result.NeedsClarification && 
-                pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
-                pickupLat.Value != 0 && destLat.Value != 0)
-            {
-                if (!string.IsNullOrWhiteSpace(edgeFare))
-                {
-                    result.Fare = edgeFare;
-                    result.Eta = edgeEta ?? "10 minutes";
-                }
-                else
-                {
-                    var dist = HaversineDistance(pickupLat.Value, pickupLon.Value, destLat.Value, destLon.Value);
-                    var fare = Math.Max(MinFare, BaseFare + (decimal)dist * PerMile);
-                    fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2;
-                    result.Fare = $"£{fare:F2}";
-                    result.Eta = $"{(int)Math.Ceiling(dist / AvgSpeedMph * 60) + BufferMinutes} minutes";
-                }
-                result.PickupLat = pickupLat.Value; result.PickupLon = pickupLon.Value;
-                result.PickupStreet = pickupStreet; result.PickupNumber = pickupNumber;
-                result.PickupPostalCode = pickupPostal; result.PickupCity = pickupCity ?? detectedArea;
-                result.PickupFormatted = resolvedPickup;
-                result.DestLat = destLat.Value; result.DestLon = destLon.Value;
-                result.DestStreet = destStreet; result.DestNumber = destNumber;
-                result.DestPostalCode = destPostal; result.DestCity = destCity ?? detectedArea;
-                result.DestFormatted = resolvedDest;
-            }
-            return result;
-
-            return await CalculateAsync(pickup, destination, phoneNumber);
+            return ParseEdgeResponse(root, pickup, destination, phoneNumber);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Edge function error, falling back");
             return await CalculateAsync(pickup, destination, phoneNumber);
         }
+    }
+
+    /// <summary>
+    /// Parse the JSON response (from either local Gemini or edge function) into a FareResult.
+    /// </summary>
+    private FareResult ParseEdgeResponse(JsonElement root, string? pickup, string? destination, string? phoneNumber)
+    {
+        var result = new FareResult();
+        string? detectedArea = root.TryGetProperty("detected_area", out var areaEl) ? areaEl.GetString() : null;
+
+        // Parse pickup
+        double? pickupLat = null, pickupLon = null;
+        string? pickupStreet = null, pickupNumber = null, pickupPostal = null, pickupCity = null;
+        string resolvedPickup = pickup ?? "";
+
+        if (root.TryGetProperty("pickup", out var pickupEl))
+        {
+            if (pickupEl.TryGetProperty("address", out var addr)) resolvedPickup = addr.GetString() ?? pickup ?? "";
+            if (pickupEl.TryGetProperty("lat", out var lat) && lat.ValueKind == JsonValueKind.Number) pickupLat = lat.GetDouble();
+            if (pickupEl.TryGetProperty("lon", out var lon) && lon.ValueKind == JsonValueKind.Number) pickupLon = lon.GetDouble();
+            if (pickupEl.TryGetProperty("street_name", out var st)) pickupStreet = st.GetString();
+            if (pickupEl.TryGetProperty("street_number", out var num)) pickupNumber = num.GetString();
+            if (pickupEl.TryGetProperty("postal_code", out var pc)) pickupPostal = pc.GetString();
+            if (pickupEl.TryGetProperty("city", out var city)) pickupCity = city.GetString();
+            if (pickupEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
+            {
+                result.NeedsClarification = true;
+                if (pickupEl.TryGetProperty("alternatives", out var alts))
+                    result.PickupAlternatives = alts.EnumerateArray().Select(a => a.GetString() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToArray();
+            }
+        }
+
+        // Parse dropoff
+        double? destLat = null, destLon = null;
+        string? destStreet = null, destNumber = null, destPostal = null, destCity = null;
+        string resolvedDest = destination ?? "";
+
+        if (root.TryGetProperty("dropoff", out var dropoffEl))
+        {
+            if (dropoffEl.TryGetProperty("address", out var addr)) resolvedDest = addr.GetString() ?? destination ?? "";
+            if (dropoffEl.TryGetProperty("lat", out var lat) && lat.ValueKind == JsonValueKind.Number) destLat = lat.GetDouble();
+            if (dropoffEl.TryGetProperty("lon", out var lon) && lon.ValueKind == JsonValueKind.Number) destLon = lon.GetDouble();
+            if (dropoffEl.TryGetProperty("street_name", out var st)) destStreet = st.GetString();
+            if (dropoffEl.TryGetProperty("street_number", out var num)) destNumber = num.GetString();
+            if (dropoffEl.TryGetProperty("postal_code", out var pc)) destPostal = pc.GetString();
+            if (dropoffEl.TryGetProperty("city", out var city)) destCity = city.GetString();
+            if (dropoffEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
+            {
+                result.NeedsClarification = true;
+                if (dropoffEl.TryGetProperty("alternatives", out var alts))
+                    result.DestAlternatives = alts.EnumerateArray().Select(a => a.GetString() ?? "").Where(s => !string.IsNullOrEmpty(s)).ToArray();
+            }
+        }
+
+        if (root.TryGetProperty("status", out var statusEl) && statusEl.GetString() == "clarification_needed")
+            result.NeedsClarification = true;
+        if (root.TryGetProperty("clarification_message", out var clarifEl) && clarifEl.ValueKind == JsonValueKind.String)
+            result.ClarificationMessage = clarifEl.GetString();
+
+        // Edge fare (from either Gemini or edge function)
+        string? edgeFare = null, edgeEta = null;
+        if (root.TryGetProperty("fare", out var fareEl) && fareEl.ValueKind == JsonValueKind.Object)
+        {
+            if (fareEl.TryGetProperty("fare", out var fv)) edgeFare = fv.GetString();
+            if (fareEl.TryGetProperty("eta", out var ev)) edgeEta = ev.GetString();
+        }
+
+        // Only calculate fare if disambiguation is NOT needed
+        if (!result.NeedsClarification &&
+            pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
+            pickupLat.Value != 0 && destLat.Value != 0)
+        {
+            if (!string.IsNullOrWhiteSpace(edgeFare))
+            {
+                result.Fare = edgeFare;
+                result.Eta = edgeEta ?? "10 minutes";
+            }
+            else
+            {
+                var dist = HaversineDistance(pickupLat.Value, pickupLon.Value, destLat.Value, destLon.Value);
+                var fare = Math.Max(MinFare, BaseFare + (decimal)dist * PerMile);
+                fare = Math.Round(fare * 2, MidpointRounding.AwayFromZero) / 2;
+                result.Fare = $"£{fare:F2}";
+                result.Eta = $"{(int)Math.Ceiling(dist / AvgSpeedMph * 60) + BufferMinutes} minutes";
+            }
+            result.PickupLat = pickupLat.Value; result.PickupLon = pickupLon.Value;
+            result.PickupStreet = pickupStreet; result.PickupNumber = pickupNumber;
+            result.PickupPostalCode = pickupPostal; result.PickupCity = pickupCity ?? detectedArea;
+            result.PickupFormatted = resolvedPickup;
+            result.DestLat = destLat.Value; result.DestLon = destLon.Value;
+            result.DestStreet = destStreet; result.DestNumber = destNumber;
+            result.DestPostalCode = destPostal; result.DestCity = destCity ?? detectedArea;
+            result.DestFormatted = resolvedDest;
+        }
+        return result;
     }
 
     public async Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber)
