@@ -1,0 +1,1 @@
+ALTER TABLE public.zone_pois ADD COLUMN area TEXT;

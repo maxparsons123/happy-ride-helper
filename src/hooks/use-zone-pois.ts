@@ -8,6 +8,7 @@ export interface ZonePoi {
   zone_id: string;
   poi_type: 'street' | 'business';
   name: string;
+  area: string | null;
   lat: number | null;
   lng: number | null;
   osm_id: number | null;

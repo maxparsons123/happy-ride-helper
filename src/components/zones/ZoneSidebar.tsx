@@ -189,6 +189,11 @@ export function ZoneSidebar({
                       <Building2 className="w-3 h-3 text-muted-foreground flex-shrink-0" />
                     )}
                     <span className="truncate">{poi.name}</span>
+                    {poi.area && (
+                      <span className="text-muted-foreground ml-auto flex-shrink-0 text-[10px]">
+                        {poi.area}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
