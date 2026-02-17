@@ -33,7 +33,7 @@ public sealed class FareCalculator : IFareCalculator
         _googleSettings = googleSettings;
         _supabaseSettings = supabaseSettings;
         _geminiClient = geminiClient;
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkModel/1.0");
     }
 
