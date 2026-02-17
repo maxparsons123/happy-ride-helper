@@ -837,11 +837,17 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
       (pickupInputStreet && pickupResolvedStreet && !pickupResolvedStreet.includes(pickupInputStreet) && !pickupInputStreet.includes(pickupResolvedStreet))
     );
     
-    const needsSanityCheck = (
-      parsed.status === "clarification_needed" && 
-      (!parsed.pickup?.alternatives?.length && !parsed.dropoff?.alternatives?.length)
-    ) || (distMilesPost !== null && distMilesPost > 50)
-      || hasStreetNameMismatch;
+    // Skip sanity guard if destination is a city-level location (no street, just a city name)
+    // Cities like "Manchester" are unambiguous and don't need a second Gemini verification pass
+    const dropoffIsCityLevel = parsed.dropoff?.street_name && !parsed.dropoff?.street_number &&
+      parsed.dropoff.street_name.toLowerCase() === (destination || "").trim().toLowerCase();
+    
+    const needsSanityCheck = !dropoffIsCityLevel && (
+      (parsed.status === "clarification_needed" && 
+      (!parsed.pickup?.alternatives?.length && !parsed.dropoff?.alternatives?.length))
+      || (distMilesPost !== null && distMilesPost > 50)
+      || hasStreetNameMismatch
+    );
 
     if (needsSanityCheck && LOVABLE_API_KEY) {
       console.log(`🛡️ SANITY GUARD: triggering (dist=${distMilesPost?.toFixed(1) || 'N/A'} miles, status=${parsed.status})`);
