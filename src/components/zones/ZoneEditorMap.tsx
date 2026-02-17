@@ -132,6 +132,12 @@ export function ZoneEditorMap({
       );
       polygon.setLatLngs(latlngs);
 
+      // Update label position
+      const newCenter = polygon.getBounds().getCenter();
+      polygon.closeTooltip();
+      polygon.setTooltipContent(polygon.getTooltip()?.getContent() as string);
+      polygon.openTooltip(newCenter);
+
       // Move vertex markers too
       vertexMarkersRef.current.forEach(m => {
         const pos = m.getLatLng();
