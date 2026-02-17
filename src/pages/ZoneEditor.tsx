@@ -96,7 +96,13 @@ export default function ZoneEditor() {
   };
 
   // Combine saved zones with pending drawn zone for preview
-  const displayZones = [...zones];
+  // For the zone being edited, use editingZone.points so drag changes persist visually
+  const displayZones = zones.map(z => {
+    if (editingZone && editingZone.id === z.id && editingZone.points) {
+      return { ...z, points: editingZone.points };
+    }
+    return z;
+  });
   if (pendingPoints && editingZone && !editingZone.id) {
     displayZones.push({
       id: '__pending__',

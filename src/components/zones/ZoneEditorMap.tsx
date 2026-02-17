@@ -94,7 +94,7 @@ export function ZoneEditorMap({
     });
   }, [zones, selectedZoneId, onZoneSelect]);
 
-  // Show vertex markers for selected zone (edit mode, not drawing)
+  // Show vertex markers + enable polygon dragging for selected zone (edit mode, not drawing)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -108,6 +108,58 @@ export function ZoneEditorMap({
     const zone = zones.find(z => z.id === selectedZoneId);
     if (!zone || zone.points.length < 3) return;
 
+    // --- Whole polygon drag ---
+    const polygon = layersRef.current.get(selectedZoneId);
+    let polyDragging = false;
+    let dragStart: L.LatLng | null = null;
+
+    const onPolyMouseDown = (e: L.LeafletMouseEvent) => {
+      L.DomEvent.stopPropagation(e);
+      polyDragging = true;
+      dragStart = e.latlng;
+      map.dragging.disable();
+      map.getContainer().style.cursor = 'move';
+    };
+
+    const onMapMouseMove = (e: L.LeafletMouseEvent) => {
+      if (!polyDragging || !dragStart || !polygon) return;
+      const dlat = e.latlng.lat - dragStart.lat;
+      const dlng = e.latlng.lng - dragStart.lng;
+      dragStart = e.latlng;
+
+      const latlngs = (polygon.getLatLngs()[0] as L.LatLng[]).map(
+        ll => L.latLng(ll.lat + dlat, ll.lng + dlng)
+      );
+      polygon.setLatLngs(latlngs);
+
+      // Move vertex markers too
+      vertexMarkersRef.current.forEach(m => {
+        const pos = m.getLatLng();
+        m.setLatLng(L.latLng(pos.lat + dlat, pos.lng + dlng));
+      });
+    };
+
+    const onMapMouseUp = () => {
+      if (!polyDragging) return;
+      polyDragging = false;
+      dragStart = null;
+      map.dragging.enable();
+      map.getContainer().style.cursor = '';
+
+      if (onPointsUpdated && polygon) {
+        const latlngs = polygon.getLatLngs()[0] as L.LatLng[];
+        const newPoints = latlngs.map(ll => ({ lat: ll.lat, lng: ll.lng }));
+        onPointsUpdated(selectedZoneId, newPoints);
+      }
+    };
+
+    if (polygon) {
+      polygon.on('mousedown', onPolyMouseDown);
+    }
+    map.on('mousemove', onMapMouseMove);
+    map.on('mouseup', onMapMouseUp);
+
+    // --- Vertex markers ---
     zone.points.forEach((pt, idx) => {
       const marker = L.circleMarker([pt.lat, pt.lng], {
         radius: 7,
@@ -117,7 +169,6 @@ export function ZoneEditorMap({
         weight: 2,
       }).addTo(map);
 
-      // Make draggable via mousedown
       const el = marker.getElement() as HTMLElement | undefined;
       if (el) {
         el.style.cursor = 'grab';
@@ -128,7 +179,6 @@ export function ZoneEditorMap({
           const pt = map.containerPointToLatLng(L.point(e.clientX - map.getContainer().getBoundingClientRect().left, e.clientY - map.getContainer().getBoundingClientRect().top));
           marker.setLatLng(pt);
 
-          // Update polygon live
           const polygon = layersRef.current.get(selectedZoneId);
           if (polygon) {
             const latlngs = polygon.getLatLngs()[0] as L.LatLng[];
@@ -147,7 +197,6 @@ export function ZoneEditorMap({
           document.removeEventListener('mouseup', onMouseUp);
           el.style.cursor = 'grab';
 
-          // Notify parent of updated points
           if (onPointsUpdated) {
             const polygon = layersRef.current.get(selectedZoneId);
             if (polygon) {
@@ -170,6 +219,14 @@ export function ZoneEditorMap({
 
       vertexMarkersRef.current.push(marker);
     });
+
+    return () => {
+      if (polygon) {
+        polygon.off('mousedown', onPolyMouseDown);
+      }
+      map.off('mousemove', onMapMouseMove);
+      map.off('mouseup', onMapMouseUp);
+    };
   }, [zones, selectedZoneId, drawingMode, onPointsUpdated]);
 
   // Drawing mode
