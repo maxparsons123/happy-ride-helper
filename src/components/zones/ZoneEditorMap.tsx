@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import type { ZonePoint, DispatchZone } from '@/hooks/use-dispatch-zones';
+import type { LiveBookingMarker } from '@/hooks/use-live-bookings';
 
 interface ZoneEditorMapProps {
   zones: DispatchZone[];
@@ -10,6 +11,7 @@ interface ZoneEditorMapProps {
   onDrawComplete: (points: ZonePoint[]) => void;
   onZoneSelect: (id: string) => void;
   onPointsUpdated?: (zoneId: string, points: ZonePoint[]) => void;
+  liveBookings?: LiveBookingMarker[];
 }
 
 const ZONE_COLORS = [
@@ -29,10 +31,12 @@ export function ZoneEditorMap({
   onDrawComplete,
   onZoneSelect,
   onPointsUpdated,
+  liveBookings = [],
 }: ZoneEditorMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layersRef = useRef<Map<string, L.Polygon>>(new Map());
+  const bookingMarkersRef = useRef<Map<string, L.Marker>>(new Map());
   const drawPointsRef = useRef<ZonePoint[]>([]);
   const drawMarkersRef = useRef<L.CircleMarker[]>([]);
   const drawLineRef = useRef<L.Polyline | null>(null);
@@ -230,6 +234,78 @@ export function ZoneEditorMap({
     };
   }, [drawingMode, onDrawComplete]);
 
+  // Render live booking markers
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    // Remove stale markers
+    const currentIds = new Set(liveBookings.map(b => b.id));
+    bookingMarkersRef.current.forEach((marker, id) => {
+      if (!currentIds.has(id)) {
+        map.removeLayer(marker);
+        bookingMarkersRef.current.delete(id);
+      }
+    });
+
+    // Add/update markers
+    liveBookings.forEach(booking => {
+      const existing = bookingMarkersRef.current.get(booking.id);
+      if (existing) {
+        existing.setLatLng([booking.lat, booking.lng]);
+        return;
+      }
+
+      const passengerIcon = L.divIcon({
+        html: `<div style="
+          background: #f39c12;
+          border: 2px solid #fff;
+          border-radius: 50%;
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: bold;
+          font-size: 14px;
+          color: #fff;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+          animation: pulse-ring 1.5s ease-out infinite;
+        "><span>👤</span><span style="
+          position: absolute;
+          top: -4px;
+          right: -4px;
+          background: #e74c3c;
+          color: white;
+          font-size: 10px;
+          font-weight: bold;
+          width: 16px;
+          height: 16px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        ">${booking.passengers}</span></div>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+        className: '',
+      });
+
+      const marker = L.marker([booking.lat, booking.lng], { icon: passengerIcon })
+        .addTo(map)
+        .bindPopup(`
+          <div style="min-width:160px">
+            <strong>${booking.caller_name || 'Passenger'}</strong><br/>
+            <small>📍 ${booking.pickup || 'Unknown'}</small><br/>
+            <small>🎯 ${booking.destination || 'Unknown'}</small><br/>
+            <small>👥 ${booking.passengers} pax</small>
+          </div>
+        `);
+
+      bookingMarkersRef.current.set(booking.id, marker);
+    });
+  }, [liveBookings]);
+
   return (
     <div className="relative w-full h-full">
       <div ref={containerRef} className="absolute inset-0" />
@@ -250,6 +326,11 @@ export function ZoneEditorMap({
           box-shadow: none !important;
         }
         .zone-label::before { display: none !important; }
+        @keyframes pulse-ring {
+          0% { box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.5); }
+          70% { box-shadow: 0 0 0 12px rgba(243, 156, 18, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(243, 156, 18, 0); }
+        }
       `}</style>
     </div>
   );
