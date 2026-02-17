@@ -416,6 +416,19 @@ public class MainForm : Form
             await _mqtt.ConnectAsync();
             await _map.InitializeAsync();
 
+            // Load dispatch zones from Supabase onto the map
+            try
+            {
+                const string supabaseUrl = "https://oerketnvlmptpfvttysy.supabase.co";
+                const string supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
+                await _map.LoadZonesFromSupabaseAsync(supabaseUrl, supabaseAnonKey);
+                _logPanel.AppendLog("🗺️ Dispatch zones loaded", Color.LightGreen);
+            }
+            catch (Exception zoneEx)
+            {
+                _logPanel.AppendLog($"⚠ Zone load failed: {zoneEx.Message}", Color.Orange);
+            }
+
             _btnConnect.Enabled = false;
             _btnDisconnect.Enabled = true;
             _lblStatus.Text = "● Connected";
