@@ -31,7 +31,8 @@ import {
   Download,
   RefreshCw,
   Building2,
-  Plus
+  Plus,
+  Trash2
 } from "lucide-react";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import {
@@ -180,6 +181,17 @@ export default function Billing() {
     return sum;
   }, 0);
 
+  // Row color based on booking age: green < 5min, amber 5-15min, red > 15min
+  const getRowAgeClass = (bookedAt: string, status: string) => {
+    if (status === "cancelled") return "bg-red-500/5";
+    if (status === "completed") return "";
+    const ageMs = Date.now() - new Date(bookedAt).getTime();
+    const ageMin = ageMs / 60000;
+    if (ageMin < 5) return "bg-green-500/10 border-l-2 border-l-green-500";
+    if (ageMin < 15) return "bg-amber-500/10 border-l-2 border-l-amber-500";
+    return "bg-red-500/10 border-l-2 border-l-red-500";
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "completed":
@@ -190,6 +202,16 @@ export default function Billing() {
         return <Badge className="bg-red-500/20 text-red-400 border-red-500/30">Cancelled</Badge>;
       default:
         return <Badge variant="outline">{status}</Badge>;
+    }
+  };
+
+  const deleteBooking = async (id: string) => {
+    const { error } = await supabase.from("bookings").delete().eq("id", id);
+    if (error) {
+      toast.error("Failed to delete booking");
+    } else {
+      setBookings(prev => prev.filter(b => b.id !== id));
+      toast.success("Booking deleted");
     }
   };
 
@@ -465,24 +487,25 @@ export default function Billing() {
                 </TableHead>
                 <TableHead className="text-muted-foreground">Fare</TableHead>
                 <TableHead className="text-muted-foreground">Status</TableHead>
+                <TableHead className="text-muted-foreground w-10"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                     Loading...
                   </TableCell>
                 </TableRow>
               ) : filteredBookings.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                     No bookings found
                   </TableCell>
                 </TableRow>
               ) : (
                 filteredBookings.map((booking) => (
-                  <TableRow key={booking.id} className="border-border hover:bg-muted/30">
+                  <TableRow key={booking.id} className={`border-border hover:bg-muted/30 ${getRowAgeClass(booking.booked_at, booking.status)}`}>
                     <TableCell className="whitespace-nowrap">
                       <div className="text-sm">{format(new Date(booking.booked_at), "MMM d, yyyy")}</div>
                       <div className="text-xs text-muted-foreground">
@@ -512,6 +535,16 @@ export default function Billing() {
                       </span>
                     </TableCell>
                     <TableCell>{getStatusBadge(booking.status)}</TableCell>
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        onClick={() => deleteBooking(booking.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))
               )}
