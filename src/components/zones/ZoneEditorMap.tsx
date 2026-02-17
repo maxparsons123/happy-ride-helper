@@ -7,6 +7,7 @@ import type { LiveBookingMarker } from '@/hooks/use-live-bookings';
 interface ZoneEditorMapProps {
   zones: DispatchZone[];
   selectedZoneId: string | null;
+  isEditing: boolean;
   drawingMode: boolean;
   onDrawComplete: (points: ZonePoint[]) => void;
   onZoneSelect: (id: string) => void;
@@ -27,6 +28,7 @@ function getZoneColor(index: number, hex?: string) {
 export function ZoneEditorMap({
   zones,
   selectedZoneId,
+  isEditing,
   drawingMode,
   onDrawComplete,
   onZoneSelect,
@@ -103,7 +105,7 @@ export function ZoneEditorMap({
     vertexMarkersRef.current.forEach(m => map.removeLayer(m));
     vertexMarkersRef.current = [];
 
-    if (drawingMode || !selectedZoneId) return;
+    if (drawingMode || !selectedZoneId || !isEditing) return;
 
     const zone = zones.find(z => z.id === selectedZoneId);
     if (!zone || zone.points.length < 3) return;
@@ -233,7 +235,7 @@ export function ZoneEditorMap({
       map.off('mousemove', onMapMouseMove);
       map.off('mouseup', onMapMouseUp);
     };
-  }, [zones, selectedZoneId, drawingMode, onPointsUpdated]);
+  }, [zones, selectedZoneId, isEditing, drawingMode, onPointsUpdated]);
 
   // Drawing mode
   useEffect(() => {

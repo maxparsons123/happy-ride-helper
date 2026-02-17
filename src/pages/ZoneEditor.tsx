@@ -150,6 +150,7 @@ export default function ZoneEditor() {
         <ZoneEditorMap
           zones={displayZones}
           selectedZoneId={selectedZoneId || (pendingPoints ? '__pending__' : null)}
+          isEditing={!!editingZone}
           drawingMode={drawingMode}
           onDrawComplete={handleDrawComplete}
           onZoneSelect={(id) => {
