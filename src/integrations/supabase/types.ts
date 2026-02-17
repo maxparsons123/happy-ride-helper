@@ -369,28 +369,49 @@ export type Database = {
       }
       companies: {
         Row: {
+          address: string | null
+          api_endpoint: string | null
+          api_key: string | null
+          contact_email: string | null
+          contact_name: string | null
+          contact_phone: string | null
           created_at: string
           id: string
           is_active: boolean
           name: string
+          opening_hours: Json | null
           slug: string
           updated_at: string
           webhook_url: string | null
         }
         Insert: {
+          address?: string | null
+          api_endpoint?: string | null
+          api_key?: string | null
+          contact_email?: string | null
+          contact_name?: string | null
+          contact_phone?: string | null
           created_at?: string
           id?: string
           is_active?: boolean
           name: string
+          opening_hours?: Json | null
           slug: string
           updated_at?: string
           webhook_url?: string | null
         }
         Update: {
+          address?: string | null
+          api_endpoint?: string | null
+          api_key?: string | null
+          contact_email?: string | null
+          contact_name?: string | null
+          contact_phone?: string | null
           created_at?: string
           id?: string
           is_active?: boolean
           name?: string
+          opening_hours?: Json | null
           slug?: string
           updated_at?: string
           webhook_url?: string | null

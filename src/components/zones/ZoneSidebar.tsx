@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Trash2, Plus, Pencil, Save, X, MapPin, Search, Building2, Route, Loader2 } from 'lucide-react';
 import type { DispatchZone, ZonePoint } from '@/hooks/use-dispatch-zones';
 import { useZonePois, useFetchZonePois } from '@/hooks/use-zone-pois';
+import { CompanyModal } from './CompanyModal';
 
 interface Company {
   id: string;
@@ -38,6 +39,7 @@ export function ZoneSidebar({
   const fetchPois = useFetchZonePois();
   const [poiFilter, setPoiFilter] = useState('');
   const [poiTab, setPoiTab] = useState<'streets' | 'businesses'>('streets');
+  const [companyModalOpen, setCompanyModalOpen] = useState(false);
 
   const streets = pois.filter(p => p.poi_type === 'street');
   const businesses = pois.filter(p => p.poi_type === 'business');
@@ -233,20 +235,25 @@ export function ZoneSidebar({
 
           <div>
             <Label className="text-xs">Company</Label>
-            <Select
-              value={editingZone.company_id || 'none'}
-              onValueChange={v => onEditChange({ company_id: v === 'none' ? null : v })}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">No company</SelectItem>
-                {companies.map(c => (
-                  <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex gap-1">
+              <Select
+                value={editingZone.company_id || 'none'}
+                onValueChange={v => onEditChange({ company_id: v === 'none' ? null : v })}
+              >
+                <SelectTrigger className="h-8 text-sm flex-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No company</SelectItem>
+                  {companies.map(c => (
+                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button variant="outline" size="icon" className="h-8 w-8 flex-shrink-0" onClick={() => setCompanyModalOpen(true)}>
+                <Plus className="w-3.5 h-3.5" />
+              </Button>
+            </div>
           </div>
 
           <div>
@@ -291,6 +298,7 @@ export function ZoneSidebar({
           </div>
         </div>
       )}
+      <CompanyModal open={companyModalOpen} onOpenChange={setCompanyModalOpen} />
     </div>
   );
 }
