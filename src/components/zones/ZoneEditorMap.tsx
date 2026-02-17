@@ -256,9 +256,16 @@ export function ZoneEditorMap({
         return;
       }
 
+      // Color based on age: green < 5min, amber 5-15min, red > 15min
+      const ageMs = Date.now() - new Date(booking.created_at).getTime();
+      const ageMin = ageMs / 60000;
+      const bgColor = ageMin < 5 ? '#2ecc71' : ageMin < 15 ? '#f39c12' : '#e74c3c';
+      const pulseColor = ageMin < 5 ? 'rgba(46,204,113,0.5)' : ageMin < 15 ? 'rgba(243,156,18,0.5)' : 'rgba(231,76,60,0.5)';
+      const animName = ageMin < 5 ? 'pulse-green' : ageMin < 15 ? 'pulse-amber' : 'pulse-red';
+
       const passengerIcon = L.divIcon({
         html: `<div style="
-          background: #f39c12;
+          background: ${bgColor};
           border: 2px solid #fff;
           border-radius: 50%;
           width: 32px;
@@ -270,12 +277,12 @@ export function ZoneEditorMap({
           font-size: 14px;
           color: #fff;
           box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-          animation: pulse-ring 1.5s ease-out infinite;
+          animation: ${animName} 1.5s ease-out infinite;
         "><span>👤</span><span style="
           position: absolute;
           top: -4px;
           right: -4px;
-          background: #e74c3c;
+          background: #222;
           color: white;
           font-size: 10px;
           font-weight: bold;
@@ -326,10 +333,20 @@ export function ZoneEditorMap({
           box-shadow: none !important;
         }
         .zone-label::before { display: none !important; }
-        @keyframes pulse-ring {
-          0% { box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.5); }
-          70% { box-shadow: 0 0 0 12px rgba(243, 156, 18, 0); }
-          100% { box-shadow: 0 0 0 0 rgba(243, 156, 18, 0); }
+        @keyframes pulse-green {
+          0% { box-shadow: 0 0 0 0 rgba(46,204,113,0.5); }
+          70% { box-shadow: 0 0 0 12px rgba(46,204,113,0); }
+          100% { box-shadow: 0 0 0 0 rgba(46,204,113,0); }
+        }
+        @keyframes pulse-amber {
+          0% { box-shadow: 0 0 0 0 rgba(243,156,18,0.5); }
+          70% { box-shadow: 0 0 0 12px rgba(243,156,18,0); }
+          100% { box-shadow: 0 0 0 0 rgba(243,156,18,0); }
+        }
+        @keyframes pulse-red {
+          0% { box-shadow: 0 0 0 0 rgba(231,76,60,0.5); }
+          70% { box-shadow: 0 0 0 12px rgba(231,76,60,0); }
+          100% { box-shadow: 0 0 0 0 rgba(231,76,60,0); }
         }
       `}</style>
     </div>
