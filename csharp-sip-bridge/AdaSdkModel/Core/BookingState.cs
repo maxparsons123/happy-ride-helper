@@ -18,6 +18,10 @@ public sealed class BookingState
     public bool Confirmed { get; set; }
     public string? BookingRef { get; set; }
     public string VehicleType { get; set; } = "Saloon";
+    public string? SpecialInstructions { get; set; }
+
+    /// <summary>Fare as decimal for iCabbi payment payload.</summary>
+    public decimal FareDecimal => decimal.TryParse(Fare?.Replace("£", "").Trim(), out var v) ? v : 0m;
 
     public static string RecommendVehicle(int passengers) => passengers switch
     {
