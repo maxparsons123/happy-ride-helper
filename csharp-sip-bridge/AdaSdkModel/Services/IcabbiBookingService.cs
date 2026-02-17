@@ -81,7 +81,7 @@ public sealed class IcabbiBookingService : IDisposable
             Log("📝 Creating iCabbi booking...");
 
             var phone = FormatE164(booking.CallerPhone);
-            var seats = booking.Passengers > 0 ? booking.Passengers : 1;
+            var seats = (booking.Passengers ?? 1) > 0 ? (booking.Passengers ?? 1) : 1;
             var vehicleType = seats <= 4 ? "R4" : seats <= 6 ? "R6" : "R7";
 
             var payload = new IcabbiBookingRequest
