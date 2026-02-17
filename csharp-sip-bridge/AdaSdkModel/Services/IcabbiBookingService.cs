@@ -89,7 +89,7 @@ public sealed class IcabbiBookingService : IDisposable
             // ── Build payload exactly like WinForms ICabbiApiClient ──
             var icabbiBooking = new IcabbiBookingRequest
             {
-                date = DateTime.UtcNow.AddMinutes(1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                date = DateTime.UtcNow.AddMinutes(1),
                 name = booking.Name ?? "Customer",
                 phone = phone,
                 extras = "WHATSAPP",
@@ -405,9 +405,9 @@ public sealed class IcabbiBookingService : IDisposable
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        WriteIndented = false
+        WriteIndented = true
     };
 
     public void Dispose() => _client?.Dispose();
@@ -460,7 +460,7 @@ public class IcabbiBookingRequest
     public string source { get; set; } = "APP";
     public string source_partner { get; set; } = "";
     public string source_version { get; set; } = "";
-    public string date { get; set; } = "";
+    public DateTime date { get; set; }
     public string name { get; set; } = "";
     public string phone { get; set; } = "";
     public string flight_number { get; set; } = "";
@@ -475,7 +475,7 @@ public class IcabbiBookingRequest
     public string instructions { get; set; } = "No special instructions";
     public string notes { get; set; } = "";
     public string id { get; set; } = "";
-    public int site_id { get; set; } = 71;
+    public int site_id { get; set; } = 14;
     public string status { get; set; } = "NEW";
     public string extras { get; set; } = "";
     public string language { get; set; } = "en-GB";
