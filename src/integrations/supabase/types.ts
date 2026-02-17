@@ -143,6 +143,8 @@ export type Database = {
           company_id: string | null
           completed_at: string | null
           created_at: string
+          dest_lat: number | null
+          dest_lng: number | null
           destination: string
           destination_name: string | null
           eta: string | null
@@ -150,6 +152,8 @@ export type Database = {
           id: string
           passengers: number
           pickup: string
+          pickup_lat: number | null
+          pickup_lng: number | null
           pickup_name: string | null
           scheduled_for: string | null
           status: string
@@ -166,6 +170,8 @@ export type Database = {
           company_id?: string | null
           completed_at?: string | null
           created_at?: string
+          dest_lat?: number | null
+          dest_lng?: number | null
           destination: string
           destination_name?: string | null
           eta?: string | null
@@ -173,6 +179,8 @@ export type Database = {
           id?: string
           passengers?: number
           pickup: string
+          pickup_lat?: number | null
+          pickup_lng?: number | null
           pickup_name?: string | null
           scheduled_for?: string | null
           status?: string
@@ -189,6 +197,8 @@ export type Database = {
           company_id?: string | null
           completed_at?: string | null
           created_at?: string
+          dest_lat?: number | null
+          dest_lng?: number | null
           destination?: string
           destination_name?: string | null
           eta?: string | null
@@ -196,6 +206,8 @@ export type Database = {
           id?: string
           passengers?: number
           pickup?: string
+          pickup_lat?: number | null
+          pickup_lng?: number | null
           pickup_name?: string | null
           scheduled_for?: string | null
           status?: string

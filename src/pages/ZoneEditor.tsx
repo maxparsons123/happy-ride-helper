@@ -3,6 +3,7 @@ import { useDispatchZones, useCompanies, useSaveZone, useDeleteZone } from '@/ho
 import type { DispatchZone, ZonePoint } from '@/hooks/use-dispatch-zones';
 import { ZoneEditorMap } from '@/components/zones/ZoneEditorMap';
 import { ZoneSidebar } from '@/components/zones/ZoneSidebar';
+import { useLiveBookings } from '@/hooks/use-live-bookings';
 import { toast } from 'sonner';
 
 export default function ZoneEditor() {
@@ -10,6 +11,7 @@ export default function ZoneEditor() {
   const { data: companies = [] } = useCompanies();
   const saveZone = useSaveZone();
   const deleteZone = useDeleteZone();
+  const liveBookings = useLiveBookings();
 
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [drawingMode, setDrawingMode] = useState(false);
@@ -149,6 +151,7 @@ export default function ZoneEditor() {
             handleSelectZone(id);
           }}
           onPointsUpdated={handlePointsUpdated}
+          liveBookings={liveBookings}
         />
       </div>
     </div>
