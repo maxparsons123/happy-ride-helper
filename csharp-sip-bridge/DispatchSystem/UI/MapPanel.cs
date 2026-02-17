@@ -1,3 +1,5 @@
+using System.Net.Http.Headers;
+using System.Text.Json;
 using Microsoft.Web.WebView2.WinForms;
 using DispatchSystem.Data;
 
@@ -102,6 +104,66 @@ public sealed class MapPanel : Panel
     }
 
     /// <summary>
+    /// Load dispatch zones from Supabase and render them as polygons on the map.
+    /// </summary>
+    public async Task LoadZonesFromSupabaseAsync(string supabaseUrl, string supabaseAnonKey)
+    {
+        if (!_mapReady) return;
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            http.DefaultRequestHeaders.Add("apikey", supabaseAnonKey);
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", supabaseAnonKey);
+
+            var response = await http.GetAsync($"{supabaseUrl}/rest/v1/dispatch_zones?is_active=eq.true&select=zone_name,color_hex,points,priority");
+            if (!response.IsSuccessStatusCode) return;
+
+            var json = await response.Content.ReadAsStringAsync();
+            var zones = JsonSerializer.Deserialize<JsonElement>(json);
+
+            if (InvokeRequired)
+            {
+                await InvokeAsync(() => PushZonesToMap(zones));
+            }
+            else
+            {
+                await PushZonesToMap(zones);
+            }
+        }
+        catch { /* Non-fatal — zones just won't show */ }
+    }
+
+    private async Task PushZonesToMap(JsonElement zones)
+    {
+        // Clear existing zones first
+        await _webView.ExecuteScriptAsync("clearZones()");
+
+        foreach (var zone in zones.EnumerateArray())
+        {
+            var name = zone.GetProperty("zone_name").GetString() ?? "";
+            var color = zone.GetProperty("color_hex").GetString() ?? "#FF000055";
+            var points = zone.GetProperty("points");
+            var priority = zone.TryGetProperty("priority", out var p) ? p.GetInt32() : 0;
+
+            // Build JS array of [lat, lng] pairs
+            var coords = new System.Text.StringBuilder("[");
+            var first = true;
+            foreach (var pt in points.EnumerateArray())
+            {
+                if (!first) coords.Append(',');
+                var lat = pt.GetProperty("lat").GetDouble().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var lng = pt.GetProperty("lng").GetDouble().ToString(System.Globalization.CultureInfo.InvariantCulture);
+                coords.Append($"[{lat},{lng}]");
+                first = false;
+            }
+            coords.Append(']');
+
+            await _webView.ExecuteScriptAsync(
+                $"drawZone('{Esc(name)}', {coords}, '{Esc(color)}', {priority})");
+        }
+    }
+
+    /// <summary>
     /// Marshal an async Task back to the UI thread and await it.
     /// </summary>
     private Task InvokeAsync(Func<Task> action)
@@ -132,6 +194,17 @@ public sealed class MapPanel : Panel
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         html,body,#map { margin:0; padding:0; width:100%; height:100%; }
+        .zone-label {
+            background: rgba(0,0,0,0.6) !important;
+            border: none !important;
+            color: #fff !important;
+            font-size: 11px !important;
+            font-weight: bold !important;
+            padding: 2px 6px !important;
+            border-radius: 4px !important;
+            box-shadow: none !important;
+        }
+        .zone-label::before { display: none !important; }
     </style>
     </head><body>
     <div id="map"></div>
@@ -145,6 +218,7 @@ public sealed class MapPanel : Panel
         const jobs = {};
         const jobTimes = {};
         const lines = {};
+        const zones = [];
 
         function driverIcon(color) {
             return L.divIcon({
@@ -212,11 +286,42 @@ public sealed class MapPanel : Panel
             }).addTo(map);
         }
 
+        function clearZones() {
+            zones.forEach(z => map.removeLayer(z));
+            zones.length = 0;
+        }
+
+        function drawZone(name, coords, color, priority) {
+            // Parse hex color, support #RRGGBBAA or #RRGGBB
+            let fillColor = color;
+            let fillOpacity = 0.25;
+            if (color.length === 9) {
+                fillColor = color.substring(0, 7);
+                fillOpacity = parseInt(color.substring(7, 9), 16) / 255;
+            }
+            const poly = L.polygon(coords, {
+                color: fillColor,
+                weight: 2,
+                fillColor: fillColor,
+                fillOpacity: fillOpacity,
+                dashArray: '6,4'
+            }).addTo(map);
+            poly.bindTooltip(name, {
+                permanent: true,
+                direction: 'center',
+                className: 'zone-label'
+            });
+            zones.push(poly);
+        }
+
         // Auto-fit map to show all markers whenever one is added/updated
         function fitAll() {
             const allLatLngs = [];
             for (const id in drivers) allLatLngs.push(drivers[id].getLatLng());
             for (const id in jobs) allLatLngs.push(jobs[id].getLatLng());
+            zones.forEach(z => {
+                z.getLatLngs()[0].forEach(ll => allLatLngs.push(ll));
+            });
             if (allLatLngs.length > 0) {
                 map.fitBounds(L.latLngBounds(allLatLngs).pad(0.1));
             }
