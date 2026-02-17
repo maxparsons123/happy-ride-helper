@@ -267,25 +267,35 @@ public sealed class CallSession : ICallSession
             return;
 
         _logger.LogInformation("[{SessionId}] Starting G.711 session for {CallerId}", SessionId, CallerId);
+
+        // Load caller history BEFORE connecting so Ada knows the caller's name from the start
+        string? callerHistory = null;
+        try
+        {
+            callerHistory = await LoadCallerHistoryAsync(CallerId);
+            if (callerHistory != null)
+                _logger.LogInformation("[{SessionId}] 📋 Caller history loaded for {CallerId}: name={Name}", SessionId, CallerId, _booking.Name ?? "(none)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed (non-fatal)", SessionId);
+        }
+
         await _aiClient.ConnectAsync(CallerId, ct);
 
-        // Inject caller history into Ada's session context (fire-and-forget, non-blocking)
-        _ = Task.Run(async () =>
+        // Inject history immediately after connect, before Ada starts greeting
+        if (callerHistory != null)
         {
             try
             {
-                var history = await LoadCallerHistoryAsync(CallerId);
-                if (history != null)
-                {
-                    await _aiClient.InjectSystemMessageAsync(history);
-                    _logger.LogInformation("[{SessionId}] 📋 Caller history injected for {CallerId}", SessionId, CallerId);
-                }
+                await _aiClient.InjectSystemMessageAsync(callerHistory);
+                _logger.LogInformation("[{SessionId}] 📋 Caller history injected for {CallerId}", SessionId, CallerId);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[{SessionId}] Caller history injection failed (non-fatal)", SessionId);
             }
-        });
+        }
     }
 
     private async Task<string?> LoadCallerHistoryAsync(string phone)
