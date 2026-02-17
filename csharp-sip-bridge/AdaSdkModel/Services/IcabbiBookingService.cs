@@ -82,8 +82,10 @@ public sealed class IcabbiBookingService : IDisposable
 
             var phone = "00" + (booking.CallerPhone?.Replace("+", "").Replace(" ", "").Replace("-", "") ?? "");
             var seats = (booking.Passengers ?? 1) > 0 ? (booking.Passengers ?? 1) : 1;
+            var fareDecimal = booking.FareDecimal;
 
-            var payload = new IcabbiBookingRequest
+            // ── Build payload exactly like WinForms ICabbiApiClient ──
+            var icabbiBooking = new IcabbiBookingRequest
             {
                 date = DateTime.UtcNow.AddMinutes(1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 name = booking.Name ?? "Customer",
@@ -105,27 +107,28 @@ public sealed class IcabbiBookingService : IDisposable
                 },
                 payment = new IcabbiPaymentDto
                 {
-                    cost = booking.FareDecimal,
-                    price = booking.FareDecimal,
-                    total = booking.FareDecimal
+                    cost = fareDecimal,
+                    price = fareDecimal,
+                    total = fareDecimal
                 }
             };
 
-            // Assign vehicle type based on seats (R4/R6/R7)
-            payload.AssignVehicleType();
+            // Assign vehicle type based on seats (same as WinForms AssignVehicleType)
+            icabbiBooking.AssignVehicleType();
 
-            // Set driver/vehicle if provided, otherwise default 2222
+            // ── Post-assign fields (same as WinForms CreateAndAssignBookingAsync) ──
             var driverId = icabbiDriverId ?? 2222;
             var vehicleId = icabbiVehicleId ?? 2222;
-            payload.driver_id = driverId;
-            payload.vehicle_id = vehicleId;
-            payload.vehicle_ref = $"DRV{driverId}_VEH{vehicleId}";
-            payload.site_id = 71;
-            payload.source = "APP";
-            payload.vehicle_group = "Taxi";
-            payload.status = "NEW";
+            icabbiBooking.driver_id = driverId;
+            icabbiBooking.vehicle_id = vehicleId;
+            icabbiBooking.vehicle_ref = $"DRV{driverId}_VEH{vehicleId}";
+            icabbiBooking.site_id = 71;
+            icabbiBooking.source = "APP";
+            icabbiBooking.vehicle_group = "Taxi";
+            icabbiBooking.vehicle_type ??= "R4";
+            icabbiBooking.status = "NEW";
 
-            payload.app_metadata = new IcabbiAppMetadataDto
+            icabbiBooking.app_metadata = new IcabbiAppMetadataDto
             {
                 extras = "WHATSAPP",
                 whatsapp_number = phone,
@@ -134,7 +137,7 @@ public sealed class IcabbiBookingService : IDisposable
                 created_at = DateTime.UtcNow.ToString("o")
             };
 
-            var json = JsonSerializer.Serialize(payload, JsonOpts);
+            var json = JsonSerializer.Serialize(icabbiBooking, JsonOpts);
             Log($"📤 Booking Add Payload: {Truncate(json)}");
 
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}bookings/add")
@@ -168,7 +171,6 @@ public sealed class IcabbiBookingService : IDisposable
             if (bookingNode is null)
                 return IcabbiBookingResult.Fail("No body.booking in response");
 
-            // iCabbi returns booking.id as integer (job ID)
             var jobId = bookingNode["id"]?.GetValue<int>();
             var journeyId = jobId?.ToString() ?? "";
             var tripId = bookingNode["trip_id"]?.GetValue<string>();
@@ -182,16 +184,6 @@ public sealed class IcabbiBookingService : IDisposable
 
             Log($"✅ Booking created — JobId: {journeyId}, TripId: {tripId}, Status: {statusStr}");
             Log($"🔗 Tracking URL: {trackingUrl}");
-
-            // Dispatch to specific driver if requested and not already assigned via payload
-            if (icabbiDriverId.HasValue && jobId.HasValue)
-            {
-                var dispatchResult = await DispatchJourneyAsync(jobId.Value, icabbiDriverId.Value, ct: ct);
-                if (!dispatchResult.success)
-                    return new IcabbiBookingResult(false, journeyId, trackingUrl, tripId, permaId, $"Dispatch failed: {dispatchResult.message}");
-
-                Log($"🚕 Journey {journeyId} dispatched to driver {icabbiDriverId.Value}");
-            }
 
             return new IcabbiBookingResult(true, journeyId, trackingUrl, tripId, permaId, "Booking created successfully");
         }
