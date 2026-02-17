@@ -363,7 +363,13 @@ public partial class MainForm : Form
             Log("🔊 Using standard G.711 A-law passthrough");
         }
 
-        var fareCalculator = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
+        GeminiAddressClient? geminiClient = null;
+        if (_settings.Gemini.Enabled && !string.IsNullOrWhiteSpace(_settings.Gemini.ApiKey))
+        {
+            geminiClient = new GeminiAddressClient(factory.CreateLogger<GeminiAddressClient>(), _settings.Gemini, _settings.Supabase);
+            Log("🧠 Local Gemini enabled for address dispatch");
+        }
+        var fareCalculator = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase, geminiClient);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 
         // iCabbi integration
@@ -591,7 +597,10 @@ public partial class MainForm : Form
     private void OpenBookingForm(string? callerPhone, string? callerName)
     {
         var factory = GetLoggerFactory();
-        var fareCalc = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
+        GeminiAddressClient? geminiClient = null;
+        if (_settings.Gemini.Enabled && !string.IsNullOrWhiteSpace(_settings.Gemini.ApiKey))
+            geminiClient = new GeminiAddressClient(factory.CreateLogger<GeminiAddressClient>(), _settings.Gemini, _settings.Supabase);
+        var fareCalc = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase, geminiClient);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 
         using var dlg = new BookingForm(fareCalc, dispatcher, factory.CreateLogger<BookingForm>(), _settings.Supabase, callerPhone, callerName);
