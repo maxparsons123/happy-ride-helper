@@ -796,6 +796,37 @@ public sealed class G711CallFeatures : IDisposable
         
         Log($"📞 [{_callId}] End call requested: {reason}");
         
+        // ══════════════════════════════════════════════════════════════
+        // BOOKING COMPLETION GUARD: Block end_call if booking is
+        // partially collected but not yet confirmed/completed.
+        // ══════════════════════════════════════════════════════════════
+        bool hasBookingData = !string.IsNullOrWhiteSpace(_booking.Pickup) ||
+                              !string.IsNullOrWhiteSpace(_booking.Destination);
+        bool isConfirmed = _booking.Confirmed;
+        
+        if (hasBookingData && !isConfirmed)
+        {
+            // Determine what's still missing
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(_booking.Pickup)) missing.Add("pickup");
+            if (string.IsNullOrWhiteSpace(_booking.Destination)) missing.Add("destination");
+            if (_booking.Passengers is null or 0) missing.Add("passengers");
+            if (string.IsNullOrWhiteSpace(_booking.PickupTime)) missing.Add("pickup time");
+            if (string.IsNullOrWhiteSpace(_booking.Fare)) missing.Add("fare quote");
+            
+            var missingStr = missing.Count > 0 ? string.Join(", ", missing) : "booking confirmation";
+            Log($"🛡️ [{_callId}] BOOKING GUARD: Blocked end_call — missing: {missingStr}");
+            
+            return new
+            {
+                success = false,
+                error = "BLOCKED",
+                instruction = $"You CANNOT end this call yet. The booking is incomplete — still missing: {missingStr}. " +
+                              "You MUST complete the booking flow first: collect all details, quote the fare, get confirmation, " +
+                              "and call book_taxi(confirmed) before ending the call. Continue the conversation now."
+            };
+        }
+        
         // Stop accepting user audio immediately
         Interlocked.Exchange(ref _ignoreUserAudio, 1);
         
@@ -808,7 +839,6 @@ public sealed class G711CallFeatures : IDisposable
             
             while (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - waitStart < MAX_WAIT_MS)
             {
-                // Check if playout queue is empty
                 if (_client.PendingFrameCount == 0)
                 {
                     Log($"✅ [{_callId}] Audio buffer drained, ending call");
@@ -820,7 +850,6 @@ public sealed class G711CallFeatures : IDisposable
             if (_client.PendingFrameCount > 0)
                 Log($"⚠️ [{_callId}] Buffer still has {_client.PendingFrameCount} frames, ending anyway");
             
-            // Signal call ended
             if (Interlocked.Exchange(ref _callEnded, 1) == 0)
             {
                 OnCallEnded?.Invoke();

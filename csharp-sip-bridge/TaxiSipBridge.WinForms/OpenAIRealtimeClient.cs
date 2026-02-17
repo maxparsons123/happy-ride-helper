@@ -1153,6 +1153,39 @@ public sealed class OpenAIRealtimeClient : IAudioAIClient, IDisposable
             case "end_call":
                 {
                     Log("📞 End call requested");
+
+                    // ══════════════════════════════════════════════════════════
+                    // BOOKING COMPLETION GUARD: Block end_call if booking is
+                    // partially collected but not yet confirmed/completed.
+                    // ══════════════════════════════════════════════════════════
+                    bool hasBookingData = !string.IsNullOrWhiteSpace(_booking.Pickup) ||
+                                          !string.IsNullOrWhiteSpace(_booking.Destination);
+                    bool isConfirmed = _booking.Confirmed;
+
+                    if (hasBookingData && !isConfirmed)
+                    {
+                        var missing = new List<string>();
+                        if (string.IsNullOrWhiteSpace(_booking.Pickup)) missing.Add("pickup");
+                        if (string.IsNullOrWhiteSpace(_booking.Destination)) missing.Add("destination");
+                        if (_booking.Passengers is null or 0) missing.Add("passengers");
+                        if (string.IsNullOrWhiteSpace(_booking.PickupTime)) missing.Add("pickup time");
+                        if (string.IsNullOrWhiteSpace(_booking.Fare)) missing.Add("fare quote");
+
+                        var missingStr = missing.Count > 0 ? string.Join(", ", missing) : "booking confirmation";
+                        Log($"🛡️ BOOKING GUARD: Blocked end_call — missing: {missingStr}");
+
+                        await SendToolResultAsync(callId, new
+                        {
+                            success = false,
+                            error = "BLOCKED",
+                            instruction = $"You CANNOT end this call yet. The booking is incomplete — still missing: {missingStr}. " +
+                                          "You MUST complete the booking flow first: collect all details, quote the fare, get confirmation, " +
+                                          "and call book_taxi(confirmed) before ending the call. Continue the conversation now."
+                        }).ConfigureAwait(false);
+                        await QueueResponseCreateAsync(delayMs: 10).ConfigureAwait(false);
+                        break;
+                    }
+
                     Interlocked.Exchange(ref _ignoreUserAudio, 1);
 
                     // v10.4: Check if mandatory closing script was already spoken
