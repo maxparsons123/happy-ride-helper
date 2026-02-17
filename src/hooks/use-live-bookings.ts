@@ -22,25 +22,59 @@ export function useLiveBookings() {
   useEffect(() => {
     // Load active live_calls with GPS
     const loadActive = async () => {
+      // Fetch active live_calls - also check bookings table for coordinates
       const { data } = await supabase
         .from('live_calls')
         .select('id, call_id, pickup, destination, passengers, caller_phone, caller_name, status, gps_lat, gps_lon, started_at')
-        .eq('status', 'active')
-        .not('gps_lat', 'is', null);
+        .eq('status', 'active');
 
-      if (data) {
-        setBookings(data.filter(d => d.gps_lat && d.gps_lon).map(d => ({
-          id: d.id,
-          pickup: d.pickup,
-          destination: d.destination,
-          passengers: d.passengers || 1,
-          caller_phone: d.caller_phone,
-          caller_name: d.caller_name,
-          status: d.status,
-          lat: d.gps_lat!,
-          lng: d.gps_lon!,
-          created_at: d.started_at,
-        })));
+      if (data && data.length > 0) {
+        // For calls without GPS, try to get coords from bookings table
+        const callIds = data.filter(d => !d.gps_lat).map(d => d.call_id);
+        let bookingCoords: Record<string, { lat: number; lng: number; dest_lat?: number; dest_lng?: number }> = {};
+        
+        if (callIds.length > 0) {
+          const { data: bookings } = await supabase
+            .from('bookings')
+            .select('call_id, pickup_lat, pickup_lng, dest_lat, dest_lng')
+            .in('call_id', callIds);
+          
+          if (bookings) {
+            for (const b of bookings) {
+              if (b.pickup_lat && b.pickup_lng) {
+                bookingCoords[b.call_id] = {
+                  lat: b.pickup_lat,
+                  lng: b.pickup_lng,
+                  dest_lat: b.dest_lat || undefined,
+                  dest_lng: b.dest_lng || undefined,
+                };
+              }
+            }
+          }
+        }
+
+        setBookings(data
+          .map(d => {
+            const lat = d.gps_lat || bookingCoords[d.call_id]?.lat;
+            const lng = d.gps_lon || bookingCoords[d.call_id]?.lng;
+            if (!lat || !lng) return null;
+            return {
+              id: d.id,
+              pickup: d.pickup,
+              destination: d.destination,
+              passengers: d.passengers || 1,
+              caller_phone: d.caller_phone,
+              caller_name: d.caller_name,
+              status: d.status,
+              lat,
+              lng,
+              dest_lat: bookingCoords[d.call_id]?.dest_lat,
+              dest_lng: bookingCoords[d.call_id]?.dest_lng,
+              created_at: d.started_at,
+            };
+          })
+          .filter((b): b is NonNullable<typeof b> => b !== null) as LiveBookingMarker[]
+        );
       }
     };
 
