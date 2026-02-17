@@ -4,8 +4,9 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
-import { Trash2, Plus, Pencil, Save, X, MapPin } from 'lucide-react';
+import { Trash2, Plus, Pencil, Save, X, MapPin, Search, Building2, Route, Loader2 } from 'lucide-react';
 import type { DispatchZone, ZonePoint } from '@/hooks/use-dispatch-zones';
+import { useZonePois, useFetchZonePois } from '@/hooks/use-zone-pois';
 
 interface Company {
   id: string;
@@ -33,6 +34,20 @@ export function ZoneSidebar({
   onSelectZone, onStartDraw, onCancelDraw, onStartEdit, onSave, onDelete, onEditChange,
 }: ZoneSidebarProps) {
   const selectedZone = zones.find(z => z.id === selectedZoneId);
+  const { data: pois = [], isLoading: poisLoading } = useZonePois(selectedZoneId);
+  const fetchPois = useFetchZonePois();
+  const [poiFilter, setPoiFilter] = useState('');
+  const [poiTab, setPoiTab] = useState<'streets' | 'businesses'>('streets');
+
+  const streets = pois.filter(p => p.poi_type === 'street');
+  const businesses = pois.filter(p => p.poi_type === 'business');
+  const filteredPois = (poiTab === 'streets' ? streets : businesses)
+    .filter(p => !poiFilter || p.name.toLowerCase().includes(poiFilter.toLowerCase()));
+
+  const handleFetchPois = () => {
+    if (!selectedZone) return;
+    fetchPois.mutate({ zoneId: selectedZone.id, points: selectedZone.points });
+  };
 
   return (
     <div className="flex flex-col h-full bg-background border-r">
@@ -104,6 +119,95 @@ export function ZoneSidebar({
           </div>
         ))}
       </div>
+
+      {/* POI Panel - shown when a saved zone is selected and not editing */}
+      {selectedZone && !editingZone && (
+        <div className="border-t bg-muted/30 flex flex-col max-h-[45%]">
+          <div className="p-3 border-b flex items-center justify-between">
+            <h3 className="font-semibold text-sm flex items-center gap-1.5">
+              <Search className="w-4 h-4" /> Streets & Businesses
+            </h3>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              onClick={handleFetchPois}
+              disabled={fetchPois.isPending}
+            >
+              {fetchPois.isPending ? (
+                <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Scanning...</>
+              ) : (
+                <><Search className="w-3 h-3 mr-1" /> {pois.length > 0 ? 'Refresh' : 'Scan Zone'}</>
+              )}
+            </Button>
+          </div>
+
+          {pois.length > 0 && (
+            <>
+              {/* Tabs */}
+              <div className="flex border-b">
+                <button
+                  className={`flex-1 px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1 ${
+                    poiTab === 'streets' ? 'border-b-2 border-primary text-primary' : 'text-muted-foreground'
+                  }`}
+                  onClick={() => setPoiTab('streets')}
+                >
+                  <Route className="w-3 h-3" /> Streets ({streets.length})
+                </button>
+                <button
+                  className={`flex-1 px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1 ${
+                    poiTab === 'businesses' ? 'border-b-2 border-primary text-primary' : 'text-muted-foreground'
+                  }`}
+                  onClick={() => setPoiTab('businesses')}
+                >
+                  <Building2 className="w-3 h-3" /> Businesses ({businesses.length})
+                </button>
+              </div>
+
+              {/* Filter */}
+              <div className="px-3 pt-2">
+                <Input
+                  value={poiFilter}
+                  onChange={e => setPoiFilter(e.target.value)}
+                  placeholder={`Filter ${poiTab}...`}
+                  className="h-7 text-xs"
+                />
+              </div>
+
+              {/* List */}
+              <div className="flex-1 overflow-auto px-1 py-1">
+                {filteredPois.length === 0 && (
+                  <div className="p-3 text-center text-xs text-muted-foreground">
+                    {poiFilter ? 'No matches' : `No ${poiTab} found`}
+                  </div>
+                )}
+                {filteredPois.map(poi => (
+                  <div key={poi.id} className="px-2 py-1 text-xs hover:bg-accent/50 rounded flex items-center gap-1.5">
+                    {poi.poi_type === 'street' ? (
+                      <Route className="w-3 h-3 text-muted-foreground flex-shrink-0" />
+                    ) : (
+                      <Building2 className="w-3 h-3 text-muted-foreground flex-shrink-0" />
+                    )}
+                    <span className="truncate">{poi.name}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {pois.length === 0 && !fetchPois.isPending && (
+            <div className="p-4 text-center text-xs text-muted-foreground">
+              Click "Scan Zone" to discover streets and businesses from OpenStreetMap
+            </div>
+          )}
+
+          {poisLoading && (
+            <div className="p-4 text-center text-xs text-muted-foreground">
+              Loading...
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Edit panel */}
       {editingZone && (
