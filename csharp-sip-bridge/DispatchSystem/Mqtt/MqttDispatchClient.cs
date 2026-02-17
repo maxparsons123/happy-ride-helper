@@ -158,14 +158,29 @@ public sealed class MqttDispatchClient : IDisposable
                     // Parse passengers: can be int OR descriptive string like "2 adults, 1 child with wheelchair"
                     int paxCount = 1;
                     string? paxDetails = null;
-                    if (booking.passengers > 0)
+                    if (booking.passengers.HasValue)
                     {
-                        paxCount = booking.passengers;
+                        var paxEl = booking.passengers.Value;
+                        if (paxEl.ValueKind == JsonValueKind.Number)
+                        {
+                            paxCount = paxEl.GetInt32();
+                        }
+                        else if (paxEl.ValueKind == JsonValueKind.String)
+                        {
+                            var paxStr = paxEl.GetString() ?? "";
+                            if (int.TryParse(paxStr, out var parsedPax))
+                                paxCount = parsedPax;
+                            else
+                            {
+                                var match = Regex.Match(paxStr, @"(\d+)");
+                                if (match.Success) paxCount = int.Parse(match.Groups[1].Value);
+                                paxDetails = paxStr;
+                            }
+                        }
                     }
                     if (!string.IsNullOrEmpty(booking.passengersText))
                     {
                         paxDetails = booking.passengersText;
-                        // Extract leading digit(s) as count
                         var match = Regex.Match(booking.passengersText, @"^(\d+)");
                         if (match.Success)
                             paxCount = int.Parse(match.Groups[1].Value);
@@ -642,7 +657,7 @@ public sealed class MqttDispatchClient : IDisposable
         // ── Dispatch/AdaMain format ──
         public string? pickup { get; set; }
         public string? dropoff { get; set; }
-        public int passengers { get; set; }
+        public JsonElement? passengers { get; set; }
         public string? vehicleType { get; set; }
         public string? specialRequirements { get; set; }
         public decimal? estimatedPrice { get; set; }
