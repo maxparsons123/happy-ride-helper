@@ -21,11 +21,11 @@ public sealed class BsqdDispatcher : IDispatcher
     private IMqttClient? _mqttClient;
     private readonly SemaphoreSlim _mqttLock = new(1, 1);
 
-    // UK bounding box validation
+    // Bounding box validation (covers UK + NL/BE/DE)
     private const double MIN_LAT = 49.5;
     private const double MAX_LAT = 61.0;
     private const double MIN_LNG = -8.5;
-    private const double MAX_LNG = 2.0;
+    private const double MAX_LNG = 10.0;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
@@ -194,7 +194,7 @@ public sealed class BsqdDispatcher : IDispatcher
         try
         {
             var encoded = Uri.EscapeDataString(address);
-            var url = $"https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1&countrycodes=gb";
+            var url = $"https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1";
             _logger.LogInformation("Geocoding {Type} address: {Address}", type, address);
 
             using var response = await _geocodeClient.GetAsync(url);
