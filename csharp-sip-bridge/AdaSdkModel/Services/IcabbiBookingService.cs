@@ -140,7 +140,7 @@ public sealed class IcabbiBookingService : IDisposable
             };
 
             var json = JsonSerializer.Serialize(icabbiBooking, JsonOpts);
-            Log($"📤 Booking Add Payload: {Truncate(json)}");
+            Log($"📤 Booking Add Payload:\n{json}");
 
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}bookings/add")
             {
