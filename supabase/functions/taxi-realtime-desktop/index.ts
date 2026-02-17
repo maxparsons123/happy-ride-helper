@@ -413,6 +413,7 @@ const TOOLS = [
 interface SessionState {
   callId: string;
   callerPhone: string;
+  callerName: string | null;
   language: string;
   booking: {
     pickup: string | null;
@@ -515,6 +516,7 @@ function createSessionState(callId: string, callerPhone: string, language: strin
   return {
     callId,
     callerPhone,
+    callerName: null,
     language,
     booking: { pickup: null, destination: null, passengers: null, pickupTime: null },
     lastQuestionAsked: "none",
@@ -549,8 +551,9 @@ async function updateLiveCall(sessionState: SessionState) {
     await supabase
       .from("live_calls")
       .upsert({
-        call_id: sessionState.callId,
+      call_id: sessionState.callId,
         caller_phone: sessionState.callerPhone,
+        caller_name: sessionState.callerName,
         pickup: sessionState.booking.pickup,
         destination: sessionState.booking.destination,
         passengers: sessionState.booking.passengers,
@@ -587,6 +590,7 @@ async function sendDispatchWebhook(
     job_id: sessionState.dispatchJobId,
     call_id: callId,
     phone: sessionState.callerPhone.replace(/^\+/, ""),
+    caller_name: sessionState.callerName,
     pickup: bookingData.pickup || sessionState.booking.pickup,
     destination: bookingData.destination || sessionState.booking.destination,
     passengers: bookingData.passengers || sessionState.booking.passengers,
@@ -643,6 +647,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   console.log(`[${callId}] 🖥️ DESKTOP MODE: New connection from ${callerPhone} (language: ${language})`);
   
   let effectiveLanguage = language;
+  let callerNameFromDb: string | null = null;
   
   // Quick caller lookup
   if (callerPhone && callerPhone !== "unknown") {
@@ -650,13 +655,17 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
       const phoneKey = normalizePhone(callerPhone);
       const { data: callerData } = await supabase
         .from("callers")
-        .select("preferred_language")
+        .select("preferred_language, name")
         .eq("phone_number", phoneKey)
         .maybeSingle();
       
       if (callerData?.preferred_language && (language === "auto" || !language)) {
         effectiveLanguage = callerData.preferred_language;
         console.log(`[${callId}] 🌐 Using saved language: ${effectiveLanguage}`);
+      }
+      if (callerData?.name) {
+        callerNameFromDb = callerData.name;
+        console.log(`[${callId}] 👤 Caller name found: ${callerData.name}`);
       }
     } catch { /* ignore */ }
     
@@ -672,6 +681,7 @@ async function handleConnection(socket: WebSocket, callId: string, callerPhone: 
   }
   
   const sessionState = createSessionState(callId, callerPhone, effectiveLanguage);
+  sessionState.callerName = callerNameFromDb;
   let openaiWs: WebSocket | null = null;
   let cleanedUp = false;
   let dispatchChannel: ReturnType<typeof supabase.channel> | null = null;
