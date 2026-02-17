@@ -154,6 +154,7 @@ public sealed class CallSession : ICallSession
         {
             await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
             await _dispatcher.SendWhatsAppAsync(callerId);
+            await SaveCallerHistoryAsync(bookingSnapshot, callerId);
 
             if (_icabbiEnabled && _icabbi != null)
             {
@@ -267,6 +268,96 @@ public sealed class CallSession : ICallSession
 
         _logger.LogInformation("[{SessionId}] Starting G.711 session for {CallerId}", SessionId, CallerId);
         await _aiClient.ConnectAsync(CallerId, ct);
+
+        // Inject caller history into Ada's session context (fire-and-forget, non-blocking)
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var history = await LoadCallerHistoryAsync(CallerId);
+                if (history != null)
+                {
+                    await _aiClient.InjectSystemMessageAsync(history);
+                    _logger.LogInformation("[{SessionId}] 📋 Caller history injected for {CallerId}", SessionId, CallerId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[{SessionId}] Caller history injection failed (non-fatal)", SessionId);
+            }
+        });
+    }
+
+    private async Task<string?> LoadCallerHistoryAsync(string phone)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var normalized = phone.Trim().Replace(" ", "");
+            var phoneVariants = new[] { phone, normalized, $"+{normalized}" };
+            var orFilter = string.Join(",", phoneVariants.Select(p => $"phone_number.eq.{Uri.EscapeDataString(p)}"));
+            var url = $"{_settings.Supabase.Url}/rest/v1/callers?or=({orFilter})&select=name,pickup_addresses,dropoff_addresses,last_pickup,last_destination,total_bookings";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var arr = doc.RootElement;
+            if (arr.GetArrayLength() == 0) return null;
+            var caller = arr[0];
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[CALLER HISTORY] This is a returning caller. Use this context to speed up the booking:");
+
+            if (caller.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(nameEl.GetString()))
+            {
+                sb.AppendLine($"  Known name: {nameEl.GetString()}");
+                sb.AppendLine($"  IMPORTANT: Greet them by name! Say \"Welcome back, {nameEl.GetString()}!\" instead of asking for their name.");
+                if (string.IsNullOrEmpty(_booking.Name))
+                    _booking.Name = nameEl.GetString();
+            }
+
+            if (caller.TryGetProperty("total_bookings", out var tb))
+                sb.AppendLine($"  Total previous bookings: {tb.GetInt32()}");
+
+            if (caller.TryGetProperty("last_pickup", out var lp) && lp.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(lp.GetString()))
+                sb.AppendLine($"  Last pickup: {lp.GetString()}");
+
+            if (caller.TryGetProperty("last_destination", out var ld) && ld.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(ld.GetString()))
+                sb.AppendLine($"  Last destination: {ld.GetString()}");
+
+            var allAddresses = new HashSet<string>();
+            if (caller.TryGetProperty("pickup_addresses", out var pickups) && pickups.ValueKind == System.Text.Json.JsonValueKind.Array)
+                foreach (var a in pickups.EnumerateArray())
+                    if (a.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(a.GetString()))
+                        allAddresses.Add(a.GetString()!);
+
+            if (caller.TryGetProperty("dropoff_addresses", out var dropoffs) && dropoffs.ValueKind == System.Text.Json.JsonValueKind.Array)
+                foreach (var a in dropoffs.EnumerateArray())
+                    if (a.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(a.GetString()))
+                        allAddresses.Add(a.GetString()!);
+
+            if (allAddresses.Count > 0)
+            {
+                sb.AppendLine($"  All known addresses ({allAddresses.Count}):");
+                var i = 1;
+                foreach (var addr in allAddresses.Take(15))
+                    sb.AppendLine($"    {i++}. {addr}");
+            }
+
+            sb.AppendLine("  INSTRUCTIONS: If the caller gives a partial address (e.g. 'same place', 'David Road', 'the usual'), try to match it to one of these history addresses. If you're confident (>80% match), use it directly without asking for disambiguation.");
+
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed", SessionId);
+            return null;
+        }
     }
 
     public async Task EndAsync(string reason)
@@ -1295,6 +1386,7 @@ public sealed class CallSession : ICallSession
 
                 await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
                 await _dispatcher.SendWhatsAppAsync(callerId);
+                await SaveCallerHistoryAsync(bookingSnapshot, callerId);
 
                 // iCabbi dispatch (fire-and-forget)
                 if (_icabbiEnabled && _icabbi != null)
@@ -1400,6 +1492,7 @@ public sealed class CallSession : ICallSession
         {
             await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
             await _dispatcher.SendWhatsAppAsync(callerId);
+            await SaveCallerHistoryAsync(bookingSnapshot, callerId);
 
             if (_icabbiEnabled && _icabbi != null)
             {
@@ -1901,5 +1994,50 @@ public sealed class CallSession : ICallSession
         }
 
         _logger.LogInformation("[{SessionId}] 🧹 CallSession fully disposed", SessionId);
+    }
+
+    // =========================
+    // CALLER HISTORY SAVE
+    // =========================
+    /// <summary>
+    /// Fire-and-forget save of caller name + addresses to the callers table
+    /// via the caller-history-save edge function. This enables Ada to remember
+    /// returning callers by name on their next call.
+    /// </summary>
+    private async Task SaveCallerHistoryAsync(BookingState booking, string callerId)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            var payload = new
+            {
+                phone = callerId,
+                name = booking.Name ?? "",
+                pickup = booking.Pickup ?? "",
+                destination = booking.Destination ?? "",
+                call_id = SessionId
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+            using var req = new HttpRequestMessage(HttpMethod.Post,
+                $"{_settings.Supabase.Url}/functions/v1/caller-history-save");
+            req.Content = content;
+            req.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            req.Headers.Add("Authorization", $"Bearer {_settings.Supabase.AnonKey}");
+
+            var response = await http.SendAsync(req);
+            if (response.IsSuccessStatusCode)
+                _logger.LogInformation("[{SessionId}] ✅ Caller history saved for {Phone} (name={Name})",
+                    SessionId, callerId, booking.Name ?? "(none)");
+            else
+                _logger.LogWarning("[{SessionId}] ⚠️ Caller history save failed: HTTP {Status}",
+                    SessionId, (int)response.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] ⚠️ Caller history save error (non-fatal)", SessionId);
+        }
     }
 }
