@@ -80,60 +80,59 @@ public sealed class IcabbiBookingService : IDisposable
         {
             Log("📝 Creating iCabbi booking...");
 
-            var phone = FormatE164(booking.CallerPhone);
+            var phone = "00" + (booking.CallerPhone?.Replace("+", "").Replace(" ", "").Replace("-", "") ?? "");
             var seats = (booking.Passengers ?? 1) > 0 ? (booking.Passengers ?? 1) : 1;
-            var vehicleType = seats <= 4 ? "R4" : seats <= 6 ? "R6" : "R7";
 
             var payload = new IcabbiBookingRequest
             {
-                source = "APP",
                 date = DateTime.UtcNow.AddMinutes(1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 name = booking.Name ?? "Customer",
                 phone = phone,
-                account_id = 9428,
-                account_name = "WhatsUrRide",
+                extras = "WHATSAPP",
+                seats = seats,
+                instructions = booking.SpecialInstructions ?? "No special instructions",
                 address = new IcabbiAddressDto
                 {
-                    formatted = booking.PickupFormatted ?? booking.Pickup ?? "",
                     lat = booking.PickupLat ?? 0,
-                    lng = booking.PickupLon ?? 0
+                    lng = booking.PickupLon ?? 0,
+                    formatted = booking.PickupFormatted ?? booking.Pickup ?? ""
                 },
                 destination = new IcabbiAddressDto
                 {
-                    formatted = booking.DestFormatted ?? booking.Destination ?? "",
                     lat = booking.DestLat ?? 0,
-                    lng = booking.DestLon ?? 0
+                    lng = booking.DestLon ?? 0,
+                    formatted = booking.DestFormatted ?? booking.Destination ?? ""
                 },
                 payment = new IcabbiPaymentDto
                 {
                     cost = booking.FareDecimal,
                     price = booking.FareDecimal,
                     total = booking.FareDecimal
-                },
-                app_metadata = new IcabbiAppMetadataDto
-                {
-                    extras = "VOICE_AI",
-                    whatsapp_number = phone,
-                    source_system = "AdaSdkModel",
-                    journey_id = Guid.NewGuid().ToString(),
-                    created_at = DateTime.UtcNow.ToString("o")
-                },
-                seats = seats,
-                vehicle_type = vehicleType,
-                vehicle_group = "Taxi",
-                site_id = 71,
-                status = "NEW",
-                extras = "VOICE_AI",
-                language = "en-GB",
-                instructions = booking.SpecialInstructions ?? "No special instructions"
+                }
             };
 
-            if (icabbiDriverId.HasValue)
+            // Assign vehicle type based on seats (R4/R6/R7)
+            payload.AssignVehicleType();
+
+            // Set driver/vehicle if provided, otherwise default 2222
+            var driverId = icabbiDriverId ?? 2222;
+            var vehicleId = icabbiVehicleId ?? 2222;
+            payload.driver_id = driverId;
+            payload.vehicle_id = vehicleId;
+            payload.vehicle_ref = $"DRV{driverId}_VEH{vehicleId}";
+            payload.site_id = 71;
+            payload.source = "APP";
+            payload.vehicle_group = "Taxi";
+            payload.status = "NEW";
+
+            payload.app_metadata = new IcabbiAppMetadataDto
             {
-                payload.driver_id = icabbiDriverId.Value;
-                payload.vehicle_id = icabbiVehicleId ?? icabbiDriverId.Value;
-                payload.vehicle_ref = $"DRV{icabbiDriverId.Value}_VEH{payload.vehicle_id}";
-            }
+                extras = "WHATSAPP",
+                whatsapp_number = phone,
+                source_system = "AdaSdkModel",
+                journey_id = Guid.NewGuid().ToString(),
+                created_at = DateTime.UtcNow.ToString("o")
+            };
 
             var json = JsonSerializer.Serialize(payload, JsonOpts);
             Log($"📤 Booking Add Payload: {Truncate(json)}");
@@ -491,6 +490,13 @@ public class IcabbiBookingRequest
     public int driver_id { get; set; }
     public int vehicle_id { get; set; }
     public string? vehicle_ref { get; set; }
+
+    public void AssignVehicleType()
+    {
+        if (seats <= 4) vehicle_type = "R4";
+        else if (seats <= 6) vehicle_type = "R6";
+        else vehicle_type = "R7";
+    }
 }
 
 public class IcabbiPassenger
