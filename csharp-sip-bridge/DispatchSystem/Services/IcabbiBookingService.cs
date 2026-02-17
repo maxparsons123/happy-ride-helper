@@ -64,10 +64,12 @@ public sealed class IcabbiBookingService : IDisposable
 
     // ── Auth ──
 
-    private AuthenticationHeaderValue AuthHeader()
+    private void AddAuthHeaders(HttpRequestMessage request, string? customerPhone = null)
     {
         var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_appKey}:{_secretKey}"));
-        return new AuthenticationHeaderValue("Basic", encoded);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Basic {encoded}");
+        if (!string.IsNullOrWhiteSpace(customerPhone))
+            request.Headers.TryAddWithoutValidation("Phone", customerPhone);
     }
 
     private string BuildTrackingUrl(string journeyId)
@@ -127,7 +129,7 @@ public sealed class IcabbiBookingService : IDisposable
             {
                 Content = new StringContent(bookingJson, Encoding.UTF8, "application/json")
             };
-            createReq.Headers.Authorization = AuthHeader();
+            AddAuthHeaders(createReq);
 
             var createResp = await _client.SendAsync(createReq, ct);
             var createBody = await createResp.Content.ReadAsStringAsync(ct);
@@ -190,7 +192,7 @@ public sealed class IcabbiBookingService : IDisposable
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
-        req.Headers.Authorization = AuthHeader();
+        AddAuthHeaders(req);
 
         var resp = await _client.SendAsync(req, ct);
         var body = await resp.Content.ReadAsStringAsync(ct);
@@ -210,7 +212,7 @@ public sealed class IcabbiBookingService : IDisposable
         Log($"🔍 Fetching status: {url}");
 
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.Authorization = AuthHeader();
+        AddAuthHeaders(req);
 
         var resp = await _client.SendAsync(req, ct);
         var raw = await resp.Content.ReadAsStringAsync(ct);
@@ -323,7 +325,7 @@ public sealed class IcabbiBookingService : IDisposable
             Log($"🌍 Registering event listener: {url}");
 
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.Authorization = AuthHeader();
+            AddAuthHeaders(req);
 
             var resp = await _client.SendAsync(req, ct);
             var body = await resp.Content.ReadAsStringAsync(ct);

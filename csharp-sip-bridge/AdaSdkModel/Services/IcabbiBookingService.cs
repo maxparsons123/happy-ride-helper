@@ -50,10 +50,12 @@ public sealed class IcabbiBookingService : IDisposable
         _client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "WhatsURideApp/1.0");
     }
 
-    private AuthenticationHeaderValue AuthHeader()
+    private void AddAuthHeaders(HttpRequestMessage request, string? customerPhone = null)
     {
         var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_appKey}:{_secretKey}"));
-        return new AuthenticationHeaderValue("Basic", encoded);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Basic {encoded}");
+        if (!string.IsNullOrWhiteSpace(customerPhone))
+            request.Headers.TryAddWithoutValidation("Phone", customerPhone);
     }
 
     private string BuildTrackingUrl(string journeyId)
@@ -144,9 +146,7 @@ public sealed class IcabbiBookingService : IDisposable
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
-            req.Headers.Authorization = AuthHeader();
-            if (!string.IsNullOrWhiteSpace(phone))
-                req.Headers.TryAddWithoutValidation("Phone", phone);
+            AddAuthHeaders(req, phone);
 
             var resp = await SendWithRetryAsync(req, ct, "CreateBooking");
             var body = await resp.Content.ReadAsStringAsync(ct);
@@ -209,7 +209,7 @@ public sealed class IcabbiBookingService : IDisposable
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
-        req.Headers.Authorization = AuthHeader();
+        AddAuthHeaders(req);
 
         var resp = await SendWithRetryAsync(req, ct, "DispatchJourney");
         var body = await resp.Content.ReadAsStringAsync(ct);
@@ -237,7 +237,7 @@ public sealed class IcabbiBookingService : IDisposable
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
-        req.Headers.Authorization = AuthHeader();
+        AddAuthHeaders(req);
 
         Log($"🧨 Cancelling booking {journeyId}");
 
@@ -260,7 +260,7 @@ public sealed class IcabbiBookingService : IDisposable
         Log($"🔗 Fetching booking status: {url}");
 
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.Authorization = AuthHeader();
+        AddAuthHeaders(req);
 
         var resp = await _client.SendAsync(req, ct);
         var raw = await resp.Content.ReadAsStringAsync(ct);
