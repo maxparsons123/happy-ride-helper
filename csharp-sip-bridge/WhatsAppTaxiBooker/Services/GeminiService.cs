@@ -7,9 +7,7 @@ using WhatsAppTaxiBooker.Models;
 namespace WhatsAppTaxiBooker.Services;
 
 /// <summary>
-/// Gemini Flash service for:
-/// 1. Transcribing voice messages (audio → text)
-/// 2. Extracting booking details from free-form text → structured JSON
+/// Gemini Flash service: transcription, booking extraction with intent detection, reply generation.
 /// </summary>
 public sealed class GeminiService
 {
@@ -20,11 +18,20 @@ public sealed class GeminiService
     private void Log(string msg) => OnLog?.Invoke(msg);
 
     private const string BookingExtractionPrompt = @"
-You are a taxi booking extraction engine. Extract booking details from the user's message.
+You are a taxi booking extraction engine. Extract booking details AND detect user intent from messages.
 The user may speak casually, e.g. 'pick me up from 52a david road going to coventry with 2 passengers'.
+
+INTENT DETECTION:
+- 'new_booking': User wants to book a new taxi (provides pickup/destination)
+- 'update': User wants to change an existing booking (e.g. 'change destination to...', 'actually make it 3 passengers', 'update pickup to...')
+- 'confirm': User confirms the booking (e.g. 'yes', 'confirm', 'book it', 'that's correct', 'go ahead', 'send it')
+- 'cancel': User wants to cancel (e.g. 'cancel', 'never mind', 'forget it')
+- 'query': User is asking about their booking (e.g. 'what's my booking?', 'status?')
+- 'greeting': Just a greeting or unrelated message
 
 Return ONLY valid JSON (no markdown, no explanation):
 {
+  ""intent"": ""new_booking|update|confirm|cancel|query|greeting"",
   ""pickup"": ""full pickup address or null"",
   ""destination"": ""full destination address or null"",
   ""passengers"": number or null,
@@ -32,12 +39,17 @@ Return ONLY valid JSON (no markdown, no explanation):
   ""notes"": ""any special requests or null"",
   ""pickup_time"": ""requested time or 'now' or null"",
   ""is_complete"": true/false (true if pickup AND destination are provided),
-  ""missing_fields"": ""comma-separated list of missing required fields or null""
+  ""missing_fields"": ""comma-separated list of missing required fields or null"",
+  ""update_fields"": ""comma-separated list of fields being updated or null""
 }
 
-Required fields: pickup, destination. Passengers defaults to 1 if not mentioned.
-If user sends a greeting or non-booking message, set is_complete=false and missing_fields='pickup,destination'.
-If user provides partial info, extract what you can and list what's missing.";
+RULES:
+- For 'confirm' intent: set is_complete=true if existing booking has all required fields
+- For 'update' intent: only populate the fields being changed, leave others null
+- For 'cancel' intent: set is_complete=false
+- For 'greeting'/'query': set is_complete=false
+- Required fields for a complete booking: pickup, destination
+- Passengers defaults to 1 if not mentioned";
 
     public GeminiService(GeminiConfig config)
     {
@@ -46,14 +58,12 @@ If user provides partial info, extract what you can and list what's missing.";
 
     /// <summary>
     /// Transcribe a WhatsApp voice message using Gemini's multimodal input.
-    /// Downloads the audio from WhatsApp, sends to Gemini as inline_data.
     /// </summary>
     public async Task<string?> TranscribeAudioAsync(string mediaUrl, string accessToken, string mimeType = "audio/ogg")
     {
         Log("🎤 [Gemini] Transcribing voice message...");
         try
         {
-            // Download audio from WhatsApp
             using var audioReq = new HttpRequestMessage(HttpMethod.Get, mediaUrl);
             audioReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             var audioResp = await _http.SendAsync(audioReq);
@@ -64,10 +74,8 @@ If user provides partial info, extract what you can and list what's missing.";
             }
             var audioBytes = await audioResp.Content.ReadAsByteArrayAsync();
             var base64Audio = Convert.ToBase64String(audioBytes);
-
             Log($"🎤 Audio downloaded: {audioBytes.Length} bytes, sending to Gemini...");
 
-            // Send to Gemini for transcription
             var requestBody = new
             {
                 contents = new[]
@@ -77,14 +85,7 @@ If user provides partial info, extract what you can and list what's missing.";
                         parts = new object[]
                         {
                             new { text = "Transcribe this audio message exactly as spoken. Return ONLY the transcription text, nothing else." },
-                            new
-                            {
-                                inline_data = new
-                                {
-                                    mime_type = mimeType,
-                                    data = base64Audio
-                                }
-                            }
+                            new { inline_data = new { mime_type = mimeType, data = base64Audio } }
                         }
                     }
                 },
@@ -92,8 +93,7 @@ If user provides partial info, extract what you can and list what's missing.";
             };
 
             var result = await CallGeminiAsync(requestBody);
-            if (result != null)
-                Log($"🎤 Transcription: \"{result}\"");
+            if (result != null) Log($"🎤 Transcription: \"{result}\"");
             return result;
         }
         catch (Exception ex)
@@ -104,20 +104,39 @@ If user provides partial info, extract what you can and list what's missing.";
     }
 
     /// <summary>
-    /// Extract booking details from free-form text using Gemini Flash.
+    /// Extract booking details + intent from free-form text.
+    /// Includes existing booking context so Gemini can detect updates vs new bookings.
     /// </summary>
-    public async Task<GeminiBookingExtraction?> ExtractBookingAsync(string userMessage, List<(string role, string message)>? conversationHistory = null)
+    public async Task<GeminiBookingExtraction?> ExtractBookingAsync(
+        string userMessage,
+        List<(string role, string message)>? conversationHistory = null,
+        Booking? existingBooking = null)
     {
-        Log($"🤖 [Gemini] Extracting booking from: \"{userMessage}\"");
+        Log($"🤖 [Gemini] Extracting from: \"{userMessage}\"");
         try
         {
             var contents = new List<object>();
 
-            // Add system instruction
+            // System instruction
             contents.Add(new { role = "user", parts = new[] { new { text = BookingExtractionPrompt } } });
-            contents.Add(new { role = "model", parts = new[] { new { text = "Understood. I will extract taxi booking details and return JSON." } } });
+            contents.Add(new { role = "model", parts = new[] { new { text = "Understood. I will extract taxi booking details with intent detection and return JSON." } } });
 
-            // Add conversation history for context
+            // Inject existing booking context
+            if (existingBooking != null)
+            {
+                var ctx = $"[EXISTING BOOKING STATE]\n" +
+                          $"Ref: {existingBooking.Id}\n" +
+                          $"Pickup: {(string.IsNullOrWhiteSpace(existingBooking.Pickup) ? "(not set)" : existingBooking.Pickup)}\n" +
+                          $"Destination: {(string.IsNullOrWhiteSpace(existingBooking.Destination) ? "(not set)" : existingBooking.Destination)}\n" +
+                          $"Passengers: {existingBooking.Passengers}\n" +
+                          $"Status: {existingBooking.Status}\n" +
+                          (existingBooking.Notes != null ? $"Notes: {existingBooking.Notes}\n" : "") +
+                          "If the user sends a confirmation, they are confirming THIS booking.";
+                contents.Add(new { role = "user", parts = new[] { new { text = ctx } } });
+                contents.Add(new { role = "model", parts = new[] { new { text = "I see the existing booking. I will detect if the user wants to update it, confirm it, or start a new one." } } });
+            }
+
+            // Conversation history
             if (conversationHistory != null)
             {
                 foreach (var (role, msg) in conversationHistory)
@@ -130,17 +149,12 @@ If user provides partial info, extract what you can and list what's missing.";
                 }
             }
 
-            // Add current message
-            contents.Add(new { role = "user", parts = new[] { new { text = $"Extract booking from this message: \"{userMessage}\"" } } });
+            contents.Add(new { role = "user", parts = new[] { new { text = $"Extract booking from: \"{userMessage}\"" } } });
 
             var requestBody = new
             {
                 contents,
-                generationConfig = new
-                {
-                    responseMimeType = "application/json",
-                    temperature = 0.1
-                }
+                generationConfig = new { responseMimeType = "application/json", temperature = 0.1 }
             };
 
             var jsonResult = await CallGeminiAsync(requestBody);
@@ -153,9 +167,7 @@ If user provides partial info, extract what you can and list what's missing.";
             });
 
             if (extraction != null)
-            {
-                Log($"✅ Extracted: pickup={extraction.Pickup}, dest={extraction.Destination}, pax={extraction.Passengers}, complete={extraction.IsComplete}");
-            }
+                Log($"✅ Intent={extraction.Intent}, pickup={extraction.Pickup}, dest={extraction.Destination}, pax={extraction.Passengers}, complete={extraction.IsComplete}");
             return extraction;
         }
         catch (Exception ex)
@@ -166,7 +178,7 @@ If user provides partial info, extract what you can and list what's missing.";
     }
 
     /// <summary>
-    /// Generate a friendly confirmation/follow-up message using Gemini.
+    /// Generate a friendly reply using Gemini.
     /// </summary>
     public async Task<string?> GenerateReplyAsync(string context)
     {
@@ -174,20 +186,14 @@ If user provides partial info, extract what you can and list what's missing.";
         {
             var requestBody = new
             {
-                contents = new[]
-                {
-                    new
-                    {
-                        parts = new[] { new { text = context } }
-                    }
-                },
+                contents = new[] { new { parts = new[] { new { text = context } } } },
                 generationConfig = new { temperature = 0.7, maxOutputTokens = 300 }
             };
             return await CallGeminiAsync(requestBody);
         }
         catch (Exception ex)
         {
-            Log($"❌ [Gemini] Reply generation error: {ex.Message}");
+            Log($"❌ [Gemini] Reply error: {ex.Message}");
             return null;
         }
     }
@@ -197,7 +203,6 @@ If user provides partial info, extract what you can and list what's missing.";
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{_config.Model}:generateContent?key={_config.ApiKey}";
         var json = JsonSerializer.Serialize(requestBody);
         var content = new StringContent(json, Encoding.UTF8, "application/json");
-
         var response = await _http.PostAsync(url, content);
         var responseBody = await response.Content.ReadAsStringAsync();
 
@@ -210,11 +215,6 @@ If user provides partial info, extract what you can and list what's missing.";
         using var doc = JsonDocument.Parse(responseBody);
         var candidates = doc.RootElement.GetProperty("candidates");
         if (candidates.GetArrayLength() == 0) return null;
-
-        return candidates[0]
-            .GetProperty("content")
-            .GetProperty("parts")[0]
-            .GetProperty("text")
-            .GetString();
+        return candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString();
     }
 }

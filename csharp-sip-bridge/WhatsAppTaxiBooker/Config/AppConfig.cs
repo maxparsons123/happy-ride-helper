@@ -8,6 +8,7 @@ public sealed class AppConfig
     public WhatsAppConfig WhatsApp { get; set; } = new();
     public GeminiConfig Gemini { get; set; } = new();
     public WebhookConfig Webhook { get; set; } = new();
+    public MqttConfig Mqtt { get; set; } = new();
 }
 
 public sealed class WhatsAppConfig
@@ -32,4 +33,13 @@ public sealed class WebhookConfig
 {
     /// <summary>Local port for the HTTP webhook listener.</summary>
     public int Port { get; set; } = 5088;
+}
+
+public sealed class MqttConfig
+{
+    /// <summary>MQTT broker URL (e.g. wss://broker.hivemq.com:8884/mqtt).</summary>
+    public string BrokerUrl { get; set; } = "wss://broker.hivemq.com:8884/mqtt";
+
+    /// <summary>Topic prefix for publishing booking requests.</summary>
+    public string TopicPrefix { get; set; } = "pubs/requests";
 }
