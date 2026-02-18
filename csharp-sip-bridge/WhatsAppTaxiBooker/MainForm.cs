@@ -15,6 +15,7 @@ public partial class MainForm : Form
     private WebhookListener? _webhook;
     private BookingEngine? _engine;
     private MqttDispatcher? _mqtt;
+    private NgrokManager? _ngrok;
 
     // Controls
     private readonly RichTextBox _logBox;
@@ -24,21 +25,25 @@ public partial class MainForm : Form
     private readonly Button _btnRefresh;
     private readonly Label _lblStatus;
     private readonly Label _lblMqttStatus;
+    private readonly Label _lblNgrokStatus;
     private readonly TextBox _txtGeminiKey;
     private readonly TextBox _txtWaToken;
     private readonly TextBox _txtPhoneId;
     private readonly TextBox _txtMqttBroker;
     private readonly NumericUpDown _nudPort;
+    private readonly CheckBox _chkNgrok;
+    private readonly TextBox _txtNgrokPath;
+    private readonly TextBox _txtNgrokDomain;
 
     public MainForm()
     {
         Text = "WhatsApp Taxi Booker — Gemini Flash + MQTT Dispatch";
-        Size = new Size(1280, 800);
+        Size = new Size(1280, 850);
         StartPosition = FormStartPosition.CenterScreen;
 
         // ── Config panel ──
-        var configGroup = new GroupBox { Text = "Configuration", Dock = DockStyle.Top, Height = 155, Padding = new Padding(8) };
-        var configTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 4 };
+        var configGroup = new GroupBox { Text = "Configuration", Dock = DockStyle.Top, Height = 195, Padding = new Padding(8) };
+        var configTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 6 };
         configTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         configTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         configTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -49,23 +54,41 @@ public partial class MainForm : Form
         _txtPhoneId = new TextBox { Dock = DockStyle.Fill };
         _txtMqttBroker = new TextBox { Dock = DockStyle.Fill };
         _nudPort = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 1024, Maximum = 65535, Value = 5088 };
+        _chkNgrok = new CheckBox { Text = "Enable ngrok", AutoSize = true, Anchor = AnchorStyles.Left };
+        _txtNgrokPath = new TextBox { Dock = DockStyle.Fill, PlaceholderText = @"C:\ngrok\ngrok.exe" };
+        _txtNgrokDomain = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "your-reserved.ngrok-free.app (optional)" };
 
+        // Row 0
         configTable.Controls.Add(new Label { Text = "Gemini API Key:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         configTable.Controls.Add(_txtGeminiKey, 1, 0);
         configTable.Controls.Add(new Label { Text = "WhatsApp Token:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 0);
         configTable.Controls.Add(_txtWaToken, 3, 0);
 
+        // Row 1
         configTable.Controls.Add(new Label { Text = "Phone Number ID:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
         configTable.Controls.Add(_txtPhoneId, 1, 1);
         configTable.Controls.Add(new Label { Text = "Webhook Port:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 1);
         configTable.Controls.Add(_nudPort, 3, 1);
 
+        // Row 2
         configTable.Controls.Add(new Label { Text = "MQTT Broker:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
         configTable.Controls.Add(_txtMqttBroker, 1, 2);
         _lblMqttStatus = new Label { Text = "⚪ MQTT: Disconnected", AutoSize = true, ForeColor = Color.Gray, Anchor = AnchorStyles.Left, Padding = new Padding(0, 5, 0, 0) };
         configTable.Controls.Add(_lblMqttStatus, 2, 2);
         configTable.SetColumnSpan(_lblMqttStatus, 2);
 
+        // Row 3 — ngrok
+        configTable.Controls.Add(_chkNgrok, 0, 3);
+        configTable.Controls.Add(_txtNgrokPath, 1, 3);
+        configTable.Controls.Add(new Label { Text = "Reserved Domain:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 3);
+        configTable.Controls.Add(_txtNgrokDomain, 3, 3);
+
+        // Row 4 — ngrok status
+        _lblNgrokStatus = new Label { Text = "⚪ ngrok: Off", AutoSize = true, ForeColor = Color.Gray, Anchor = AnchorStyles.Left, Padding = new Padding(0, 3, 0, 0) };
+        configTable.Controls.Add(_lblNgrokStatus, 0, 4);
+        configTable.SetColumnSpan(_lblNgrokStatus, 4);
+
+        // Row 5 — buttons
         var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Fill };
         _btnStart = new Button { Text = "▶ Start", Width = 100, Height = 30 };
         _btnStop = new Button { Text = "⏹ Stop", Width = 100, Height = 30, Enabled = false };
@@ -75,7 +98,7 @@ public partial class MainForm : Form
         _btnStop.Click += BtnStop_Click;
         _btnRefresh.Click += (_, _) => RefreshBookings();
         btnPanel.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnRefresh, _lblStatus });
-        configTable.Controls.Add(btnPanel, 0, 3);
+        configTable.Controls.Add(btnPanel, 0, 5);
         configTable.SetColumnSpan(btnPanel, 4);
 
         configGroup.Controls.Add(configTable);
@@ -89,7 +112,6 @@ public partial class MainForm : Form
             SplitterDistance = 350
         };
 
-        // Full booking grid with all columns
         _bookingGrid = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -133,7 +155,6 @@ public partial class MainForm : Form
         gridGroup.Controls.Add(_bookingGrid);
         splitter.Panel1.Controls.Add(gridGroup);
 
-        // Log box
         _logBox = new RichTextBox
         {
             Dock = DockStyle.Fill,
@@ -196,6 +217,9 @@ public partial class MainForm : Form
         _txtPhoneId.Text = _config.WhatsApp.PhoneNumberId;
         _nudPort.Value = _config.Webhook.Port;
         _txtMqttBroker.Text = _config.Mqtt.BrokerUrl;
+        _chkNgrok.Checked = _config.Ngrok.Enabled;
+        _txtNgrokPath.Text = _config.Ngrok.NgrokPath;
+        _txtNgrokDomain.Text = _config.Ngrok.ReservedDomain;
     }
 
     private void SaveConfig()
@@ -205,6 +229,9 @@ public partial class MainForm : Form
         _config.WhatsApp.PhoneNumberId = _txtPhoneId.Text.Trim();
         _config.Webhook.Port = (int)_nudPort.Value;
         _config.Mqtt.BrokerUrl = _txtMqttBroker.Text.Trim();
+        _config.Ngrok.Enabled = _chkNgrok.Checked;
+        _config.Ngrok.NgrokPath = _txtNgrokPath.Text.Trim();
+        _config.Ngrok.ReservedDomain = _txtNgrokDomain.Text.Trim();
 
         var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
         File.WriteAllText(path, JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true }));
@@ -221,7 +248,46 @@ public partial class MainForm : Form
         }
 
         SaveConfig();
+        _btnStart.Enabled = false;
+        _lblStatus.Text = "⏳ Starting...";
+        _lblStatus.ForeColor = Color.Orange;
 
+        // ── Start ngrok if enabled ──
+        if (_config.Ngrok.Enabled)
+        {
+            if (!File.Exists(_config.Ngrok.NgrokPath))
+            {
+                MessageBox.Show($"ngrok not found at:\n{_config.Ngrok.NgrokPath}", "ngrok Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _btnStart.Enabled = true;
+                _lblStatus.Text = "⏸ Stopped";
+                _lblStatus.ForeColor = Color.Gray;
+                return;
+            }
+
+            _lblNgrokStatus.Text = "🟡 ngrok: Starting...";
+            _lblNgrokStatus.ForeColor = Color.Orange;
+
+            var domain = string.IsNullOrWhiteSpace(_config.Ngrok.ReservedDomain) ? null : _config.Ngrok.ReservedDomain;
+            _ngrok = new NgrokManager(_config.Ngrok.NgrokPath, _config.Webhook.Port.ToString(), domain);
+            _ngrok.OnLog += AppendLog;
+            _ngrok.Start();
+
+            var url = await _ngrok.GetPublicUrlAsync();
+            if (url != null)
+            {
+                _lblNgrokStatus.Text = $"🟢 ngrok: {url}/webhook/";
+                _lblNgrokStatus.ForeColor = Color.LimeGreen;
+                AppendLog($"🌍 WhatsApp webhook URL: {url}/webhook/");
+            }
+            else
+            {
+                _lblNgrokStatus.Text = "🔴 ngrok: Failed to get URL";
+                _lblNgrokStatus.ForeColor = Color.Red;
+                AppendLog("⚠️ ngrok started but couldn't retrieve public URL. Check ngrok dashboard.");
+            }
+        }
+
+        // ── Start services ──
         _db = new BookingDb();
         _gemini = new GeminiService(_config.Gemini);
         _whatsApp = new WhatsAppService(_config.WhatsApp);
@@ -229,20 +295,17 @@ public partial class MainForm : Form
         _webhook = new WebhookListener(_config.Webhook, _config.WhatsApp.VerifyToken);
         _engine = new BookingEngine(_gemini, _whatsApp, _db, _config.WhatsApp, _mqtt);
 
-        // Wire logging
         _gemini.OnLog += AppendLog;
         _whatsApp.OnLog += AppendLog;
         _webhook.OnLog += AppendLog;
         _engine.OnLog += AppendLog;
         _mqtt.OnLog += AppendLog;
 
-        // Wire events — refresh grid on any booking change
         _webhook.OnMessage += msg => Task.Run(() => _engine.HandleMessageAsync(msg));
         _engine.OnBookingCreated += _ => Invoke(RefreshBookings);
         _engine.OnBookingUpdated += _ => Invoke(RefreshBookings);
         _engine.OnBookingDispatched += _ => Invoke(RefreshBookings);
 
-        // Connect MQTT
         await _mqtt.ConnectAsync();
         Invoke(() =>
         {
@@ -252,7 +315,6 @@ public partial class MainForm : Form
 
         _webhook.Start();
 
-        _btnStart.Enabled = false;
         _btnStop.Enabled = true;
         _lblStatus.Text = "🟢 Running";
         _lblStatus.ForeColor = Color.LimeGreen;
@@ -265,6 +327,8 @@ public partial class MainForm : Form
     {
         _webhook?.Stop();
         _mqtt?.Dispose();
+        _ngrok?.Stop();
+        _ngrok = null;
         _db?.Dispose();
         _db = null;
 
@@ -274,6 +338,8 @@ public partial class MainForm : Form
         _lblStatus.ForeColor = Color.Gray;
         _lblMqttStatus.Text = "⚪ MQTT: Disconnected";
         _lblMqttStatus.ForeColor = Color.Gray;
+        _lblNgrokStatus.Text = "⚪ ngrok: Off";
+        _lblNgrokStatus.ForeColor = Color.Gray;
 
         AppendLog("🛑 Stopped");
     }
@@ -310,6 +376,7 @@ public partial class MainForm : Form
     {
         _webhook?.Stop();
         _mqtt?.Dispose();
+        _ngrok?.Stop();
         _db?.Dispose();
         base.OnFormClosing(e);
     }

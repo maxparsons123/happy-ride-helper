@@ -9,6 +9,7 @@ public sealed class AppConfig
     public GeminiConfig Gemini { get; set; } = new();
     public WebhookConfig Webhook { get; set; } = new();
     public MqttConfig Mqtt { get; set; } = new();
+    public NgrokConfig Ngrok { get; set; } = new();
 }
 
 public sealed class WhatsAppConfig
@@ -42,4 +43,16 @@ public sealed class MqttConfig
 
     /// <summary>Topic prefix for publishing booking requests.</summary>
     public string TopicPrefix { get; set; } = "pubs/requests";
+}
+
+public sealed class NgrokConfig
+{
+    /// <summary>Enable ngrok tunnel on start.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>Path to ngrok executable.</summary>
+    public string NgrokPath { get; set; } = @"C:\ngrok\ngrok.exe";
+
+    /// <summary>Reserved domain (leave empty for random URL).</summary>
+    public string ReservedDomain { get; set; } = "";
 }
