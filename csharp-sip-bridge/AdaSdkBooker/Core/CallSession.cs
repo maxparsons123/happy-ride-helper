@@ -569,10 +569,14 @@ public sealed class CallSession : ICallSession
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
                     if (_aiClient is OpenAiSdkClient sdkInject)
+                    {
+                        var etaPart = IsImmediatePickup(_booking.PickupTime)
+                            ? $", estimated time of arrival is {_booking.Eta}"
+                            : "";
                         await sdkInject.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
-                            $"estimated time of arrival is {_booking.Eta}. " +
+                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart}. " +
                             $"Read back the VERIFIED addresses and fare to the caller and ask them to confirm the booking.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -846,10 +850,14 @@ public sealed class CallSession : ICallSession
                 sessionId, _booking.Fare, _booking.Eta);
 
             if (_aiClient is OpenAiSdkClient sdkInject)
+            {
+                var etaPart = IsImmediatePickup(_booking.PickupTime)
+                    ? $", estimated time of arrival is {_booking.Eta}"
+                    : "";
                 await sdkInject.InjectMessageAndRespondAsync(
-                    $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
-                    $"estimated time of arrival is {_booking.Eta}. " +
+                    $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart}. " +
                     "Read back the VERIFIED addresses and fare to the caller and ask them to confirm.");
+            }
         }
         catch (Exception ex)
         {
@@ -1018,10 +1026,14 @@ public sealed class CallSession : ICallSession
 
                     // Inject fare result into conversation — Ada will read it back
                     if (_aiClient is OpenAiSdkClient sdkInject)
+                    {
+                        var etaPart = IsImmediatePickup(_booking.PickupTime)
+                            ? $", estimated time of arrival is {_booking.Eta}"
+                            : "";
                         await sdkInject.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}, " +
-                            $"estimated time of arrival is {_booking.Eta}. " +
+                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart}. " +
                             $"Read back these details to the caller and ask them to confirm the booking.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1360,6 +1372,13 @@ public sealed class CallSession : ICallSession
             return pence > 0 ? $"{whole} {currencyWord} {pence}" : $"{whole} {currencyWord}";
         }
         return fare;
+    }
+
+    private static bool IsImmediatePickup(string? pickupTime)
+    {
+        if (string.IsNullOrWhiteSpace(pickupTime)) return true;
+        var lower = pickupTime.Trim().ToLowerInvariant();
+        return lower is "now" or "asap" or "straight away" or "immediately" or "as soon as possible" or "right now";
     }
 
     private static string FormatAddressForReadback(string? number, string? street, string? postalCode, string? city)
