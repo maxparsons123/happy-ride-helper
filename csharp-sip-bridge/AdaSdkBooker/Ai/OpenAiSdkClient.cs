@@ -697,7 +697,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // GREETING
     // =========================
-    public async Task SendGreetingAsync()
+    public async Task SendGreetingAsync(string? callerName = null)
     {
         if (Interlocked.Exchange(ref _greetingSent, 1) == 1) return;
         if (_session == null) return;
@@ -708,8 +708,17 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             var langName = GetLanguageName(lang);
             var localizedGreeting = GetLocalizedGreeting(lang);
 
-            var greeting = $"[SYSTEM] [LANG: {langName}] A new caller has connected (ID: {_callerId}). " +
+            string greeting;
+            if (!string.IsNullOrWhiteSpace(callerName))
+            {
+                greeting = $"[SYSTEM] [LANG: {langName}] A returning caller named {callerName} has connected (ID: {_callerId}). " +
+                           $"Greet them BY NAME in {langName}. Say: \"Hello {callerName}, welcome back to Taxibot. I'm Ada. Where can I take you today?\"";
+            }
+            else
+            {
+                greeting = $"[SYSTEM] [LANG: {langName}] A new caller has connected (ID: {_callerId}). " +
                            $"Greet them in {langName}. Say: \"{localizedGreeting}\"";
+            }
             await _session.AddItemAsync(
                 ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(greeting) }));
             await _session.StartResponseAsync();

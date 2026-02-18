@@ -116,8 +116,8 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Step 4: NOW send the greeting — Ada has the caller's name and history context
-        await _aiClient.SendGreetingAsync();
+        // Step 4: NOW send the greeting — pass caller name directly so it's in the greeting instruction
+        await _aiClient.SendGreetingAsync(_booking.Name);
     }
 
     private async Task<string?> LoadCallerHistoryAsync(string phone)

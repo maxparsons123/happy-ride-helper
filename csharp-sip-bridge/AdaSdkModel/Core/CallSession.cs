@@ -94,7 +94,9 @@ public sealed class CallSession : ICallSession
         {
             return _currentStage switch
             {
-                BookingStage.Greeting => "The caller has not provided their name yet. Ask again: What is your name?",
+                BookingStage.Greeting => string.IsNullOrWhiteSpace(_booking.Name)
+                    ? "The caller has not provided their name yet. Ask again: What is your name?"
+                    : $"The caller's name is {_booking.Name}. Ask where they'd like to be picked up from.",
                 BookingStage.CollectingPickup => $"The pickup address has not been provided yet. Ask: Where would you like to be picked up from?",
                 BookingStage.CollectingDestination => $"The destination has NOT been provided yet. The pickup is '{_booking.Pickup ?? "unknown"}'. Ask: Where would you like to go? Do NOT mention any fare or price — the destination is still missing.",
                 BookingStage.CollectingPassengers => "The number of passengers has not been provided yet. Ask: How many passengers will be traveling?",
@@ -298,8 +300,8 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Step 4: NOW send the greeting — Ada has the caller's name and history context
-        await _aiClient.SendGreetingAsync();
+        // Step 4: NOW send the greeting — pass caller name directly so it's in the greeting instruction
+        await _aiClient.SendGreetingAsync(_booking.Name);
     }
 
     private async Task<string?> LoadCallerHistoryAsync(string phone)
