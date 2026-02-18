@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -11,8 +10,8 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// Pro-Grade A-law RTP playout engine v10.0.
-/// Zero-delay start, ArrayPool GC reduction, corrected catch-up, Win32 handle safety.
+/// Pro-Grade A-law RTP playout engine v10.1.
+/// Zero-delay start, exact-size frames (no ArrayPool crackling), corrected catch-up, Win32 handle safety.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
@@ -28,10 +27,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
     private const int CATCHUP_THRESHOLD = 50;       // 1s buffer → start sending 2x
-    private const int RESUME_THRESHOLD = 4;          // 80ms mid-speech resume
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
-    private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
 
@@ -79,7 +76,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
             while (_accCount >= FRAME_SIZE)
             {
-                var frame = _pool.Rent(FRAME_SIZE);
+                var frame = new byte[FRAME_SIZE];
                 Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
                 _frameQueue.Enqueue(frame);
                 _accCount -= FRAME_SIZE;
@@ -95,7 +92,7 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             if (_accCount > 0)
             {
-                var frame = _pool.Rent(FRAME_SIZE);
+                var frame = new byte[FRAME_SIZE];
                 Array.Fill(frame, ALAW_SILENCE);
                 Buffer.BlockCopy(_accumulator, 0, frame, 0, _accCount);
                 _frameQueue.Enqueue(frame);
@@ -121,10 +118,10 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.Highest,
-            Name = "RTP_v10.0"
+            Name = "RTP_v10.1"
         };
         _playoutThread.Start();
-        OnLog?.Invoke("[RTP] v10.0 Started (Zero-Delay + ArrayPool + Catch-up)");
+        OnLog?.Invoke("[RTP] v10.1 Started (Zero-Delay + Exact Frames + Catch-up)");
     }
 
     private void PlayoutLoop()
@@ -158,13 +155,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private void ProcessPlayout()
     {
         int count = Volatile.Read(ref _queueCount);
-
-        // Catch-up: send TWO frames this tick instead of one when buffer > 1s
         int framesToSend = count > CATCHUP_THRESHOLD ? 2 : 1;
 
         if (_isBuffering)
         {
-            // ZERO-DELAY: break out as soon as first frame arrives
             if (count > 0)
             {
                 _isBuffering = false;
@@ -172,7 +166,6 @@ public sealed class ALawRtpPlayout : IDisposable
             }
             else
             {
-                // No audio yet — fill with typing sounds while waiting
                 var fillFrame = _typingSoundsEnabled
                     ? _typingSound.NextFrame()
                     : _silenceFrame;
@@ -191,7 +184,6 @@ public sealed class ALawRtpPlayout : IDisposable
                 try { OnQueueEmpty?.Invoke(); } catch { }
                 return;
             }
-            // Advance timestamp for the extra catch-up frame
             if (i < framesToSend - 1) _timestamp += FRAME_SIZE;
         }
     }
@@ -200,16 +192,9 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         if (_frameQueue.TryDequeue(out var frame))
         {
-            try
-            {
-                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, 8);
-                return true;
-            }
-            finally
-            {
-                _pool.Return(frame);
-                Interlocked.Decrement(ref _queueCount);
-            }
+            Interlocked.Decrement(ref _queueCount);
+            _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, 8);
+            return true;
         }
         return false;
     }
@@ -221,11 +206,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out var frame))
-        {
-            _pool.Return(frame);
-            Interlocked.Decrement(ref _queueCount);
-        }
+        while (_frameQueue.TryDequeue(out _)) { }
+        Volatile.Write(ref _queueCount, 0);
         lock (_accLock) { _accCount = 0; }
         _isBuffering = true;
         _hasPlayedAudio = false;
@@ -249,7 +231,6 @@ public sealed class ALawRtpPlayout : IDisposable
             }
         }
 
-        // Flush partial accumulator before clearing
         Flush();
         Clear();
     }
