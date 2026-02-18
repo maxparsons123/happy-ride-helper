@@ -13,7 +13,7 @@ public interface IOpenAiClient
     Task CancelResponseAsync();
     Task InjectMessageAndRespondAsync(string message);
     Task InjectSystemMessageAsync(string message);
-    Task SendGreetingAsync();
+    Task SendGreetingAsync(string? callerName = null);
     Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f);
 
     event Action<byte[]>? OnAudio;
