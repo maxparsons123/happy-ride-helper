@@ -132,13 +132,13 @@ public class MainForm : Form
 
         if (transport.Equals("TCP", StringComparison.OrdinalIgnoreCase))
         {
-            _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, 5060)));
-            Log("📡 SIP TCP on port 5060");
+            _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, 0)));
+            Log("📡 SIP TCP channel started (ephemeral port)");
         }
         else
         {
-            _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 5060)));
-            Log("📡 SIP UDP on port 5060");
+            _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0)));
+            Log("📡 SIP UDP channel started (ephemeral port)");
         }
 
         // OPTIONS keepalive handler
@@ -161,7 +161,8 @@ public class MainForm : Form
             effectiveAuthUser,
             password,
             effectiveDomain,
-            3600);
+            outboundProxy.ToString(),
+            expiry: 3600);
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
         {
