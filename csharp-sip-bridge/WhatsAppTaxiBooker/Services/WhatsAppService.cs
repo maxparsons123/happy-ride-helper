@@ -1,18 +1,36 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using WhatsAppTaxiBooker.Config;
+using WhatsAppTaxiBooker.Helpers;
 
 namespace WhatsAppTaxiBooker.Services;
 
 /// <summary>
 /// WhatsApp Business Cloud API client for sending messages.
+/// Uses a singleton HttpClient with proper handler configuration.
+/// All outbound phone numbers are normalised to UK WhatsApp format (44...).
 /// </summary>
 public sealed class WhatsAppService
 {
     private readonly WhatsAppConfig _config;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private const string BaseUrl = "https://graph.facebook.com/v21.0";
+
+    // Singleton HttpClient — socket reuse, no TIME_WAIT storms
+    private static readonly HttpClient _http;
+    static WhatsAppService()
+    {
+        var handler = new HttpClientHandler
+        {
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+        };
+        _http = new HttpClient(handler, disposeHandler: false)
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("WhatsAppTaxiBooker/1.0");
+    }
 
     public event Action<string>? OnLog;
     private void Log(string msg) => OnLog?.Invoke(msg);
@@ -24,9 +42,11 @@ public sealed class WhatsAppService
 
     /// <summary>
     /// Send a text message to a WhatsApp user.
+    /// Phone number is auto-normalised to UK E.164.
     /// </summary>
     public async Task<bool> SendTextAsync(string to, string message)
     {
+        to = PhoneFormatter.ToWhatsAppFormat(to);
         Log($"📤 [WhatsApp] Sending to {to}: {message[..Math.Min(80, message.Length)]}...");
         try
         {
