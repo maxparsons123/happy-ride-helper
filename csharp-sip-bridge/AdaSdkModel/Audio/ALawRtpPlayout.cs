@@ -26,7 +26,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
-    private const int JITTER_BUFFER_RESUME_THRESHOLD = 4; // 80ms mid-speech resume
+    private const int JITTER_BUFFER_START_THRESHOLD = 3;  // 60ms initial start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 1; // 20ms mid-speech resume (near zero-delay)
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
@@ -143,15 +144,16 @@ public sealed class ALawRtpPlayout : IDisposable
 
             if (_isBuffering)
             {
-                // ZERO-DELAY: play immediately when first frame arrives
-                if (count > 0)
+                // Initial start: wait for 60ms buffer; mid-speech resume: 20ms
+                int threshold = _hasPlayedAudio ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
+                if (count >= threshold)
                 {
                     _isBuffering = false;
                     _hasPlayedAudio = true;
                 }
                 else
                 {
-                    // No audio yet — typing sounds while waiting
+                    // Not enough buffered yet — typing sounds or silence
                     var fillFrame = _typingSoundsEnabled
                         ? _typingSound.NextFrame()
                         : _silenceFrame;
