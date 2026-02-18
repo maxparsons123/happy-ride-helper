@@ -76,6 +76,21 @@ export default function TrackDriver() {
     vehicleReg ? `${driverName} (${vehicleReg})` : driverName
   );
   const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+    } else {
+      document.exitFullscreen?.().catch(() => {});
+    }
+  };
 
   // TTS state
   const tts = useRef({ twoMin: false, nearby: false, outside: false, timer: null as any });
@@ -522,6 +537,15 @@ export default function TrackDriver() {
           50% { box-shadow: 0 0 20px rgba(251,191,36,0.8); }
         }
         .track-info-bar.arriving { animation: pulseGlow 1.5s ease-in-out infinite; }
+        .track-fullscreen-btn {
+          position: absolute; top: calc(8px + var(--safe-area-inset-top)); right: 8px;
+          z-index: 1001; width: 40px; height: 40px; border-radius: 8px;
+          background: rgba(26,32,44,0.8); border: 1px solid rgba(251,191,36,0.4);
+          color: #fbbf24; font-size: 20px; cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+          backdrop-filter: blur(4px); transition: all 0.2s;
+        }
+        .track-fullscreen-btn:active { transform: scale(0.9); }
         @media (max-width: 768px) {
           .track-ad-banner { height: calc(60px + var(--safe-area-inset-top)); }
           .track-info-value { font-size: 14px; }
@@ -535,6 +559,11 @@ export default function TrackDriver() {
       `}</style>
 
       <div className="track-app">
+        {/* Fullscreen toggle */}
+        <button className="track-fullscreen-btn" onClick={toggleFullscreen} title={isFullscreen ? "Exit fullscreen" : "Go fullscreen"}>
+          {isFullscreen ? "✕" : "⛶"}
+        </button>
+
         {/* Ad Banner */}
         <div className="track-ad-banner">
           {AD_SLIDES.map((url, i) => (
