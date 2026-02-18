@@ -166,8 +166,8 @@ public class MainForm : Form
             effectiveAuthUser,
             password,
             effectiveDomain,
-            outboundProxy.ToString(),
-            expiry: 3600);
+            3600);
+        _regAgent.OutboundProxy = outboundProxy;
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
         {
