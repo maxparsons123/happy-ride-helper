@@ -28,7 +28,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
     private const byte PAYLOAD_TYPE_PCMA = 8;
-    private const int JITTER_BUFFER_RESUME_THRESHOLD = 4; // 80ms mid-speech resume
+    private const int JITTER_BUFFER_START_THRESHOLD = 3;  // 60ms initial start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 1; // 20ms mid-speech resume
     private const int MAX_QUEUE_FRAMES = 1500;
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
@@ -44,6 +45,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private System.Threading.Timer? _natKeepaliveTimer;
     private volatile bool _running;
     private volatile bool _isBuffering = true;
+    private volatile bool _hasPlayedAudio;
     private volatile int _disposed;
     private volatile int _started;
     private int _framesSent;
@@ -220,10 +222,12 @@ public sealed class ALawRtpPlayout : IDisposable
 
             if (_isBuffering)
             {
-                // ZERO-DELAY: play immediately when first frame arrives
-                if (count > 0)
+                // Initial start: 60ms buffer; mid-speech resume: 20ms
+                int threshold = _hasPlayedAudio ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
+                if (count >= threshold)
                 {
                     _isBuffering = false;
+                    _hasPlayedAudio = true;
                 }
                 else
                 {
@@ -269,7 +273,7 @@ public sealed class ALawRtpPlayout : IDisposable
             Interlocked.Decrement(ref _queueCount);
         lock (_accLock) { _accCount = 0; }
         _isBuffering = true;
-    }
+        _hasPlayedAudio = false;
 
     private void SafeLog(string msg)
     {
