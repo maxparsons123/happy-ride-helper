@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -12,8 +11,8 @@ using SIPSorceryMedia.Abstractions;
 namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
-/// Pure A-law RTP playout engine v10.0.
-/// Zero-delay start, ArrayPool GC reduction, corrected catch-up, NAT keepalive, Win32 handle safety.
+/// Pure A-law RTP playout engine v10.1.
+/// Zero-delay start, exact-size frames (no ArrayPool crackling), corrected catch-up, NAT keepalive.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
@@ -29,11 +28,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
     private const byte PAYLOAD_TYPE_PCMA = 8;
-    private const int CATCHUP_THRESHOLD = 50;        // 1s buffer → send 2x
-    private const int MAX_QUEUE_FRAMES = 1500;       // ~30s safety cap
+    private const int CATCHUP_THRESHOLD = 50;
+    private const int MAX_QUEUE_FRAMES = 1500;
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
-    private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
 
@@ -54,7 +52,6 @@ public sealed class ALawRtpPlayout : IDisposable
     private IntPtr _waitableTimer;
     private long _lastRtpSendTimeTicks = DateTime.UtcNow.Ticks;
 
-    // NAT state
     private IPEndPoint? _lastRemoteEndpoint;
     private volatile bool _natBindingEstablished;
 
@@ -115,17 +112,13 @@ public sealed class ALawRtpPlayout : IDisposable
 
             while (_accCount >= FRAME_SIZE)
             {
-                // Overflow protection
                 while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
                 {
-                    if (_frameQueue.TryDequeue(out var discarded))
-                    {
-                        _pool.Return(discarded);
+                    if (_frameQueue.TryDequeue(out _))
                         Interlocked.Decrement(ref _queueCount);
-                    }
                 }
 
-                var frame = _pool.Rent(FRAME_SIZE);
+                var frame = new byte[FRAME_SIZE];
                 Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
                 _frameQueue.Enqueue(frame);
                 Interlocked.Increment(ref _queueCount);
@@ -143,7 +136,7 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             if (_accCount > 0)
             {
-                var frame = _pool.Rent(FRAME_SIZE);
+                var frame = new byte[FRAME_SIZE];
                 Array.Fill(frame, ALAW_SILENCE);
                 Buffer.BlockCopy(_accumulator, 0, frame, 0, _accCount);
                 _frameQueue.Enqueue(frame);
@@ -173,10 +166,10 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.Highest,
-            Name = "RTP_v10.0"
+            Name = "RTP_v10.1"
         };
         _playoutThread.Start();
-        SafeLog("[RTP] v10.0 Started (Zero-Delay + ArrayPool + Catch-up + NAT)");
+        SafeLog("[RTP] v10.1 Started (Zero-Delay + Exact Frames + Catch-up + NAT)");
     }
 
     public void Stop()
@@ -227,7 +220,6 @@ public sealed class ALawRtpPlayout : IDisposable
             _timestamp += FRAME_SIZE;
             nextTickNs += 20_000_000;
 
-            // Gentle drift correction: snap if >100ms behind
             long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
             if (currentNs - nextTickNs > 100_000_000)
                 nextTickNs = currentNs + 20_000_000;
@@ -237,13 +229,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private void ProcessPlayout()
     {
         int count = Volatile.Read(ref _queueCount);
-
-        // Catch-up: send TWO frames this tick when buffer > 1s
         int framesToSend = count > CATCHUP_THRESHOLD ? 2 : 1;
 
         if (_isBuffering)
         {
-            // ZERO-DELAY: break out as soon as first frame arrives
             if (count > 0)
             {
                 _isBuffering = false;
@@ -272,18 +261,11 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         if (_frameQueue.TryDequeue(out var frame))
         {
-            try
-            {
-                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, PAYLOAD_TYPE_PCMA);
-                Interlocked.Exchange(ref _lastRtpSendTimeTicks, DateTime.UtcNow.Ticks);
-                Interlocked.Increment(ref _framesSent);
-                return true;
-            }
-            finally
-            {
-                _pool.Return(frame);
-                Interlocked.Decrement(ref _queueCount);
-            }
+            Interlocked.Decrement(ref _queueCount);
+            _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, PAYLOAD_TYPE_PCMA);
+            Interlocked.Exchange(ref _lastRtpSendTimeTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Increment(ref _framesSent);
+            return true;
         }
         return false;
     }
@@ -300,10 +282,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out var frame))
-        {
-            _pool.Return(frame);
-        }
+        while (_frameQueue.TryDequeue(out _)) { }
         Volatile.Write(ref _queueCount, 0);
         lock (_accLock) { _accCount = 0; }
         _isBuffering = true;
