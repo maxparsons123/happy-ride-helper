@@ -1,6 +1,8 @@
 using System;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Windows.Forms;
 using Microsoft.Extensions.Configuration;
 using SIPSorcery.Media;
@@ -108,6 +110,9 @@ public class MainForm : Form
             Log("❌ Server and Username are required.");
             return;
         }
+
+        // Persist credentials for next launch
+        SaveSettings(server, port.ToString(), username, password, authId, domain, transport);
 
         var effectiveAuthUser = string.IsNullOrEmpty(authId) ? username : authId;
         var effectiveDomain = string.IsNullOrEmpty(domain) ? server : domain;
@@ -237,6 +242,42 @@ public class MainForm : Form
             _btnRegister.Enabled = true;
             _btnUnregister.Enabled = false;
             Log("👋 Unregistered");
+        }
+    }
+
+    // ── Persistence ──
+    private void SaveSettings(string server, string port, string username, string password, string authId, string domain, string transport)
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+            Dictionary<string, object>? root = null;
+
+            if (File.Exists(path))
+            {
+                var json = File.ReadAllText(path);
+                root = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
+            }
+            root ??= new Dictionary<string, object>();
+
+            root["Gamma"] = new Dictionary<string, string?>
+            {
+                ["Server"] = server,
+                ["Port"] = port,
+                ["Username"] = username,
+                ["Password"] = password,
+                ["AuthId"] = string.IsNullOrEmpty(authId) ? null : authId,
+                ["Domain"] = domain,
+                ["Transport"] = transport
+            };
+
+            var opts = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(path, JsonSerializer.Serialize(root, opts));
+            Log("💾 Settings saved");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Could not save settings: {ex.Message}");
         }
     }
 
