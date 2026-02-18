@@ -89,7 +89,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // CONSTANTS
     // =========================
     private const int MAX_NO_REPLY_PROMPTS = 3;
-    private const int NO_REPLY_TIMEOUT_MS = 15_000;
+    private const int NO_REPLY_TIMEOUT_MS = 8_000;
     private const int CONFIRMATION_TIMEOUT_MS = 30_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
     private const int ECHO_GUARD_MS = 300;
@@ -1082,8 +1082,12 @@ STEP-BY-STEP (DO NOT SKIP ANY STEP):
 
 1. After all fields collected, say ONLY: ""Let me check those addresses and get you a price.""
 2. WAIT for the [FARE RESULT] message — DO NOT call book_taxi yet
-3. When you receive [FARE RESULT], read back the VERIFIED addresses and fare:
-   ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare] with an estimated arrival in [ETA]. Would you like to confirm or change anything?""
+3. When you receive [FARE RESULT], read back the VERIFIED addresses and fare.
+   - For IMMEDIATE pickups (""now"", ""as soon as possible"", ""straight away""):
+     ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare] with an estimated arrival in [ETA]. Would you like to confirm or change anything?""
+   - For SCHEDULED/FUTURE pickups (any specific time or date):
+     ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare]. Would you like to confirm or change anything?""
+     ⚠️ Do NOT mention ETA for scheduled bookings — it is not relevant.
 4. WAIT for the user to say YES (""yes"", ""confirm"", ""go ahead"", etc.)
 5. ONLY THEN call book_taxi(action=""confirmed"")
 6. Give reference ID from the tool result
@@ -1427,11 +1431,14 @@ ETA HANDLING
 - Scheduled pickup → do NOT mention arrival ETA
 
 ==============================
-CURRENCY
+CURRENCY (STRICT)
 ==============================
 
 Use the fare_spoken field for speech — it already contains the correct currency word (pounds, euros, etc.).
 NEVER change the currency. NEVER invent a fare.
+⚠️ NEVER mix currencies. If fare_spoken says ""pounds"", ALL prices must be in pounds.
+NEVER say ""euros"" if fare_spoken says ""pounds"", and vice versa.
+If you are unsure of the currency, use EXACTLY what fare_spoken contains — do NOT substitute.
 
 ==============================
 ABSOLUTE RULES – VIOLATION FORBIDDEN
