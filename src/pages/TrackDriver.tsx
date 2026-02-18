@@ -64,10 +64,14 @@ export default function TrackDriver() {
   const routeLineRef = useRef<any>(null);
   const mqttRef = useRef<any>(null);
   const lastMqttTs = useRef(0);
+  const demoRouteRef = useRef<[number, number][] | null>(null);
+  const demoIndexRef = useRef(0);
+  const demoTimerRef = useRef<any>(null);
 
   const [currentAd, setCurrentAd] = useState(0);
   const [distance, setDistance] = useState("--");
   const [eta, setEta] = useState("--");
+  const [arrived, setArrived] = useState(false);
   const [driverLabel, setDriverLabel] = useState(
     vehicleReg ? `${driverName} (${vehicleReg})` : driverName
   );
@@ -313,12 +317,68 @@ export default function TrackDriver() {
     return () => clearInterval(timer);
   }, []);
 
+  /* ── Demo simulation: fetch OSRM route then animate along it ── */
+  useEffect(() => {
+    // Fetch the full road route from initial driver pos to pickup
+    const fetchDemoRoute = async () => {
+      try {
+        const url = `${OSRM_BASE}/${initDriverLon},${initDriverLat};${pickupLon},${pickupLat}?overview=full&geometries=geojson&steps=false`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!data.routes?.length) return;
+        const coords: [number, number][] = data.routes[0].geometry.coordinates.map(
+          ([lng, lat]: number[]) => [lat, lng] as [number, number]
+        );
+        demoRouteRef.current = coords;
+        demoIndexRef.current = 0;
+
+        // Start animating along the route
+        demoTimerRef.current = setInterval(() => {
+          // If real MQTT data is flowing, pause demo
+          if (Date.now() - lastMqttTs.current < 15000) return;
+
+          const route = demoRouteRef.current;
+          if (!route) return;
+          const idx = demoIndexRef.current;
+          if (idx >= route.length) {
+            clearInterval(demoTimerRef.current);
+            setArrived(true);
+            return;
+          }
+
+          // Move 1-3 points per tick for smooth but visible movement
+          const step = Math.min(3, route.length - idx);
+          const nextIdx = idx + step;
+          demoIndexRef.current = nextIdx;
+          const pos = route[Math.min(nextIdx, route.length - 1)];
+          updateDriverPosition(pos);
+
+          // Check arrival
+          const dist = haversine(pos[0], pos[1], pickupLat, pickupLon);
+          if (dist < 30) {
+            clearInterval(demoTimerRef.current);
+            setArrived(true);
+          }
+        }, 2000);
+      } catch (err) {
+        console.error("Demo route fetch failed:", err);
+      }
+    };
+
+    // Delay slightly so map loads first
+    const timeout = setTimeout(fetchDemoRoute, 2000);
+    return () => {
+      clearTimeout(timeout);
+      if (demoTimerRef.current) clearInterval(demoTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* ── passenger GPS ──────────────────────────────────────────── */
   useEffect(() => {
     if (!navigator.geolocation) return;
     const id = navigator.geolocation.watchPosition(
       (pos) => {
-        // Could add a live "you are here" marker
         console.log("📍 Passenger GPS:", pos.coords.latitude, pos.coords.longitude);
       },
       () => {},
@@ -428,12 +488,49 @@ export default function TrackDriver() {
         }
         .track-toast.show { opacity: 1; }
         .track-toast.error { background: #ef4444; }
+        .track-arrived-overlay {
+          position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0,0,0,0.6); display: flex; flex-direction: column;
+          align-items: center; justify-content: center; z-index: 999;
+          animation: fadeInOverlay 0.5s ease-out;
+        }
+        @keyframes fadeInOverlay {
+          from { opacity: 0; } to { opacity: 1; }
+        }
+        @keyframes bounceIn {
+          0% { transform: scale(0.3); opacity: 0; }
+          50% { transform: scale(1.05); }
+          70% { transform: scale(0.95); }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        .track-arrived-card {
+          background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+          color: white; border-radius: 20px; padding: 32px 40px;
+          text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+          animation: bounceIn 0.6s ease-out;
+        }
+        .track-arrived-card .emoji { font-size: 48px; margin-bottom: 12px; }
+        .track-arrived-card h2 { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+        .track-arrived-card p { font-size: 16px; opacity: 0.9; }
+        .track-arrived-card .reg { 
+          display: inline-block; margin-top: 12px; padding: 6px 16px;
+          background: rgba(255,255,255,0.2); border-radius: 8px;
+          font-size: 18px; font-weight: 700; letter-spacing: 2px;
+        }
+        @keyframes pulseGlow {
+          0%, 100% { box-shadow: 0 0 8px rgba(251,191,36,0.4); }
+          50% { box-shadow: 0 0 20px rgba(251,191,36,0.8); }
+        }
+        .track-info-bar.arriving { animation: pulseGlow 1.5s ease-in-out infinite; }
         @media (max-width: 768px) {
           .track-ad-banner { height: calc(60px + var(--safe-area-inset-top)); }
           .track-info-value { font-size: 14px; }
           .track-info-label { font-size: 11px; }
           .track-controls { padding-bottom: calc(70px + var(--safe-area-inset-bottom)); }
           .track-btn { padding: 10px 6px; font-size: 12px; min-height: 48px; gap: 4px; }
+          .track-arrived-card { padding: 24px 28px; }
+          .track-arrived-card .emoji { font-size: 40px; }
+          .track-arrived-card h2 { font-size: 20px; }
         }
       `}</style>
 
@@ -448,7 +545,7 @@ export default function TrackDriver() {
         </div>
 
         {/* Info Bar */}
-        <div className="track-info-bar">
+        <div className={`track-info-bar ${eta === "Arriving!" ? "arriving" : ""}`}>
           <div className="track-info-container">
             <div className="track-info-item">
               <span className="track-info-label">🚖 Driver</span>
@@ -457,12 +554,12 @@ export default function TrackDriver() {
             <div className="track-info-divider" />
             <div className="track-info-item">
               <span className="track-info-label">📍 Distance</span>
-              <span className="track-info-value">{distance}</span>
+              <span className="track-info-value">{arrived ? "Here!" : distance}</span>
             </div>
             <div className="track-info-divider" />
             <div className="track-info-item">
               <span className="track-info-label">⏱ ETA</span>
-              <span className="track-info-value">{eta}</span>
+              <span className="track-info-value">{arrived ? "Arrived!" : eta}</span>
             </div>
           </div>
         </div>
@@ -470,6 +567,16 @@ export default function TrackDriver() {
         {/* Map */}
         <div className="track-map">
           <div ref={mapRef} style={{ height: "100%", width: "100%" }} />
+          {arrived && (
+            <div className="track-arrived-overlay">
+              <div className="track-arrived-card">
+                <div className="emoji">🚕</div>
+                <h2>Your taxi has arrived!</h2>
+                <p>Look out for {driverName}</p>
+                {vehicleReg && <div className="reg">{vehicleReg}</div>}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Controls */}
