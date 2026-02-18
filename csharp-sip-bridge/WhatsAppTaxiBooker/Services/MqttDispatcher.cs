@@ -71,31 +71,53 @@ public sealed class MqttDispatcher : IDisposable
         }
 
         var topic = $"{_config.TopicPrefix}/{booking.Id}";
+
+        // Payload matches the driver app job schema (v2026)
         var payload = new
         {
-            jobId = booking.Id,
+            job = booking.Id,
             lat = booking.PickupLat ?? 0.0,
             lng = booking.PickupLng ?? 0.0,
             pickupAddress = booking.Pickup,
-            pickup = booking.Pickup,
             dropoff = booking.Destination,
             dropoffLat = booking.DropoffLat ?? 0.0,
             dropoffLng = booking.DropoffLng ?? 0.0,
+            biddingWindowSec = 45,
             passengers = booking.Passengers.ToString(),
             customerName = booking.CallerName ?? "WhatsApp Customer",
             customerPhone = booking.Phone,
             fare = booking.Fare ?? "",
             notes = booking.Notes ?? "",
-            biddingWindowSec = 30,
-            source = "whatsapp",
-            priority = "normal"
+            temp1 = booking.PickupTime ?? "",
+            temp2 = "whatsapp",
+            temp3 = ""
         };
 
         var json = JsonSerializer.Serialize(payload);
         var packet = BuildMqttPublish(topic, json);
         await _ws.SendAsync(packet, WebSocketMessageType.Binary, true, CancellationToken.None);
-
         Log($"📨 [MQTT] Dispatched {booking.Id} to {topic}");
+
+        // Also publish to passengers/ topic for driver app compatibility
+        var passengerTopic = $"passengers/{booking.Id}/created";
+        var pPayload = new
+        {
+            jobId = booking.Id,
+            customerName = booking.CallerName ?? "WhatsApp Customer",
+            customerPhone = booking.Phone,
+            customerbooktim = DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"),
+            pickupLat = booking.PickupLat ?? 0.0,
+            pickupLng = booking.PickupLng ?? 0.0,
+            pickupAddress = booking.Pickup,
+            dropAddress = booking.Destination,
+            dropofflat = booking.DropoffLat ?? 0.0,
+            dropofflon = booking.DropoffLng ?? 0.0,
+            status = "WAITING"
+        };
+        var pJson = JsonSerializer.Serialize(pPayload);
+        var pPacket = BuildMqttPublish(passengerTopic, pJson);
+        await _ws.SendAsync(pPacket, WebSocketMessageType.Binary, true, CancellationToken.None);
+        Log($"📨 [MQTT] Also published to {passengerTopic}");
     }
 
     // ── Minimal MQTT packet builders ──
