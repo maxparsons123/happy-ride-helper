@@ -26,8 +26,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
-    private const int JITTER_BUFFER_START_THRESHOLD = 3;  // 60ms initial start
-    private const int JITTER_BUFFER_RESUME_THRESHOLD = 1; // 20ms mid-speech resume (near zero-delay)
+    private const int JITTER_BUFFER_START_THRESHOLD = 2;  // 40ms initial start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 1; // 20ms mid-speech resume
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
