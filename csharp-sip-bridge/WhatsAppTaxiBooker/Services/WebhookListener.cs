@@ -6,8 +6,8 @@ using WhatsAppTaxiBooker.Config;
 namespace WhatsAppTaxiBooker.Services;
 
 /// <summary>
-/// HTTP listener for WhatsApp Cloud API webhook callbacks.
-/// Handles GET (verify) and POST (incoming messages).
+/// HTTP listener for WhatsApp Cloud API webhook callbacks AND iCabbi webhook events.
+/// Routes: GET /webhook/ (verify), POST /webhook/ (WhatsApp messages), POST /icabbi/ (iCabbi events).
 /// </summary>
 public sealed class WebhookListener : IDisposable
 {
@@ -17,6 +17,7 @@ public sealed class WebhookListener : IDisposable
 
     public event Action<string>? OnLog;
     public event Action<IncomingWhatsAppMessage>? OnMessage;
+    public event Action<string>? OnIcabbiEvent; // raw JSON body
 
     private void Log(string msg) => OnLog?.Invoke(msg);
 
@@ -25,13 +26,14 @@ public sealed class WebhookListener : IDisposable
         _verifyToken = verifyToken;
         _listener = new HttpListener();
         _listener.Prefixes.Add($"http://+:{webhookConfig.Port}/webhook/");
+        _listener.Prefixes.Add($"http://+:{webhookConfig.Port}/icabbi/");
     }
 
     public void Start()
     {
         _cts = new CancellationTokenSource();
         _listener.Start();
-        Log($"🌐 Webhook listener started on {_listener.Prefixes.First()}");
+        Log($"🌐 Webhook listener started on port (webhook + icabbi)");
         Task.Run(() => ListenLoop(_cts.Token));
     }
 
@@ -61,16 +63,29 @@ public sealed class WebhookListener : IDisposable
     {
         try
         {
-            if (ctx.Request.HttpMethod == "GET")
+            var path = ctx.Request.Url?.AbsolutePath?.TrimEnd('/').ToLowerInvariant() ?? "";
+
+            // iCabbi webhook route
+            if (path == "/icabbi" && ctx.Request.HttpMethod == "POST")
             {
-                HandleVerification(ctx);
+                await HandleIcabbiWebhook(ctx);
                 return;
             }
 
-            if (ctx.Request.HttpMethod == "POST")
+            // WhatsApp webhook routes
+            if (path == "/webhook")
             {
-                await HandleIncomingMessage(ctx);
-                return;
+                if (ctx.Request.HttpMethod == "GET")
+                {
+                    HandleVerification(ctx);
+                    return;
+                }
+
+                if (ctx.Request.HttpMethod == "POST")
+                {
+                    await HandleIncomingMessage(ctx);
+                    return;
+                }
             }
 
             ctx.Response.StatusCode = 405;
@@ -106,12 +121,23 @@ public sealed class WebhookListener : IDisposable
         ctx.Response.Close();
     }
 
+    private async Task HandleIcabbiWebhook(HttpListenerContext ctx)
+    {
+        using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        var body = await reader.ReadToEndAsync();
+
+        ctx.Response.StatusCode = 200;
+        ctx.Response.Close();
+
+        Log($"📡 iCabbi webhook received ({body.Length} bytes)");
+        OnIcabbiEvent?.Invoke(body);
+    }
+
     private async Task HandleIncomingMessage(HttpListenerContext ctx)
     {
         using var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding);
         var body = await reader.ReadToEndAsync();
 
-        // Always respond 200 to Meta immediately
         ctx.Response.StatusCode = 200;
         ctx.Response.Close();
 
@@ -120,7 +146,6 @@ public sealed class WebhookListener : IDisposable
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
 
-            // Navigate: entry[0].changes[0].value.messages[0]
             if (!root.TryGetProperty("entry", out var entries)) return;
             
             foreach (var entry in entries.EnumerateArray())
@@ -137,7 +162,7 @@ public sealed class WebhookListener : IDisposable
                         var parsed = ParseMessage(msg, value);
                         if (parsed != null)
                         {
-                            Log($"📥 [{parsed.Type}] from {parsed.From}: {parsed.Text?[..Math.Min(80, parsed.Text.Length ?? 0)] ?? "(media)"}");
+                            Log($"📥 [{parsed.Type}] from {parsed.From}: {parsed.Text?[..Math.Min(80, parsed.Text.Length)] ?? "(media)"}");
                             OnMessage?.Invoke(parsed);
                         }
                     }
@@ -156,7 +181,6 @@ public sealed class WebhookListener : IDisposable
         var from = msg.GetProperty("from").GetString() ?? "";
         var msgId = msg.GetProperty("id").GetString() ?? "";
 
-        // Get contact name if available
         string? contactName = null;
         if (value.TryGetProperty("contacts", out var contacts) && contacts.GetArrayLength() > 0)
         {
@@ -168,26 +192,19 @@ public sealed class WebhookListener : IDisposable
         {
             "text" => new IncomingWhatsAppMessage
             {
-                MessageId = msgId,
-                From = from,
-                ContactName = contactName,
-                Type = "text",
-                Text = msg.GetProperty("text").GetProperty("body").GetString()
+                MessageId = msgId, From = from, ContactName = contactName,
+                Type = "text", Text = msg.GetProperty("text").GetProperty("body").GetString()
             },
             "audio" => new IncomingWhatsAppMessage
             {
-                MessageId = msgId,
-                From = from,
-                ContactName = contactName,
+                MessageId = msgId, From = from, ContactName = contactName,
                 Type = "audio",
                 MediaId = msg.GetProperty("audio").GetProperty("id").GetString(),
                 MimeType = msg.GetProperty("audio").TryGetProperty("mime_type", out var mt) ? mt.GetString() : "audio/ogg"
             },
             "location" => new IncomingWhatsAppMessage
             {
-                MessageId = msgId,
-                From = from,
-                ContactName = contactName,
+                MessageId = msgId, From = from, ContactName = contactName,
                 Type = "location",
                 Latitude = msg.GetProperty("location").GetProperty("latitude").GetDouble(),
                 Longitude = msg.GetProperty("location").GetProperty("longitude").GetDouble(),

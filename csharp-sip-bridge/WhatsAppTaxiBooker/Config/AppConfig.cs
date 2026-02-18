@@ -10,6 +10,7 @@ public sealed class AppConfig
     public WebhookConfig Webhook { get; set; } = new();
     public MqttConfig Mqtt { get; set; } = new();
     public NgrokConfig Ngrok { get; set; } = new();
+    public IcabbiConfig Icabbi { get; set; } = new();
 }
 
 public sealed class WhatsAppConfig
@@ -55,4 +56,22 @@ public sealed class NgrokConfig
 
     /// <summary>Reserved domain (leave empty for random URL).</summary>
     public string ReservedDomain { get; set; } = "";
+}
+
+public sealed class IcabbiConfig
+{
+    /// <summary>Enable iCabbi dispatch integration.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>iCabbi API App Key.</summary>
+    public string AppKey { get; set; } = "";
+
+    /// <summary>iCabbi API Secret Key.</summary>
+    public string SecretKey { get; set; } = "";
+
+    /// <summary>iCabbi tenant base URL (e.g. https://yourtenant.icabbi.net).</summary>
+    public string TenantBase { get; set; } = "https://yourtenant.icabbi.net";
+
+    /// <summary>iCabbi site ID for bookings.</summary>
+    public int SiteId { get; set; } = 71;
 }

@@ -5,12 +5,8 @@ using WhatsAppTaxiBooker.Models;
 namespace WhatsAppTaxiBooker.Services;
 
 /// <summary>
-/// Orchestrates the booking flow with intent-aware processing:
-/// - new_booking: Create and collect details
-/// - update: Modify existing booking fields
-/// - confirm: Lock booking + dispatch via MQTT
-/// - cancel: Cancel active booking
-/// - query: Show booking status
+/// Orchestrates the booking flow with intent-aware processing.
+/// On confirm: dispatches via MQTT AND submits to iCabbi if enabled.
 /// </summary>
 public sealed class BookingEngine
 {
@@ -19,6 +15,7 @@ public sealed class BookingEngine
     private readonly BookingDb _db;
     private readonly WhatsAppConfig _waConfig;
     private readonly MqttDispatcher _mqtt;
+    private readonly IcabbiService? _icabbi;
 
     public event Action<string>? OnLog;
     public event Action<Booking>? OnBookingCreated;
@@ -26,13 +23,15 @@ public sealed class BookingEngine
     public event Action<Booking>? OnBookingDispatched;
     private void Log(string msg) => OnLog?.Invoke(msg);
 
-    public BookingEngine(GeminiService gemini, WhatsAppService whatsApp, BookingDb db, WhatsAppConfig waConfig, MqttDispatcher mqtt)
+    public BookingEngine(GeminiService gemini, WhatsAppService whatsApp, BookingDb db,
+        WhatsAppConfig waConfig, MqttDispatcher mqtt, IcabbiService? icabbi = null)
     {
         _gemini = gemini;
         _whatsApp = whatsApp;
         _db = db;
         _waConfig = waConfig;
         _mqtt = mqtt;
+        _icabbi = icabbi;
     }
 
     public async Task HandleMessageAsync(IncomingWhatsAppMessage msg)
@@ -74,11 +73,9 @@ public sealed class BookingEngine
 
         _db.SaveMessage(msg.From, "user", textContent);
 
-        // Load existing booking context for this caller
         var existingBooking = _db.GetActiveBookingByPhone(msg.From);
         var history = _db.GetConversation(msg.From, 8);
 
-        // Extract with intent detection
         var extraction = await _gemini.ExtractBookingAsync(textContent, history, existingBooking);
         if (extraction == null)
         {
@@ -109,7 +106,7 @@ public sealed class BookingEngine
                 else
                     await SendReply(msg.From, "Hi! 🚕 I'd love to help you book a taxi. Where would you like to be picked up from, and where are you heading?");
                 break;
-            default: // new_booking
+            default:
                 await HandleNewOrMergeAsync(msg.From, msg.ContactName, existingBooking, extraction);
                 break;
         }
@@ -126,7 +123,7 @@ public sealed class BookingEngine
         booking.Status = "confirmed";
         _db.SaveBooking(booking);
 
-        // Dispatch via MQTT to the Windows dispatch system
+        // 1) Dispatch via MQTT
         try
         {
             await _mqtt.PublishBookingAsync(booking);
@@ -136,6 +133,29 @@ public sealed class BookingEngine
         catch (Exception ex)
         {
             Log($"⚠️ MQTT dispatch failed: {ex.Message}");
+        }
+
+        // 2) Submit to iCabbi if enabled
+        if (_icabbi != null)
+        {
+            try
+            {
+                var icabbiId = await _icabbi.CreateBookingAsync(booking);
+                if (icabbiId != null)
+                {
+                    Log($"✅ iCabbi booking created: {icabbiId}");
+                    booking.Notes = (booking.Notes ?? "") + $" [iCabbi:{icabbiId}]";
+                    _db.SaveBooking(booking);
+                }
+                else
+                {
+                    Log("⚠️ iCabbi booking submission returned null");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ iCabbi submission failed: {ex.Message}");
+            }
         }
 
         var confirmation = $"✅ *Booking Confirmed & Dispatched!*\n\n" +
@@ -183,12 +203,10 @@ public sealed class BookingEngine
     {
         if (booking == null)
         {
-            // No active booking — treat as new
             await HandleNewOrMergeAsync(phone, contactName, null, extraction);
             return;
         }
 
-        // Merge only updated fields
         MergeExtraction(booking, extraction);
         booking.Status = IsBookingReady(booking) ? "ready" : "collecting";
         _db.SaveBooking(booking);

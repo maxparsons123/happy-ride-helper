@@ -16,6 +16,8 @@ public partial class MainForm : Form
     private BookingEngine? _engine;
     private MqttDispatcher? _mqtt;
     private NgrokManager? _ngrok;
+    private IcabbiService? _icabbi;
+    private IcabbiWebhookHandler? _icabbiHandler;
 
     // Controls
     private readonly RichTextBox _logBox;
@@ -26,6 +28,7 @@ public partial class MainForm : Form
     private readonly Label _lblStatus;
     private readonly Label _lblMqttStatus;
     private readonly Label _lblNgrokStatus;
+    private readonly Label _lblIcabbiStatus;
     private readonly TextBox _txtGeminiKey;
     private readonly TextBox _txtWaToken;
     private readonly TextBox _txtPhoneId;
@@ -34,16 +37,20 @@ public partial class MainForm : Form
     private readonly CheckBox _chkNgrok;
     private readonly TextBox _txtNgrokPath;
     private readonly TextBox _txtNgrokDomain;
+    private readonly CheckBox _chkIcabbi;
+    private readonly TextBox _txtIcabbiAppKey;
+    private readonly TextBox _txtIcabbiSecret;
+    private readonly TextBox _txtIcabbiTenant;
 
     public MainForm()
     {
-        Text = "WhatsApp Taxi Booker — Gemini Flash + MQTT Dispatch";
-        Size = new Size(1280, 850);
+        Text = "WhatsApp Taxi Booker — Gemini Flash + MQTT + iCabbi";
+        Size = new Size(1280, 900);
         StartPosition = FormStartPosition.CenterScreen;
 
         // ── Config panel ──
-        var configGroup = new GroupBox { Text = "Configuration", Dock = DockStyle.Top, Height = 195, Padding = new Padding(8) };
-        var configTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 6 };
+        var configGroup = new GroupBox { Text = "Configuration", Dock = DockStyle.Top, Height = 235, Padding = new Padding(8) };
+        var configTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 8 };
         configTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         configTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         configTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -57,6 +64,10 @@ public partial class MainForm : Form
         _chkNgrok = new CheckBox { Text = "Enable ngrok", AutoSize = true, Anchor = AnchorStyles.Left };
         _txtNgrokPath = new TextBox { Dock = DockStyle.Fill, PlaceholderText = @"C:\ngrok\ngrok.exe" };
         _txtNgrokDomain = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "your-reserved.ngrok-free.app (optional)" };
+        _chkIcabbi = new CheckBox { Text = "Enable iCabbi", AutoSize = true, Anchor = AnchorStyles.Left };
+        _txtIcabbiAppKey = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true, PlaceholderText = "App Key" };
+        _txtIcabbiSecret = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true, PlaceholderText = "Secret Key" };
+        _txtIcabbiTenant = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "https://yourtenant.icabbi.net" };
 
         // Row 0
         configTable.Controls.Add(new Label { Text = "Gemini API Key:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
@@ -88,7 +99,20 @@ public partial class MainForm : Form
         configTable.Controls.Add(_lblNgrokStatus, 0, 4);
         configTable.SetColumnSpan(_lblNgrokStatus, 4);
 
-        // Row 5 — buttons
+        // Row 5 — iCabbi
+        configTable.Controls.Add(_chkIcabbi, 0, 5);
+        configTable.Controls.Add(_txtIcabbiAppKey, 1, 5);
+        configTable.Controls.Add(new Label { Text = "iCabbi Secret:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 5);
+        configTable.Controls.Add(_txtIcabbiSecret, 3, 5);
+
+        // Row 6 — iCabbi tenant + status
+        configTable.Controls.Add(new Label { Text = "iCabbi Tenant:", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
+        configTable.Controls.Add(_txtIcabbiTenant, 1, 6);
+        _lblIcabbiStatus = new Label { Text = "⚪ iCabbi: Off", AutoSize = true, ForeColor = Color.Gray, Anchor = AnchorStyles.Left, Padding = new Padding(0, 5, 0, 0) };
+        configTable.Controls.Add(_lblIcabbiStatus, 2, 6);
+        configTable.SetColumnSpan(_lblIcabbiStatus, 2);
+
+        // Row 7 — buttons
         var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Fill };
         _btnStart = new Button { Text = "▶ Start", Width = 100, Height = 30 };
         _btnStop = new Button { Text = "⏹ Stop", Width = 100, Height = 30, Enabled = false };
@@ -98,7 +122,7 @@ public partial class MainForm : Form
         _btnStop.Click += BtnStop_Click;
         _btnRefresh.Click += (_, _) => RefreshBookings();
         btnPanel.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnRefresh, _lblStatus });
-        configTable.Controls.Add(btnPanel, 0, 5);
+        configTable.Controls.Add(btnPanel, 0, 7);
         configTable.SetColumnSpan(btnPanel, 4);
 
         configGroup.Controls.Add(configTable);
@@ -220,6 +244,10 @@ public partial class MainForm : Form
         _chkNgrok.Checked = _config.Ngrok.Enabled;
         _txtNgrokPath.Text = _config.Ngrok.NgrokPath;
         _txtNgrokDomain.Text = _config.Ngrok.ReservedDomain;
+        _chkIcabbi.Checked = _config.Icabbi.Enabled;
+        _txtIcabbiAppKey.Text = _config.Icabbi.AppKey;
+        _txtIcabbiSecret.Text = _config.Icabbi.SecretKey;
+        _txtIcabbiTenant.Text = _config.Icabbi.TenantBase;
     }
 
     private void SaveConfig()
@@ -232,6 +260,10 @@ public partial class MainForm : Form
         _config.Ngrok.Enabled = _chkNgrok.Checked;
         _config.Ngrok.NgrokPath = _txtNgrokPath.Text.Trim();
         _config.Ngrok.ReservedDomain = _txtNgrokDomain.Text.Trim();
+        _config.Icabbi.Enabled = _chkIcabbi.Checked;
+        _config.Icabbi.AppKey = _txtIcabbiAppKey.Text.Trim();
+        _config.Icabbi.SecretKey = _txtIcabbiSecret.Text.Trim();
+        _config.Icabbi.TenantBase = _txtIcabbiTenant.Text.Trim();
 
         var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
         File.WriteAllText(path, JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true }));
@@ -277,13 +309,13 @@ public partial class MainForm : Form
             {
                 _lblNgrokStatus.Text = $"🟢 ngrok: {url}/webhook/";
                 _lblNgrokStatus.ForeColor = Color.LimeGreen;
-                AppendLog($"🌍 WhatsApp webhook URL: {url}/webhook/");
+                AppendLog($"🌍 WhatsApp webhook: {url}/webhook/");
+                AppendLog($"🌍 iCabbi webhook: {url}/icabbi/");
             }
             else
             {
                 _lblNgrokStatus.Text = "🔴 ngrok: Failed to get URL";
                 _lblNgrokStatus.ForeColor = Color.Red;
-                AppendLog("⚠️ ngrok started but couldn't retrieve public URL. Check ngrok dashboard.");
             }
         }
 
@@ -293,19 +325,48 @@ public partial class MainForm : Form
         _whatsApp = new WhatsAppService(_config.WhatsApp);
         _mqtt = new MqttDispatcher(_config.Mqtt);
         _webhook = new WebhookListener(_config.Webhook, _config.WhatsApp.VerifyToken);
-        _engine = new BookingEngine(_gemini, _whatsApp, _db, _config.WhatsApp, _mqtt);
 
+        // iCabbi
+        IcabbiService? icabbiSvc = null;
+        if (_config.Icabbi.Enabled && !string.IsNullOrWhiteSpace(_config.Icabbi.AppKey))
+        {
+            icabbiSvc = new IcabbiService(_config.Icabbi);
+            icabbiSvc.OnLog += AppendLog;
+            _icabbi = icabbiSvc;
+
+            _icabbiHandler = new IcabbiWebhookHandler(_whatsApp);
+            _icabbiHandler.OnLog += AppendLog;
+            _icabbiHandler.OnEvent += evt => Invoke(() => AppendLog($"📡 iCabbi: {evt.EventType} → {evt.CustomerPhone}"));
+
+            // Wire iCabbi webhook events
+            _webhook.OnIcabbiEvent += body => Task.Run(() => _icabbiHandler.HandleEventAsync(body));
+
+            _lblIcabbiStatus.Text = "🟢 iCabbi: Enabled";
+            _lblIcabbiStatus.ForeColor = Color.LimeGreen;
+            AppendLog("✅ iCabbi integration enabled — bookings will be sent on confirm");
+        }
+        else
+        {
+            _lblIcabbiStatus.Text = "⚪ iCabbi: Off";
+            _lblIcabbiStatus.ForeColor = Color.Gray;
+        }
+
+        _engine = new BookingEngine(_gemini, _whatsApp, _db, _config.WhatsApp, _mqtt, icabbiSvc);
+
+        // Wire logging
         _gemini.OnLog += AppendLog;
         _whatsApp.OnLog += AppendLog;
         _webhook.OnLog += AppendLog;
         _engine.OnLog += AppendLog;
         _mqtt.OnLog += AppendLog;
 
+        // Wire events
         _webhook.OnMessage += msg => Task.Run(() => _engine.HandleMessageAsync(msg));
         _engine.OnBookingCreated += _ => Invoke(RefreshBookings);
         _engine.OnBookingUpdated += _ => Invoke(RefreshBookings);
         _engine.OnBookingDispatched += _ => Invoke(RefreshBookings);
 
+        // Connect MQTT
         await _mqtt.ConnectAsync();
         Invoke(() =>
         {
@@ -319,7 +380,7 @@ public partial class MainForm : Form
         _lblStatus.Text = "🟢 Running";
         _lblStatus.ForeColor = Color.LimeGreen;
 
-        AppendLog($"✅ WhatsApp Taxi Booker started — webhook port {_config.Webhook.Port}, MQTT {(_mqtt.IsConnected ? "connected" : "failed")}");
+        AppendLog($"✅ WhatsApp Taxi Booker started — port {_config.Webhook.Port}, MQTT {(_mqtt.IsConnected ? "✓" : "✗")}, iCabbi {(_config.Icabbi.Enabled ? "✓" : "✗")}");
         RefreshBookings();
     }
 
@@ -329,6 +390,8 @@ public partial class MainForm : Form
         _mqtt?.Dispose();
         _ngrok?.Stop();
         _ngrok = null;
+        _icabbi = null;
+        _icabbiHandler = null;
         _db?.Dispose();
         _db = null;
 
@@ -340,6 +403,8 @@ public partial class MainForm : Form
         _lblMqttStatus.ForeColor = Color.Gray;
         _lblNgrokStatus.Text = "⚪ ngrok: Off";
         _lblNgrokStatus.ForeColor = Color.Gray;
+        _lblIcabbiStatus.Text = "⚪ iCabbi: Off";
+        _lblIcabbiStatus.ForeColor = Color.Gray;
 
         AppendLog("🛑 Stopped");
     }
