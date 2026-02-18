@@ -260,7 +260,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             _eventLoopTask = Task.Run(() => ReceiveEventsLoopAsync(_sessionCts.Token));
             _keepaliveTask = Task.Run(() => KeepaliveLoopAsync(_sessionCts.Token));
 
-            await SendGreetingAsync();
+            // NOTE: Do NOT send greeting here — CallSession will call SendGreetingAsync()
+            // AFTER injecting caller history so Ada knows the caller's name.
         }
         catch (Exception ex)
         {
@@ -374,6 +375,22 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error injecting message");
+        }
+    }
+
+    public async Task InjectSystemMessageAsync(string message)
+    {
+        if (!IsConnected) return;
+
+        try
+        {
+            Log($"💉 System inject: {(message.Length > 80 ? message[..80] + "..." : message)}");
+            await _session!.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error injecting system message");
         }
     }
 
@@ -680,7 +697,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // GREETING
     // =========================
-    private async Task SendGreetingAsync()
+    public async Task SendGreetingAsync()
     {
         if (Interlocked.Exchange(ref _greetingSent, 1) == 1) return;
         if (_session == null) return;
