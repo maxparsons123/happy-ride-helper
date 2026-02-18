@@ -180,7 +180,10 @@ public sealed class CallSession : ICallSession
                     sb.AppendLine($"    {i++}. {addr}");
             }
 
-            sb.AppendLine("  INSTRUCTIONS: If the caller gives a partial address (e.g. 'same place', 'David Road', 'the usual'), try to match it to one of these history addresses. If you're confident (>80% match), use it directly without asking for disambiguation.");
+            sb.AppendLine("  INSTRUCTIONS: This history is ONLY for reference. NEVER auto-fill pickup, destination, or any booking field from history.");
+            sb.AppendLine("  NEVER skip asking for pickup or destination because you see previous addresses.");
+            sb.AppendLine("  ONLY use history to help interpret PARTIAL references like 'same place' or 'the usual' — and ALWAYS confirm with the caller before using it.");
+            sb.AppendLine("  Each call MUST start fresh: ask for NAME → PICKUP → DESTINATION → PASSENGERS → TIME in order.");
 
             return sb.ToString();
         }
