@@ -1431,6 +1431,18 @@ public sealed class CallSession : ICallSession
             }
         }
 
+        // CITY-LEVEL BYPASS: If destination is a known town/city (no street number), 
+        // the user clearly intends a long-distance trip — skip sanity check entirely
+        if (IsCityLevelDestination(dest))
+        {
+            _logger.LogInformation("[{SessionId}] ✅ Fare sanity BYPASSED — city-level destination '{Dest}' (no street-level detail)",
+                SessionId, dest);
+            _fareSanityAlertCount = 0;
+            _lastSanityAlertDestination = null;
+            _fareSanityActive = false;
+            return true;
+        }
+
         // Parse fare amount
         var fareStr = result.Fare?.Replace("£", "").Replace("€", "").Replace("$", "").Trim();
         if (decimal.TryParse(fareStr, System.Globalization.NumberStyles.Any,
@@ -1465,6 +1477,34 @@ public sealed class CallSession : ICallSession
         _lastSanityAlertDestination = null;
         _fareSanityActive = false;
         return true;
+    }
+
+    /// <summary>
+    /// Detects city/town-level destinations (no street number or specific address).
+    /// These are intentional long-distance trips and should bypass fare sanity checks.
+    /// </summary>
+    private static bool IsCityLevelDestination(string destination)
+    {
+        if (string.IsNullOrWhiteSpace(destination)) return false;
+
+        var d = destination.Trim();
+
+        // If it contains a street number (digits at start or after comma), it's street-level
+        // e.g. "52A David Road" or "David Road, 52A"
+        if (System.Text.RegularExpressions.Regex.IsMatch(d, @"\b\d+[A-Za-z]?\b.*\b(road|street|lane|drive|avenue|close|way|crescent|terrace|place|grove|court|gardens|walk|rise|hill|park|row|square|mews|passage|yard)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return false;
+
+        // Short destination with 1-3 words and no digits = likely a town/city name
+        var words = d.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+        var nonTrivialWords = words.Where(w => !string.Equals(w, "city", StringComparison.OrdinalIgnoreCase) 
+            && !string.Equals(w, "centre", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(w, "center", StringComparison.OrdinalIgnoreCase)).ToArray();
+
+        // No digits anywhere = no house number or postcode = city-level
+        if (!System.Text.RegularExpressions.Regex.IsMatch(d, @"\d"))
+            return true;
+
+        return false;
     }
 
     private void ApplyFareResult(FareResult result)

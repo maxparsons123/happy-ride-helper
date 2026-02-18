@@ -1731,6 +1731,18 @@ public sealed class CallSession : ICallSession
             }
         }
 
+        // CITY-LEVEL BYPASS: If destination is a known town/city (no street number), 
+        // the user clearly intends a long-distance trip — skip sanity check entirely
+        if (IsCityLevelDestination(dest))
+        {
+            _logger.LogInformation("[{SessionId}] ✅ Fare sanity BYPASSED — city-level destination '{Dest}' (no street-level detail)",
+                SessionId, dest);
+            _fareSanityAlertCount = 0;
+            _lastSanityAlertDestination = null;
+            _fareSanityActive = false;
+            return true;
+        }
+
         // Parse fare amount — only check fare, NOT ETA
         var fareStr = result.Fare?.Replace("£", "").Replace("€", "").Replace("$", "").Trim();
         if (decimal.TryParse(fareStr, System.Globalization.NumberStyles.Any,
@@ -1755,6 +1767,27 @@ public sealed class CallSession : ICallSession
         _lastSanityAlertDestination = null;
         _fareSanityActive = false;
         return true;
+    }
+
+    /// <summary>
+    /// Detects city/town-level destinations (no street number or specific address).
+    /// These are intentional long-distance trips and should bypass fare sanity checks.
+    /// </summary>
+    private static bool IsCityLevelDestination(string destination)
+    {
+        if (string.IsNullOrWhiteSpace(destination)) return false;
+
+        var d = destination.Trim();
+
+        // If it contains a street number + road type, it's street-level
+        if (System.Text.RegularExpressions.Regex.IsMatch(d, @"\b\d+[A-Za-z]?\b.*\b(road|street|lane|drive|avenue|close|way|crescent|terrace|place|grove|court|gardens|walk|rise|hill|park|row|square|mews|passage|yard)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return false;
+
+        // No digits anywhere = no house number or postcode = city-level
+        if (!System.Text.RegularExpressions.Regex.IsMatch(d, @"\d"))
+            return true;
+
+        return false;
     }
 
     private void ApplyFareResult(FareResult result)
