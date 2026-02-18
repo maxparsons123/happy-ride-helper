@@ -158,16 +158,10 @@ public class MainForm : Form
 
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            outboundProxy.ToString(),
-            new SIPURI(username, effectiveDomain, null),
             effectiveAuthUser,
             password,
-            null,
             effectiveDomain,
-            null,
-            3600,
-            null, null,
-            async (uri, msg) => { });
+            3600);
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
         {
@@ -189,38 +183,34 @@ public class MainForm : Form
             });
         };
 
-        // Handle inbound calls
-        _userAgent = new SIPUserAgent(_sipTransport, outboundProxy.ToString());
-        _userAgent.OnIncomingCall += async (ua, req) =>
-        {
-            var from = req.Header.From?.FromURI?.User ?? "unknown";
-            Log($"📞 Incoming call from {from}");
-
-            var mediaSession = new VoIPMediaSession();
-            mediaSession.AcceptRtpFromAny = true;
-
-            var answered = await ua.Answer(req, mediaSession);
-            if (answered)
-            {
-                Log("✅ Call answered — audio bridge active");
-                ua.OnCallHungup += (d) =>
-                {
-                    Log("📴 Call ended");
-                    mediaSession.Close("bye");
-                };
-            }
-            else
-            {
-                Log("❌ Failed to answer call");
-            }
-        };
+        // Handle inbound INVITEs directly via transport
+        _userAgent = new SIPUserAgent(_sipTransport, outboundProxy);
 
         _sipTransport.SIPTransportRequestReceived += async (localEP, remoteEP, request) =>
         {
             if (request.Method == SIPMethodsEnum.INVITE)
             {
-                Log($"📥 INVITE from {remoteEP}");
-                _userAgent.OnIncomingCall?.Invoke(_userAgent, request);
+                var from = request.Header.From?.FromURI?.User ?? "unknown";
+                Log($"📞 Incoming INVITE from {from}");
+
+                var uas = _userAgent.AcceptCall(request);
+                var mediaSession = new VoIPMediaSession();
+                mediaSession.AcceptRtpFromAny = true;
+
+                var answered = await _userAgent.Answer(uas, mediaSession);
+                if (answered)
+                {
+                    Log("✅ Call answered — audio bridge active");
+                    _userAgent.OnCallHungup += (d) =>
+                    {
+                        Log("📴 Call ended");
+                        mediaSession.Close("bye");
+                    };
+                }
+                else
+                {
+                    Log("❌ Failed to answer call");
+                }
             }
         };
 
