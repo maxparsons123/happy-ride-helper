@@ -239,17 +239,14 @@ public sealed class ALawRtpPlayout : IDisposable
                 Interlocked.Decrement(ref _queueCount);
                 SendRtp(frame);
                 Interlocked.Increment(ref _framesSent);
-
-                if (Volatile.Read(ref _queueCount) == 0)
-                {
-                    _isBuffering = true;
-                    try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
-                }
+                // Don't rebuffer here — let next tick try dequeue again
             }
             else
             {
+                // Dequeue failed — queue truly empty, rebuffer
                 _isBuffering = true;
                 SendRtp(_silenceFrame);
+                try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
             }
 
             _timestamp += FRAME_SIZE;

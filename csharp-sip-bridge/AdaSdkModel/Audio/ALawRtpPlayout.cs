@@ -164,21 +164,16 @@ public sealed class ALawRtpPlayout : IDisposable
             {
                 Interlocked.Decrement(ref _queueCount);
                 _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, 8);
-
-                // When queue nearly empty, re-enter buffering with 80ms resume threshold
-                if (Volatile.Read(ref _queueCount) < JITTER_BUFFER_RESUME_THRESHOLD && Volatile.Read(ref _queueCount) == 0)
-                {
-                    _isBuffering = true;
-                    _typingSound.Reset();
-                    try { OnQueueEmpty?.Invoke(); } catch { }
-                }
+                // Don't rebuffer here — let the next tick try to dequeue again.
+                // Only rebuffer when dequeue actually fails (below).
             }
             else
             {
-                // Queue empty — re-buffer
+                // Dequeue failed — queue truly empty, rebuffer
                 _isBuffering = true;
                 _typingSound.Reset();
                 _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, _silenceFrame, _timestamp, 0, 8);
+                try { OnQueueEmpty?.Invoke(); } catch { }
             }
 
             _timestamp += FRAME_SIZE;
