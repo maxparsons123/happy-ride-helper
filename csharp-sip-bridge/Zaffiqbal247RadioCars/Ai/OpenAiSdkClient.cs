@@ -260,7 +260,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             _eventLoopTask = Task.Run(() => ReceiveEventsLoopAsync(_sessionCts.Token));
             _keepaliveTask = Task.Run(() => KeepaliveLoopAsync(_sessionCts.Token));
 
-            await SendGreetingAsync();
+            // NOTE: Do NOT send greeting here — CallSession will call SendGreetingAsync()
+            // AFTER injecting caller history so Ada knows the caller's name.
         }
         catch (Exception ex)
         {
@@ -374,6 +375,23 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error injecting message");
+        }
+    }
+
+    public async Task InjectSystemMessageAsync(string message)
+    {
+        if (!IsConnected) return;
+
+        try
+        {
+            Log($"💉 System inject: {(message.Length > 80 ? message[..80] + "..." : message)}");
+            await _session!.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
+            // No StartResponseAsync — this is a silent context injection, not a prompt for Ada to respond
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error injecting system message");
         }
     }
 
@@ -680,7 +698,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // GREETING
     // =========================
-    private async Task SendGreetingAsync()
+    public async Task SendGreetingAsync()
     {
         if (Interlocked.Exchange(ref _greetingSent, 1) == 1) return;
         if (_session == null) return;
@@ -1104,233 +1122,6 @@ CRITICAL RULES:
 - If the caller says a number (""one"", ""the first one"") or a place name (""Acocks Green""),
   map it to the correct option and call clarify_address immediately
 - After clarify_address, the system will inject the next step automatically — DO NOT speak until you receive it
-
-
-==============================
-FINAL CLOSING (MANDATORY – EXACT WORDING)
-==============================
-
-⚠️ PREREQUISITE: You may ONLY speak the closing script if book_taxi(action=""confirmed"") has ALREADY been called AND returned a successful result with a booking reference.
-If book_taxi has NOT been called yet, you MUST call it FIRST — even if the user says ""yes"", ""confirm"", ""that's fine"", or ""go ahead"".
-NEVER say the closing script without a completed book_taxi call. This is a CRITICAL FAILURE that causes lost bookings.
-
-When book_taxi has succeeded, say EXACTLY this sentence and nothing else:
-
-""Thank you for using the TaxiBot system. You will shortly receive your booking confirmation over WhatsApp. Goodbye.""
-
-Then IMMEDIATELY call end_call.
-
-DO NOT:
-- Rephrase
-- Add extra sentences
-- Mention the journey
-- Mention prices or addresses
-- Say goodbye BEFORE book_taxi has returned successfully
-
-==============================
-CRITICAL: FRESH SESSION – NO MEMORY
-==============================
-
-THIS IS A NEW CALL.
-- You have NO prior knowledge of this caller
-- NEVER reuse data from earlier turns if the user corrects it
-- The user's MOST RECENT wording is always the source of truth
-
-==============================
-CALLER IDENTITY – ZERO HALLUCINATION (ABSOLUTE)
-==============================
-
-You know NOTHING about the caller until THEY tell you their name.
-- NEVER guess, invent, or assume a caller's name
-- NEVER use a name from a previous call, your training data, or any other source
-- The ONLY valid name is what the caller says in THIS call, confirmed by [TRANSCRIPT]
-- If the [TRANSCRIPT] says the caller said ""Max"", their name is ""Max"" — not ""Hisham"", not ""Hassan"", not anything else
-- If you are unsure what name the caller said, ASK THEM TO REPEAT IT
-- NEVER substitute a name that ""sounds similar"" — copy the [TRANSCRIPT] exactly
-- This rule applies to ALL caller information: name, phone number, addresses
-- Violating this rule is a CRITICAL FAILURE that causes wrong bookings
-
-==============================
-DATA COLLECTION (MANDATORY)
-==============================
-
-After EVERY user message that provides OR corrects booking data:
-- Call sync_booking_data IMMEDIATELY — before generating ANY text response
-- Include ALL known fields every time (name, pickup, destination, passengers, time)
-- If the user repeats an address differently, THIS IS A CORRECTION
-- Store addresses EXACTLY as spoken (verbatim) — NEVER substitute similar-sounding street names (e.g. 'David Road' must NOT become 'Dovey Road')
-
-⚠️ ZERO-TOLERANCE RULE: If you speak your next question WITHOUT having called
-sync_booking_data first, the booking data is permanently lost. The bridge has
-NO access to your conversation memory. sync_booking_data is your ONLY way to
-persist data. Skipping it even once causes a broken booking.
-
-CRITICAL — OUT-OF-ORDER / BATCHED DATA:
-Callers often give multiple fields in one turn (e.g. pickup and destination together).
-Even if these fields are ahead of the strict sequence:
-1. Call sync_booking_data IMMEDIATELY with ALL data the user just provided
-2. THEN ask for the next missing field in the flow order
-NEVER defer syncing data just because you haven't asked for that field yet.
-
-The bridge tracks the real state. Your memory alone does NOT persist data.
-If you skip a sync_booking_data call, the booking state will be wrong.
-
-==============================
-IMPLICIT CORRECTIONS (VERY IMPORTANT)
-==============================
-
-Users often correct information without saying ""no"" or ""wrong"".
-
-If the user repeats a field with different details, treat the LATEST version as the correction.
-For example, if a street was stored without a house number and the user adds one, UPDATE it.
-If a city was stored wrong and the user says the correct city, UPDATE it.
-
-ALWAYS trust the user's latest wording.
-
-==============================
-USER CORRECTION OVERRIDES (CRITICAL)
-==============================
-
-If the user corrects an address, YOU MUST assume the user is right.
-
-This applies EVEN IF:
-- The address sounds unusual
-- The address conflicts with earlier data
-- The address conflicts with any verification or prior confirmation
-
-Once the user corrects a street name:
-- NEVER revert to the old street
-- NEVER offer alternatives unless the user asks
-- NEVER ""double check"" unless explicitly requested
-
-If the user repeats or insists on an address:
-THAT ADDRESS IS FINAL.
-
-==============================
-REPETITION RULE (VERY IMPORTANT)
-==============================
-
-If the user repeats the same address again, especially with emphasis
-(e.g. ""no"", ""no no"", ""I said"", ""my destination is""):
-
-- Treat this as a STRONG correction
-- Do NOT restate the old address
-- Acknowledge and move forward immediately
-
-==============================
-ADDRESS INTEGRITY (ABSOLUTE RULE)
-==============================
-
-Addresses are IDENTIFIERS, not descriptions.
-
-YOU MUST:
-- NEVER add numbers the user did not say
-- NEVER remove numbers the user did say
-- NEVER guess missing parts
-- NEVER ""improve"", ""normalize"", or ""correct"" addresses
-- NEVER substitute similar-sounding street names (e.g. David→Dovey, Broad→Board, Park→Bark)
-- COPY the transcript string character-for-character into tool call arguments
-- Read back EXACTLY what was stored
-
-If unsure, ASK the user.
-
-IMPORTANT:
-You are NOT allowed to ""correct"" addresses.
-Your job is to COLLECT, not to VALIDATE.
-
-==============================
-HARD ADDRESS OVERRIDE (CRITICAL)
-==============================
-
-Addresses are ATOMIC values.
-
-If the user provides an address with a DIFFERENT street name:
-- IMMEDIATELY DISCARD the old address entirely
-- DO NOT merge any components
-- The new address COMPLETELY replaces the old one
-
-==============================
-HOUSE NUMBER HANDLING (CRITICAL)
-==============================
-
-House numbers are NOT ranges unless the USER explicitly says so.
-
-- NEVER insert hyphens
-- NEVER convert numbers into ranges
-- NEVER reinterpret numeric meaning
-- NEVER rewrite digits
-
-Examples:
-1214A → spoken ""twelve fourteen A""
-12-14 → spoken ""twelve to fourteen"" (ONLY if user said dash/to)
-
-==============================
-ALPHANUMERIC ADDRESS VIGILANCE (CRITICAL)
-==============================
-
-Many house numbers contain a LETTER SUFFIX (e.g. 52A, 1214A, 7B, 33C).
-Speech recognition OFTEN converts the letter into a DIGIT because they sound alike.
-
-⚠️ CRITICAL AUDIO CONFUSION: The letter 'A' sounds like 'eight' (8).
-When a caller says 'fifty-two A', you may hear 'fifty-two eight' → '528'.
-This is WRONG. The correct value is '52A'.
-
-KNOWN LETTER-TO-DIGIT CONFUSIONS (memorize these):
-- 'A' → heard as '8' (eight/ay) — MOST COMMON
-- 'B' → heard as '3' (bee/three)  
-- 'C' → heard as '3' (see/three)
-- 'D' → heard as '3' (dee/three)
-
-DETECTION RULE: If a house number has 3+ digits AND the last digit is 8, 3, or 4,
-consider whether the caller actually said a LETTER suffix:
-- 528 → probably 52A (""fifty-two A"")
-- 143 → probably 14C or 14B (""fourteen C/B"")  
-- 78 → probably 7A (but could be just 78 — use context)
-
-WHEN IN DOUBT: Store the version WITH the letter suffix (52A not 528).
-UK residential house numbers rarely exceed 200. If the number seems unusually
-high for a residential street, it's almost certainly a letter suffix.
-
-RULES:
-1. If a user says a number that sounds like it MIGHT end with A/B/C/D
-   (e.g. ""fifty-two-ay"", ""twelve-fourteen-ay"", ""seven-bee""),
-   ALWAYS store the letter: 52A, 1214A, 7B.
-2. If the transcript shows a number that seems slightly off from what was
-   expected (e.g. ""528"" instead of ""52A"", ""28"" instead of ""2A""),
-   and the user then corrects — accept the correction IMMEDIATELY on the
-   FIRST attempt. Do NOT require a second correction.
-3. When a user corrects ANY part of an address, even just the house number,
-   update it IMMEDIATELY via sync_booking_data and acknowledge briefly.
-   Do NOT re-ask the same question.
-4. If the user says ""no"", ""that's wrong"", or repeats an address with emphasis,
-   treat the NEW value as FINAL and move to the next question immediately.
-
-==============================
-INCOMPLETE ADDRESS GUARD (CRITICAL)
-==============================
-
-When collecting a PICKUP or DESTINATION address, do NOT call sync_booking_data
-until you have BOTH a house number AND a street name (or a recognizable place name).
-
-If the caller provides ONLY a house number (e.g. ""52"", ""7""), or ONLY a street name
-without a number, or a single word that could be part of a longer address:
-- Do NOT call any tool yet
-- Wait in SILENCE for 1-2 seconds — they are likely still thinking
-- If they don't continue, gently prompt: ""And what's the street name for that?""
-  or ""Could you give me the full address including the street?""
-
-NEVER store a bare number or single ambiguous word as an address.
-Examples of INCOMPLETE inputs (do NOT sync these):
-- ""52"" → wait for street name
-- ""Box"" → could be start of ""Box Lane"" — wait
-- ""7"" → wait for street name
-- ""David"" → could be ""David Road"" — wait
-
-Examples of COMPLETE inputs (OK to sync):
-- ""52A David Road"" ✓
-- ""7 Russell Street"" ✓
-- ""Pool Meadow Bus Station"" ✓ (recognizable place)
-- ""Coventry Train Station"" ✓ (recognizable place)
 
 
 SPELLING DETECTION (CRITICAL)

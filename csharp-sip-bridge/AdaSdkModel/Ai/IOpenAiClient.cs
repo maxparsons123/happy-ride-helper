@@ -14,6 +14,7 @@ public interface IOpenAiClient
     Task CancelResponseAsync();
     Task InjectMessageAndRespondAsync(string message);
     Task InjectSystemMessageAsync(string message);
+    Task SendGreetingAsync();
     Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f);
 
     /// <summary>Notify that playout has finished (for echo guard timing).</summary>

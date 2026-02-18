@@ -268,7 +268,7 @@ public sealed class CallSession : ICallSession
 
         _logger.LogInformation("[{SessionId}] Starting G.711 session for {CallerId}", SessionId, CallerId);
 
-        // Load caller history BEFORE connecting so Ada knows the caller's name from the start
+        // Step 1: Load caller history BEFORE connecting so Ada knows the caller's name from the start
         string? callerHistory = null;
         try
         {
@@ -281,9 +281,10 @@ public sealed class CallSession : ICallSession
             _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed (non-fatal)", SessionId);
         }
 
+        // Step 2: Connect to OpenAI (session configured, event loops started, but NO greeting yet)
         await _aiClient.ConnectAsync(CallerId, ct);
 
-        // Inject history immediately after connect, before Ada starts greeting
+        // Step 3: Inject caller history BEFORE greeting so Ada knows the caller's name
         if (callerHistory != null)
         {
             try
@@ -296,6 +297,9 @@ public sealed class CallSession : ICallSession
                 _logger.LogWarning(ex, "[{SessionId}] Caller history injection failed (non-fatal)", SessionId);
             }
         }
+
+        // Step 4: NOW send the greeting — Ada has the caller's name and history context
+        await _aiClient.SendGreetingAsync();
     }
 
     private async Task<string?> LoadCallerHistoryAsync(string phone)

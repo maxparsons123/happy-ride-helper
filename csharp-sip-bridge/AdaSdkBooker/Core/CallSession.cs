@@ -85,25 +85,39 @@ public sealed class CallSession : ICallSession
             return;
 
         _logger.LogInformation("[{SessionId}] Starting G.711 session for {CallerId}", SessionId, CallerId);
+
+        // Step 1: Load caller history BEFORE connecting so Ada knows the caller's name
+        string? callerHistory = null;
+        try
+        {
+            callerHistory = await LoadCallerHistoryAsync(CallerId);
+            if (callerHistory != null)
+                _logger.LogInformation("[{SessionId}] 📋 Caller history loaded for {CallerId}", SessionId, CallerId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed (non-fatal)", SessionId);
+        }
+
+        // Step 2: Connect to OpenAI (session configured, event loops started, but NO greeting yet)
         await _aiClient.ConnectAsync(CallerId, ct);
 
-        // Inject caller history into Ada's session context (fire-and-forget, non-blocking)
-        _ = Task.Run(async () =>
+        // Step 3: Inject caller history BEFORE greeting so Ada knows the caller's name
+        if (!string.IsNullOrEmpty(callerHistory))
         {
             try
             {
-                var history = await LoadCallerHistoryAsync(CallerId);
-                if (!string.IsNullOrEmpty(history))
-                {
-                    await _aiClient.InjectSystemMessageAsync(history);
-                    _logger.LogInformation("[{SessionId}] 📋 Caller history injected for {CallerId}", SessionId, CallerId);
-                }
+                await _aiClient.InjectSystemMessageAsync(callerHistory);
+                _logger.LogInformation("[{SessionId}] 📋 Caller history injected for {CallerId}", SessionId, CallerId);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[{SessionId}] Caller history injection failed (non-fatal)", SessionId);
             }
-        });
+        }
+
+        // Step 4: NOW send the greeting — Ada has the caller's name and history context
+        await _aiClient.SendGreetingAsync();
     }
 
     private async Task<string?> LoadCallerHistoryAsync(string phone)
