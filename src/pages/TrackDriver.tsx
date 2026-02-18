@@ -81,7 +81,23 @@ export default function TrackDriver() {
   useEffect(() => {
     const onChange = () => setIsFullscreen(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
+
+    // Auto-enter fullscreen on first user interaction
+    const autoFs = () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      }
+      document.removeEventListener("click", autoFs);
+      document.removeEventListener("touchstart", autoFs);
+    };
+    document.addEventListener("click", autoFs, { once: true });
+    document.addEventListener("touchstart", autoFs, { once: true });
+
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("click", autoFs);
+      document.removeEventListener("touchstart", autoFs);
+    };
   }, []);
 
   const toggleFullscreen = () => {
