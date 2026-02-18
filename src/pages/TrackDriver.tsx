@@ -35,11 +35,13 @@ function speak(text: string, cancelBefore = true) {
   speechSynthesis.speak(msg);
 }
 
-/* ── ad images (replace with real URLs) ──────────────────────── */
+/* ── ad images ────────────────────────────────────────────────── */
 const AD_SLIDES = [
-  "https://placehold.co/728x90/2d3748/fbbf24?text=Ad+Banner+1",
-  "https://placehold.co/728x90/1a202c/3b82f6?text=Ad+Banner+2",
-  "https://placehold.co/728x90/2d3748/ef4444?text=Ad+Banner+3",
+  "https://placehold.co/728x90/1a1a2e/e94560?text=🍕+Order+Pizza+Now+•+50%25+Off+First+Order&font=roboto",
+  "https://placehold.co/728x90/0f3460/e94560?text=⚡+SuperFast+WiFi+•+From+£19.99/mo&font=roboto",
+  "https://placehold.co/728x90/533483/e94560?text=🎬+StreamMax+•+Free+Trial+30+Days&font=roboto",
+  "https://placehold.co/728x90/16213e/0f3460?text=🏋️+FitLife+Gym+•+No+Joining+Fee+This+Month&font=roboto",
+  "https://placehold.co/728x90/1a1a2e/fbbf24?text=🚗+AutoInsure+•+Save+Up+To+40%25&font=roboto",
 ];
 
 export default function TrackDriver() {
