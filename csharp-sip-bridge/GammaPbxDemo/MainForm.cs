@@ -196,16 +196,21 @@ public class MainForm : Form
         var proto = transport.Equals("TCP", StringComparison.OrdinalIgnoreCase) ? SIPProtocolsEnum.tcp : SIPProtocolsEnum.udp;
         var outboundProxy = new SIPEndPoint(proto, registrarIp!, port);
 
+        // AOR uses the SIP username (extension), NOT the auth ID.
+        // e.g. REGISTER sip:domain  →  To: sip:username@domain
+        // Digest auth uses effectiveAuthUser (= AuthId if set, else username)
         Log($"🔧 OutboundProxy  : {outboundProxy}");
-        Log($"🔧 AuthUser       : {effectiveAuthUser}");
+        Log($"🔧 AOR Username   : {username}");
+        Log($"🔧 Auth Username  : {effectiveAuthUser}");
         Log($"🔧 Domain (AOR)   : {effectiveDomain}");
         Log($"🔧 Transport      : {transport}");
         Log($"🔧 Expiry         : 120s");
+        Log($"🔧 AOR will be    : sip:{username}@{effectiveDomain}");
 
-        // SHORT expiry (120s) keeps the BT NAT hole alive with frequent re-REGISTERs
+        // Pass SIP username for AOR; auth credentials handled via effectiveAuthUser internally
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            effectiveAuthUser,
+            username,          // ← AOR user part (SIP extension, e.g. 1001)
             password,
             effectiveDomain,
             120);
