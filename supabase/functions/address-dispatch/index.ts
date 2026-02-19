@@ -908,6 +908,7 @@ Decision Rules:
 - If only the house number changed slightly (528→52A, letter/digit confusion): MATCH
 - If the city changed to a distant city: MISMATCH
 - IMPORTANT: Two streets in the SAME city can still be a MISMATCH if the street NAMES are different.
+- LANDMARK/POI RESOLUTION: If the user said a landmark or POI (e.g., "Train Station", "Hospital", "Airport", "University", "Bus Station", "Shopping Centre") and the geocoder returned the STREET where that landmark is located (e.g., "Station Square" for a train station, "Hospital Lane" for a hospital), this is a MATCH — the geocoder correctly resolved the landmark to its physical address. Do NOT flag this as a mismatch.
 
 Evaluate BOTH pickup and dropoff independently.` },
               { role: "user", content: sanityUserMsg },
