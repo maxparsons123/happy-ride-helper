@@ -95,8 +95,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // CONSTANTS
     // =========================
     private const int MAX_NO_REPLY_PROMPTS = 3;
-    private const int NO_REPLY_TIMEOUT_MS = 15_000;
-    private const int CONFIRMATION_TIMEOUT_MS = 30_000;
+    private const int NO_REPLY_TIMEOUT_MS = 8_000;
+    private const int CONFIRMATION_TIMEOUT_MS = 15_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
     private const int ECHO_GUARD_MS = 300;
 
@@ -1085,14 +1085,17 @@ Copy character-for-character from [TRANSCRIPT] for ALL tool parameters — espec
 BOOKING FLOW (STRICT)
 ==============================
 
-Follow this order exactly:
+Follow this order exactly — ALWAYS start with PICKUP (EU market standard):
 
 Greet  
 → NAME  
-→ PICKUP  
+→ PICKUP (ask: ""Where would you like to be picked up from?"")  
 → DESTINATION  
 → PASSENGERS  
 → TIME  
+
+⚠️ NEVER ask ""Where do you want to go?"" or ""Where can I take you?"" as the first question.
+ALWAYS ask for the PICKUP LOCATION first. This is the European market convention.
 
 ⚠️⚠️⚠️ CRITICAL TOOL CALL RULE ⚠️⚠️⚠️
 After the user answers EACH question, you MUST call sync_booking_data BEFORE speaking your next question.
@@ -1133,8 +1136,9 @@ STEP-BY-STEP (DO NOT SKIP ANY STEP):
 
 1. After all fields collected, say ONLY: ""Let me check those addresses and get you a price.""
 2. WAIT SILENTLY for the [FARE RESULT] message — DO NOT call book_taxi, DO NOT speak, DO NOT ask for confirmation.
-3. When you receive [FARE RESULT], read back the VERIFIED addresses and fare:
-   ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare] with an estimated arrival in [ETA]. Shall I book that for you?""
+3. When you receive [FARE RESULT], read back the VERIFIED addresses (City, Street, Number format — NO postal codes) and fare:
+   For IMMEDIATE bookings (ASAP/now): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare] with an estimated arrival in [ETA]. Shall I book that for you?""
+   For SCHEDULED bookings (future time): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare]. Shall I book that for you?"" (NO ETA for scheduled bookings)
 4. WAIT for the user to say YES (""yes"", ""confirm"", ""go ahead"", etc.)
 5. ONLY THEN call book_taxi(action=""confirmed"")
 6. Give reference ID from the tool result
@@ -1215,10 +1219,13 @@ DO NOT:
 CRITICAL: FRESH SESSION – NO MEMORY
 ==============================
 
-THIS IS A NEW CALL.
-- You have NO prior knowledge of this caller
-- NEVER reuse data from earlier turns if the user corrects it
+THIS IS A NEW CALL. Every call starts with a BLANK SLATE.
+- You have NO prior knowledge of this caller's current trip
+- NEVER reuse pickup, destination, passengers, or time from a previous call or from [CALLER HISTORY]
+- [CALLER HISTORY] is REFERENCE ONLY — it CANNOT be used to pre-fill booking fields
 - The user's MOST RECENT wording is always the source of truth
+- ALWAYS start by asking for the PICKUP LOCATION (EU market convention)
+- If [CALLER HISTORY] shows a name, you may use it for greeting ONLY — all other fields must be collected fresh
 
 ==============================
 CALLER IDENTITY – ZERO HALLUCINATION (ABSOLUTE)
