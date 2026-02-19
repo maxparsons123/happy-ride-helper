@@ -712,7 +712,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (!string.IsNullOrWhiteSpace(callerName))
             {
                 greeting = $"[SYSTEM] [LANG: {langName}] A returning caller named {callerName} has connected (ID: {_callerId}). " +
-                           $"Greet them BY NAME in {langName}. Say: \"Hello {callerName}, welcome back to Taxibot. I'm Ada. Where would you like to be picked up from?\" " +
+                           $"Greet them BY NAME in {langName}. You MUST say EXACTLY: \"Hello {callerName}, welcome back to Taxibot. I'm Ada. Where would you like to be picked up from?\" " +
+                           $"⚠️ Do NOT say \"Where can I take you\" or any variation. ALWAYS ask for PICKUP LOCATION first. " +
                            $"Do NOT assume any addresses from previous trips. Start the booking fresh.";
             }
             else
