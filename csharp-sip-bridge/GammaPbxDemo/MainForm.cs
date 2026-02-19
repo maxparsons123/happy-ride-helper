@@ -195,7 +195,6 @@ public class MainForm : Form
         SaveSettings(server, port.ToString(), username, password, authId, domain, transport);
 
         var effectiveAuthUser = string.IsNullOrEmpty(authId) ? username : authId;
-        var effectiveDomain   = string.IsNullOrEmpty(domain)  ? server  : domain;
 
         // Resolve hostname → IP for outbound proxy routing
         IPAddress? registrarIp = null;
@@ -210,6 +209,21 @@ public class MainForm : Form
         {
             Log($"❌ DNS failed: {ex.Message}");
             if (!IPAddress.TryParse(server, out registrarIp)) return;
+        }
+
+        // If domain is blank or equals the server hostname, use the resolved raw IP.
+        // Gamma Hosted PBX (csuc.cloud etc.) expects AOR domain = IP, not hostname.
+        // If domain is explicitly set to something other than server, honour it (e.g. dcota.nl).
+        string effectiveDomain;
+        if (string.IsNullOrEmpty(domain) || domain.Equals(server, StringComparison.OrdinalIgnoreCase))
+        {
+            effectiveDomain = registrarIp!.ToString();
+            Log($"ℹ️ Domain auto-set to resolved IP: {effectiveDomain}");
+        }
+        else
+        {
+            effectiveDomain = domain;
+            Log($"ℹ️ Domain (explicit): {effectiveDomain}");
         }
 
         _sipTransport = new SIPTransport();
