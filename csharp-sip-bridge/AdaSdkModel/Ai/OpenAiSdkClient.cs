@@ -926,7 +926,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 pickup = new { type = "string", description = "Pickup address (verbatim from caller)" },
                 destination = new { type = "string", description = "Destination address (verbatim from caller)" },
                 passengers = new { type = "integer", description = "Number of passengers" },
-                pickup_time = new { type = "string", description = "Requested pickup time" },
+                pickup_time = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. Use REFERENCE_DATETIME from system prompt to resolve relative times like 'tomorrow', 'in 30 minutes', '5pm'. NEVER pass raw phrases." },
                 vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers (1-4=Saloon, 5-6=Estate, 7+=Minibus). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." },
                 interpretation = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed and why (e.g. 'User corrected pickup from Parkhouse Street to Far Gosford Street — venue name is Sweet Spot'). This helps the system track your understanding." }
             }
@@ -949,7 +949,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 destination = new { type = "string", description = "Destination address (verbatim from caller)" },
                 caller_name = new { type = "string", description = "Caller name (must be a real name, NOT 'unknown' or 'caller')" },
                 passengers = new { type = "integer", description = "Number of passengers" },
-                pickup_time = new { type = "string", description = "Pickup time" }
+                pickup_time = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. NEVER pass raw phrases." }
             },
             required = new[] { "action", "pickup", "destination", "caller_name", "passengers" }
         }))
@@ -1035,8 +1035,14 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // SYSTEM PROMPT
     // =========================
-    public static string GetDefaultSystemPromptStatic() =>
-@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.9.
+    public static string GetDefaultSystemPromptStatic()
+    {
+        // Inject current London time as reference anchor for AI time parsing
+        var londonTz = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        var londonNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, londonTz);
+        var referenceDateTime = londonNow.ToString("dddd, dd MMMM yyyy HH:mm");
+
+        return $@"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.10.
 
 ==============================
 VOICE STYLE
@@ -1476,12 +1482,41 @@ RULES:
 4. After ANY correction, call sync_booking_data IMMEDIATELY
 
 ==============================
-PICKUP TIME HANDLING
+TIME NORMALISATION RULES (CRITICAL)
 ==============================
+REFERENCE_DATETIME (Current local time): {referenceDateTime}
 
-- ""now"", ""right now"", ""ASAP"" → store exactly as ""now""
-- NEVER convert ""now"" into a clock time
-- Only use exact times if the USER gives one
+Your task is to convert ALL time phrases into a specific YYYY-MM-DD HH:MM format in the pickup_time field.
+
+1. IMMEDIATE REQUESTS:
+   - ""now"", ""asap"", ""immediately"", ""straight away"", ""right now"" → ""ASAP""
+
+2. TIME ONLY (no date mentioned):
+   - If user says ""at 5pm"" and current time is before 5pm → Use TODAY: ""{londonNow:yyyy-MM-dd} 17:00""
+   - If user says ""at 1pm"" and current time is after 1pm → Use TOMORROW (no past bookings)
+
+3. RELATIVE DAYS:
+   - ""tomorrow"" → The date following REFERENCE_DATETIME
+   - ""tonight"" → Today's date at 21:00
+   - ""this evening"" → Today's date at 19:00
+   - ""morning"" → 09:00 (today if future, else tomorrow)
+   - ""in 30 minutes"" → Add 30 minutes to REFERENCE_DATETIME
+   - ""in 2 hours"" → Add 2 hours to REFERENCE_DATETIME
+
+4. DAY-OF-WEEK:
+   - ""next Thursday at 3pm"" → Calculate the date of the next Thursday relative to REFERENCE_DATETIME and set time to 15:00
+
+5. EXAMPLES (using REFERENCE_DATETIME as anchor):
+   - User: ""tomorrow at 12:30"" → pickup_time: ""[tomorrow's date] 12:30""
+   - User: ""5:30 pm"" → pickup_time: ""[today or tomorrow] 17:30""
+   - User: ""in 45 minutes"" → pickup_time: ""[calculated datetime]""
+   - User: ""next Saturday at 2pm"" → pickup_time: ""[calculated date] 14:00""
+
+6. OUTPUT REQUIREMENT:
+   - MUST be ""YYYY-MM-DD HH:MM"" or ""ASAP""
+   - Use 24-hour clock format
+   - NEVER return raw phrases like ""tomorrow"", ""5:30pm"", ""in an hour"" in the pickup_time field
+   - The system CANNOT parse natural language — it ONLY understands YYYY-MM-DD HH:MM or ASAP
 
 ==============================
 INPUT VALIDATION (IMPORTANT)
@@ -1613,6 +1648,7 @@ RESPONSE STYLE
 - When fare is being calculated, say ONLY the interjection (e.g. ""Let me get you a price on that journey."") — do NOT add extra sentences
 - NEVER call end_call except after the FINAL CLOSING
     ";
+    }
     // =========================
     // DISPOSE
     // =========================
