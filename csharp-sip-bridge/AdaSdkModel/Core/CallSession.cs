@@ -327,12 +327,14 @@ public sealed class CallSession : ICallSession
             var caller = arr[0];
 
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("[CALLER HISTORY] This is a returning caller. Use this context to speed up the booking:");
+            sb.AppendLine("[CALLER HISTORY] This is a returning caller. This data is for REFERENCE ONLY.");
+            sb.AppendLine("⚠️ DO NOT auto-fill ANY booking fields from this history. ALWAYS ask the caller explicitly for pickup, destination, passengers, and time.");
+            sb.AppendLine("⚠️ This history may ONLY be used to resolve vague phrases like 'the usual', 'same place', or 'home'. Otherwise IGNORE it completely.");
 
             if (caller.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(nameEl.GetString()))
             {
                 sb.AppendLine($"  Known name: {nameEl.GetString()}");
-                sb.AppendLine($"  IMPORTANT: Greet them by name! Say \"Welcome back, {nameEl.GetString()}!\" instead of asking for their name.");
+                sb.AppendLine($"  You may skip asking for their name and greet them by name.");
                 if (string.IsNullOrEmpty(_booking.Name))
                     _booking.Name = nameEl.GetString();
             }
@@ -341,10 +343,10 @@ public sealed class CallSession : ICallSession
                 sb.AppendLine($"  Total previous bookings: {tb.GetInt32()}");
 
             if (caller.TryGetProperty("last_pickup", out var lp) && lp.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(lp.GetString()))
-                sb.AppendLine($"  Last pickup: {lp.GetString()}");
+                sb.AppendLine($"  Last pickup (reference only): {lp.GetString()}");
 
             if (caller.TryGetProperty("last_destination", out var ld) && ld.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(ld.GetString()))
-                sb.AppendLine($"  Last destination: {ld.GetString()}");
+                sb.AppendLine($"  Last destination (reference only): {ld.GetString()}");
 
             var allAddresses = new HashSet<string>();
             if (caller.TryGetProperty("pickup_addresses", out var pickups) && pickups.ValueKind == System.Text.Json.JsonValueKind.Array)
@@ -359,13 +361,13 @@ public sealed class CallSession : ICallSession
 
             if (allAddresses.Count > 0)
             {
-                sb.AppendLine($"  All known addresses ({allAddresses.Count}):");
+                sb.AppendLine($"  Known addresses (reference only — {allAddresses.Count}):");
                 var i = 1;
                 foreach (var addr in allAddresses.Take(15))
                     sb.AppendLine($"    {i++}. {addr}");
             }
 
-            sb.AppendLine("  INSTRUCTIONS: If the caller gives a partial address (e.g. 'same place', 'David Road', 'the usual'), try to match it to one of these history addresses. If you're confident (>80% match), use it directly without asking for disambiguation.");
+            sb.AppendLine("  RULES: ONLY use these addresses when the caller explicitly says 'the usual', 'same place', 'same as last time', or 'home'. In ALL other cases, you MUST collect the address fresh from the caller. NEVER pre-fill or assume addresses.");
 
             return sb.ToString();
         }
@@ -1657,16 +1659,16 @@ public sealed class CallSession : ICallSession
 
     private static string FormatAddressForReadback(string? number, string? street, string? postalCode, string? city)
     {
+        // EU format: City, Street, Number — no postal codes in verbal readback
         var parts = new List<string>();
         
-        if (!string.IsNullOrWhiteSpace(number))
-            parts.Add(number);
-        if (!string.IsNullOrWhiteSpace(street))
-            parts.Add(street);
-        if (!string.IsNullOrWhiteSpace(postalCode))
-            parts.Add(postalCode);
         if (!string.IsNullOrWhiteSpace(city))
             parts.Add(city);
+        if (!string.IsNullOrWhiteSpace(street))
+            parts.Add(street);
+        if (!string.IsNullOrWhiteSpace(number))
+            parts.Add(number);
+        // Postal codes intentionally omitted from verbal readback (stored in backend only)
         
         return parts.Count > 0 ? string.Join(", ", parts) : "the address";
     }

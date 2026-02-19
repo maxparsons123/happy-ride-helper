@@ -97,8 +97,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     // CONSTANTS
     // =========================
     private const int MAX_NO_REPLY_PROMPTS = 3;
-    private const int NO_REPLY_TIMEOUT_MS = 15_000;
-    private const int CONFIRMATION_TIMEOUT_MS = 30_000;
+    private const int NO_REPLY_TIMEOUT_MS = 8_000;
+    private const int CONFIRMATION_TIMEOUT_MS = 15_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
     private const int ECHO_GUARD_MS = 300;
 

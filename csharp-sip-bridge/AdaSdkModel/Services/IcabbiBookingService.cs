@@ -99,13 +99,13 @@ public sealed class IcabbiBookingService : IDisposable
                 {
                     lat = booking.PickupLat ?? 0,
                     lng = booking.PickupLon ?? 0,
-                    formatted = booking.PickupFormatted ?? booking.Pickup ?? ""
+                    formatted = booking.PickupFormatted ?? FormatStandardAddress(booking.PickupCity, booking.PickupStreet, booking.PickupNumber, booking.Pickup)
                 },
                 destination = new IcabbiAddressDto
                 {
                     lat = booking.DestLat ?? 0,
                     lng = booking.DestLon ?? 0,
-                    formatted = booking.DestFormatted ?? booking.Destination ?? ""
+                    formatted = booking.DestFormatted ?? FormatStandardAddress(booking.DestCity, booking.DestStreet, booking.DestNumber, booking.Destination)
                 },
                 payment = new IcabbiPaymentDto
                 {
@@ -391,6 +391,20 @@ public sealed class IcabbiBookingService : IDisposable
     // ═══════════════════════════════════════════
 
     private void Log(string msg) => OnLog?.Invoke($"[iCabbi] {msg}");
+
+    private static string FormatStandardAddress(string? city, string? street, string? number, string? rawFallback)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(city)) parts.Add(city);
+        if (!string.IsNullOrWhiteSpace(street))
+        {
+            var streetPart = street;
+            if (!string.IsNullOrWhiteSpace(number))
+                streetPart += " " + number;
+            parts.Add(streetPart);
+        }
+        return parts.Count > 0 ? string.Join(", ", parts) : rawFallback ?? "";
+    }
 
     private static string Truncate(string s, int max = 300)
         => s.Length <= max ? s : s[..max] + "…";

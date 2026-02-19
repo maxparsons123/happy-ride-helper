@@ -66,8 +66,8 @@ public sealed class BsqdDispatcher : IDispatcher
         {
             var payload = new
             {
-                departure_address = new { lat = booking.PickupLat ?? 0, lon = booking.PickupLon ?? 0, street_name = booking.PickupStreet ?? "", street_number = booking.PickupNumber ?? "", postal_code = booking.PickupPostalCode ?? "", city = booking.PickupCity ?? "", formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "" },
-                destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? booking.Destination ?? "" },
+                departure_address = new { lat = booking.PickupLat ?? 0, lon = booking.PickupLon ?? 0, street_name = booking.PickupStreet ?? "", street_number = booking.PickupNumber ?? "", postal_code = booking.PickupPostalCode ?? "", city = booking.PickupCity ?? "", formatted_depa_address = booking.PickupFormatted ?? FormatStandardAddress(booking.PickupCity, booking.PickupStreet, booking.PickupNumber, booking.Pickup) },
+                destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? FormatStandardAddress(booking.DestCity, booking.DestStreet, booking.DestNumber, booking.Destination) },
                 departure_time = DateTimeOffset.Now.AddMinutes(5),
                 first_name = booking.Name ?? "Customer",
                 total_price = ParseFare(booking.Fare),
@@ -262,6 +262,24 @@ public sealed class BsqdDispatcher : IDispatcher
             return "+" + clean;
         if (clean.StartsWith("0")) return "+31" + clean[1..];
         return "+" + clean;
+    }
+
+    /// <summary>
+    /// Formats an address in standardized EU format (City, Street Number) for WhatsApp/dispatch.
+    /// Falls back to raw input if geocoded components are unavailable.
+    /// </summary>
+    private static string FormatStandardAddress(string? city, string? street, string? number, string? rawFallback)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(city)) parts.Add(city);
+        if (!string.IsNullOrWhiteSpace(street))
+        {
+            var streetPart = street;
+            if (!string.IsNullOrWhiteSpace(number))
+                streetPart += " " + number;
+            parts.Add(streetPart);
+        }
+        return parts.Count > 0 ? string.Join(", ", parts) : rawFallback ?? "";
     }
 
     private static string ParseFare(string? fare)
