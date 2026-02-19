@@ -177,8 +177,8 @@ public sealed class BsqdDispatcher : IDispatcher
                 callerPhone = FormatE164(phoneNumber),
                 fare = fareStr,
                 estimatedFare = fareStr,
-                notes = booking.PickupTime ?? "None",
-                specialRequirements = booking.PickupTime ?? "None",
+                notes = booking.ScheduledAt.HasValue ? "Advance booking" : (booking.PickupTime ?? "None"),
+                specialRequirements = booking.ScheduledAt.HasValue ? "Advance booking" : (booking.PickupTime ?? "None"),
                 scheduledTime = booking.ScheduledAt?.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 pickupTime = booking.PickupTime ?? "ASAP",
                 formattedPickupTime = FormatPickupTime(booking),
@@ -304,7 +304,7 @@ public sealed class BsqdDispatcher : IDispatcher
             return $"Today at {timeStr}";
         if (local.Date == nowLocal.Date.AddDays(1))
             return $"Tomorrow at {timeStr}";
-        return $"{local:ddd dd MMM} at {timeStr}";
+        return $"{local:dddd dd MMMM yyyy} at {timeStr}";
     }
 
     private static string ParseFare(string? fare)
