@@ -76,7 +76,8 @@ public sealed class BsqdDispatcher : IDispatcher
                 phoneNumber = FormatE164(phoneNumber),
                 passengers = (booking.Passengers ?? 1).ToString()
             };
-            var json = JsonSerializer.Serialize(payload, JsonOptions);
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, WriteIndented = true });
+            _logger.LogInformation("📤 BSQD payload:\n{Json}", json);
             var request = new HttpRequestMessage(HttpMethod.Post, _settings.BsqdWebhookUrl);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.BsqdApiKey);
             request.Content = new StringContent(json, Encoding.UTF8, "application/json");
