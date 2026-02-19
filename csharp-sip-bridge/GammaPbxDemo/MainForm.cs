@@ -139,25 +139,70 @@ public class MainForm : Form
         _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0)));
         Log("📡 SIP UDP channel started (ephemeral port)");
 
-        // Note: SIPSorcery handles NAT traversal via the outbound proxy pattern.
-        // STUN discovery is not directly available via SIPTransport in this version.
-
-        // OPTIONS keepalive handler
+        // ── FULL SIP TRACE — single consolidated handler ──
+        // Logs every inbound SIP request with full headers
         _sipTransport.SIPTransportRequestReceived += async (localEP, remoteEP, request) =>
         {
+            Log($"⬇ SIP RX [{request.Method}] {remoteEP} → {localEP}");
+            Log($"   From   : {request.Header.From}");
+            Log($"   To     : {request.Header.To}");
+            Log($"   URI    : {request.URI}");
+            Log($"   CSeq   : {request.Header.CSeq} {request.Header.CSeqMethod}");
+            Log($"   CallId : {request.Header.CallId}");
+
             if (request.Method == SIPMethodsEnum.OPTIONS)
             {
                 var ok = SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.Ok, null);
                 await _sipTransport.SendResponseAsync(ok);
-                Log($"📤 OPTIONS → 200 OK to {remoteEP}");
+                Log($"   ↳ Auto-replied 200 OK to OPTIONS");
             }
+            else if (request.Method == SIPMethodsEnum.INVITE)
+            {
+                var from = request.Header.From?.FromURI?.User ?? "unknown";
+                Log($"📞 Incoming INVITE from {from}");
+                var uas = _userAgent!.AcceptCall(request);
+                var mediaSession = new VoIPMediaSession();
+                mediaSession.AcceptRtpFromAny = true;
+                var answered = await _userAgent.Answer(uas, mediaSession);
+                if (answered)
+                {
+                    Log("✅ Call answered — audio bridge active");
+                    _userAgent.OnCallHungup += (d) => { Log("📴 Call ended"); mediaSession.Close("bye"); };
+                }
+                else
+                {
+                    Log("❌ Failed to answer call");
+                }
+            }
+        };
+
+        // Logs every inbound SIP response with full headers — key for diagnosing 4xx errors
+        _sipTransport.SIPTransportResponseReceived += (localEP, remoteEP, response) =>
+        {
+            Log($"⬇ SIP RX [{(int)response.Status} {response.ReasonPhrase}] {remoteEP} → {localEP}");
+            Log($"   From   : {response.Header.From}");
+            Log($"   To     : {response.Header.To}");
+            Log($"   CSeq   : {response.Header.CSeq} {response.Header.CSeqMethod}");
+            Log($"   CallId : {response.Header.CallId}");
+            if (response.Header.AuthenticationHeaders != null)
+                foreach (var ah in response.Header.AuthenticationHeaders)
+                    Log($"   WWW-Auth: {ah}");
+            if (!string.IsNullOrEmpty(response.Body))
+                Log($"   Body   : {response.Body}");
+            return Task.CompletedTask;
         };
 
         // Register — use OutboundProxy for IP routing, preserve domain in AOR
         var proto = transport.Equals("TCP", StringComparison.OrdinalIgnoreCase) ? SIPProtocolsEnum.tcp : SIPProtocolsEnum.udp;
         var outboundProxy = new SIPEndPoint(proto, registrarIp!, port);
 
-        // 3. SHORT expiry (120s) keeps the BT NAT hole alive with frequent re-REGISTERs
+        Log($"🔧 OutboundProxy  : {outboundProxy}");
+        Log($"🔧 AuthUser       : {effectiveAuthUser}");
+        Log($"🔧 Domain (AOR)   : {effectiveDomain}");
+        Log($"🔧 Transport      : {transport}");
+        Log($"🔧 Expiry         : 120s");
+
+        // SHORT expiry (120s) keeps the BT NAT hole alive with frequent re-REGISTERs
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
             effectiveAuthUser,
@@ -183,39 +228,16 @@ public class MainForm : Form
                 _lblStatus.Text = "● Failed";
                 _lblStatus.ForeColor = System.Drawing.Color.Red;
                 Log($"❌ Registration failed: {resp?.StatusCode} {resp?.ReasonPhrase} — {err}");
+                if (resp != null)
+                {
+                    Log($"   Full response To  : {resp.Header.To}");
+                    Log($"   Full response From: {resp.Header.From}");
+                }
             });
         };
 
-        // Handle inbound INVITEs directly via transport
+        // Inbound call user agent
         _userAgent = new SIPUserAgent(_sipTransport, outboundProxy);
-
-        _sipTransport.SIPTransportRequestReceived += async (localEP, remoteEP, request) =>
-        {
-            if (request.Method == SIPMethodsEnum.INVITE)
-            {
-                var from = request.Header.From?.FromURI?.User ?? "unknown";
-                Log($"📞 Incoming INVITE from {from}");
-
-                var uas = _userAgent.AcceptCall(request);
-                var mediaSession = new VoIPMediaSession();
-                mediaSession.AcceptRtpFromAny = true;
-
-                var answered = await _userAgent.Answer(uas, mediaSession);
-                if (answered)
-                {
-                    Log("✅ Call answered — audio bridge active");
-                    _userAgent.OnCallHungup += (d) =>
-                    {
-                        Log("📴 Call ended");
-                        mediaSession.Close("bye");
-                    };
-                }
-                else
-                {
-                    Log("❌ Failed to answer call");
-                }
-            }
-        };
 
         _regAgent.Start();
         Log("⏳ Registering...");
