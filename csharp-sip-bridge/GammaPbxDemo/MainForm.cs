@@ -139,9 +139,8 @@ public class MainForm : Form
         _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 5061)));
         Log("📡 SIP UDP channel started on port 5061");
 
-        // 2. Add Google STUN to discover the public BT IP and keep the NAT hole open
-        _sipTransport.STUNEndpoints.Add(new IPEndPoint(IPAddress.Parse("74.125.200.127"), 19302));
-        Log("🌐 STUN: Google 74.125.200.127:19302");
+        // Note: SIPSorcery handles NAT traversal via the outbound proxy pattern.
+        // STUN discovery is not directly available via SIPTransport in this version.
 
         // OPTIONS keepalive handler
         _sipTransport.SIPTransportRequestReceived += async (localEP, remoteEP, request) =>
