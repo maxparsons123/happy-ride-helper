@@ -28,6 +28,9 @@ public sealed class FareResult
     public string[]? PickupAlternatives { get; set; }
     public string[]? DestAlternatives { get; set; }
     public string? ClarificationMessage { get; set; }
+
+    /// <summary>AI-parsed scheduled pickup time (ISO 8601 UTC). Null = ASAP.</summary>
+    public DateTime? ScheduledAt { get; set; }
 }
 
 /// <summary>
@@ -36,5 +39,5 @@ public sealed class FareResult
 public interface IFareCalculator
 {
     Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber);
-    Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber);
+    Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber, string? pickupTime = null);
 }

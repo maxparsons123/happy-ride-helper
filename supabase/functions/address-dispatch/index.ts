@@ -258,6 +258,24 @@ GEOCODING RULES (CRITICAL):
 6. Coordinates must be realistic (UK lat ~50-58, lon ~-6 to 2; NL lat ~51-53, lon ~3-7)
 7. Extract structured components: street_name, street_number, postal_code, city
 
+PICKUP TIME NORMALISATION (CRITICAL):
+When a pickup_time is provided in the user message, parse it into ISO 8601 UTC: "YYYY-MM-DDTHH:MM:SSZ".
+The REFERENCE_DATETIME (current UTC) is provided in the user message.
+
+Rules:
+- "now", "asap", "immediately", "straight away", "right now" → scheduled_at = null
+- "in X minutes" → REFERENCE + X minutes
+- "in X hours" → REFERENCE + X hours
+- "in X days" → REFERENCE + X days
+- Time only ("5pm") → today at that time; if past → tomorrow
+- "tonight" → today 21:00; "this evening" → 19:00; "afternoon" → 15:00; "morning" → 09:00
+- "tomorrow" → tomorrow same time; "tomorrow at 3pm" → tomorrow 15:00
+- "this time tomorrow" → REFERENCE + 24h; "same time next week" → REFERENCE + 7d
+- Day-of-week: "this Wed" → nearest Wed; "next Wed" → Wed of next week
+- "Friday evening" → next Fri 19:00; "Monday morning" → next Mon 09:00
+- NO-PAST RULE: always roll forward if result < REFERENCE_DATETIME
+- Not provided or empty → scheduled_at = null
+
 OUTPUT FORMAT (STRICT JSON):
 {
   "detected_area": "city name or region",
@@ -291,8 +309,9 @@ OUTPUT FORMAT (STRICT JSON):
     "alternatives": [],
     "matched_from_history": boolean
   },
+  "scheduled_at": "ISO 8601 UTC datetime string or null if ASAP/immediate",
   "status": "ready" | "clarification_needed",
-  "clarification_message": "Human-readable question for the caller when ANY address is ambiguous, e.g. 'Which city is David Road in? I found it in Coventry, Birmingham, and London.' MUST be provided when status is clarification_needed."
+  "clarification_message": "question for the caller when address is ambiguous"
 }`;
 
 serve(async (req) => {
@@ -301,14 +320,14 @@ serve(async (req) => {
   }
 
   try {
-    const { pickup, destination, phone } = await req.json();
+    const { pickup, destination, phone, pickup_time } = await req.json();
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}"`);
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}"`);
 
     // Look up caller history from database
     let callerHistory = "";
@@ -350,9 +369,11 @@ serve(async (req) => {
       }
     }
 
-    // Build the user message
+    // Build the user message with reference datetime for time parsing
+    const refDatetime = new Date().toISOString();
+    const timePart = pickup_time ? `\nPickup Time Requested: "${pickup_time}"\nREFERENCE_DATETIME (current UTC): ${refDatetime}` : '';
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}${callerHistory}`;
+User Phone: ${phone || 'not provided'}${timePart}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -418,6 +439,7 @@ User Phone: ${phone || 'not provided'}${callerHistory}`;
                   },
                   required: ["address", "lat", "lon", "city", "is_ambiguous"]
                 },
+                scheduled_at: { type: "string", description: "ISO 8601 UTC datetime for scheduled pickup, or null if ASAP/immediate" },
                 status: { type: "string", enum: ["ready", "clarification_needed"] },
                 clarification_message: { type: "string" }
               },
