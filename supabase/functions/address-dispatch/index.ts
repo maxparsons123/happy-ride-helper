@@ -382,7 +382,7 @@ User Phone: ${phone || 'not provided'}${timePart}${callerHistory}`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
+        model: "google/gemini-2.5-flash",
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: userMessage },
@@ -891,7 +891,7 @@ Key question: Does the dropoff street name "${parsed.dropoff?.street_name || ''}
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "google/gemini-3-flash-preview",
+            model: "google/gemini-2.5-flash",
             messages: [
               { role: "system", content: `You are a "Taxi Address Sanity Guard." You compare User Input (STT) vs. Geocoder Results (GEO).
 
