@@ -39,7 +39,7 @@ public sealed class GeminiAddressClient
     /// Resolve addresses and calculate fare using direct Google Gemini API.
     /// Returns the same JSON structure as the address-dispatch edge function.
     /// </summary>
-    public async Task<JsonElement?> ResolveAsync(string? pickup, string? destination, string? phone)
+    public async Task<JsonElement?> ResolveAsync(string? pickup, string? destination, string? phone, string? pickupTime = null)
     {
         if (string.IsNullOrWhiteSpace(_settings.ApiKey))
         {
@@ -53,7 +53,8 @@ public sealed class GeminiAddressClient
             var callerHistory = await GetCallerHistoryAsync(phone);
 
             // ── Step 2: Call Gemini with function calling ──
-            var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{callerHistory}";
+            var timePart = !string.IsNullOrWhiteSpace(pickupTime) ? $"\nPickup Time Requested: \"{pickupTime}\"\nREFERENCE_DATETIME (current UTC): {DateTime.UtcNow:o}" : "";
+            var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{timePart}{callerHistory}";
 
             var geminiUrl = $"https://generativelanguage.googleapis.com/v1beta/models/{_settings.Model}:generateContent?key={_settings.ApiKey}";
 
@@ -210,7 +211,8 @@ public sealed class GeminiAddressClient
                                     ["pickup"] = BuildAddressSchema(),
                                     ["dropoff"] = BuildAddressSchema(),
                                     ["status"] = new { type = "STRING", @enum = new[] { "ready", "clarification_needed" } },
-                                    ["clarification_message"] = new { type = "STRING" }
+                                    ["clarification_message"] = new { type = "STRING" },
+                                    ["scheduled_at"] = new { type = "STRING", description = "ISO 8601 UTC datetime for scheduled pickup, or null if ASAP" }
                                 },
                                 required = new[] { "detected_area", "region_source", "phone_analysis", "pickup", "dropoff", "status" }
                             }
@@ -1083,5 +1085,18 @@ GEOCODING RULES:
 3. Extract structured components: street_name, street_number, postal_code, city
 
 ""NEAREST X"" / RELATIVE POI RESOLUTION:
-Resolve to the ACTUAL NEAREST real-world instance relative to the caller's location.";
+Resolve to the ACTUAL NEAREST real-world instance relative to the caller's location.
+
+PICKUP TIME NORMALISATION:
+When a pickup_time is provided, parse it into ISO 8601 UTC: ""YYYY-MM-DDTHH:MM:SSZ"".
+Rules:
+- ""now"", ""asap"", ""immediately"" → scheduled_at = null
+- ""in X minutes/hours/days"" → REFERENCE + X
+- Time only (""5pm"") → today; if past → tomorrow
+- ""tonight"" → 21:00; ""this evening"" → 19:00; ""afternoon"" → 15:00; ""morning"" → 09:00
+- ""tomorrow at 3pm"" → tomorrow 15:00
+- ""this time tomorrow"" → +24h; ""same time next week"" → +7d
+- Day-of-week: ""this Wed"" → nearest; ""next Wed"" → next week's Wed
+- NO-PAST RULE: always roll forward if result < REFERENCE_DATETIME
+- Not provided → scheduled_at = null";
 }

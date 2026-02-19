@@ -642,7 +642,7 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
-                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -1077,7 +1077,7 @@ public sealed class CallSession : ICallSession
         try
         {
             _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after Address Lock resolution", sessionId);
-            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime);
 
             // Check if re-disambiguation is needed (e.g. clarified address still ambiguous in a different way)
             if (result.NeedsClarification)
@@ -1216,7 +1216,7 @@ public sealed class CallSession : ICallSession
                     _logger.LogInformation("[{SessionId}] 🔄 Background fare calculation starting for {Pickup} → {Dest}",
                         sessionId, pickup, destination);
 
-                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -1385,7 +1385,7 @@ public sealed class CallSession : ICallSession
                 try
                 {
                     var (ep, ed) = GetEnrichedAddresses();
-                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(ep, ed, CallerId);
+                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(ep, ed, CallerId, _booking.PickupTime);
                     ApplyFareResultNullSafe(result);
                 }
                 catch (Exception ex)
@@ -1463,7 +1463,7 @@ public sealed class CallSession : ICallSession
                 ? EnrichWithVerifiedCity(_booking.Destination, _booking.DestLat.HasValue && _booking.DestLat != 0 ? _booking.DestCity : null)
                 : enrichedPickup;
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
-                enrichedPickup, enrichedDest, CallerId);
+                enrichedPickup, enrichedDest, CallerId, _booking.PickupTime);
             var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
             FareResult result;
@@ -1869,6 +1869,10 @@ public sealed class CallSession : ICallSession
         _booking.DestFormatted ??= result.DestFormatted;
         _booking.Fare ??= result.Fare;
         _booking.Eta ??= result.Eta;
+
+        // Apply AI-parsed scheduled time (overrides regex parsing)
+        if (result.ScheduledAt.HasValue)
+            _booking.ScheduledAt = result.ScheduledAt;
 
         if (_booking.PickupLat == 0 && result.PickupLat != 0) _booking.PickupLat = result.PickupLat;
         if (_booking.PickupLon == 0 && result.PickupLon != 0) _booking.PickupLon = result.PickupLon;

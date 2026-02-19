@@ -37,7 +37,7 @@ public sealed class FareCalculator : IFareCalculator
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkModel/1.0");
     }
 
-    public async Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber)
+    public async Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber, string? pickupTime = null)
     {
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
@@ -47,7 +47,7 @@ public sealed class FareCalculator : IFareCalculator
         {
             try
             {
-                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber);
+                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber, pickupTime);
                 if (geminiResult.HasValue)
                 {
                     _logger.LogDebug("✅ Using local Gemini for address dispatch");
@@ -64,7 +64,7 @@ public sealed class FareCalculator : IFareCalculator
         // ── Fall back to edge function ──
         try
         {
-            var requestBody = JsonSerializer.Serialize(new { pickup = pickup ?? "", destination = destination ?? "", phone = phoneNumber ?? "" });
+            var requestBody = JsonSerializer.Serialize(new { pickup = pickup ?? "", destination = destination ?? "", phone = phoneNumber ?? "", pickup_time = pickupTime ?? "" });
             var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
                 Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
@@ -149,6 +149,18 @@ public sealed class FareCalculator : IFareCalculator
             result.NeedsClarification = true;
         if (root.TryGetProperty("clarification_message", out var clarifEl) && clarifEl.ValueKind == JsonValueKind.String)
             result.ClarificationMessage = clarifEl.GetString();
+
+        // Parse AI-resolved scheduled time
+        if (root.TryGetProperty("scheduled_at", out var schedEl) && schedEl.ValueKind == JsonValueKind.String)
+        {
+            var schedStr = schedEl.GetString();
+            if (!string.IsNullOrWhiteSpace(schedStr) && DateTime.TryParse(schedStr, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var schedDt))
+            {
+                result.ScheduledAt = schedDt;
+                _logger.LogInformation("⏰ AI parsed pickup time → {ScheduledAt:u}", schedDt);
+            }
+        }
 
         // Edge fare (from either Gemini or edge function)
         string? edgeFare = null, edgeEta = null;
