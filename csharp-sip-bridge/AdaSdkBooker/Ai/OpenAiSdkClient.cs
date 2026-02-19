@@ -215,8 +215,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             _session = await _client.StartConversationSessionAsync(_sessionCts.Token);
 
             // Detect language from caller's phone number and prepend hint to instructions
-            var detectedLang = DetectLanguageStatic(callerId);
-            var detectedLangName = GetLanguageNameStatic(detectedLang);
+            var detectedLang = DetectLanguage(callerId);
+            var detectedLangName = GetLanguageName(detectedLang);
             var langPreamble = detectedLang != "en"
                 ? $"[LANGUAGE PREWARN] The caller's phone number indicates they are from a {detectedLangName}-speaking country. " +
                   $"EXPECT the caller to speak {detectedLangName}. Transcribe and respond in {detectedLangName} by default. " +
