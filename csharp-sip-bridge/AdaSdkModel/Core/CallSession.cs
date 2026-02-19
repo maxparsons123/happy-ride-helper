@@ -1645,14 +1645,19 @@ public sealed class CallSession : ICallSession
     private static string FormatFareForSpeech(string? fare)
     {
         if (string.IsNullOrEmpty(fare)) return "unknown";
-        var currencyWord = fare.Contains("£") ? "pounds" : "euros";
+        // Detect currency from symbol
+        string currencyWord, subunitWord;
+        if (fare.Contains("£")) { currencyWord = "pounds"; subunitWord = "pence"; }
+        else if (fare.Contains("$")) { currencyWord = "dollars"; subunitWord = "cents"; }
+        else { currencyWord = "euros"; subunitWord = "cents"; }
+
         var clean = fare.Replace("€", "").Replace("£", "").Replace("$", "").Trim();
         if (decimal.TryParse(clean, System.Globalization.NumberStyles.Any,
             System.Globalization.CultureInfo.InvariantCulture, out var amount))
         {
             var whole = (int)amount;
-            var pence = (int)((amount - whole) * 100);
-            return pence > 0 ? $"{whole} {currencyWord} {pence}" : $"{whole} {currencyWord}";
+            var subunit = (int)((amount - whole) * 100);
+            return subunit > 0 ? $"{whole} {currencyWord} {subunit} {subunitWord}" : $"{whole} {currencyWord}";
         }
         return fare;
     }
