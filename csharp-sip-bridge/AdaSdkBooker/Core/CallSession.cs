@@ -586,9 +586,14 @@ public sealed class CallSession : ICallSession
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
                     if (_aiClient is OpenAiSdkClient sdkFallback)
+                    {
+                        var fallbackEtaPart = IsImmediatePickup(_booking.PickupTime)
+                            ? ", estimated time of arrival is 8 minutes"
+                            : "";
                         await sdkFallback.InjectMessageAndRespondAsync(
-                            "[FARE RESULT] The estimated fare is 8 pounds, estimated time of arrival is 8 minutes. " +
+                            $"[FARE RESULT] The estimated fare is 8 pounds{fallbackEtaPart}. " +
                             "Read back the details to the caller and ask them to confirm.");
+                    }
                 }
             });
 
