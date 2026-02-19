@@ -48,11 +48,14 @@ public sealed class BookingState
         lower = Regex.Replace(lower, @"p\s*\.\s*m\s*\.?", "pm");
         lower = Regex.Replace(lower, @"a\s*\.\s*m\s*\.?", "am");
 
-        // Try ISO format first (from AI tool calls: "2026-02-19 15:30")
+        // Try ISO format first (from AI tool calls: "2026-02-20 17:30" in London local time)
         if (DateTime.TryParseExact(lower, new[] { "yyyy-MM-dd HH:mm", "yyyy-MM-ddTHH:mm", "yyyy-MM-ddTHH:mm:ss" },
-            System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var iso))
+            System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var iso))
         {
-            return EnsureFuture(DateTime.SpecifyKind(iso, DateTimeKind.Utc));
+            // AI returns London local time — convert to UTC for storage/dispatch
+            var londonTz = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(iso, DateTimeKind.Unspecified), londonTz);
+            return EnsureFuture(utc);
         }
 
         var now = DateTime.UtcNow;
