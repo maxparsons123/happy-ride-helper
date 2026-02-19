@@ -911,6 +911,33 @@ Decision Rules:
         public string? Reasoning { get; set; }
     }
 
+    // Country → currency mapping based on phone-detected country
+    private static readonly Dictionary<string, (string Symbol, string CurrencyWord, string SubunitWord)> CountryCurrency = new()
+    {
+        ["UK"] = ("£", "pounds", "pence"),
+        ["US"] = ("$", "dollars", "cents"),
+        ["CA"] = ("$", "dollars", "cents"),
+        ["NL"] = ("€", "euros", "cents"),
+        ["BE"] = ("€", "euros", "cents"),
+        ["FR"] = ("€", "euros", "centimes"),
+        ["DE"] = ("€", "euros", "cent"),
+        ["ES"] = ("€", "euros", "céntimos"),
+        ["IT"] = ("€", "euros", "centesimi"),
+        ["IE"] = ("€", "euros", "cents"),
+        ["AT"] = ("€", "euros", "cent"),
+        ["PT"] = ("€", "euros", "cêntimos"),
+        ["LU"] = ("€", "euros", "cents"),
+        ["FI"] = ("€", "euros", "cents"),
+        ["GR"] = ("€", "euros", "cents"),
+    };
+
+    private static (string Symbol, string CurrencyWord, string SubunitWord) GetCurrencyForCountry(string detectedCountry)
+    {
+        if (CountryCurrency.TryGetValue(detectedCountry, out var c)) return c;
+        // Default to EUR for unknown European countries, GBP for UK-prefix
+        return ("€", "euros", "cents");
+    }
+
     private FareCalcResult CalculateFare(double distanceMiles, string detectedCountry)
     {
         var rawFare = Math.Max((double)MinFare, (double)BaseFare + distanceMiles * (double)PerMile);
@@ -919,10 +946,7 @@ Decision Rules:
         var tripEtaMinutes = (int)Math.Ceiling(distanceMiles / AvgSpeedMph * 60) + BufferMinutes;
         var driverEtaMinutes = Math.Min(DriverEtaMax, Math.Max(DriverEtaMin, DriverEtaDefault + (int)(distanceMiles / 20)));
 
-        var isNL = detectedCountry == "NL";
-        var symbol = isNL ? "€" : "£";
-        var currencyWord = isNL ? "euros" : "pounds";
-        var subunitWord = isNL ? "cents" : "pence";
+        var (symbol, currencyWord, subunitWord) = GetCurrencyForCountry(detectedCountry);
 
         var whole = (int)Math.Floor(fare);
         var subunit = (int)Math.Round((fare - whole) * 100);
@@ -965,7 +989,7 @@ Decision Rules:
     }
 
     // ── System prompt — identical to the edge function ──
-    private const string SystemPrompt = @"Role: Professional Taxi Dispatch Logic System for UK & Netherlands.
+    private const string SystemPrompt = @"Role: Professional Taxi Dispatch Logic System for Europe and North America.
 
 Objective: Extract, validate, and GEOCODE pickup and drop-off addresses from user messages, using phone number patterns to determine geographic bias.
 
@@ -1005,10 +1029,18 @@ When CALLER_HISTORY is provided, it contains addresses this specific caller has 
 - Set region_source to ""caller_history"" when used.
 
 PHONE NUMBER BIASING LOGIC (CRITICAL):
-1. UK Landline Area Codes - STRONG bias to specific city (024→Coventry, 020→London, 0121→Birmingham, etc.)
-2. UK Mobile (+44 7 or 07) → NO geographic clue. Check history, then city mentions, then flag as ambiguous.
-3. Netherlands: +31 or 0031. 020→Amsterdam, 010→Rotterdam, 070→The Hague, 030→Utrecht.
-4. EXPLICIT CITY NAME OVERRIDES PHONE PREFIX.
+1. UK: +44. Landline area codes give strong city bias (024→Coventry, 020→London, 0121→Birmingham). Mobile +44 7 → no geographic clue.
+2. Netherlands: +31. 020→Amsterdam, 010→Rotterdam, 070→The Hague, 030→Utrecht.
+3. Belgium: +32. 02→Brussels, 03→Antwerp, 09→Ghent.
+4. France: +33. 01→Paris/Île-de-France.
+5. Germany: +49. 030→Berlin, 089→Munich, 040→Hamburg.
+6. Spain: +34. Italy: +39. Ireland: +353. Austria: +43. Portugal: +351.
+7. US/Canada: +1.
+8. EXPLICIT CITY NAME OVERRIDES PHONE PREFIX.
+
+PHONE → COUNTRY MAPPING for detected_country field:
++44 → UK, +31 → NL, +32 → BE, +33 → FR, +49 → DE, +34 → ES, +39 → IT, +353 → IE, +43 → AT, +351 → PT, +352 → LU, +358 → FI, +30 → GR, +1 → US.
+Always set detected_country to the TWO-LETTER ISO code based on the phone prefix.
 
 CHAIN BUSINESSES & LANDMARKS WITH MULTIPLE LOCATIONS (CRITICAL):
 For chains with no city context from a mobile caller, set is_ambiguous=true with alternatives.
