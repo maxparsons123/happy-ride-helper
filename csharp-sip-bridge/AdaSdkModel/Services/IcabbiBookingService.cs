@@ -89,7 +89,7 @@ public sealed class IcabbiBookingService : IDisposable
             // ── Build payload exactly like WinForms ICabbiApiClient ──
             var icabbiBooking = new IcabbiBookingRequest
             {
-                date = DateTime.UtcNow.AddMinutes(1),
+                date = booking.ScheduledAt ?? DateTime.UtcNow.AddMinutes(1),
                 name = booking.Name ?? "Customer",
                 phone = phone,
                 extras = "WHATSAPP",

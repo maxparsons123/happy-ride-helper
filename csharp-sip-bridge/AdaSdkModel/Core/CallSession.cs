@@ -589,7 +589,10 @@ public sealed class CallSession : ICallSession
                 _booking.VehicleType = BookingState.RecommendVehicle(pn);
         }
         if (args.TryGetValue("pickup_time", out var pt))
+        {
             _booking.PickupTime = pt?.ToString();
+            _booking.ScheduledAt = BookingState.ParsePickupTimeToDateTime(_booking.PickupTime);
+        }
         if (args.TryGetValue("vehicle_type", out var vt) && !string.IsNullOrWhiteSpace(vt?.ToString()))
             _booking.VehicleType = vt.ToString()!;
 
@@ -807,9 +810,9 @@ public sealed class CallSession : ICallSession
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
-                    var etaPart1 = IsImmediatePickup(_booking.PickupTime) ? $", estimated time of arrival is {_booking.Eta}" : "";
+                    var timePart1 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{etaPart1}. " +
+                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart1}. " +
                             $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm the booking.");
                 }
                 catch (Exception ex)
@@ -819,9 +822,9 @@ public sealed class CallSession : ICallSession
                     _booking.Eta = "8 minutes";
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
-                    var fallbackEta1 = IsImmediatePickup(_booking.PickupTime) ? ", estimated time of arrival is 8 minutes" : "";
+                    var fallbackTimePart1 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The estimated fare is 8 pounds{fallbackEta1}. " +
+                            $"[FARE RESULT] The estimated fare is 8 pounds{fallbackTimePart1}. " +
                             "Read back the details to the caller and ask them to confirm.");
                 }
             });
@@ -1144,9 +1147,9 @@ public sealed class CallSession : ICallSession
             _logger.LogInformation("[{SessionId}] 💰 Fare ready after clarification: {Fare}, ETA: {Eta}",
                 sessionId, _booking.Fare, _booking.Eta);
 
-            var etaPart2 = IsImmediatePickup(_booking.PickupTime) ? $", estimated time of arrival is {_booking.Eta}" : "";
+            var timePart2 = FormatScheduledTimePart();
             await _aiClient.InjectMessageAndRespondAsync(
-                    $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{etaPart2}. " +
+                    $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart2}. " +
                     "Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm.");
         }
         catch (Exception ex)
@@ -1156,9 +1159,9 @@ public sealed class CallSession : ICallSession
             _booking.Eta = "8 minutes";
             OnBookingUpdated?.Invoke(_booking.Clone());
 
-            var fallbackEta2 = IsImmediatePickup(_booking.PickupTime) ? ", estimated time of arrival is 8 minutes" : "";
+            var fallbackTimePart2 = FormatScheduledTimePart();
             await _aiClient.InjectMessageAndRespondAsync(
-                    $"[FARE RESULT] The estimated fare is 8 pounds{fallbackEta2}. " +
+                    $"[FARE RESULT] The estimated fare is 8 pounds{fallbackTimePart2}. " +
                     "Read back the details to the caller and ask them to confirm.");
         }
     }
@@ -1182,7 +1185,10 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("passengers", out var bpax) && int.TryParse(bpax?.ToString(), out var bpn))
             _booking.Passengers = bpn;
         if (args.TryGetValue("pickup_time", out var bpt) && !string.IsNullOrWhiteSpace(bpt?.ToString()))
+        {
             _booking.PickupTime = bpt.ToString();
+            _booking.ScheduledAt = BookingState.ParsePickupTimeToDateTime(_booking.PickupTime);
+        }
 
         if (action == "request_quote")
         {
@@ -1309,9 +1315,9 @@ public sealed class CallSession : ICallSession
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
                     // Inject fare result into conversation — Ada will read it back
-                    var etaPart3 = IsImmediatePickup(_booking.PickupTime) ? $", estimated time of arrival is {_booking.Eta}" : "";
+                    var timePart3 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{etaPart3}. " +
+                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart3}. " +
                             $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm the booking.");
                 }
                 catch (Exception ex)
@@ -1321,9 +1327,9 @@ public sealed class CallSession : ICallSession
                     _booking.Eta = "8 minutes";
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
-                    var fallbackEta3 = IsImmediatePickup(_booking.PickupTime) ? ", estimated time of arrival is 8 minutes" : "";
+                    var fallbackTimePart3 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The estimated fare is 8 pounds{fallbackEta3}. " +
+                            $"[FARE RESULT] The estimated fare is 8 pounds{fallbackTimePart3}. " +
                             "Read back these details to the caller and ask them to confirm.");
                 }
             });
@@ -1640,6 +1646,24 @@ public sealed class CallSession : ICallSession
         if (string.IsNullOrWhiteSpace(pickupTime)) return true;
         var lower = pickupTime.Trim().ToLowerInvariant();
         return lower is "now" or "asap" or "as soon as possible" or "immediately" or "straight away" or "right now";
+    }
+
+    private string FormatScheduledTimePart()
+    {
+        if (IsImmediatePickup(_booking.PickupTime))
+            return $", estimated time of arrival is {_booking.Eta ?? "8 minutes"}";
+        
+        if (_booking.ScheduledAt.HasValue)
+        {
+            var s = _booking.ScheduledAt.Value;
+            var timeStr = s.ToString("h:mm tt").ToLower();
+            var isToday = s.Date == DateTime.UtcNow.Date;
+            var isTomorrow = s.Date == DateTime.UtcNow.Date.AddDays(1);
+            var dayPart = isToday ? "today" : isTomorrow ? "tomorrow" : s.ToString("dddd, MMMM d");
+            return $", scheduled for {timeStr} {dayPart}";
+        }
+        
+        return !string.IsNullOrWhiteSpace(_booking.PickupTime) ? $", scheduled for {_booking.PickupTime}" : "";
     }
 
     private static string FormatFareForSpeech(string? fare)

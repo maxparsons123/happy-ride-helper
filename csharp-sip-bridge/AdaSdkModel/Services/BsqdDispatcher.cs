@@ -68,7 +68,7 @@ public sealed class BsqdDispatcher : IDispatcher
             {
                 departure_address = new { lat = booking.PickupLat ?? 0, lon = booking.PickupLon ?? 0, street_name = booking.PickupStreet ?? "", street_number = booking.PickupNumber ?? "", postal_code = booking.PickupPostalCode ?? "", city = booking.PickupCity ?? "", formatted_depa_address = booking.PickupFormatted ?? FormatStandardAddress(booking.PickupCity, booking.PickupStreet, booking.PickupNumber, booking.Pickup) },
                 destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? FormatStandardAddress(booking.DestCity, booking.DestStreet, booking.DestNumber, booking.Destination) },
-                departure_time = DateTimeOffset.Now.AddMinutes(5),
+                departure_time = booking.ScheduledAt.HasValue ? new DateTimeOffset(booking.ScheduledAt.Value, TimeSpan.Zero) : DateTimeOffset.Now.AddMinutes(5),
                 first_name = booking.Name ?? "Customer",
                 total_price = ParseFare(booking.Fare),
                 phoneNumber = FormatE164(phoneNumber),
@@ -178,6 +178,8 @@ public sealed class BsqdDispatcher : IDispatcher
                 estimatedFare = fareStr,
                 notes = booking.PickupTime ?? "None",
                 specialRequirements = booking.PickupTime ?? "None",
+                scheduledTime = booking.ScheduledAt?.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                pickupTime = booking.PickupTime ?? "ASAP",
                 biddingWindowSec = booking.BiddingWindowSec ?? 30,
                 passengers = booking.Passengers?.ToString() ?? "1",
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
