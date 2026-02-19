@@ -586,7 +586,10 @@ public sealed class GeminiAddressClient
         var dropoffAlts = work["dropoff"]?["alternatives"];
         var noAlts = (pickupAlts == null || pickupAlts.AsArray().Count == 0) && (dropoffAlts == null || dropoffAlts.AsArray().Count == 0);
 
-        var needsSanityCheck = (currentStatus == "clarification_needed" && noAlts) ||
+        // ALWAYS run dual-perspective sanity check when both addresses are resolved
+        var hasBothAddresses = work["pickup"]?["street_name"] != null && work["dropoff"]?["street_name"] != null;
+        var needsSanityCheck = hasBothAddresses ||
+                               (currentStatus == "clarification_needed" && noAlts) ||
                                (distMilesPost.HasValue && distMilesPost.Value > 50) ||
                                hasStreetMismatch;
 
@@ -806,27 +809,38 @@ public sealed class GeminiAddressClient
             var geminiUrl = $"https://generativelanguage.googleapis.com/v1beta/models/{_settings.Model}:generateContent?key={_settings.ApiKey}";
 
             var sanityUserMsg = $@"Context City: {contextCity}
-Pickup STT Input: ""{pickup ?? ""}""
-Pickup Geocoder Result: ""{pickupAddr ?? ""}"" (street: ""{pickupStreet ?? ""}"", city: {pickupCity ?? "unknown"})
-Dropoff STT Input: ""{destination ?? ""}""
-Dropoff Geocoder Result: ""{dropoffAddr ?? ""}"" (street: ""{dropoffStreet ?? ""}"", city: {dropoffCity ?? "unknown"})
-Distance: {distMiles?.ToString("F1") ?? "unknown"} miles
-Key question: Does the dropoff street name ""{dropoffStreet ?? ""}"" match what the user said ""{destination ?? ""}""? Are they the SAME street or DIFFERENT streets?";
 
-            var sanitySystemPrompt = $@"You are a ""Taxi Address Sanity Guard."" You compare User Input (STT) vs. Geocoder Results (GEO).
+PERSPECTIVE 1 — CALLER'S RAW SPEECH (from Speech-to-Text):
+  Pickup: ""{pickup ?? ""}""
+  Dropoff: ""{destination ?? ""}""
 
-CRITICAL: Compare the STREET NAME the user said vs the STREET NAME the geocoder returned.
+PERSPECTIVE 2 — ADA'S GEOCODED INTERPRETATION:
+  Pickup: ""{pickupAddr ?? ""}"" (street: ""{pickupStreet ?? ""}"", city: {pickupCity ?? "unknown"})
+  Dropoff: ""{dropoffAddr ?? ""}"" (street: ""{dropoffStreet ?? ""}"", city: {dropoffCity ?? "unknown"})
 
-Evaluation Criteria:
-1. Street Name Phonetic Match: Compare character by character. ""Russell"" vs ""Rossville"" — DIFFERENT streets. ""528"" vs ""52A"" — same address.
-2. Regional Bias: User is in {contextCity}. If GEO returns >20 miles away, MISMATCH.
-3. STT Artifacts: ""NUX"" might be ""MAX"". But ""Rossville"" is NOT ""Russell"".
-4. Fabrication Detection: If geocoder returned a phonetically similar but different street, MISMATCH.
+Distance between geocoded points: {distMiles?.ToString("F1") ?? "unknown"} miles
 
-Decision Rules:
-- Street name core identity changed (Russell→Rossville): MISMATCH
-- Only house number changed (528→52A): MATCH
-- City changed to distant city: MISMATCH";
+Your task: Compare BOTH perspectives. Determine which version is more likely to be the correct real-world address.
+- If both match or are very similar → MATCH (high confidence)
+- If they differ but Ada's geocoded version is plausible for the area → MATCH (trust geocoder)
+- If the caller said something completely different from what the geocoder resolved → MISMATCH
+- For each side (pickup/dropoff), indicate which perspective is more trustworthy.";
+
+            var sanitySystemPrompt = $@"You are a Dual-Perspective Taxi Address Verifier. You receive TWO versions of each address:
+1. CALLER'S RAW SPEECH — what the Speech-to-Text system heard (may contain mishearings)
+2. ADA'S GEOCODED VERSION — what the geocoding system resolved (may have picked wrong location)
+
+Your job: Compare both perspectives and determine the BEST real-world address for each side.
+
+DECISION RULES:
+- If both say essentially the same street → MATCH. The geocoded version is authoritative.
+- If geocoder corrected a minor STT error (e.g., ""Daventry"" → ""Davenport"") and the geocoded street EXISTS in {contextCity} → MATCH. Trust the geocoder.
+- If geocoder returned a completely different street in a distant city → MISMATCH. The caller's intent was different.
+- If the caller said a landmark/POI name and geocoder resolved it to a street address → MATCH. The geocoder correctly resolved the POI.
+- House number variations (528 vs 52A) → MATCH.
+
+IMPORTANT: When in doubt, prefer Ada's geocoded version if the street exists in the local area. STT mishearings are far more common than geocoder errors for local addresses.";
+
 
             var requestBody = new
             {
