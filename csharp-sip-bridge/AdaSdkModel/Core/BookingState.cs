@@ -44,6 +44,10 @@ public sealed class BookingState
         if (lower is "now" or "asap" or "as soon as possible" or "immediately" or "straight away" or "right now")
             return null;
 
+        // Normalize "p.m." → "pm", "a.m." → "am" and strip extra dots/spaces
+        lower = Regex.Replace(lower, @"p\s*\.\s*m\s*\.?", "pm");
+        lower = Regex.Replace(lower, @"a\s*\.\s*m\s*\.?", "am");
+
         // Try ISO format first (from AI tool calls: "2026-02-19 15:30")
         if (DateTime.TryParseExact(lower, new[] { "yyyy-MM-dd HH:mm", "yyyy-MM-ddTHH:mm", "yyyy-MM-ddTHH:mm:ss" },
             System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var iso))
@@ -103,15 +107,15 @@ public sealed class BookingState
             if (daysAhead == 0) daysAhead = 7; // always next occurrence
             if (isNextWeek)
             {
-                // "next Wednesday" = Wednesday of next calendar week
                 daysAhead = ((int)targetDay.Value - (int)now.DayOfWeek + 7) % 7 + 7;
             }
             baseDate = now.Date.AddDays(daysAhead);
         }
 
-        // Extract explicit time (e.g., "at 3pm", "15:30", "5 o'clock")
-        var timeMatch = Regex.Match(lower, @"(\d{1,2})[:.](\d{2})?\s*(am|pm)?|(\d{1,2})\s*(am|pm)|(\d{1,2})\s*o'?\s*clock");
+        // Extract explicit time — handles "5:30pm", "5.30pm", "5 30 pm", "15:30", "5pm", "5 o'clock"
+        var timeMatch = Regex.Match(lower, @"(\d{1,2})\s*[:.\s]\s*(\d{2})\s*(am|pm)?|(\d{1,2})\s*(am|pm)|(\d{1,2})\s*o'?\s*clock");
         int hour = -1, min = 0;
+        bool hasAmPm = false;
 
         if (timeMatch.Success)
         {
@@ -123,16 +127,25 @@ public sealed class BookingState
             {
                 hour = int.Parse(timeMatch.Groups[4].Value);
                 var ap = timeMatch.Groups[5].Value;
+                hasAmPm = true;
                 if (ap == "pm" && hour < 12) hour += 12;
                 if (ap == "am" && hour == 12) hour = 0;
             }
-            else if (timeMatch.Groups[1].Success) // "15:30" or "3:30pm"
+            else if (timeMatch.Groups[1].Success) // "15:30" or "3:30pm" or "5 30 pm"
             {
                 hour = int.Parse(timeMatch.Groups[1].Value);
                 min = timeMatch.Groups[2].Success ? int.Parse(timeMatch.Groups[2].Value) : 0;
-                var ap = timeMatch.Groups[3].Value;
+                var ap = timeMatch.Groups[3].Success ? timeMatch.Groups[3].Value : "";
+                hasAmPm = !string.IsNullOrEmpty(ap);
                 if (ap == "pm" && hour < 12) hour += 12;
                 if (ap == "am" && hour == 12) hour = 0;
+            }
+
+            // TAXI HEURISTIC: If no am/pm specified and hour is 1-9, assume PM
+            // (nobody books a taxi for 5:30 AM without saying "am" explicitly)
+            if (!hasAmPm && hour >= 1 && hour <= 9)
+            {
+                hour += 12;
             }
         }
         else if (naturalHour.HasValue)
@@ -155,14 +168,16 @@ public sealed class BookingState
         }
 
         // Last resort: try matching just a bare time "3pm", "15:30" without any context words
-        var bareTime = Regex.Match(lower, @"^(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?$");
+        var bareTime = Regex.Match(lower, @"^(\d{1,2})\s*[:.\s]?\s*(\d{2})?\s*(am|pm)?$");
         if (bareTime.Success)
         {
             hour = int.Parse(bareTime.Groups[1].Value);
             min = bareTime.Groups[2].Success ? int.Parse(bareTime.Groups[2].Value) : 0;
             var ap = bareTime.Groups[3].Value;
+            hasAmPm = !string.IsNullOrEmpty(ap);
             if (ap == "pm" && hour < 12) hour += 12;
             if (ap == "am" && hour == 12) hour = 0;
+            if (!hasAmPm && hour >= 1 && hour <= 9) hour += 12;
             var result = new DateTime(now.Year, now.Month, now.Day, hour, min, 0, DateTimeKind.Utc);
             return EnsureFuture(result);
         }
