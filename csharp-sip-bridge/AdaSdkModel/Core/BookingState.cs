@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace AdaSdkModel.Core;
 
 /// <summary>
@@ -28,7 +30,10 @@ public sealed class BookingState
 
     /// <summary>
     /// Parses natural-language pickup time into a UTC DateTime.
-    /// Handles: "now", "ASAP", "in 30 minutes", "at 3pm", "at 15:30", "tomorrow at 9am", etc.
+    /// Aligned with WinForms TaxiAIEngine time normalisation rules.
+    /// Handles: "now", "ASAP", "in X minutes", "at 3pm", "tonight", "this evening",
+    /// "tomorrow at 9am", "next Wednesday", "this time tomorrow", day-of-week, etc.
+    /// Always returns future datetimes (no-past rule).
     /// </summary>
     public static DateTime? ParsePickupTimeToDateTime(string? pickupTime)
     {
@@ -39,40 +44,139 @@ public sealed class BookingState
         if (lower is "now" or "asap" or "as soon as possible" or "immediately" or "straight away" or "right now")
             return null;
 
+        // Try ISO format first (from AI tool calls: "2026-02-19 15:30")
+        if (DateTime.TryParseExact(lower, new[] { "yyyy-MM-dd HH:mm", "yyyy-MM-ddTHH:mm", "yyyy-MM-ddTHH:mm:ss" },
+            System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var iso))
+        {
+            return EnsureFuture(DateTime.SpecifyKind(iso, DateTimeKind.Utc));
+        }
+
         var now = DateTime.UtcNow;
 
-        // "in X minutes/hours"
-        var inMatch = System.Text.RegularExpressions.Regex.Match(lower, @"in\s+(\d+)\s*(min|hour|hr)");
+        // "this time tomorrow" / "same time next week"
+        if (lower.Contains("this time tomorrow")) return now.AddDays(1);
+        if (lower.Contains("same time next week") || lower.Contains("next week at this time")) return now.AddDays(7);
+
+        // "in X minutes/hours/days"
+        var inMatch = Regex.Match(lower, @"in\s+(\d+)\s*(min|hour|hr|day)");
         if (inMatch.Success)
         {
             var amount = int.Parse(inMatch.Groups[1].Value);
-            return inMatch.Groups[2].Value.StartsWith("hour") || inMatch.Groups[2].Value.StartsWith("hr")
-                ? now.AddHours(amount) : now.AddMinutes(amount);
+            var unit = inMatch.Groups[2].Value;
+            if (unit.StartsWith("day")) return now.AddDays(amount);
+            if (unit.StartsWith("hour") || unit.StartsWith("hr")) return now.AddHours(amount);
+            return now.AddMinutes(amount);
         }
 
-        // "at HH:MM" or "at Hpm/am"
-        var atMatch = System.Text.RegularExpressions.Regex.Match(lower, @"(?:at\s+)?(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?");
-        if (atMatch.Success)
+        // Natural time phrases (resolve to specific hours)
+        int? naturalHour = null;
+        if (lower.Contains("tonight")) naturalHour = 21;
+        else if (lower.Contains("this evening") || lower.Contains("evening")) naturalHour = 19;
+        else if (lower.Contains("afternoon")) naturalHour = 15;
+        else if (lower.Contains("morning")) naturalHour = 9;
+
+        // Day-of-week detection
+        var dayNames = new[] { "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday" };
+        DayOfWeek? targetDay = null;
+        bool isNextWeek = lower.Contains("next ");
+
+        foreach (var dn in dayNames)
         {
-            var hour = int.Parse(atMatch.Groups[1].Value);
-            var min = atMatch.Groups[2].Success ? int.Parse(atMatch.Groups[2].Value) : 0;
-            var ampm = atMatch.Groups[3].Value;
+            if (lower.Contains(dn))
+            {
+                targetDay = Enum.Parse<DayOfWeek>(char.ToUpper(dn[0]) + dn[1..]);
+                break;
+            }
+        }
 
-            if (ampm == "pm" && hour < 12) hour += 12;
-            if (ampm == "am" && hour == 12) hour = 0;
+        // Determine the base date
+        DateTime baseDate = now.Date;
+        bool hasTomorrow = lower.Contains("tomorrow");
 
-            var scheduled = new DateTime(now.Year, now.Month, now.Day, hour, min, 0, DateTimeKind.Utc);
+        if (hasTomorrow)
+        {
+            baseDate = now.Date.AddDays(1);
+        }
+        else if (targetDay.HasValue)
+        {
+            int daysAhead = ((int)targetDay.Value - (int)now.DayOfWeek + 7) % 7;
+            if (daysAhead == 0) daysAhead = 7; // always next occurrence
+            if (isNextWeek)
+            {
+                // "next Wednesday" = Wednesday of next calendar week
+                daysAhead = ((int)targetDay.Value - (int)now.DayOfWeek + 7) % 7 + 7;
+            }
+            baseDate = now.Date.AddDays(daysAhead);
+        }
 
-            // If the caller said "tomorrow"
-            if (lower.Contains("tomorrow")) scheduled = scheduled.AddDays(1);
-            // If time already passed today, assume tomorrow
-            else if (scheduled <= now) scheduled = scheduled.AddDays(1);
+        // Extract explicit time (e.g., "at 3pm", "15:30", "5 o'clock")
+        var timeMatch = Regex.Match(lower, @"(\d{1,2})[:.](\d{2})?\s*(am|pm)?|(\d{1,2})\s*(am|pm)|(\d{1,2})\s*o'?\s*clock");
+        int hour = -1, min = 0;
 
-            return scheduled;
+        if (timeMatch.Success)
+        {
+            if (timeMatch.Groups[6].Success) // "X o'clock"
+            {
+                hour = int.Parse(timeMatch.Groups[6].Value);
+            }
+            else if (timeMatch.Groups[4].Success) // "5pm"
+            {
+                hour = int.Parse(timeMatch.Groups[4].Value);
+                var ap = timeMatch.Groups[5].Value;
+                if (ap == "pm" && hour < 12) hour += 12;
+                if (ap == "am" && hour == 12) hour = 0;
+            }
+            else if (timeMatch.Groups[1].Success) // "15:30" or "3:30pm"
+            {
+                hour = int.Parse(timeMatch.Groups[1].Value);
+                min = timeMatch.Groups[2].Success ? int.Parse(timeMatch.Groups[2].Value) : 0;
+                var ap = timeMatch.Groups[3].Value;
+                if (ap == "pm" && hour < 12) hour += 12;
+                if (ap == "am" && hour == 12) hour = 0;
+            }
+        }
+        else if (naturalHour.HasValue)
+        {
+            hour = naturalHour.Value;
+        }
+
+        // If we resolved a time or day
+        if (hour >= 0)
+        {
+            var result = new DateTime(baseDate.Year, baseDate.Month, baseDate.Day, hour, min, 0, DateTimeKind.Utc);
+            return EnsureFuture(result);
+        }
+
+        // If we only got a day-of-week or "tomorrow" with no time, use same time of day as now
+        if (hasTomorrow || targetDay.HasValue)
+        {
+            var result = new DateTime(baseDate.Year, baseDate.Month, baseDate.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
+            return EnsureFuture(result);
+        }
+
+        // Last resort: try matching just a bare time "3pm", "15:30" without any context words
+        var bareTime = Regex.Match(lower, @"^(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?$");
+        if (bareTime.Success)
+        {
+            hour = int.Parse(bareTime.Groups[1].Value);
+            min = bareTime.Groups[2].Success ? int.Parse(bareTime.Groups[2].Value) : 0;
+            var ap = bareTime.Groups[3].Value;
+            if (ap == "pm" && hour < 12) hour += 12;
+            if (ap == "am" && hour == 12) hour = 0;
+            var result = new DateTime(now.Year, now.Month, now.Day, hour, min, 0, DateTimeKind.Utc);
+            return EnsureFuture(result);
         }
 
         return null; // Could not parse — treat as ASAP
     }
+
+    /// <summary>No-past rule: if computed datetime is in the past, roll forward to next valid occurrence.</summary>
+    private static DateTime EnsureFuture(DateTime dt)
+    {
+        if (dt <= DateTime.UtcNow) return dt.AddDays(1);
+        return dt;
+    }
+
 
     public static string RecommendVehicle(int passengers) => passengers switch
     {
