@@ -70,6 +70,7 @@ public sealed class BsqdDispatcher : IDispatcher
                 destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? FormatStandardAddress(booking.DestCity, booking.DestStreet, booking.DestNumber, booking.Destination) },
                 departure_time = booking.ScheduledAt.HasValue ? new DateTimeOffset(booking.ScheduledAt.Value, TimeSpan.Zero) : DateTimeOffset.Now.AddMinutes(5),
                 formatted_pickup_time = FormatPickupTime(booking),
+                booking_type = booking.ScheduledAt.HasValue ? "advance" : "immediate",
                 first_name = booking.Name ?? "Customer",
                 total_price = ParseFare(booking.Fare),
                 phoneNumber = FormatE164(phoneNumber),
