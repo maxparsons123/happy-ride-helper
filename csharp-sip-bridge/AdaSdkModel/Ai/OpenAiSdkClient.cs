@@ -363,6 +363,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         if (!IsConnected) return;
 
+        // Cancel any pending no-reply watchdog — we're about to trigger a new response
+        Interlocked.Increment(ref _noReplyWatchdogId);
+
         try
         {
             bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("DISAMBIGUATION") || message.Contains("[FARE SANITY ALERT]");
