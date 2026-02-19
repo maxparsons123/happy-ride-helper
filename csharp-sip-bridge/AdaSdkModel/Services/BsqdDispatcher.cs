@@ -292,21 +292,7 @@ public sealed class BsqdDispatcher : IDispatcher
     /// e.g. "Tomorrow at 4:30 PM", "Today at 6:00 PM", "Wed 25 Feb at 3:00 PM", or "ASAP".
     /// </summary>
     private static string FormatPickupTime(BookingState booking)
-    {
-        if (!booking.ScheduledAt.HasValue)
-            return booking.PickupTime ?? "ASAP";
-
-        var uk = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
-        var local = TimeZoneInfo.ConvertTimeFromUtc(booking.ScheduledAt.Value, uk);
-        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, uk);
-        var timeStr = local.ToString("h:mm tt");
-
-        if (local.Date == nowLocal.Date)
-            return $"Today at {timeStr}";
-        if (local.Date == nowLocal.Date.AddDays(1))
-            return $"Tomorrow at {timeStr}";
-        return $"{local:dddd dd MMMM yyyy} at {timeStr}";
-    }
+        => booking.PickupTime ?? "ASAP";
 
     private static string ParseFare(string? fare)
     {
