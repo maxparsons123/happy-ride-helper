@@ -1655,15 +1655,22 @@ public sealed class CallSession : ICallSession
         
         if (_booking.ScheduledAt.HasValue)
         {
-            var s = _booking.ScheduledAt.Value;
-            var timeStr = s.ToString("h:mm tt").ToLower();
-            var isToday = s.Date == DateTime.UtcNow.Date;
-            var isTomorrow = s.Date == DateTime.UtcNow.Date.AddDays(1);
-            var dayPart = isToday ? "today" : isTomorrow ? "tomorrow" : s.ToString("dddd, MMMM d");
-            return $", scheduled for {timeStr} {dayPart}";
+            // Convert UTC to London local for human-readable readback
+            var londonTz = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var local = TimeZoneInfo.ConvertTimeFromUtc(_booking.ScheduledAt.Value, londonTz);
+            var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, londonTz);
+            var timeStr = local.ToString("h:mm tt").ToLower();
+            var isToday = local.Date == nowLocal.Date;
+            var isTomorrow = local.Date == nowLocal.Date.AddDays(1);
+            var dayPart = isToday ? "today" : isTomorrow ? "tomorrow" : local.ToString("dddd, MMMM d");
+            return $", scheduled for {timeStr} {dayPart}. Do NOT mention any ETA or arrival time — this is an advance booking";
         }
         
-        return !string.IsNullOrWhiteSpace(_booking.PickupTime) ? $", scheduled for {_booking.PickupTime}" : "";
+        // Fallback: PickupTime is set but ScheduledAt failed to parse — still treat as advance
+        if (!string.IsNullOrWhiteSpace(_booking.PickupTime))
+            return $", scheduled for {_booking.PickupTime}. Do NOT mention any ETA or arrival time — this is an advance booking";
+        
+        return "";
     }
 
     private static string FormatFareForSpeech(string? fare)
