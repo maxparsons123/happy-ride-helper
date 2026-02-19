@@ -606,6 +606,8 @@ public sealed class CallSession : ICallSession
         {
             _booking.PickupTime = pt?.ToString();
             _booking.ScheduledAt = BookingState.ParsePickupTimeToDateTime(_booking.PickupTime);
+            _logger.LogInformation("[{SessionId}] ⏰ pickup_time raw='{Raw}' → ScheduledAt={Scheduled}",
+                SessionId, _booking.PickupTime, _booking.ScheduledAt?.ToString("o") ?? "ASAP");
         }
         if (args.TryGetValue("vehicle_type", out var vt) && !string.IsNullOrWhiteSpace(vt?.ToString()))
             _booking.VehicleType = vt.ToString()!;
