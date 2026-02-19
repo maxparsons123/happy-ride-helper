@@ -809,8 +809,8 @@ public sealed class CallSession : ICallSession
 
                     var etaPart1 = IsImmediatePickup(_booking.PickupTime) ? $", estimated time of arrival is {_booking.Eta}" : "";
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart1}. " +
-                            $"Read back the VERIFIED addresses and fare to the caller and ask them to confirm the booking.");
+                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{etaPart1}. " +
+                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm the booking.");
                 }
                 catch (Exception ex)
                 {
@@ -1146,8 +1146,8 @@ public sealed class CallSession : ICallSession
 
             var etaPart2 = IsImmediatePickup(_booking.PickupTime) ? $", estimated time of arrival is {_booking.Eta}" : "";
             await _aiClient.InjectMessageAndRespondAsync(
-                    $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart2}. " +
-                    "Read back the VERIFIED addresses and fare to the caller and ask them to confirm.");
+                    $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{etaPart2}. " +
+                    "Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm.");
         }
         catch (Exception ex)
         {
@@ -1311,8 +1311,8 @@ public sealed class CallSession : ICallSession
                     // Inject fare result into conversation — Ada will read it back
                     var etaPart3 = IsImmediatePickup(_booking.PickupTime) ? $", estimated time of arrival is {_booking.Eta}" : "";
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart3}. " +
-                            $"Read back these details to the caller and ask them to confirm the booking.");
+                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{etaPart3}. " +
+                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm the booking.");
                 }
                 catch (Exception ex)
                 {
