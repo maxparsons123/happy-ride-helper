@@ -22,6 +22,12 @@ public sealed class BookingState
     public string VehicleType { get; set; } = "Saloon";
     public string? SpecialInstructions { get; set; }
 
+    /// <summary>Previous pickup interpretations for safeguarding (most recent first).</summary>
+    public List<string> PreviousPickups { get; set; } = new();
+
+    /// <summary>Previous destination interpretations for safeguarding (most recent first).</summary>
+    public List<string> PreviousDestinations { get; set; } = new();
+
     /// <summary>Parsed scheduled pickup DateTime (UTC). Null = ASAP.</summary>
     public DateTime? ScheduledAt { get; set; }
 
@@ -232,6 +238,8 @@ public sealed class BookingState
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;
+        PreviousPickups.Clear();
+        PreviousDestinations.Clear();
         Confirmed = false;
     }
 

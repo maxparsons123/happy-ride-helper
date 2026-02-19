@@ -554,11 +554,18 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("pickup", out var p))
         {
             var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
+            // Safeguard: store previous interpretation before overwriting
+            if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
+            {
+                if (!_booking.PreviousPickups.Contains(_booking.Pickup))
+                    _booking.PreviousPickups.Insert(0, _booking.Pickup);
+                _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
+                    SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
+            }
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
                 _booking.PickupLat = _booking.PickupLon = null;
                 _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
-                // Reset fare/booking state so stale data can't bypass guards
                 _booking.Fare = null;
                 _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
@@ -569,11 +576,18 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("destination", out var d))
         {
             var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
+            // Safeguard: store previous interpretation before overwriting
+            if (!string.IsNullOrWhiteSpace(_booking.Destination) && _booking.Destination != incoming)
+            {
+                if (!_booking.PreviousDestinations.Contains(_booking.Destination))
+                    _booking.PreviousDestinations.Insert(0, _booking.Destination);
+                _logger.LogInformation("[{SessionId}] 📝 Dest history: [{History}] → new: '{New}'",
+                    SessionId, string.Join(" | ", _booking.PreviousDestinations), incoming);
+            }
             if (StreetNameChanged(_booking.Destination, incoming))
             {
                 _booking.DestLat = _booking.DestLon = null;
                 _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
-                // Reset fare/booking state so stale data can't bypass guards
                 _booking.Fare = null;
                 _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
