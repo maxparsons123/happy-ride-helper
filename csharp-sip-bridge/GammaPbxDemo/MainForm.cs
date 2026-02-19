@@ -135,16 +135,13 @@ public class MainForm : Form
         // Create transport
         _sipTransport = new SIPTransport();
 
-        if (transport.Equals("TCP", StringComparison.OrdinalIgnoreCase))
-        {
-            _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, 0)));
-            Log("📡 SIP TCP channel started (ephemeral port)");
-        }
-        else
-        {
-            _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0)));
-            Log("📡 SIP UDP channel started (ephemeral port)");
-        }
+        // 1. Bind UDP on port 5061 to bypass BT's internal 5060 NAT rules
+        _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 5061)));
+        Log("📡 SIP UDP channel started on port 5061");
+
+        // 2. Add Google STUN to discover the public BT IP and keep the NAT hole open
+        _sipTransport.STUNEndpoints.Add(new IPEndPoint(IPAddress.Parse("74.125.200.127"), 19302));
+        Log("🌐 STUN: Google 74.125.200.127:19302");
 
         // OPTIONS keepalive handler
         _sipTransport.SIPTransportRequestReceived += async (localEP, remoteEP, request) =>
@@ -157,16 +154,17 @@ public class MainForm : Form
             }
         };
 
-        // Register
+        // Register — use OutboundProxy for IP routing, preserve domain in AOR
         var proto = transport.Equals("TCP", StringComparison.OrdinalIgnoreCase) ? SIPProtocolsEnum.tcp : SIPProtocolsEnum.udp;
         var outboundProxy = new SIPEndPoint(proto, registrarIp!, port);
 
+        // 3. SHORT expiry (120s) keeps the BT NAT hole alive with frequent re-REGISTERs
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
             effectiveAuthUser,
             password,
             effectiveDomain,
-            3600);
+            120);
         _regAgent.OutboundProxy = outboundProxy;
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
