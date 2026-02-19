@@ -135,9 +135,9 @@ public class MainForm : Form
         // Create transport
         _sipTransport = new SIPTransport();
 
-        // 1. Bind UDP on port 5061 to bypass BT's internal 5060 NAT rules
-        _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 5061)));
-        Log("📡 SIP UDP channel started on port 5061");
+        // Bind UDP on an ephemeral port (OS picks a free one) — avoids port conflicts
+        _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, 0)));
+        Log("📡 SIP UDP channel started (ephemeral port)");
 
         // Note: SIPSorcery handles NAT traversal via the outbound proxy pattern.
         // STUN discovery is not directly available via SIPTransport in this version.
