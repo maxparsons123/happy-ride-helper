@@ -68,7 +68,7 @@ public sealed class BsqdDispatcher : IDispatcher
             {
                 departure_address = new { lat = booking.PickupLat ?? 0, lon = booking.PickupLon ?? 0, street_name = booking.PickupStreet ?? "", street_number = booking.PickupNumber ?? "", postal_code = booking.PickupPostalCode ?? "", city = booking.PickupCity ?? "", formatted_depa_address = booking.PickupFormatted ?? FormatStandardAddress(booking.PickupCity, booking.PickupStreet, booking.PickupNumber, booking.Pickup) },
                 destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? FormatStandardAddress(booking.DestCity, booking.DestStreet, booking.DestNumber, booking.Destination) },
-                departure_time = booking.ScheduledAt.HasValue ? new DateTimeOffset(booking.ScheduledAt.Value, TimeSpan.Zero) : DateTimeOffset.Now.AddMinutes(5),
+                departure_time = booking.ScheduledAt.HasValue ? booking.ScheduledAt.Value.ToString("yyyy-MM-ddTHH:mm:ssZ") : DateTime.UtcNow.AddMinutes(5).ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 formatted_pickup_time = FormatPickupTime(booking),
                 booking_type = booking.ScheduledAt.HasValue ? "advance" : "immediate",
                 first_name = booking.Name ?? "Customer",
