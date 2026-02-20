@@ -892,19 +892,93 @@ public sealed class CallSession : ICallSession
                                 }
                                 else
                                 {
-                                    _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
+                                    // ── House-Number Locale Fallback ─────────────────────────────────────────
+                                    // If either address had a house number it was sent bare (no city) to the
+                                    // geocoder first. If that bare pass failed, retry with the caller's locale
+                                    // city appended BEFORE asking the caller to clarify. This handles the case
+                                    // where the caller says e.g. "52A David Road" without mentioning Coventry —
+                                    // we try "52A David Road, Coventry" silently before bothering them.
+                                    var pickupComponents = Services.AddressParser.ParseAddress(pickup);
+                                    var destComponents   = Services.AddressParser.ParseAddress(destination);
+                                    var localeCity       = TryExtractCityFromHistory(pickup) ?? TryExtractCityFromHistory(destination);
 
-                                    var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
-                                        ? result.ClarificationMessage
-                                        : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
+                                    bool retriedWithLocale = false;
+                                    if (localeCity != null && (pickupComponents.HasHouseNumber || destComponents.HasHouseNumber))
+                                    {
+                                        var retryPickup = pickupComponents.HasHouseNumber && !pickup.Contains(localeCity, StringComparison.OrdinalIgnoreCase)
+                                            ? $"{pickup}, {localeCity}" : pickup;
+                                        var retryDest   = destComponents.HasHouseNumber && !destination.Contains(localeCity, StringComparison.OrdinalIgnoreCase)
+                                            ? $"{destination}, {localeCity}" : destination;
 
-                                    await _aiClient.InjectMessageAndRespondAsync(
-                                        $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
-                                        $"Ask the caller: \"{clarMsg}\" " +
-                                        "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
+                                        if (retryPickup != pickup || retryDest != destination)
+                                        {
+                                            _logger.LogInformation("[{SessionId}] 🔄 House-number locale fallback: retrying with '{Pickup}' → '{Dest}' (locale: {City})",
+                                                sessionId, retryPickup, retryDest, localeCity);
 
-                                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                                    return;
+                                            var retryTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
+                                                retryPickup, retryDest, callerId, _booking.PickupTime,
+                                                spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                                                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                                            var retryCompleted = await Task.WhenAny(retryTask, Task.Delay(10000));
+
+                                            if (retryCompleted == retryTask)
+                                            {
+                                                var retryResult = await retryTask;
+                                                _logger.LogInformation("[{SessionId}] 📊 Locale-retry result: NeedsClarification={Clarif}, Fare={Fare}",
+                                                    sessionId, retryResult.NeedsClarification, retryResult.Fare);
+
+                                                if (!retryResult.NeedsClarification && !string.IsNullOrWhiteSpace(retryResult.Fare))
+                                                {
+                                                    // Success — use the locale-enriched result
+                                                    result = retryResult;
+                                                    retriedWithLocale = true;
+                                                    _logger.LogInformation("[{SessionId}] ✅ Locale fallback resolved: {Fare}, ETA: {Eta}",
+                                                        sessionId, result.Fare, result.Eta);
+                                                    // Fall through to fare presentation below
+                                                }
+                                                else if (retryResult.NeedsClarification && (retryResult.PickupAlternatives?.Length > 0 || retryResult.DestAlternatives?.Length > 0))
+                                                {
+                                                    // Retry returned disambiguation options — use them
+                                                    result = retryResult;
+                                                    retriedWithLocale = true;
+                                                    _logger.LogInformation("[{SessionId}] ✅ Locale fallback produced disambiguation options", sessionId);
+                                                    // Fall through — the outer if (result.NeedsClarification) block will handle these alternatives
+                                                    // by re-entering sync. Instead, handle inline:
+                                                    var rPickupAlts = retryResult.PickupAlternatives ?? Array.Empty<string>();
+                                                    var rDestAlts   = retryResult.DestAlternatives   ?? Array.Empty<string>();
+                                                    if (rPickupAlts.Length > 0 || rDestAlts.Length > 0)
+                                                    {
+                                                        // Reset and let disambiguation flow handle it
+                                                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                                                        // Re-trigger with the enriched addresses stored
+                                                        _booking.Pickup      = retryPickup;
+                                                        _booking.Destination = retryDest;
+                                                    }
+                                                }
+                                            }
+                                            else
+                                            {
+                                                _logger.LogWarning("[{SessionId}] ⚠️ Locale fallback retry timed out", sessionId);
+                                            }
+                                        }
+                                    }
+
+                                    if (!retriedWithLocale || result.NeedsClarification)
+                                    {
+                                        _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
+
+                                        var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
+                                            ? result.ClarificationMessage
+                                            : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
+
+                                        await _aiClient.InjectMessageAndRespondAsync(
+                                            $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
+                                            $"Ask the caller: \"{clarMsg}\" " +
+                                            "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
+
+                                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                                        return;
+                                    }
                                 }
                             }
 
