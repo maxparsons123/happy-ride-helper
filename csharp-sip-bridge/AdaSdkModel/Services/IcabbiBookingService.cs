@@ -168,25 +168,34 @@ public sealed class IcabbiBookingService : IDisposable
                 return null;
             }
 
-            // Try common fare fields across all known iCabbi response shapes
-            var total = TryGetDecimal(quoteObj, "price")
-                     ?? TryGetDecimal(quoteObj, "total")
-                     ?? TryGetDecimal(quoteObj, "cost")
-                     ?? TryGetDecimal(quoteObj, "fare")
-                     ?? TryGetDecimal(quoteObj, "amount")
-                     ?? TryGetDecimal(quoteObj, "fixed_price")
-                     ?? TryGetDecimal(quoteObj, "base_fare");
+            // iCabbi multi-quote response: each entry is { vehicle: {...}, price: {...} }
+            // Drill into the nested "price" object if present, otherwise try flat fields
+            var priceObj = quoteObj["price"] as JsonObject ?? quoteObj;
+
+            // Extract fare from price object
+            var total = TryGetDecimal(priceObj, "price")
+                     ?? TryGetDecimal(priceObj, "cost")
+                     ?? TryGetDecimal(priceObj, "total")
+                     ?? TryGetDecimal(priceObj, "fare")
+                     ?? TryGetDecimal(priceObj, "amount")
+                     ?? TryGetDecimal(priceObj, "fixed_price")
+                     ?? TryGetDecimal(priceObj, "base_fare");
 
             if (total is null || total == 0)
             {
-                Log($"⚠️ Quote returned zero/null fare (node keys: {string.Join(", ", quoteObj.Select(k => k.Key))}) — using Gemini estimate");
+                Log($"⚠️ Quote returned zero/null fare (price node keys: {string.Join(", ", priceObj.Select(k => k.Key))}) — using Gemini estimate");
                 return null;
             }
 
-            var etaMinutes = SafeGetInt(quoteObj, "eta")
-                          ?? SafeGetInt(quoteObj, "eta_minutes")
-                          ?? SafeGetInt(quoteObj, "pickup_eta")
-                          ?? SafeGetInt(quoteObj, "wait_time");
+            // ETA from iCabbi is in seconds — convert to minutes
+            var etaSeconds = TryGetDecimal(priceObj, "eta_seconds");
+            var etaMinutes = etaSeconds.HasValue
+                ? (int)Math.Ceiling(etaSeconds.Value / 60m)
+                : SafeGetInt(priceObj, "eta")
+                  ?? SafeGetInt(priceObj, "eta_minutes")
+                  ?? SafeGetInt(priceObj, "pickup_eta")
+                  ?? SafeGetInt(quoteObj, "eta_minutes")
+                  ?? SafeGetInt(quoteObj, "wait_time");
 
             Log($"✅ iCabbi quote received: £{total:F2}, ETA={etaMinutes?.ToString() ?? "unknown"} min");
             return new IcabbiFareQuote(total.Value, etaMinutes, null);
