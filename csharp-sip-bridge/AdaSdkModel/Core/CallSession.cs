@@ -1862,25 +1862,16 @@ public sealed class CallSession : ICallSession
             _ = Task.Run(async () =>
             {
                 for (int i = 0; i < 50 && _aiClient.IsResponseActive; i++)
-                    await Task.Delay(100);
+                await Task.Delay(100);
 
-                await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
-                await _dispatcher.SendWhatsAppAsync(callerId);
-                await SaveCallerHistoryAsync(bookingSnapshot, callerId);
-
-                // ── SumUp PAYMENT LINK (card payers only) ────────────────────────────────
-                // If the caller chose the fixed price / card option, generate a SumUp
-                // checkout link and send it via WhatsApp so they can pay in advance.
+                // ── SumUp PAYMENT LINK (card payers only) — generate BEFORE dispatch ──────
+                // This ensures the payment URL is included in the BSQD payload.
                 if (bookingSnapshot.PaymentPreference == "card" && sumUpRef != null)
                 {
                     try
                     {
                         var fareDecimal = bookingSnapshot.FareDecimal;
-                        if (fareDecimal <= 0)
-                        {
-                            _logger.LogWarning("[{SessionId}] [SumUp] Fare is zero — skipping payment link", sessionId);
-                        }
-                        else
+                        if (fareDecimal > 0)
                         {
                             var description = $"Taxi: {bookingSnapshot.Pickup} → {bookingSnapshot.Destination} (Ref: {bookingSnapshot.BookingRef})";
                             var paymentUrl = await sumUpRef.CreateCheckoutLinkAsync(
@@ -1891,14 +1882,17 @@ public sealed class CallSession : ICallSession
 
                             if (!string.IsNullOrWhiteSpace(paymentUrl))
                             {
-                                _logger.LogInformation("[{SessionId}] 💳 SumUp payment link generated: {Url}", sessionId, paymentUrl);
-                                // Send the payment link via WhatsApp (BSQD webhook carries the URL as custom note)
-                                await SendSumUpLinkViaWhatsAppAsync(callerId, paymentUrl, bookingSnapshot, sessionId);
+                                bookingSnapshot.PaymentLink = paymentUrl;
+                                _logger.LogInformation("[{SessionId}] 💳 SumUp payment link generated (pre-dispatch): {Url}", sessionId, paymentUrl);
                             }
                             else
                             {
-                                _logger.LogWarning("[{SessionId}] [SumUp] No payment URL returned — payment link not sent", sessionId);
+                                _logger.LogWarning("[{SessionId}] [SumUp] No payment URL returned", sessionId);
                             }
+                        }
+                        else
+                        {
+                            _logger.LogWarning("[{SessionId}] [SumUp] Fare is zero — skipping payment link", sessionId);
                         }
                     }
                     catch (Exception ex)
@@ -1906,6 +1900,14 @@ public sealed class CallSession : ICallSession
                         _logger.LogWarning(ex, "[{SessionId}] SumUp payment link error", sessionId);
                     }
                 }
+
+                await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
+                await _dispatcher.SendWhatsAppAsync(callerId);
+                await SaveCallerHistoryAsync(bookingSnapshot, callerId);
+
+                // Send WhatsApp payment message if link was generated
+                if (!string.IsNullOrWhiteSpace(bookingSnapshot.PaymentLink))
+                    await SendSumUpLinkViaWhatsAppAsync(callerId, bookingSnapshot.PaymentLink, bookingSnapshot, sessionId);
 
                 // ── iCabbi CONFIRMED BOOKING (Phase 2 of 2) ─────────────────────────────────
                 // Phase 1 was GetFareQuoteAsync → gave Ada the official price/ETA to read back.
