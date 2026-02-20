@@ -22,6 +22,9 @@ public sealed class BookingState
     public string VehicleType { get; set; } = "Saloon";
     public string? SpecialInstructions { get; set; }
 
+    /// <summary>Payment preference chosen by caller: "card" (fixed price via SumUp) or "meter" (pay on the day).</summary>
+    public string? PaymentPreference { get; set; }
+
     /// <summary>Previous pickup interpretations for safeguarding (most recent first).</summary>
     public List<string> PreviousPickups { get; set; } = new();
 
@@ -114,6 +117,7 @@ public sealed class BookingState
         Passengers = null;
         ScheduledAt = null;
         VehicleType = "Saloon";
+        PaymentPreference = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;

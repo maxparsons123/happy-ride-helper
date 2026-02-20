@@ -22,6 +22,7 @@ public sealed class AppSettings
     public SimliSettings Simli { get; set; } = new();
     public IcabbiSettings Icabbi { get; set; } = new();
     public ZoneGuardSettings ZoneGuard { get; set; } = new();
+    public SumUpSettings SumUp { get; set; } = new();
 }
 
 public sealed class SimliSettings
@@ -177,6 +178,21 @@ public sealed class SipAccount
 /// Plug-in point (NOT YET WIRED):
 ///   CallSession.HandleSyncBookingData() → after house-number guard, before fare calc.
 /// </summary>
+public sealed class SumUpSettings
+{
+    /// <summary>Enable SumUp payment link generation for card payments.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>SumUp Merchant Code (used as checkout reference prefix).</summary>
+    public string MerchantCode { get; set; } = "";
+
+    /// <summary>SumUp OAuth API key (Personal Token with checkout scope).</summary>
+    public string ApiKey { get; set; } = "";
+
+    /// <summary>Currency for checkouts.</summary>
+    public string Currency { get; set; } = "GBP";
+}
+
 public sealed class ZoneGuardSettings
 {
     /// <summary>Master on/off switch. False = service is built but does nothing.</summary>
