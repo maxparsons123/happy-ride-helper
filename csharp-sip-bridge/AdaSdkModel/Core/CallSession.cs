@@ -1102,7 +1102,8 @@ public sealed class CallSession : ICallSession
                     else
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
-                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                        var localeCity1 = TryExtractCityFromHistory(pickup);
+                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId, localeCity1);
                         EnrichFallbackResultStructuredFields(result, pickup, destination);
                     }
 
@@ -1761,7 +1762,8 @@ public sealed class CallSession : ICallSession
                     else
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
-                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                        var localeCity2 = TryExtractCityFromHistory(pickup);
+                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId, localeCity2);
                         EnrichFallbackResultStructuredFields(result, pickup, destination);
                     }
 

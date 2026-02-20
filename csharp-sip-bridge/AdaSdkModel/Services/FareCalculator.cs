@@ -214,12 +214,22 @@ public sealed class FareCalculator : IFareCalculator
         return result;
     }
 
-    public async Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber)
+    /// <param name="localeCity">Optional city to anchor bare addresses that have a house number but no city
+    /// component — prevents Nominatim from picking a same-named street in the wrong city (e.g. London vs Coventry).</param>
+    public async Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber, string? localeCity = null)
     {
         var result = new FareResult();
         if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
         {
             result.Fare = "£4.00"; result.Eta = "5 minutes"; return result;
+        }
+
+        // Anchor bare addresses (has house number, no city) to the locale city to avoid
+        // Nominatim picking a same-named street in the wrong city (e.g. London instead of Coventry).
+        if (!string.IsNullOrWhiteSpace(localeCity))
+        {
+            pickup      = AnchorToLocaleCity(pickup,      localeCity);
+            destination = AnchorToLocaleCity(destination, localeCity);
         }
 
         // Nominatim fallback geocoding
@@ -261,6 +271,19 @@ public sealed class FareCalculator : IFareCalculator
             Lat = double.Parse(first.GetProperty("lat").GetString()!),
             Lon = double.Parse(first.GetProperty("lon").GetString()!)
         };
+    }
+
+    /// <summary>
+    /// If <paramref name="address"/> has a house number but no city token, appends
+    /// <paramref name="localeCity"/> so Nominatim searches in the right city.
+    /// Addresses that already contain a comma (already have city/context) are returned unchanged.
+    /// </summary>
+    private static string AnchorToLocaleCity(string address, string localeCity)
+    {
+        if (string.IsNullOrWhiteSpace(localeCity)) return address;
+        if (address.Contains(',')) return address;      // already has context
+        if (!address.Any(char.IsDigit)) return address; // no house number → vague, don't anchor
+        return $"{address}, {localeCity}";
     }
 
     private static string GetRegionBias(string? phone)

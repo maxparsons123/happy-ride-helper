@@ -38,7 +38,9 @@ public sealed class FareResult
 /// </summary>
 public interface IFareCalculator
 {
-    Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber);
+    /// <param name="localeCity">Optional city to anchor bare house-number addresses so Nominatim
+    /// searches in the correct city rather than a same-named street elsewhere (e.g. London vs Coventry).</param>
+    Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber, string? localeCity = null);
 
     /// <param name="spokenPickupNumber">House number extracted from the caller's speech — used as a guard against geocoder substitution.</param>
     /// <param name="spokenDestNumber">House number extracted from the caller's speech — used as a guard against geocoder substitution.</param>
