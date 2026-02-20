@@ -37,6 +37,29 @@ public static class AddressParser
         "mews", "hill", "view", "green", "end"
     };
 
+    /// <summary>
+    /// Named-place keywords. If any word in the address matches one of these,
+    /// the address is a landmark/POI and never requires a house number,
+    /// even if it also contains a street-suffix word (e.g. "New Street Railway Station").
+    /// </summary>
+    private static readonly HashSet<string> NamedPlaceKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Transport
+        "station", "railway", "airport", "terminal", "bus", "metro", "tram", "interchange",
+        // Retail / food
+        "supermarket", "aldi", "lidl", "tesco", "asda", "morrisons", "sainsburys", "waitrose",
+        "market", "mall", "centre", "center", "retail", "arcade",
+        // Hospitality & leisure
+        "hotel", "inn", "pub", "bar", "restaurant", "cafe", "cafe", "cinema", "theatre",
+        "stadium", "arena", "park", "museum", "gallery", "library",
+        // Health & education
+        "hospital", "clinic", "surgery", "pharmacy", "school", "college", "university",
+        // Religion & community
+        "church", "mosque", "temple", "gurdwara", "synagogue", "chapel",
+        // Other landmarks
+        "office", "tower", "building", "complex", "centre", "center", "plaza"
+    };
+
     private static readonly string[] KnownTowns =
     {
         "birmingham", "coventry", "manchester", "london", "leicester", "derby",
@@ -97,14 +120,22 @@ public static class AddressParser
 
         // Split into parts and find street suffix
         var parts = remaining.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        int suffixIndex = -1;
 
-        for (int i = 0; i < parts.Length; i++)
+        // If ANY word in the full address is a named-place keyword (station, supermarket, hotel, etc.)
+        // then this is a POI/landmark — never requires a house number, regardless of street-suffix words.
+        var allWords = address.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        bool isNamedPlace = allWords.Any(w => NamedPlaceKeywords.Contains(w));
+
+        int suffixIndex = -1;
+        if (!isNamedPlace)
         {
-            if (StreetSuffixes.Contains(parts[i]))
+            for (int i = 0; i < parts.Length; i++)
             {
-                suffixIndex = i;
-                break;
+                if (StreetSuffixes.Contains(parts[i]))
+                {
+                    suffixIndex = i;
+                    break;
+                }
             }
         }
 
@@ -119,7 +150,7 @@ public static class AddressParser
         else
         {
             components.StreetName = remaining;
-            // Not a recognizable street suffix — could be a named place (bus station, hotel, etc.)
+            // Named place or no recognizable street suffix — house number not required
             components.IsStreetTypeAddress = false;
         }
 
