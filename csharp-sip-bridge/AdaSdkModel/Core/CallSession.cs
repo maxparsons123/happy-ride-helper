@@ -442,6 +442,10 @@ public sealed class CallSession : ICallSession
         sb.AppendLine($"  Passengers: {(_booking.Passengers.HasValue ? $"{_booking.Passengers} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Time: {(_booking.PickupTime != null ? $"{_booking.PickupTime} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Vehicle: {_booking.VehicleType}");
+        sb.AppendLine();
+        sb.AppendLine("⚠️ ADDRESS CORRECTION RULE: If the caller provides TWO address utterances in a row for the same field (e.g. destination),");
+        sb.AppendLine("   ALWAYS use the MOST RECENT one. The first may be a speech recognition error or a self-correction.");
+        sb.AppendLine("   When calling sync_booking_data, use whatever the caller said LAST for each field.");
 
         if (_booking.Fare != null)
             sb.AppendLine($"  Fare: {_booking.Fare}");
@@ -969,12 +973,22 @@ public sealed class CallSession : ICallSession
 
                                         var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
                                             ? result.ClarificationMessage
-                                            : "I couldn't pinpoint those addresses. Could you tell me which city or area they're in?";
+                                            : "I couldn't verify that destination address. Could you repeat the full destination including the street name and city?";
+
+                                        // Build context hints to help Ada ask the right question
+                                        var pickupCityHint = !string.IsNullOrWhiteSpace(_booking.PickupCity)
+                                            ? $"The pickup is in {_booking.PickupCity}."
+                                            : !string.IsNullOrWhiteSpace(pickup) && DestinationLacksCityContext(pickup)
+                                                ? ""
+                                                : $"The pickup address is '{pickup}'.";
 
                                         await _aiClient.InjectMessageAndRespondAsync(
-                                            $"[ADDRESS CLARIFICATION NEEDED] The addresses could not be verified. " +
-                                            $"Ask the caller: \"{clarMsg}\" " +
-                                            "Once they provide the city or area, call sync_booking_data again with the updated addresses including the city.");
+                                            $"[ADDRESS CLARIFICATION NEEDED] The destination '{_booking.Destination}' could not be verified by the geocoder — the street name may be wrong or unclear. " +
+                                            $"{pickupCityHint} " +
+                                            "IMPORTANT: Before asking the caller anything, first check the conversation history — did the caller already provide a DIFFERENT or CORRECTED address for the destination? " +
+                                            "If yes, call sync_booking_data immediately with that corrected address (do NOT ask again). " +
+                                            $"If no correction is found, ask the caller: \"{clarMsg}\" " +
+                                            "Once they confirm or correct it, call sync_booking_data again with the full corrected destination.");
 
                                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                                         return;
