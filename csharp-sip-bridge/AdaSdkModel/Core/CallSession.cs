@@ -1866,6 +1866,10 @@ public sealed class CallSession : ICallSession
 
                 // ── SumUp PAYMENT LINK (card payers only) — generate BEFORE dispatch ──────
                 // This ensures the payment URL is included in the BSQD payload.
+                if (bookingSnapshot.PaymentPreference == "card" && sumUpRef == null)
+                {
+                    _logger.LogWarning("[{SessionId}] ⚠️ Caller chose card payment but SumUp is DISABLED or not configured — no payment link will be generated. Enable SumUp in appsettings.json (SumUp.Enabled=true + ApiKey + MerchantCode).", sessionId);
+                }
                 if (bookingSnapshot.PaymentPreference == "card" && sumUpRef != null)
                 {
                     try
