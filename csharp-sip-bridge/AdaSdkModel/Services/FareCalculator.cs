@@ -37,7 +37,13 @@ public sealed class FareCalculator : IFareCalculator
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkModel/1.0");
     }
 
-    public async Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber, string? pickupTime = null)
+    public async Task<FareResult> ExtractAndCalculateWithAiAsync(
+        string? pickup,
+        string? destination,
+        string? phoneNumber,
+        string? pickupTime = null,
+        string? spokenPickupNumber = null,
+        string? spokenDestNumber = null)
     {
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
@@ -47,7 +53,7 @@ public sealed class FareCalculator : IFareCalculator
         {
             try
             {
-                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber, pickupTime);
+                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber, pickupTime, spokenPickupNumber, spokenDestNumber);
                 if (geminiResult.HasValue)
                 {
                     _logger.LogDebug("✅ Using local Gemini for address dispatch");
@@ -61,10 +67,18 @@ public sealed class FareCalculator : IFareCalculator
             }
         }
 
-        // ── Fall back to edge function ──
+        // ── Fall back to edge function (passes spoken house numbers as extra guard) ──
         try
         {
-            var requestBody = JsonSerializer.Serialize(new { pickup = pickup ?? "", destination = destination ?? "", phone = phoneNumber ?? "", pickup_time = pickupTime ?? "" });
+            var requestBody = JsonSerializer.Serialize(new
+            {
+                pickup = pickup ?? "",
+                destination = destination ?? "",
+                phone = phoneNumber ?? "",
+                pickup_time = pickupTime ?? "",
+                pickup_house_number = spokenPickupNumber ?? "",
+                destination_house_number = spokenDestNumber ?? ""
+            });
             var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
                 Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")

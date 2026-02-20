@@ -320,14 +320,14 @@ serve(async (req) => {
   }
 
   try {
-    const { pickup, destination, phone, pickup_time } = await req.json();
+    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number } = await req.json();
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}"`);
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}"`);
 
     // Look up caller history from database
     let callerHistory = "";
@@ -372,8 +372,18 @@ serve(async (req) => {
     // Build the user message with reference datetime for time parsing
     const refDatetime = new Date().toISOString();
     const timePart = pickup_time ? `\nPickup Time Requested: "${pickup_time}"\nREFERENCE_DATETIME (current UTC): ${refDatetime}` : '';
+
+    // Append spoken house number hints so Gemini is anchored to what the caller said
+    let houseNumberHints = '';
+    if (pickup_house_number) {
+      houseNumberHints += `\nSPOKEN PICKUP HOUSE NUMBER (caller said this explicitly): "${pickup_house_number}" — your street_number for pickup MUST match this or flag is_ambiguous=true.`;
+    }
+    if (destination_house_number) {
+      houseNumberHints += `\nSPOKEN DESTINATION HOUSE NUMBER (caller said this explicitly): "${destination_house_number}" — your street_number for dropoff MUST match this or flag is_ambiguous=true.`;
+    }
+
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}${timePart}${callerHistory}`;
+User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -671,6 +681,30 @@ User Phone: ${phone || 'not provided'}${timePart}${callerHistory}`;
         parsed.clarification_message = parsed.clarification_message || 
           `There are several ${streetName}s in ${city}. Which area or district is it in?`;
       }
+    }
+
+    // ── SPOKEN HOUSE NUMBER GUARD ──
+    // If a spoken house number was provided from the C# bridge, verify Gemini's resolved
+    // street_number matches. If Gemini returned an alphanumeric (e.g. "4B") that differs
+    // from what the caller said (e.g. "43"), flag as ambiguous so Ada asks the caller.
+    for (const [side, spoken] of [["pickup", pickup_house_number], ["dropoff", destination_house_number]] as const) {
+      if (!spoken?.trim()) continue;
+      const addr = parsed[side as "pickup" | "dropoff"];
+      if (!addr) continue;
+      const resolvedNum: string = (addr.street_number || "").trim();
+      if (!resolvedNum) continue;
+      // Only flag when Gemini returned an alphanumeric (e.g. "4B")
+      if (!/^\d+[A-Za-z]$/.test(resolvedNum)) continue;
+      const numericPrefix = resolvedNum.match(/^(\d+)/)?.[1] ?? "";
+      const spokenDigits = spoken.trim().match(/^(\d+)/)?.[1] ?? "";
+      if (!spokenDigits || spokenDigits === numericPrefix) continue;
+      // Mismatch: caller said "43" but Gemini resolved "4B"
+      console.log(`🏠 HOUSE NUMBER GUARD (${side}): caller said "${spoken}" but Gemini resolved "${resolvedNum}" — flagging`);
+      addr.is_ambiguous = true;
+      (addr as any).house_number_mismatch = true;
+      parsed.status = "clarification_needed";
+      parsed.clarification_message = `I want to confirm the house number for your ${side === "pickup" ? "pickup" : "destination"} address. ` +
+        `You said ${spoken}, but the system found ${resolvedNum}. Which is correct — ${spoken} or ${resolvedNum}?`;
     }
 
     // ── Calculate fare from Gemini coordinates ──
