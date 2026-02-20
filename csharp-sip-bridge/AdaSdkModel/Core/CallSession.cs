@@ -892,6 +892,19 @@ public sealed class CallSession : ICallSession
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
+                    // Guard: reject if geocoder resolved pickup and destination to the same address
+                    if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
+                    {
+                        _logger.LogWarning("[{SessionId}] ⚠ Same-address detected: pickup == destination ({Addr}). Asking caller to re-confirm destination.", sessionId, pickupAddr);
+                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                        _aiClient.SetAwaitingConfirmation(false);
+                        _currentStage = BookingStage.CollectingDetails;
+                        await _aiClient.InjectMessageAndRespondAsync(
+                            "[ADDRESS ERROR] The pickup and destination appear to be the same address. " +
+                            "Ask the caller to confirm their destination again — it may have been misheard.");
+                        return;
+                    }
+
                     var timePart1 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart1}. " +
@@ -1237,6 +1250,19 @@ public sealed class CallSession : ICallSession
             var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
             var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
+            // Guard: reject if geocoder resolved pickup and destination to the same address
+            if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
+            {
+                _logger.LogWarning("[{SessionId}] ⚠ Same-address detected after clarification: pickup == destination ({Addr}). Re-asking.", sessionId, pickupAddr);
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                _aiClient.SetAwaitingConfirmation(false);
+                _currentStage = BookingStage.CollectingDetails;
+                await _aiClient.InjectMessageAndRespondAsync(
+                    "[ADDRESS ERROR] The pickup and destination appear to be the same address. " +
+                    "Ask the caller to confirm their destination again — it may have been misheard.");
+                return;
+            }
+
             _logger.LogInformation("[{SessionId}] 💰 Fare ready after clarification: {Fare}, ETA: {Eta}",
                 sessionId, _booking.Fare, _booking.Eta);
 
@@ -1408,6 +1434,19 @@ public sealed class CallSession : ICallSession
 
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
+
+                    // Guard: reject if geocoder resolved pickup and destination to the same address
+                    if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
+                    {
+                        _logger.LogWarning("[{SessionId}] ⚠ Same-address detected (sync path): pickup == destination ({Addr}). Re-asking.", sessionId, pickupAddr);
+                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                        _aiClient.SetAwaitingConfirmation(false);
+                        _currentStage = BookingStage.CollectingDetails;
+                        await _aiClient.InjectMessageAndRespondAsync(
+                            "[ADDRESS ERROR] The pickup and destination appear to be the same address. " +
+                            "Ask the caller to confirm their destination again — it may have been misheard.");
+                        return;
+                    }
 
                     // Inject fare result into conversation — Ada will read it back
                     var timePart3 = FormatScheduledTimePart();
