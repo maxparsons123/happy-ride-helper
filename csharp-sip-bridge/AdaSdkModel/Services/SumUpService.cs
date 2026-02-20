@@ -1,30 +1,28 @@
-using System.Net.Http.Headers;
-using System.Text;
-using System.Text.Json;
 using AdaSdkModel.Config;
 using Microsoft.Extensions.Logging;
+using SumUp;
+using SumUp.Models;
 
 namespace AdaSdkModel.Services;
 
 /// <summary>
 /// Generates SumUp payment checkout links for fixed-price taxi bookings.
-/// Uses the SumUp Checkouts API (POST /v0.1/checkouts).
+/// Uses the official SumUp .NET SDK.
 /// </summary>
 public sealed class SumUpService
 {
     private readonly ILogger<SumUpService> _logger;
     private readonly SumUpSettings _settings;
-    private readonly HttpClient _httpClient;
-
-    private const string BaseUrl = "https://api.sumup.com/v0.1";
+    private readonly SumUpClient _client;
 
     public SumUpService(ILogger<SumUpService> logger, SumUpSettings settings)
     {
         _logger = logger;
         _settings = settings;
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-        _httpClient.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", _settings.ApiKey);
+        _client = new SumUpClient(new SumUpClientOptions
+        {
+            AccessToken = _settings.ApiKey
+        });
     }
 
     /// <summary>
@@ -51,55 +49,30 @@ public sealed class SumUpService
 
         try
         {
-            // Build a unique checkout reference (SumUp requires unique IDs per merchant)
             var checkoutRef = $"{_settings.MerchantCode}-{bookingRef}-{DateTime.UtcNow:HHmmss}";
-
-            var payload = new
-            {
-                checkout_reference = checkoutRef,
-                amount = Math.Round(amount, 2),
-                currency = _settings.Currency,
-                merchant_code = _settings.MerchantCode,
-                description = description,
-                // Optional: redirect caller name as pay-to label
-                pay_to_email = (string?)null   // can be set if merchant email is known
-            };
-
-            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
-            {
-                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-            });
 
             _logger.LogInformation("[SumUp] Creating checkout: ref={Ref}, amount={Amount} {Currency}",
                 checkoutRef, amount, _settings.Currency);
 
-            var request = new HttpRequestMessage(HttpMethod.Post, $"{BaseUrl}/checkouts");
-            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await _httpClient.SendAsync(request);
-            var body = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
+            var response = await _client.Checkouts.CreateAsync(new CheckoutCreateRequest
             {
-                _logger.LogWarning("[SumUp] Checkout creation failed [{Status}]: {Body}",
-                    (int)response.StatusCode, body);
+                Amount = (float)Math.Round(amount, 2),
+                Currency = _settings.Currency,
+                CheckoutReference = checkoutRef,
+                MerchantCode = _settings.MerchantCode,
+                Description = description
+            });
+
+            var checkoutId = response.Data?.Id;
+            if (string.IsNullOrWhiteSpace(checkoutId))
+            {
+                _logger.LogWarning("[SumUp] Checkout response missing 'id'");
                 return null;
             }
 
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-
-            // SumUp returns the checkout ID — construct the hosted payment URL
-            if (root.TryGetProperty("id", out var idEl))
-            {
-                var checkoutId = idEl.GetString();
-                var paymentUrl = $"https://pay.sumup.com/b2c/checkout/{checkoutId}";
-                _logger.LogInformation("[SumUp] ✅ Checkout created — id={Id}, url={Url}", checkoutId, paymentUrl);
-                return paymentUrl;
-            }
-
-            _logger.LogWarning("[SumUp] Checkout response missing 'id' field: {Body}", body);
-            return null;
+            var paymentUrl = $"https://pay.sumup.com/b2c/checkout/{checkoutId}";
+            _logger.LogInformation("[SumUp] ✅ Checkout created — id={Id}, url={Url}", checkoutId, paymentUrl);
+            return paymentUrl;
         }
         catch (Exception ex)
         {
