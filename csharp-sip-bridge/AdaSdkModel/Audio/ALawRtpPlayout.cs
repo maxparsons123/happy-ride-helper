@@ -61,9 +61,12 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte PAYLOAD_TYPE_PCMA = 8;
 
     // ── Hysteresis calibration ──
-    // 10 frames (200ms) to start or resume — eliminates jitter/grumble
-    // Rebuffer only when queue reaches 0 — avoids false underruns
-    private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms
+    // 10 frames (200ms) cold start — eliminates first-word grumble
+    // 5 frames (100ms) warm resume — faster restart after inter-burst gap
+    // 3 frames (60ms) grace window — absorbs OpenAI inter-burst gaps without rebuffering
+    private const int JITTER_BUFFER_START_THRESHOLD  = 10; // 200ms cold start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 5;  // 100ms warm restart
+    private const int UNDERRUN_GRACE_FRAMES          = 3;  // 60ms gap absorption
     private const int MAX_QUEUE_FRAMES = 1500;             // ~30s safety cap
     private const int MAX_ACCUMULATOR_SIZE = 65536;
     private const int CIRCUIT_BREAKER_LIMIT = 10;
@@ -93,6 +96,8 @@ public sealed class ALawRtpPlayout : IDisposable
     // Jitter/state tracking
     private bool _wasPlaying;
     private int _consecutiveSendErrors;
+    private int _consecutiveUnderruns;      // Grace window counter
+    private bool _hasPlayedAtLeastOneFrame; // Distinguishes cold start from warm resume
     private DateTime _lastErrorLog;
     private DateTime _lastRtpSendTime = DateTime.UtcNow;
 
@@ -247,6 +252,8 @@ public sealed class ALawRtpPlayout : IDisposable
         _totalUnderruns = 0;
         _totalFramesEnqueued = 0;
         _lastStatsLog = DateTime.UtcNow;
+        _consecutiveUnderruns = 0;
+        _hasPlayedAtLeastOneFrame = false;
         _typingSound.Reset();
 
         if (IsWindows)
@@ -266,10 +273,11 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.Highest,
-            Name = "ALawPlayout-v11.0"
+            Name = "ALawPlayout-v12.0"
         };
         _playoutThread.Start();
-        SafeLog($"[RTP] v11.0 SMOOTH EDITION started (hysteresis={JITTER_BUFFER_START_THRESHOLD * 20}ms, " +
+        SafeLog($"[RTP] v12.0 GRACE EDITION started (cold={JITTER_BUFFER_START_THRESHOLD * 20}ms, " +
+                $"resume={JITTER_BUFFER_RESUME_THRESHOLD * 20}ms, grace={UNDERRUN_GRACE_FRAMES * 20}ms, " +
                 $"timer={(_useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait")})");
     }
 
@@ -323,21 +331,27 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Add(ref _statsQueueSizeSum, queueCount);
         Interlocked.Increment(ref _statsQueueSizeSamples);
 
-        // ── HYSTERESIS: wait for full 200ms buffer before starting/resuming ──
+        // ── HYSTERESIS: wait for buffer before starting/resuming ──
+        // Cold start: 200ms (10 frames) — prevents first-word grumble
+        // Warm resume: 100ms (5 frames) — faster restart after inter-burst gap
         if (_isBuffering)
         {
-            if (queueCount < JITTER_BUFFER_START_THRESHOLD)
+            int resumeThreshold = _hasPlayedAtLeastOneFrame
+                ? JITTER_BUFFER_RESUME_THRESHOLD
+                : JITTER_BUFFER_START_THRESHOLD;
+
+            if (queueCount < resumeThreshold)
             {
-                // Fill with typing sound or silence during the buffering wait
-                // Only click after Ada has spoken — never during the initial greeting wait
                 var fillFrame = _typingSoundsEnabled && _adaHasSpoken ? _typingSound.NextFrame() : _silenceFrame;
                 SendRtpFrame(fillFrame);
                 return;
             }
 
             _isBuffering = false;
+            _consecutiveUnderruns = 0;
             _typingSound.Reset();
-            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
+            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout " +
+                    $"({(_hasPlayedAtLeastOneFrame ? "warm" : "cold")} start)");
         }
 
         if (_frameQueue.TryDequeue(out var frame))
@@ -346,29 +360,37 @@ public sealed class ALawRtpPlayout : IDisposable
             SendRtpFrame(frame);
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
+            _hasPlayedAtLeastOneFrame = true;
+            _consecutiveUnderruns = 0; // Reset grace window on successful dequeue
 
-            // Rebuffer immediately when queue drains to 0 — prevents single-frame grumble
+            // Queue drained — enter grace window, don't rebuffer yet
             if (Volatile.Read(ref _queueCount) == 0)
-            {
-                _isBuffering = true;
-                _typingSound.Reset();
-                Interlocked.Increment(ref _totalUnderruns);
-                try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
-            }
+                _consecutiveUnderruns = 1; // Mark first empty tick
         }
         else
         {
-            // Emergency fallback
-            _isBuffering = true;
-            _typingSound.Reset();
-            SendRtpFrame(_silenceFrame);
-            Interlocked.Increment(ref _totalUnderruns);
+            // Queue empty — apply 60ms grace window before rebuffering
+            _consecutiveUnderruns++;
+            SendRtpFrame(_silenceFrame); // Always fill the RTP slot
 
-            if (_wasPlaying)
+            if (_consecutiveUnderruns >= UNDERRUN_GRACE_FRAMES)
             {
-                _wasPlaying = false;
-                try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
+                // Genuine stall: sustained 60ms+ gap — trigger rebuffer
+                if (!_isBuffering)
+                {
+                    _isBuffering = true;
+                    _typingSound.Reset();
+                    Interlocked.Increment(ref _totalUnderruns);
+                    SafeLog($"[RTP] ⚠ Genuine underrun after {_consecutiveUnderruns} frames — rebuffering");
+
+                    if (_wasPlaying)
+                    {
+                        _wasPlaying = false;
+                        try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
+                    }
+                }
             }
+            // else: absorbing inter-burst gap silently (within grace window)
         }
 
         // Periodic stats
@@ -418,6 +440,7 @@ public sealed class ALawRtpPlayout : IDisposable
         lock (_accLock) { _accCount = 0; Array.Clear(_accumulator, 0, _accumulator.Length); }
         _isBuffering = true;
         _wasPlaying = false;
+        _consecutiveUnderruns = 0;
         _typingSound.Reset();
     }
 
