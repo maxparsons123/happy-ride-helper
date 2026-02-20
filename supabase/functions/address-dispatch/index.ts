@@ -234,10 +234,12 @@ Even when the CITY is known (e.g., Birmingham from landline 0121), many street n
 - FIRST check CALLER_HISTORY — if the caller has been to "School Road, Hall Green" before and says "School Road", resolve to Hall Green directly.
 - If NO history match and a street name exists in 3+ districts within the detected city AND no district/area/postcode is mentioned:
   → Set is_ambiguous=true, status="clarification_needed"
+  → Populate the "districts_found" array with ALL the districts this street appears in (e.g. ["Hall Green", "Moseley", "Yardley", "Kings Heath"])
   → Provide alternatives as "Street Name, District" (e.g., "School Road, Hall Green", "School Road, Moseley")
-  → Ask the user which area/district they mean
-- District-unique streets (only one in the city) can be resolved directly.
+  → Set clarification_message to ask the user which area/district they mean (e.g., "There are several School Roads in Birmingham. Is it the one in Hall Green, Moseley, or Yardley?")
+- District-unique streets (only one in the city) can be resolved directly with districts_found = [].
 - A house number can help: if "School Road, Hall Green" is short (numbers up to ~80) but "School Road, Yardley" is long (numbers up to 200+), a high house number narrows it down.
+- IMPORTANT: Always use your world knowledge to enumerate ALL real districts — do not guess or limit to 3.
 
 HOUSE NUMBER DISAMBIGUATION (CRITICAL):
 When a user provides a house number with a street name, USE the house number to disambiguate which street it is:
@@ -430,6 +432,7 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
                     city: { type: "string" },
                     is_ambiguous: { type: "boolean" },
                     alternatives: { type: "array", items: { type: "string" } },
+                    districts_found: { type: "array", items: { type: "string" }, description: "List of districts/areas this street appears in within the city (e.g. ['Hall Green', 'Moseley', 'Yardley']). Populate when is_ambiguous=true due to multi-district street." },
                     matched_from_history: { type: "boolean" }
                   },
                   required: ["address", "lat", "lon", "city", "is_ambiguous"]
@@ -446,6 +449,7 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
                     city: { type: "string" },
                     is_ambiguous: { type: "boolean" },
                     alternatives: { type: "array", items: { type: "string" } },
+                    districts_found: { type: "array", items: { type: "string" }, description: "List of districts/areas this street appears in within the city (e.g. ['Hall Green', 'Moseley', 'Yardley']). Populate when is_ambiguous=true due to multi-district street." },
                     matched_from_history: { type: "boolean" }
                   },
                   required: ["address", "lat", "lon", "city", "is_ambiguous"]
@@ -600,87 +604,84 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
       }
     }
 
-    // ── Post-processing: enforce disambiguation for known multi-district streets ──
-    // Gemini sometimes resolves ambiguous streets directly. This safety net catches those cases.
-    const KNOWN_MULTI_DISTRICT_STREETS: Record<string, string[]> = {
-      "Birmingham": [
-        "School Road", "Church Road", "Park Road", "Station Road", "High Street",
-        "Victoria Road", "Albert Road", "Green Lane", "New Road", "Warwick Road",
-        "Church Lane", "Grove Road", "Mill Lane", "King Street", "Queen Street"
-      ],
-      "Coventry": [
-        "Church Road", "Station Road", "High Street", "Park Road", "School Road",
-        "Victoria Road", "Albert Road", "Green Lane", "New Road"
-      ],
-      "London": [
-        "Church Road", "Station Road", "High Street", "Park Road", "School Road",
-        "Victoria Road", "Albert Road", "Green Lane", "New Road"
-      ],
-      "Manchester": [
-        "Church Road", "Station Road", "High Street", "Park Road", "School Road",
-        "Victoria Road", "Albert Road", "Green Lane", "New Road"
-      ],
-    };
+    // ── Post-processing: enforce disambiguation for multi-district streets ──
+    // Gemini populates districts_found[] when it detects a street in multiple areas.
+    // This block honours that signal and falls back to the uk_locations DB if Gemini
+    // flagged ambiguity without supplying district names.
+    const supabaseUrl2 = Deno.env.get("SUPABASE_URL")!;
+    const supabaseKey2 = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabase2 = createClient(supabaseUrl2, supabaseKey2);
 
-    // Check if Gemini returned a non-ambiguous result for a known multi-district street
+    // Cache: city → district list (avoids duplicate DB calls for pickup+dropoff)
+    const districtCache: Record<string, string[]> = {};
+
+    async function getCityDistricts(city: string): Promise<string[]> {
+      if (districtCache[city]) return districtCache[city];
+      try {
+        const { data } = await supabase2
+          .from("uk_locations")
+          .select("name")
+          .ilike("parent_city", city)
+          .in("type", ["district", "suburb", "neighbourhood"])
+          .limit(50);
+        const areas = (data || []).map((r: { name: string }) => r.name);
+        districtCache[city] = areas;
+        return areas;
+      } catch {
+        districtCache[city] = [];
+        return [];
+      }
+    }
+
     for (const side of ["pickup", "dropoff"] as const) {
       const addr = parsed[side];
-      if (!addr || addr.is_ambiguous) continue;
-      
-      // CALLER HISTORY BIAS: If Gemini resolved from caller history, trust it — skip disambiguation
+      if (!addr) continue;
+
+      // Trust caller-history matches — no need to disambiguate
       if (addr.matched_from_history === true) {
         console.log(`✅ "${addr.street_name || addr.address}" matched from caller history — skipping disambiguation`);
         continue;
       }
-      
-      const city = addr.city || parsed.detected_area || "";
-      const streetName = addr.street_name || "";
-      const knownStreets = KNOWN_MULTI_DISTRICT_STREETS[city];
-      if (!knownStreets) continue;
-      
-      // Check if the street name matches a known ambiguous street (case-insensitive)
-      const isKnownAmbiguous = knownStreets.some(s => 
-        streetName.toLowerCase().replace(/\s+/g, " ").trim() === s.toLowerCase()
-      );
-      if (!isKnownAmbiguous) continue;
-      
-      // Check if the address already contains a district/area qualifier
-      const addressLower = (addr.address || "").toLowerCase();
-      const hasDistrict = addressLower.includes(",") && 
-        addressLower.split(",").length > 2; // e.g., "School Road, Hall Green, Birmingham"
-      const hasPostcode = /\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b/i.test(addr.address || "");
-      
-      // Also check if the caller used a specific district in their original input
+
       const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
-      const originalHasDistrict = originalInput.toLowerCase().split(",").length > 2 ||
-        /\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b/i.test(originalInput);
-      
-      // Extract house number to check if it's discriminating (500+ is highly specific)
+      const hasPostcode = /\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b/i.test(originalInput);
       const houseNumberMatch = (addr.street_number || "").match(/^(\d+)/);
       const houseNumber = houseNumberMatch ? parseInt(houseNumberMatch[1], 10) : 0;
-      const isHighHouseNumber = houseNumber >= 500; // High numbers discriminate well
-      
-      // If no district and no postcode in the original input, consider forcing disambiguation
-      if (!originalHasDistrict) {
-        // SKIP disambiguation if house number is high (500+) — it's discriminating enough
-        if (isHighHouseNumber) {
-          console.log(`✅ House number ${houseNumber} is discriminating enough for "${streetName}" in ${city} — skipping disambiguation`);
-          continue;
-        }
-        
-        console.log(`⚠️ Post-processing: "${streetName}" in ${city} is a known multi-district street — forcing disambiguation`);
-        addr.is_ambiguous = true;
+      const isHighHouseNumber = houseNumber >= 500;
+
+      // If Gemini already flagged as ambiguous AND supplied districts_found — honour it
+      if (addr.is_ambiguous && addr.districts_found?.length > 0) {
+        const districts: string[] = addr.districts_found;
+        const streetName = addr.street_name || "";
+        const city = addr.city || parsed.detected_area || "";
+        console.log(`🏙️ Gemini flagged multi-district ambiguity for "${streetName}" in ${city}: [${districts.join(", ")}]`);
         parsed.status = "clarification_needed";
-        
-        // If Gemini provided alternatives, keep them. Otherwise, ask for city/area.
         if (!addr.alternatives || addr.alternatives.length === 0) {
-          // Empty alternatives will trigger the fallback in C# to ask for city/area
-          addr.alternatives = [];
+          addr.alternatives = districts.map(d => `${streetName}, ${d}, ${city}`);
         }
-        
-        const sideLabel = side === "pickup" ? "pickup" : "destination";
-        parsed.clarification_message = parsed.clarification_message || 
-          `There are several ${streetName}s in ${city}. Which area or district is it in?`;
+        parsed.clarification_message = parsed.clarification_message ||
+          `There are several ${streetName}s in ${city}. Is it the one in ${districts.slice(0, 3).join(", ")}?`;
+        continue;
+      }
+
+      // If Gemini resolved without ambiguity, check if it should have been ambiguous.
+      // We rely on Gemini's world knowledge (districts_found) as the primary signal.
+      // Only enforce here if: (a) already ambiguous but no districts, OR 
+      // (b) Gemini resolved but districts_found has entries (shouldn't happen, but guard it)
+      if (addr.is_ambiguous && (!addr.districts_found || addr.districts_found.length === 0)) {
+        // Ambiguous but no district names — try DB fallback
+        if (!hasPostcode && !isHighHouseNumber) {
+          const city = addr.city || parsed.detected_area || "";
+          const streetName = addr.street_name || "";
+          const dbDistricts = await getCityDistricts(city);
+          console.log(`🔍 DB fallback for "${streetName}" in ${city}: ${dbDistricts.length} districts available`);
+          parsed.status = "clarification_needed";
+          if (!addr.alternatives || addr.alternatives.length === 0) {
+            addr.alternatives = [];
+          }
+          parsed.clarification_message = parsed.clarification_message ||
+            `There are several ${streetName}s in ${city}. Which area or district is it in?`;
+        }
       }
     }
 
