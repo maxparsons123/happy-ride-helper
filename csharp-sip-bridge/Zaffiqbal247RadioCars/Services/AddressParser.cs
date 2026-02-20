@@ -71,8 +71,8 @@ public static class AddressParser
             remaining = remaining[unitMatch.Length..];
         }
 
-        // Detect leading house number (e.g. "43 Dovey Road" → "43", "52A David Road" → "52A")
-        var numberMatch = Regex.Match(remaining, @"^(\d+[A-Za-z]?)\s+(.+)");
+        // Detect leading house number (e.g. "43 Dovey Road" → "43", "52A David Road" → "52A", "52-8 David Road" → "52-8")
+        var numberMatch = Regex.Match(remaining, @"^(\d+(?:[-A-Za-z]\d*)?)\s+(.+)");
         if (numberMatch.Success)
         {
             houseNumber = numberMatch.Groups[1].Value;
