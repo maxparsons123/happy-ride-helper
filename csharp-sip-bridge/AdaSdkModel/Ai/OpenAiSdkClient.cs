@@ -239,10 +239,6 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 InputTranscriptionOptions = new ConversationInputTranscriptionOptions
                 {
                     Model = "whisper-1",
-                    // Vocabulary hint: tell Whisper to expect UK alphanumeric house numbers.
-                    // Without this, "52A" is often transcribed as "52-8" because the letter
-                    // "A" is phonetically heard as "eight" in a numeric context.
-                    Prompt = "UK address. House numbers may include letter suffixes: 52A, 14B, 7C, 22D. Street names include David Road, Dovey Road, Warwick Road, High Street."
                 },
                 // SDK 2.1.0-beta.4 doesn't support semantic_vad natively.
                 // Simulate patient vs responsive modes using server_vad with different parameters.
