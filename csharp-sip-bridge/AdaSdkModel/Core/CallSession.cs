@@ -1590,8 +1590,19 @@ public sealed class CallSession : ICallSession
             _booking.ScheduledAt = BookingState.ParsePickupTimeToDateTime(_booking.PickupTime);
         }
         // Capture payment preference (card = fixed price via SumUp, meter = pay on the day)
+        // Normalize: AI may say "card", "fixed", "link", "payment_link" etc. — all map to "card"
         if (args.TryGetValue("payment_preference", out var pref) && !string.IsNullOrWhiteSpace(pref?.ToString()))
-            _booking.PaymentPreference = pref.ToString()!.Trim().ToLowerInvariant();
+        {
+            var rawPref = pref.ToString()!.Trim().ToLowerInvariant();
+            var normalizedPref = (rawPref.Contains("card") || rawPref.Contains("fixed") || rawPref.Contains("link") || rawPref.Contains("sumup"))
+                ? "card" : "meter";
+            _booking.PaymentPreference = normalizedPref;
+            _logger.LogInformation("[{SessionId}] 💳 payment_preference raw='{Raw}' → normalized='{Normalized}'", SessionId, rawPref, normalizedPref);
+        }
+        else
+        {
+            _logger.LogInformation("[{SessionId}] 💳 payment_preference not provided in book_taxi args (current: '{Current}')", SessionId, _booking.PaymentPreference ?? "null");
+        }
 
         if (action == "request_quote")
         {
