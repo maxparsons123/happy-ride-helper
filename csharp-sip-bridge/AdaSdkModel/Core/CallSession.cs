@@ -665,7 +665,31 @@ public sealed class CallSession : ICallSession
         if (string.IsNullOrWhiteSpace(_booking.Name))
             return new { success = true, warning = "Name is required before booking. Ask the caller for their name." };
 
-        // ── HOUSE NUMBER GUARD ──
+        // ── SAME-ADDRESS GUARD ──
+        // Reject before geocoding if Ada submitted identical raw strings for pickup and destination.
+        // This happens when the caller's destination was misheard as the pickup or Ada re-used it.
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(_booking.Destination))
+        {
+            var normPickup = _booking.Pickup.Trim().ToLowerInvariant();
+            var normDest   = _booking.Destination.Trim().ToLowerInvariant();
+            if (normPickup == normDest)
+            {
+                _logger.LogWarning("[{SessionId}] ⚠ Same-address submitted: pickup == destination ('{Addr}'). Rejecting and re-asking destination.", SessionId, _booking.Pickup);
+                // Clear destination so it must be re-collected
+                _booking.Destination = null;
+                _booking.DestLat = _booking.DestLon = null;
+                _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                _booking.Fare = null;
+                _booking.Eta = null;
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                return new
+                {
+                    success = false,
+                    warning = $"DESTINATION ERROR: The destination you submitted ('{_booking.Pickup}') is the same as the pickup address. " +
+                              "You MUST ask the caller: 'Where would you like to go?' and collect a DIFFERENT destination before proceeding."
+                };
+            }
+        }
         // If pickup is a street-type address (Road, Avenue, Close, etc.) but has no house number,
         // instruct Ada to ask the caller for it before proceeding.
         if (!string.IsNullOrWhiteSpace(_booking.Pickup) && Services.AddressParser.RequiresHouseNumber(_booking.Pickup))
@@ -892,16 +916,22 @@ public sealed class CallSession : ICallSession
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
 
-                    // Guard: reject if geocoder resolved pickup and destination to the same address
+                    // Guard: geocoder resolved pickup and destination to the same address.
+                    // Clear destination and force Ada to re-collect it — do NOT proceed to fare.
                     if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
                     {
-                        _logger.LogWarning("[{SessionId}] ⚠ Same-address detected: pickup == destination ({Addr}). Asking caller to re-confirm destination.", sessionId, pickupAddr);
+                        _logger.LogWarning("[{SessionId}] ⚠ Post-geocode same-address: pickup == destination ({Addr}). Clearing destination and re-asking.", sessionId, pickupAddr);
+                        _booking.Destination = null;
+                        _booking.DestLat = _booking.DestLon = null;
+                        _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                        _booking.Fare = null; _booking.Eta = null;
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         _aiClient.SetAwaitingConfirmation(false);
                         _currentStage = BookingStage.CollectingDetails;
                         await _aiClient.InjectMessageAndRespondAsync(
-                            "[ADDRESS ERROR] The pickup and destination appear to be the same address. " +
-                            "Ask the caller to confirm their destination again — it may have been misheard.");
+                            "[DESTINATION ERROR] The verified pickup and destination resolved to the same location. " +
+                            "Ask the caller where they want to go — their destination was not captured correctly. " +
+                            "When they answer, call sync_booking_data with the corrected destination.");
                         return;
                     }
 
@@ -1253,13 +1283,18 @@ public sealed class CallSession : ICallSession
             // Guard: reject if geocoder resolved pickup and destination to the same address
             if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
             {
-                _logger.LogWarning("[{SessionId}] ⚠ Same-address detected after clarification: pickup == destination ({Addr}). Re-asking.", sessionId, pickupAddr);
+                _logger.LogWarning("[{SessionId}] ⚠ Post-geocode same-address (clarification path): pickup == destination ({Addr}). Clearing destination.", sessionId, pickupAddr);
+                _booking.Destination = null;
+                _booking.DestLat = _booking.DestLon = null;
+                _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                _booking.Fare = null; _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 _aiClient.SetAwaitingConfirmation(false);
                 _currentStage = BookingStage.CollectingDetails;
                 await _aiClient.InjectMessageAndRespondAsync(
-                    "[ADDRESS ERROR] The pickup and destination appear to be the same address. " +
-                    "Ask the caller to confirm their destination again — it may have been misheard.");
+                    "[DESTINATION ERROR] The verified pickup and destination resolved to the same location. " +
+                    "Ask the caller where they want to go — their destination was not captured correctly. " +
+                    "When they answer, call sync_booking_data with the corrected destination.");
                 return;
             }
 
@@ -1438,7 +1473,11 @@ public sealed class CallSession : ICallSession
                     // Guard: reject if geocoder resolved pickup and destination to the same address
                     if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
                     {
-                        _logger.LogWarning("[{SessionId}] ⚠ Same-address detected (sync path): pickup == destination ({Addr}). Re-asking.", sessionId, pickupAddr);
+                        _logger.LogWarning("[{SessionId}] ⚠ Post-geocode same-address (sync path): pickup == destination ({Addr}). Clearing destination.", sessionId, pickupAddr);
+                        _booking.Destination = null;
+                        _booking.DestLat = _booking.DestLon = null;
+                        _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                        _booking.Fare = null; _booking.Eta = null;
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         _aiClient.SetAwaitingConfirmation(false);
                         _currentStage = BookingStage.CollectingDetails;
