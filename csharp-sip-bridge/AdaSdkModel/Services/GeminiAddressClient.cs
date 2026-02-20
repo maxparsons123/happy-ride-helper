@@ -264,7 +264,18 @@ public sealed class GeminiAddressClient
             ["postal_code"] = new { type = "STRING" },
             ["city"] = new { type = "STRING" },
             ["is_ambiguous"] = new { type = "BOOLEAN" },
-            ["alternatives"] = new { type = "ARRAY", items = new { type = "STRING" } },
+            ["districts_found"] = new
+            {
+                type = "ARRAY",
+                items = new { type = "STRING" },
+                description = "If this street exists in multiple districts of the city, list each distinct district/area name here (e.g. [\"Moseley\", \"Handsworth\", \"Yardley\"]). Leave empty if the street is unambiguous."
+            },
+            ["alternatives"] = new
+            {
+                type = "ARRAY",
+                items = new { type = "STRING" },
+                description = "Formatted full addresses for each district version found (e.g. [\"School Road, Moseley, Birmingham\", \"School Road, Handsworth, Birmingham\"])."
+            },
             ["matched_from_history"] = new { type = "BOOLEAN" }
         },
         required = new[] { "address", "lat", "lon", "city", "is_ambiguous" }
@@ -300,13 +311,8 @@ public sealed class GeminiAddressClient
         }
     }
 
-    // ── Known multi-district streets (same as edge function) ──
-    private static readonly Dictionary<string, string[]> KnownMultiDistrictStreets = new()
-    {
-        ["Birmingham"] = new[] { "School Road", "Church Road", "Park Road", "Station Road", "High Street", "Victoria Road", "Albert Road", "Green Lane", "New Road", "Warwick Road", "Church Lane", "Grove Road", "Mill Lane", "King Street", "Queen Street" },
-        ["Coventry"] = new[] { "Church Road", "Station Road", "High Street", "Park Road", "School Road", "Victoria Road", "Albert Road", "Green Lane", "New Road" },
-        ["London"] = new[] { "Church Road", "Station Road", "High Street", "Park Road", "School Road", "Victoria Road", "Albert Road", "Green Lane", "New Road" },
-    };
+    // Multi-district street detection is now handled dynamically by Gemini itself via the
+    // districts_found field in BuildAddressSchema(). No hardcoded street lists needed.
 
     // ── In-memory cache: city → list of district/suburb names fetched from uk_locations ──
     // Areas are stored in the database (uk_locations, type='district'/'suburb') and can be
@@ -448,61 +454,91 @@ public sealed class GeminiAddressClient
             }
         }
 
-        // ── Enforce disambiguation for known multi-district streets ──
-        // Areas are fetched dynamically from uk_locations (cached 60 min).
+        // ── Enforce disambiguation for multi-district streets ──
+        // Gemini detects these dynamically via its world knowledge and populates districts_found.
+        // We trust Gemini's detection; our job here is to ensure state is consistent and
+        // fall back to uk_locations if Gemini didn't provide district names.
         // Track force-flagged sides so the DB auto-correct step cannot clear them.
         var forceAmbiguousSides = new HashSet<string>();
         foreach (var side in new[] { "pickup", "dropoff" })
         {
             var addr = work[side];
             if (addr == null) continue;
-            var isAmbiguous = addr["is_ambiguous"]?.GetValue<bool>() ?? false;
-            if (isAmbiguous) continue;
             if (addr["matched_from_history"]?.GetValue<bool>() == true) continue;
 
-            var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
-            var streetName = addr["street_name"]?.GetValue<string>() ?? "";
-            if (!KnownMultiDistrictStreets.TryGetValue(city, out var knownStreets)) continue;
+            var isAmbiguous = addr["is_ambiguous"]?.GetValue<bool>() ?? false;
 
-            var isKnown = knownStreets.Any(s => string.Equals(s, streetName, StringComparison.OrdinalIgnoreCase));
-            if (!isKnown) continue;
+            // Read districts_found from Gemini's response
+            var districtsNode = addr["districts_found"];
+            var districts = districtsNode?.AsArray()
+                .Select(d => d?.GetValue<string>() ?? "")
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .ToArray() ?? Array.Empty<string>();
 
-            var originalInput = side == "pickup" ? (pickup ?? "") : (destination ?? "");
-            var hasDistrict = originalInput.Split(',').Length > 2;
-            var hasPostcode = System.Text.RegularExpressions.Regex.IsMatch(originalInput, @"\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            // High house numbers are area-unique (e.g. 1214A Warwick Road)
-            var streetNum = addr["street_number"]?.GetValue<string>() ?? "";
-            var numMatch = System.Text.RegularExpressions.Regex.Match(streetNum, @"^(\d+)");
-            var houseNumber = numMatch.Success ? int.Parse(numMatch.Groups[1].Value) : 0;
-
-            if (!hasDistrict && !hasPostcode)
+            // If Gemini flagged multiple districts → enforce clarification
+            if (districts.Length > 1 && !isAmbiguous)
             {
-                if (houseNumber >= 500)
+                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
+                var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
+                var originalInput = side == "pickup" ? (pickup ?? "") : (destination ?? "");
+                var hasPostcode = System.Text.RegularExpressions.Regex.IsMatch(originalInput, @"\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+                // High house numbers discriminate (e.g. 1214A Warwick Road)
+                var streetNum = addr["street_number"]?.GetValue<string>() ?? "";
+                var numMatch = System.Text.RegularExpressions.Regex.Match(streetNum, @"^(\d+)");
+                var houseNumber = numMatch.Success ? int.Parse(numMatch.Groups[1].Value) : 0;
+                var userNamedDistrict = districts.Any(d => originalInput.Contains(d, StringComparison.OrdinalIgnoreCase));
+
+                if (!hasPostcode && !userNamedDistrict && houseNumber < 500)
                 {
-                    _logger.LogDebug("✅ House number {Num} discriminates \"{Street}\" in {City}", houseNumber, streetName, city);
-                    continue;
+                    _logger.LogInformation("⚠️ Gemini detected \"{Street}\" in {City} across {Count} districts: {Districts} — forcing clarification",
+                        streetName, city, districts.Length, string.Join(", ", districts));
+                    addr["is_ambiguous"] = true;
+                    work["status"] = "clarification_needed";
+                    forceAmbiguousSides.Add(side);
+
+                    // Build alternatives from Gemini's districts_found
+                    var altsArr = new System.Text.Json.Nodes.JsonArray();
+                    foreach (var d in districts.Take(6))
+                        altsArr.Add($"{streetName}, {d}, {city}");
+                    addr["alternatives"] = altsArr;
+                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", districts.Take(3))}.";
                 }
-
-                _logger.LogInformation("⚠️ \"{Street}\" in {City} is multi-district — forcing disambiguation (house={HouseNum})", streetName, city, houseNumber);
-                addr["is_ambiguous"] = true;
-                work["status"] = "clarification_needed";
+                else if (userNamedDistrict || hasPostcode || houseNumber >= 500)
+                {
+                    _logger.LogDebug("✅ District/postcode/high house number discriminates \"{Street}\" in {City} — no clarification needed", streetName, city);
+                }
+            }
+            else if (isAmbiguous && districts.Length > 0)
+            {
+                // Gemini already set is_ambiguous=true AND provided districts — ensure clarification message uses them
+                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
+                var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
                 forceAmbiguousSides.Add(side);
-
-                // Fetch area list dynamically from uk_locations
-                var areas = await GetCityAreasAsync(city);
-                if (areas.Length > 0)
+                work["status"] = "clarification_needed";
+                var existingMsg = work["clarification_message"]?.GetValue<string>() ?? "";
+                if (string.IsNullOrWhiteSpace(existingMsg))
+                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", districts.Take(3))}.";
+            }
+            else if (isAmbiguous)
+            {
+                // Gemini flagged ambiguous but gave no districts — fall back to uk_locations
+                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
+                var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
+                forceAmbiguousSides.Add(side);
+                work["status"] = "clarification_needed";
+                var dbAreas = await GetCityAreasAsync(city);
+                if (dbAreas.Length > 0)
                 {
                     var altsArr = new System.Text.Json.Nodes.JsonArray();
-                    foreach (var area in areas.Take(6))
+                    foreach (var area in dbAreas.Take(6))
                         altsArr.Add($"{streetName}, {area}, {city}");
                     addr["alternatives"] = altsArr;
-                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", areas.Take(3))}.";
+                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", dbAreas.Take(3))}.";
                 }
-                else
+                else if (string.IsNullOrWhiteSpace(work["clarification_message"]?.GetValue<string>()))
                 {
-                    if (work["clarification_message"] == null || string.IsNullOrEmpty(work["clarification_message"]?.GetValue<string>()))
-                        work["clarification_message"] = $"There are several {streetName}s in {city}. Which area or district is it in?";
+                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area or district is it in?";
                 }
             }
         }
@@ -1223,8 +1259,21 @@ ADDRESS EXTRACTION RULES:
 4. ALWAYS include postal code in address field
 5. INDEPENDENT POSTCODES: each address must have its own postal code
 
-INTRA-CITY DISTRICT DISAMBIGUATION (CRITICAL):
-Even when CITY is known, many streets exist in multiple districts. Check caller history first, then flag if needed.
+DISTRICT DISAMBIGUATION RULE — MULTI-DISTRICT STREETS (CRITICAL):
+Many streets in dense UK cities (Birmingham, Coventry, Manchester, London, etc.) exist in 5+ different districts with completely different postcodes and GPS coordinates.
+When a user provides a common street name WITHOUT a district, postcode, or high house number (500+):
+
+1. Use your world knowledge to SEARCH ALL OCCURRENCES of that street in the detected city.
+2. If MORE THAN ONE distinct location exists:
+   - Set is_ambiguous = true
+   - Set status = ""clarification_needed""
+   - Populate districts_found with the SPECIFIC district/area names where this street exists (e.g. [""Moseley"", ""Handsworth"", ""Yardley Wood"", ""Acocks Green""])
+   - Populate alternatives with the full formatted addresses for each district version
+   - Set clarification_message to a natural question, e.g.: ""There are several School Roads in Birmingham. Is it the one in Moseley, Handsworth, or Yardley Wood?""
+3. EXAMPLES of streets that ALWAYS need disambiguation in Birmingham: School Road, Church Road, Park Road, Station Road, High Street, Victoria Road, Albert Road, Green Lane, New Road, Church Lane, Grove Road, Mill Lane, Bristol Road, Pershore Road, Stratford Road
+4. EXAMPLES of streets that ALWAYS need disambiguation in Coventry: Church Road, Station Road, High Street, Park Road, School Road, Victoria Road
+5. If the caller provides a POSTCODE, DISTRICT NAME, or HIGH HOUSE NUMBER (500+) → resolve directly without asking.
+6. If the caller's history contains a matching address → use it without asking.
 
 HOUSE NUMBER DISAMBIGUATION: High house numbers (500+) strongly suggest long arterial roads.
 
