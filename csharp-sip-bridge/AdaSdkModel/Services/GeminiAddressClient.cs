@@ -79,7 +79,7 @@ public sealed class GeminiAddressClient
 
             _logger.LogDebug("📍 Gemini address dispatch: pickup=\"{Pickup}\", dest=\"{Dest}\", phone=\"{Phone}\"", pickup, destination, phone);
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
             var response = await _http.PostAsync(geminiUrl, content, cts.Token);
             var responseJson = await response.Content.ReadAsStringAsync();
 
@@ -1067,7 +1067,7 @@ IMPORTANT: When in doubt, prefer Ada's geocoded version if the street exists in 
             };
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), System.Text.Encoding.UTF8, "application/json");
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             var response = await _http.PostAsync(geminiUrl, content, cts.Token);
 
             if (!response.IsSuccessStatusCode)
