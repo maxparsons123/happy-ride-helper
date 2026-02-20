@@ -608,6 +608,40 @@ public sealed class CallSession : ICallSession
                 _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
                     SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
             }
+
+            // ── HOUSE-NUMBER RESCUE (pickup) ─────────────────────────────────────────
+            var incomingPickupComponents = Services.AddressParser.ParseAddress(incoming);
+            if (!incomingPickupComponents.HasHouseNumber && !string.IsNullOrWhiteSpace(incoming))
+            {
+                var allPrevPickups = new List<string>();
+                if (!string.IsNullOrWhiteSpace(_booking.Pickup)) allPrevPickups.Add(_booking.Pickup);
+                allPrevPickups.AddRange(_booking.PreviousPickups);
+
+                foreach (var prev in allPrevPickups)
+                {
+                    var prevComponents = Services.AddressParser.ParseAddress(prev);
+                    if (prevComponents.HasHouseNumber)
+                    {
+                        var incomingStreet = incomingPickupComponents.StreetName.ToLowerInvariant().Trim();
+                        var prevStreet = prevComponents.StreetName.ToLowerInvariant().Trim();
+                        if (!string.IsNullOrWhiteSpace(incomingStreet) && !string.IsNullOrWhiteSpace(prevStreet)
+                            && (incomingStreet.Contains(prevStreet) || prevStreet.Contains(incomingStreet)))
+                        {
+                            var prefix = string.IsNullOrWhiteSpace(prevComponents.FlatOrUnit)
+                                ? prevComponents.HouseNumber
+                                : $"{prevComponents.FlatOrUnit} {prevComponents.HouseNumber}";
+                            var rescued = $"{prefix} {incoming}";
+                            _logger.LogInformation("[{SessionId}] 🏠 RESCUE: Re-attached pickup house number '{Num}' → '{Rescued}'",
+                                SessionId, prefix, rescued);
+                            sttCorrections.Add($"HOUSE NUMBER RESCUE: The pickup was updated to '{incoming}' (no house number) but history shows '{prev}' was previously confirmed. The house number '{prefix}' has been automatically re-attached. Updated pickup = '{rescued}'. Do NOT ask for the house number again.");
+                            incoming = rescued;
+                            break;
+                        }
+                    }
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────────────
+
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
                 _booking.PickupLat = _booking.PickupLon = null;
@@ -634,6 +668,47 @@ public sealed class CallSession : ICallSession
                 _logger.LogInformation("[{SessionId}] 📝 Dest history: [{History}] → new: '{New}'",
                     SessionId, string.Join(" | ", _booking.PreviousDestinations), incoming);
             }
+
+            // ── HOUSE-NUMBER RESCUE ──────────────────────────────────────────────────
+            // If the AI just dropped a house number that was present in a previous sync
+            // (e.g. caller said "Warwick Road, Coventry" to confirm the city after the
+            // geocoder couldn't resolve "1214A Warwick Road"), re-attach the number from
+            // history so we don't re-trigger the house-number guard unnecessarily.
+            var incomingComponents = Services.AddressParser.ParseAddress(incoming);
+            if (!incomingComponents.HasHouseNumber && !string.IsNullOrWhiteSpace(incoming))
+            {
+                // Search current destination and all previous versions for a matching house number
+                var allPrevDests = new List<string>();
+                if (!string.IsNullOrWhiteSpace(_booking.Destination)) allPrevDests.Add(_booking.Destination);
+                allPrevDests.AddRange(_booking.PreviousDestinations);
+
+                foreach (var prev in allPrevDests)
+                {
+                    var prevComponents = Services.AddressParser.ParseAddress(prev);
+                    if (prevComponents.HasHouseNumber)
+                    {
+                        // Check that the street name is the same or one contains the other
+                        var incomingStreet = incomingComponents.StreetName.ToLowerInvariant().Trim();
+                        var prevStreet = prevComponents.StreetName.ToLowerInvariant().Trim();
+                        if (!string.IsNullOrWhiteSpace(incomingStreet) && !string.IsNullOrWhiteSpace(prevStreet)
+                            && (incomingStreet.Contains(prevStreet) || prevStreet.Contains(incomingStreet)))
+                        {
+                            // Re-attach: prepend the house number (and flat prefix if any) to the incoming address
+                            var prefix = string.IsNullOrWhiteSpace(prevComponents.FlatOrUnit)
+                                ? prevComponents.HouseNumber
+                                : $"{prevComponents.FlatOrUnit} {prevComponents.HouseNumber}";
+                            var rescued = $"{prefix} {incoming}";
+                            _logger.LogInformation("[{SessionId}] 🏠 RESCUE: Re-attached house number '{Num}' from history → '{Rescued}'",
+                                SessionId, prefix, rescued);
+                            sttCorrections.Add($"HOUSE NUMBER RESCUE: The destination was updated to '{incoming}' (no house number) but history shows '{prev}' was previously confirmed. The house number '{prefix}' has been automatically re-attached. Updated destination = '{rescued}'. Do NOT ask for the house number again.");
+                            incoming = rescued;
+                            break;
+                        }
+                    }
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────────────
+
             if (StreetNameChanged(_booking.Destination, incoming))
             {
                 _booking.DestLat = _booking.DestLon = null;
