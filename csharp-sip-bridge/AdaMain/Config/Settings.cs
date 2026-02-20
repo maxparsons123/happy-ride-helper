@@ -29,6 +29,8 @@ public sealed class IcabbiSettings
     public string AppKey { get; set; } = "";
     public string SecretKey { get; set; } = "";
     public string TenantBase { get; set; } = "https://yourtenant.icabbi.net";
+    public int SiteId { get; set; } = 0;
+    public string CompanyId { get; set; } = "";
 }
 
 public sealed class SipSettings
