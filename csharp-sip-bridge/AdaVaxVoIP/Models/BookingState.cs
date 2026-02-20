@@ -16,6 +16,8 @@ public sealed class BookingState
     public bool Confirmed { get; set; }
     public string? BookingRef { get; set; }
     public string VehicleType { get; set; } = "Saloon";
+    public string? PaymentPreference { get; set; }
+    public int BiddingWindowSec { get; set; } = 45;
 
     public static string RecommendVehicle(int passengers) => passengers switch
     {
@@ -49,6 +51,8 @@ public sealed class BookingState
         Name = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
         VehicleType = "Saloon";
+        PaymentPreference = null;
+        BiddingWindowSec = 45;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;
