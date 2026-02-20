@@ -1237,13 +1237,39 @@ public sealed class CallSession : ICallSession
         var pickup = _booking.Pickup!;
         var destination = _booking.Destination!;
 
-        // If pickup has verified geocoded city, enrich the pickup string
+        // If pickup has verified geocoded city, use it — otherwise fall back to history inference
         if (_booking.PickupLat.HasValue && _booking.PickupLat != 0)
+        {
             pickup = EnrichWithVerifiedCity(pickup, _booking.PickupCity);
+        }
+        else if (DestinationLacksCityContext(pickup))
+        {
+            // First calculation — no coords yet. Try to enrich pickup from caller history
+            // so Gemini can disambiguate correctly (e.g. "52A David Road" → "52A David Road, Birmingham")
+            var cityFromHistory = TryExtractCityFromHistory(pickup);
+            if (cityFromHistory != null)
+            {
+                _logger.LogInformation("[{SessionId}] 🏙️ Enriching pickup '{Pickup}' with history city '{City}' before geocoding",
+                    SessionId, pickup, cityFromHistory);
+                pickup = $"{pickup}, {cityFromHistory}";
+            }
+        }
 
-        // If destination has verified geocoded city, enrich the destination string
+        // If destination has verified geocoded city, use it — otherwise fall back to history inference
         if (_booking.DestLat.HasValue && _booking.DestLat != 0)
+        {
             destination = EnrichWithVerifiedCity(destination, _booking.DestCity);
+        }
+        else if (DestinationLacksCityContext(destination))
+        {
+            var cityFromHistory = TryExtractCityFromHistory(destination);
+            if (cityFromHistory != null)
+            {
+                _logger.LogInformation("[{SessionId}] 🏙️ Enriching destination '{Dest}' with history city '{City}' before geocoding",
+                    SessionId, destination, cityFromHistory);
+                destination = $"{destination}, {cityFromHistory}";
+            }
+        }
 
         return (pickup, destination);
     }
