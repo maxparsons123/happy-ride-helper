@@ -1875,13 +1875,13 @@ public sealed class CallSession : ICallSession
                 for (int i = 0; i < 50 && _aiClient.IsResponseActive; i++)
                 await Task.Delay(100);
 
-                // ── SumUp PAYMENT LINK (card payers only) — generate BEFORE dispatch ──────
-                // This ensures the payment URL is included in the BSQD payload.
-                if (bookingSnapshot.PaymentPreference == "card" && sumUpRef == null)
+                // ── SumUp PAYMENT LINK — always generate if SumUp is configured ──────────
+                // Link is included in the BSQD eta field and sent via WhatsApp regardless of preference.
+                if (sumUpRef == null)
                 {
-                    _logger.LogWarning("[{SessionId}] ⚠️ Caller chose card payment but SumUp is DISABLED or not configured — no payment link will be generated. Enable SumUp in appsettings.json (SumUp.Enabled=true + ApiKey + MerchantCode).", sessionId);
+                    _logger.LogWarning("[{SessionId}] ⚠️ SumUp not configured — no payment link generated.", sessionId);
                 }
-                if (bookingSnapshot.PaymentPreference == "card" && sumUpRef != null)
+                if (sumUpRef != null)
                 {
                     try
                     {
