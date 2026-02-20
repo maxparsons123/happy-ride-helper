@@ -1930,15 +1930,15 @@ public sealed class CallSession : ICallSession
 
     private static string FormatAddressForReadback(string? number, string? street, string? postalCode, string? city)
     {
-        // EU format: City, Street, Number — no postal codes in verbal readback
+        // Standard UK format: Number Street, City — natural verbal delivery order
         var parts = new List<string>();
         
+        // Combine number + street into a single part (e.g. "1214A Warwick Road")
+        var streetPart = string.Join(" ", new[] { number, street }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        if (!string.IsNullOrWhiteSpace(streetPart))
+            parts.Add(streetPart);
         if (!string.IsNullOrWhiteSpace(city))
             parts.Add(city);
-        if (!string.IsNullOrWhiteSpace(street))
-            parts.Add(street);
-        if (!string.IsNullOrWhiteSpace(number))
-            parts.Add(number);
         // Postal codes intentionally omitted from verbal readback (stored in backend only)
         
         return parts.Count > 0 ? string.Join(", ", parts) : "the address";
