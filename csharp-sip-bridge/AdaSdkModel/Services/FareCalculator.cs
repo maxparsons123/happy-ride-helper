@@ -18,7 +18,7 @@ public sealed class FareCalculator : IFareCalculator
     private const decimal BaseFare = 3.50m;
     private const decimal PerMile = 1.00m;
     private const decimal MinFare = 4.00m;
-    private const double AvgSpeedMph = 20.0;
+    private const double AvgSpeedMph = 30.0;
     private const int BufferMinutes = 3;
 
     private string EdgeFunctionUrl => $"{_supabaseSettings.Url}/functions/v1/address-dispatch";
