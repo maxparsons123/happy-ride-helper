@@ -554,7 +554,7 @@ public sealed class CallSession : ICallSession
         if (!string.IsNullOrWhiteSpace(_aiClient.LastUserTranscript))
         {
             var sttText = _aiClient.LastUserTranscript;
-            
+
             // Only run mismatch detection if Whisper produced intelligible English text
             if (IsIntelligibleEnglish(sttText))
             {
@@ -562,7 +562,7 @@ public sealed class CallSession : ICallSession
                 if (args.TryGetValue("pickup", out var pickupArg) && !string.IsNullOrWhiteSpace(pickupArg?.ToString()))
                 {
                     var pickupVal = pickupArg.ToString()!;
-                    if (IsSignificantlyDifferent(pickupVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Pickup) 
+                    if (IsSignificantlyDifferent(pickupVal, sttText) && !string.IsNullOrWhiteSpace(_booking.Pickup)
                         && IsSignificantlyDifferent(pickupVal, _booking.Pickup))
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ PICKUP MISMATCH: STT='{Stt}' vs Ada='{Ada}'", SessionId, sttText, pickupVal);
@@ -570,7 +570,7 @@ public sealed class CallSession : ICallSession
                             "You may optionally confirm with the caller if you're unsure, but trust your own interpretation as primary.";
                     }
                 }
-                
+
                 // Check destination mismatch
                 if (args.TryGetValue("destination", out var destArg) && !string.IsNullOrWhiteSpace(destArg?.ToString()))
                 {
@@ -608,40 +608,6 @@ public sealed class CallSession : ICallSession
                 _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
                     SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
             }
-
-            // ── HOUSE-NUMBER RESCUE (pickup) ─────────────────────────────────────────
-            var incomingPickupComponents = Services.AddressParser.ParseAddress(incoming);
-            if (!incomingPickupComponents.HasHouseNumber && !string.IsNullOrWhiteSpace(incoming))
-            {
-                var allPrevPickups = new List<string>();
-                if (!string.IsNullOrWhiteSpace(_booking.Pickup)) allPrevPickups.Add(_booking.Pickup);
-                allPrevPickups.AddRange(_booking.PreviousPickups);
-
-                foreach (var prev in allPrevPickups)
-                {
-                    var prevComponents = Services.AddressParser.ParseAddress(prev);
-                    if (prevComponents.HasHouseNumber)
-                    {
-                        var incomingStreet = incomingPickupComponents.StreetName.ToLowerInvariant().Trim();
-                        var prevStreet = prevComponents.StreetName.ToLowerInvariant().Trim();
-                        if (!string.IsNullOrWhiteSpace(incomingStreet) && !string.IsNullOrWhiteSpace(prevStreet)
-                            && (incomingStreet.Contains(prevStreet) || prevStreet.Contains(incomingStreet)))
-                        {
-                            var prefix = string.IsNullOrWhiteSpace(prevComponents.FlatOrUnit)
-                                ? prevComponents.HouseNumber
-                                : $"{prevComponents.FlatOrUnit} {prevComponents.HouseNumber}";
-                            var rescued = $"{prefix} {incoming}";
-                            _logger.LogInformation("[{SessionId}] 🏠 RESCUE: Re-attached pickup house number '{Num}' → '{Rescued}'",
-                                SessionId, prefix, rescued);
-                            sttCorrections.Add($"HOUSE NUMBER RESCUE: The pickup was updated to '{incoming}' (no house number) but history shows '{prev}' was previously confirmed. The house number '{prefix}' has been automatically re-attached. Updated pickup = '{rescued}'. Do NOT ask for the house number again.");
-                            incoming = rescued;
-                            break;
-                        }
-                    }
-                }
-            }
-            // ─────────────────────────────────────────────────────────────────────────
-
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
                 _booking.PickupLat = _booking.PickupLon = null;
@@ -668,47 +634,6 @@ public sealed class CallSession : ICallSession
                 _logger.LogInformation("[{SessionId}] 📝 Dest history: [{History}] → new: '{New}'",
                     SessionId, string.Join(" | ", _booking.PreviousDestinations), incoming);
             }
-
-            // ── HOUSE-NUMBER RESCUE ──────────────────────────────────────────────────
-            // If the AI just dropped a house number that was present in a previous sync
-            // (e.g. caller said "Warwick Road, Coventry" to confirm the city after the
-            // geocoder couldn't resolve "1214A Warwick Road"), re-attach the number from
-            // history so we don't re-trigger the house-number guard unnecessarily.
-            var incomingComponents = Services.AddressParser.ParseAddress(incoming);
-            if (!incomingComponents.HasHouseNumber && !string.IsNullOrWhiteSpace(incoming))
-            {
-                // Search current destination and all previous versions for a matching house number
-                var allPrevDests = new List<string>();
-                if (!string.IsNullOrWhiteSpace(_booking.Destination)) allPrevDests.Add(_booking.Destination);
-                allPrevDests.AddRange(_booking.PreviousDestinations);
-
-                foreach (var prev in allPrevDests)
-                {
-                    var prevComponents = Services.AddressParser.ParseAddress(prev);
-                    if (prevComponents.HasHouseNumber)
-                    {
-                        // Check that the street name is the same or one contains the other
-                        var incomingStreet = incomingComponents.StreetName.ToLowerInvariant().Trim();
-                        var prevStreet = prevComponents.StreetName.ToLowerInvariant().Trim();
-                        if (!string.IsNullOrWhiteSpace(incomingStreet) && !string.IsNullOrWhiteSpace(prevStreet)
-                            && (incomingStreet.Contains(prevStreet) || prevStreet.Contains(incomingStreet)))
-                        {
-                            // Re-attach: prepend the house number (and flat prefix if any) to the incoming address
-                            var prefix = string.IsNullOrWhiteSpace(prevComponents.FlatOrUnit)
-                                ? prevComponents.HouseNumber
-                                : $"{prevComponents.FlatOrUnit} {prevComponents.HouseNumber}";
-                            var rescued = $"{prefix} {incoming}";
-                            _logger.LogInformation("[{SessionId}] 🏠 RESCUE: Re-attached house number '{Num}' from history → '{Rescued}'",
-                                SessionId, prefix, rescued);
-                            sttCorrections.Add($"HOUSE NUMBER RESCUE: The destination was updated to '{incoming}' (no house number) but history shows '{prev}' was previously confirmed. The house number '{prefix}' has been automatically re-attached. Updated destination = '{rescued}'. Do NOT ask for the house number again.");
-                            incoming = rescued;
-                            break;
-                        }
-                    }
-                }
-            }
-            // ─────────────────────────────────────────────────────────────────────────
-
             if (StreetNameChanged(_booking.Destination, incoming))
             {
                 _booking.DestLat = _booking.DestLon = null;
@@ -768,7 +693,7 @@ public sealed class CallSession : ICallSession
         if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(_booking.Destination))
         {
             var normPickup = _booking.Pickup.Trim().ToLowerInvariant();
-            var normDest   = _booking.Destination.Trim().ToLowerInvariant();
+            var normDest = _booking.Destination.Trim().ToLowerInvariant();
             if (normPickup == normDest)
             {
                 _logger.LogWarning("[{SessionId}] ⚠ Same-address submitted: pickup == destination ('{Addr}'). Rejecting and re-asking destination.", SessionId, _booking.Pickup);
@@ -972,31 +897,29 @@ public sealed class CallSession : ICallSession
                                 }
                                 else
                                 {
-                                    // ── House-Number Locale Fallback (Pickup + Destination) ──────────────
-                                    // Pass 1: Anchor pickup to locale city, keep destination bare.
-                                    //         This handles the common case where the pickup lacks city.
-                                    // Pass 2: If pass 1 still fails AND the destination also has a house
-                                    //         number, anchor BOTH pickup and destination to the locale city.
-                                    //         This handles cases like "1214A Warwick Road" where the geocoder
-                                    //         resolves to a different city (e.g. Birmingham vs Coventry).
+                                    // ── House-Number Pickup Locale Fallback ──────────────────────────────────
+                                    // If the pickup has a house number it was sent bare (no city). If bare
+                                    // geocoding failed, silently retry with the caller's locale city on the
+                                    // PICKUP only. The destination is NEVER city-enriched here — it could be
+                                    // in any city, and the caller must confirm it if bare geocoding fails.
                                     var pickupComponents = Services.AddressParser.ParseAddress(pickup);
-                                    var destComponents   = Services.AddressParser.ParseAddress(destination);
-                                    var localeCity       = TryExtractCityFromHistory(pickup);
+                                    var localeCity = TryExtractCityFromHistory(pickup);
 
                                     bool retriedWithLocale = false;
                                     if (localeCity != null && pickupComponents.HasHouseNumber)
                                     {
                                         var retryPickup = !pickup.Contains(localeCity, StringComparison.OrdinalIgnoreCase)
                                             ? $"{pickup}, {localeCity}" : pickup;
+                                        // destination always stays bare — we do NOT assume its city
+                                        var retryDest = destination;
 
-                                        // ── Pass 1: bare destination ──────────────────────────────────────────
                                         if (retryPickup != pickup)
                                         {
-                                            _logger.LogInformation("[{SessionId}] 🔄 Pickup locale fallback (pass 1): pickup='{Pickup}' (locale: {City}), dest stays bare='{Dest}'",
-                                                sessionId, retryPickup, localeCity, destination);
+                                            _logger.LogInformation("[{SessionId}] 🔄 Pickup locale fallback: retrying with pickup='{Pickup}' (locale: {City}), dest stays bare='{Dest}'",
+                                                sessionId, retryPickup, localeCity, retryDest);
 
                                             var retryTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
-                                                retryPickup, destination, callerId, _booking.PickupTime,
+                                                retryPickup, retryDest, callerId, _booking.PickupTime,
                                                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
                                                 spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
                                             var retryCompleted = await Task.WhenAny(retryTask, Task.Delay(18000));
@@ -1004,41 +927,45 @@ public sealed class CallSession : ICallSession
                                             if (retryCompleted == retryTask)
                                             {
                                                 var retryResult = await retryTask;
-                                                _logger.LogInformation("[{SessionId}] 📊 Locale-retry (pass 1): NeedsClarification={Clarif}, Fare={Fare}",
+                                                _logger.LogInformation("[{SessionId}] 📊 Locale-retry result: NeedsClarification={Clarif}, Fare={Fare}",
                                                     sessionId, retryResult.NeedsClarification, retryResult.Fare);
 
                                                 if (!retryResult.NeedsClarification && !string.IsNullOrWhiteSpace(retryResult.Fare))
                                                 {
+                                                    // Success — use the locale-enriched result
                                                     result = retryResult;
                                                     retriedWithLocale = true;
-                                                    localeRetrySuccess = true;
-                                                    _logger.LogInformation("[{SessionId}] ✅ Locale fallback (pass 1) resolved: {Fare}, ETA: {Eta}",
+                                                    localeRetrySuccess = true; // signals the outer block to NOT return early
+                                                    _logger.LogInformation("[{SessionId}] ✅ Locale fallback resolved: {Fare}, ETA: {Eta}",
                                                         sessionId, result.Fare, result.Eta);
+                                                    // Fall through to fare presentation below
                                                 }
                                                 else if (retryResult.NeedsClarification && (retryResult.PickupAlternatives?.Length > 0 || retryResult.DestAlternatives?.Length > 0))
                                                 {
+                                                    // Retry returned disambiguation options — use them
                                                     result = retryResult;
                                                     retriedWithLocale = true;
-                                                    _logger.LogInformation("[{SessionId}] ✅ Locale fallback (pass 1) produced disambiguation options", sessionId);
+                                                    _logger.LogInformation("[{SessionId}] ✅ Locale fallback produced disambiguation options", sessionId);
+                                                    // Fall through — the outer if (result.NeedsClarification) block will handle these alternatives
+                                                    // by re-entering sync. Instead, handle inline:
                                                     var rPickupAlts = retryResult.PickupAlternatives ?? Array.Empty<string>();
-                                                    var rDestAlts   = retryResult.DestAlternatives   ?? Array.Empty<string>();
+                                                    var rDestAlts = retryResult.DestAlternatives ?? Array.Empty<string>();
                                                     if (rPickupAlts.Length > 0 || rDestAlts.Length > 0)
                                                     {
+                                                        // Reset and let disambiguation flow handle it
                                                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                                                        _booking.Pickup      = retryPickup;
-                                                        _booking.Destination = destination;
+                                                        // Re-trigger with the enriched addresses stored
+                                                        _booking.Pickup = retryPickup;
+                                                        _booking.Destination = retryDest;
                                                     }
                                                 }
                                             }
                                             else
                                             {
-                                                _logger.LogWarning("[{SessionId}] ⚠️ Locale fallback (pass 1) timed out", sessionId);
+                                                _logger.LogWarning("[{SessionId}] ⚠️ Locale fallback retry timed out", sessionId);
                                             }
                                         }
-
-                                        // Pass 2 removed: anchoring the destination to the pickup's locale city
-                                        // is wrong for cross-city trips (e.g. Coventry pickup → Birmingham dest).
-                                        // The sanity guard now accepts inter-city trips within 50 miles.
+                                    }
 
                                     if (!retriedWithLocale || result.NeedsClarification)
                                     {
@@ -1102,8 +1029,7 @@ public sealed class CallSession : ICallSession
                     else
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
-                        var localeCity1 = TryExtractCityFromHistory(pickup);
-                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId, localeCity1);
+                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
                         EnrichFallbackResultStructuredFields(result, pickup, destination);
                     }
 
@@ -1164,16 +1090,16 @@ public sealed class CallSession : ICallSession
                         }
                     }
 
-            _aiClient.SetAwaitingConfirmation(true);
-            _currentStage = BookingStage.FarePresented;
-            await _aiClient.SetVadModeAsync(useSemantic: false);
-            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no) (stage→FarePresented)", sessionId);
+                    _aiClient.SetAwaitingConfirmation(true);
+                    _currentStage = BookingStage.FarePresented;
+                    await _aiClient.SetVadModeAsync(useSemantic: false);
+                    _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no) (stage→FarePresented)", sessionId);
 
-            OnBookingUpdated?.Invoke(_booking.Clone());
+                    OnBookingUpdated?.Invoke(_booking.Clone());
 
-            var spokenFare = FormatFareForSpeech(_booking.Fare);
-            _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
-                        sessionId, _booking.Fare, spokenFare, _booking.Eta);
+                    var spokenFare = FormatFareForSpeech(_booking.Fare);
+                    _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
+                                sessionId, _booking.Fare, spokenFare, _booking.Eta);
 
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
                     var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
@@ -1448,24 +1374,14 @@ public sealed class CallSession : ICallSession
         }
         else if (DestinationLacksCityContext(pickup))
         {
-            // Enrich pickup with caller's history city ONLY if the pickup has no house number.
-            // A numbered address (e.g. "52A David Road") is specific enough to resolve globally —
-            // the geocoder should resolve it bare first; the locale fallback handles failure.
-            var pickupComponents2 = Services.AddressParser.ParseAddress(pickup);
-            if (!pickupComponents2.HasHouseNumber)
+            // First calculation — no coords yet. Try to enrich pickup from caller history
+            // so Gemini can disambiguate correctly (e.g. "52A David Road" → "52A David Road, Birmingham")
+            var cityFromHistory = TryExtractCityFromHistory(pickup);
+            if (cityFromHistory != null)
             {
-                var cityFromHistory = TryExtractCityFromHistory(pickup);
-                if (cityFromHistory != null)
-                {
-                    _logger.LogInformation("[{SessionId}] 🏙️ Enriching vague pickup '{Pickup}' with history city '{City}' before geocoding",
-                        SessionId, pickup, cityFromHistory);
-                    pickup = $"{pickup}, {cityFromHistory}";
-                }
-            }
-            else
-            {
-                _logger.LogInformation("[{SessionId}] 🏠 Pickup '{Pickup}' has house number — sending bare to geocoder (no city inference)",
-                    SessionId, pickup);
+                _logger.LogInformation("[{SessionId}] 🏙️ Enriching pickup '{Pickup}' with history city '{City}' before geocoding",
+                    SessionId, pickup, cityFromHistory);
+                pickup = $"{pickup}, {cityFromHistory}";
             }
         }
 
@@ -1762,8 +1678,7 @@ public sealed class CallSession : ICallSession
                     else
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
-                        var localeCity2 = TryExtractCityFromHistory(pickup);
-                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId, localeCity2);
+                        result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
                         EnrichFallbackResultStructuredFields(result, pickup, destination);
                     }
 
@@ -2087,7 +2002,7 @@ public sealed class CallSession : ICallSession
         try
         {
             var enrichedPickup = EnrichWithVerifiedCity(_booking.Pickup!, _booking.PickupLat.HasValue && _booking.PickupLat != 0 ? _booking.PickupCity : null);
-            var enrichedDest = _booking.Destination != null 
+            var enrichedDest = _booking.Destination != null
                 ? EnrichWithVerifiedCity(_booking.Destination, _booking.DestLat.HasValue && _booking.DestLat != 0 ? _booking.DestCity : null)
                 : enrichedPickup;
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
@@ -2282,7 +2197,7 @@ public sealed class CallSession : ICallSession
     {
         if (IsImmediatePickup(_booking.PickupTime))
             return $", estimated time of arrival is {_booking.Eta ?? "8 minutes"}";
-        
+
         if (_booking.ScheduledAt.HasValue)
         {
             // Convert UTC to London local for human-readable readback
@@ -2295,11 +2210,11 @@ public sealed class CallSession : ICallSession
             var dayPart = isToday ? "today" : isTomorrow ? "tomorrow" : local.ToString("dddd, MMMM d");
             return $", scheduled for {timeStr} {dayPart}. Do NOT mention any ETA or arrival time — this is an advance booking";
         }
-        
+
         // Fallback: PickupTime is set but ScheduledAt failed to parse — still treat as advance
         if (!string.IsNullOrWhiteSpace(_booking.PickupTime))
             return $", scheduled for {_booking.PickupTime}. Do NOT mention any ETA or arrival time — this is an advance booking";
-        
+
         return "";
     }
 
@@ -2327,7 +2242,7 @@ public sealed class CallSession : ICallSession
     {
         // Standard UK format: Number Street, City — natural verbal delivery order
         var parts = new List<string>();
-        
+
         // Combine number + street into a single part (e.g. "1214A Warwick Road")
         var streetPart = string.Join(" ", new[] { number, street }.Where(s => !string.IsNullOrWhiteSpace(s)));
         if (!string.IsNullOrWhiteSpace(streetPart))
@@ -2335,7 +2250,7 @@ public sealed class CallSession : ICallSession
         if (!string.IsNullOrWhiteSpace(city))
             parts.Add(city);
         // Postal codes intentionally omitted from verbal readback (stored in backend only)
-        
+
         return parts.Count > 0 ? string.Join(", ", parts) : "the address";
     }
 
@@ -2480,8 +2395,8 @@ public sealed class CallSession : ICallSession
         if (string.IsNullOrWhiteSpace(result.PickupStreet))
         {
             var p = Services.AddressParser.ParseAddress(pickup);
-            result.PickupStreet  = p.StreetName;
-            result.PickupNumber  = p.HasHouseNumber ? p.HouseNumber : null;
+            result.PickupStreet = p.StreetName;
+            result.PickupNumber = p.HasHouseNumber ? p.HouseNumber : null;
             if (string.IsNullOrWhiteSpace(result.PickupCity))
                 result.PickupCity = p.TownOrArea.Length > 0 ? p.TownOrArea : TryExtractCityFromHistory(pickup);
             result.PickupFormatted = pickup;
@@ -2493,8 +2408,8 @@ public sealed class CallSession : ICallSession
         if (string.IsNullOrWhiteSpace(result.DestStreet))
         {
             var d = Services.AddressParser.ParseAddress(destination);
-            result.DestStreet  = d.StreetName;
-            result.DestNumber  = d.HasHouseNumber ? d.HouseNumber : null;
+            result.DestStreet = d.StreetName;
+            result.DestNumber = d.HasHouseNumber ? d.HouseNumber : null;
             if (string.IsNullOrWhiteSpace(result.DestCity))
                 result.DestCity = d.TownOrArea.Length > 0 ? d.TownOrArea : TryExtractCityFromHistory(destination);
             result.DestFormatted = destination;
@@ -2594,8 +2509,8 @@ public sealed class CallSession : ICallSession
         if (!match.Success) return address;
 
         var baseNum = match.Groups[1].Value;
-        var digit   = match.Groups[2].Value;
-        var letter  = _digitToLetter[digit];
+        var digit = match.Groups[2].Value;
+        var letter = _digitToLetter[digit];
         var corrected = $"{baseNum}{letter}{trimmed[(match.Length)..]}";
 
         _logger.LogInformation(
@@ -2730,12 +2645,12 @@ public sealed class CallSession : ICallSession
     {
 
         if (string.IsNullOrWhiteSpace(sttText)) return false;
-        
+
         var trimmed = sttText.Trim();
-        
+
         // Too short to be meaningful (e.g., single word fragments)
         if (trimmed.Length < 5) return false;
-        
+
         // Check ratio of Latin characters — if less than 60%, it's likely non-English/garbled
         int latinCount = 0, totalLetters = 0;
         foreach (var c in trimmed)
@@ -2747,17 +2662,17 @@ public sealed class CallSession : ICallSession
                     latinCount++;
             }
         }
-        
+
         // If no letters at all, or mostly non-Latin script, skip
         if (totalLetters == 0) return false;
         var latinRatio = (double)latinCount / totalLetters;
         if (latinRatio < 0.6) return false;
-        
+
         // Check if it has at least 2 recognizable English-like words (3+ chars, Latin)
         var words = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var englishLikeWords = words.Count(w => w.Length >= 3 && w.All(c => char.IsLetterOrDigit(c) || c == '\'' || c == '-'));
         if (englishLikeWords < 2) return false;
-        
+
         return true;
     }
 
