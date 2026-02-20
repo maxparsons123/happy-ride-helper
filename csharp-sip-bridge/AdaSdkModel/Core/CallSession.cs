@@ -1,3 +1,4 @@
+// Last updated: 2026-02-20 (CallSession — Confirmed Address Immunity + Clarification Loop Breaker)
 using AdaSdkModel.Ai;
 using AdaSdkModel.Config;
 using AdaSdkModel.Services;
@@ -533,6 +534,10 @@ public sealed class CallSession : ICallSession
     private volatile bool _fareSanityActive; // blocks book_taxi while sanity alert is shown
     private volatile bool _disambiguationPerformed; // skip fare sanity after disambiguation resolved
 
+    // ── Clarification loop breaker: track no-alt clarification attempts per address ──
+    private int _noAltClarificationCount;
+    private string? _lastNoAltClarificationAddress;
+
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
         // Name validation guard — reject placeholder names
@@ -600,24 +605,42 @@ public sealed class CallSession : ICallSession
             // If normalisation changed the value, record the correction for AI context injection
             if (incoming != raw && raw != null)
                 sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
-            // Safeguard: store previous interpretation before overwriting
-            if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
+
+            // ── CONFIRMED ADDRESS IMMUNITY ──
+            // If pickup is already geocoded (has lat/lon), reject phonetic mishearings.
+            // E.g., "David Rose" should not overwrite verified "David Road".
+            if (_booking.PickupLat.HasValue && _booking.PickupLon.HasValue
+                && !string.IsNullOrWhiteSpace(_booking.Pickup)
+                && !string.IsNullOrWhiteSpace(incoming)
+                && StreetNameChanged(_booking.Pickup, incoming)
+                && IsPhoneticMishearing(_booking.Pickup, incoming))
             {
-                if (!_booking.PreviousPickups.Contains(_booking.Pickup))
-                    _booking.PreviousPickups.Insert(0, _booking.Pickup);
-                _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
-                    SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
+                _logger.LogWarning("[{SessionId}] 🛡️ CONFIRMED ADDRESS IMMUNITY: Rejected pickup update '{Incoming}' — verified pickup '{Verified}' is locked",
+                    SessionId, incoming, _booking.Pickup);
+                sttCorrections.Add($"STT IMMUNITY: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}'. The pickup is LOCKED — use '{_booking.Pickup}' in all future tool calls.");
+                // Do NOT update _booking.Pickup — keep the verified value
             }
-            if (StreetNameChanged(_booking.Pickup, incoming))
+            else
             {
-                _booking.PickupLat = _booking.PickupLon = null;
-                _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
-                _booking.Fare = null;
-                _booking.Eta = null;
-                Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                // Safeguard: store previous interpretation before overwriting
+                if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
+                {
+                    if (!_booking.PreviousPickups.Contains(_booking.Pickup))
+                        _booking.PreviousPickups.Insert(0, _booking.Pickup);
+                    _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
+                        SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
+                }
+                if (StreetNameChanged(_booking.Pickup, incoming))
+                {
+                    _booking.PickupLat = _booking.PickupLon = null;
+                    _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+                    _booking.Fare = null;
+                    _booking.Eta = null;
+                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                    Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                }
+                _booking.Pickup = incoming;
             }
-            _booking.Pickup = incoming;
         }
         if (args.TryGetValue("destination", out var d))
         {
@@ -938,28 +961,50 @@ public sealed class CallSession : ICallSession
 
                                     if (!retriedWithLocale || result.NeedsClarification)
                                     {
-                                        _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives — asking caller for city/area", sessionId);
+                                        // ── CLARIFICATION LOOP BREAKER ──
+                                        // Track how many times we've hit no-alt clarification for the same address.
+                                        // After 2 attempts, fall through to Nominatim fallback instead of looping.
+                                        var destKey = (_booking.Destination ?? "").Trim().ToLowerInvariant();
+                                        if (destKey == (_lastNoAltClarificationAddress ?? ""))
+                                            _noAltClarificationCount++;
+                                        else
+                                        {
+                                            _noAltClarificationCount = 1;
+                                            _lastNoAltClarificationAddress = destKey;
+                                        }
 
-                                        var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
-                                            ? result.ClarificationMessage
-                                            : "I couldn't verify that destination address. Could you repeat the full destination including the street name and city?";
+                                        if (_noAltClarificationCount >= 2)
+                                        {
+                                            _logger.LogWarning("[{SessionId}] 🔄 CLARIFICATION LOOP BREAKER: {Count} no-alt attempts for '{Dest}' — using Nominatim fallback",
+                                                sessionId, _noAltClarificationCount, _booking.Destination);
+                                            _noAltClarificationCount = 0;
+                                            _lastNoAltClarificationAddress = null;
+                                            result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                                            localeRetrySuccess = true; // fall through to fare presentation
+                                        }
+                                        else
+                                        {
+                                            _logger.LogWarning("[{SessionId}] ⚠️ NeedsClarification=true but no alternatives (attempt {Count}) — asking caller for city/area", sessionId, _noAltClarificationCount);
 
-                                        // pickupCityHint removed — pickup is confirmed in state; Ada must not reference it during destination clarification
+                                            var clarMsg = !string.IsNullOrWhiteSpace(result.ClarificationMessage)
+                                                ? result.ClarificationMessage
+                                                : "I couldn't verify that destination address. Could you repeat the full destination including the street name and city?";
 
-                                        // Build confirmed pickup string for the injection (always use state, never raw STT)
-                                        var confirmedPickup = !string.IsNullOrWhiteSpace(_booking.Pickup) ? _booking.Pickup : pickup;
+                                            // Build confirmed pickup string for the injection (always use state, never raw STT)
+                                            var confirmedPickup = !string.IsNullOrWhiteSpace(_booking.Pickup) ? _booking.Pickup : pickup;
 
-                                        await _aiClient.InjectMessageAndRespondAsync(
-                                            $"[ADDRESS CLARIFICATION NEEDED] The DESTINATION '{_booking.Destination}' could not be verified by the geocoder. " +
-                                            $"CRITICAL: The PICKUP address '{confirmedPickup}' IS ALREADY CONFIRMED AND CORRECT — do NOT question it, do NOT mention it, do NOT compare it to anything the caller said. The pickup is locked in state. " +
-                                            "Your task is ONLY to clarify the DESTINATION. " +
-                                            "IMPORTANT: Before asking the caller anything, first check the conversation history — did the caller already provide a DIFFERENT or CORRECTED address for the destination? " +
-                                            "If yes, call sync_booking_data immediately with that corrected destination (do NOT ask again). " +
-                                            $"If no correction is found, ask the caller ONLY about the destination: \"{clarMsg}\" " +
-                                            "Once they confirm or correct the destination, call sync_booking_data again with the full corrected destination.");
+                                            await _aiClient.InjectMessageAndRespondAsync(
+                                                $"[ADDRESS CLARIFICATION NEEDED] The DESTINATION '{_booking.Destination}' could not be verified by the geocoder. " +
+                                                $"CRITICAL: The PICKUP address '{confirmedPickup}' IS ALREADY CONFIRMED AND CORRECT — do NOT question it, do NOT mention it, do NOT compare it to anything the caller said. The pickup is locked in state. " +
+                                                "Your task is ONLY to clarify the DESTINATION. " +
+                                                "IMPORTANT: Before asking the caller anything, first check the conversation history — did the caller already provide a DIFFERENT or CORRECTED address for the destination? " +
+                                                "If yes, call sync_booking_data immediately with that corrected destination (do NOT ask again). " +
+                                                $"If no correction is found, ask the caller ONLY about the destination: \"{clarMsg}\" " +
+                                                "Once they confirm or correct the destination, call sync_booking_data again with the full corrected destination.");
 
-                                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                                        return;
+                                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -2526,6 +2571,49 @@ public sealed class CallSession : ICallSession
             SessionId, fieldName, match.Value, $"{baseNum}{letter}");
 
         return corrected;
+    }
+
+    /// <summary>
+    /// Returns true if the incoming address is a phonetic mishearing of the existing address.
+    /// Compares street-name portions using Levenshtein distance (≤2 chars difference = phonetic mishearing).
+    /// E.g., "David Rose" is a mishearing of "David Road" (distance=2).
+    /// </summary>
+    private static bool IsPhoneticMishearing(string verified, string incoming)
+    {
+        var verifiedStreet = ExtractStreetNameForComparison(verified);
+        var incomingStreet = ExtractStreetNameForComparison(incoming);
+
+        if (string.IsNullOrWhiteSpace(verifiedStreet) || string.IsNullOrWhiteSpace(incomingStreet))
+            return false;
+
+        // If identical, it's not a mishearing
+        if (string.Equals(verifiedStreet, incomingStreet, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // Levenshtein distance ≤ 2 on the street name = phonetic mishearing
+        var distance = LevenshteinDistance(verifiedStreet.ToLowerInvariant(), incomingStreet.ToLowerInvariant());
+        return distance > 0 && distance <= 2;
+    }
+
+    private static string ExtractStreetNameForComparison(string address)
+    {
+        var street = address.Split(',')[0].Trim();
+        var match = System.Text.RegularExpressions.Regex.Match(street, @"^\d+[A-Za-z]?\s+(.+)");
+        return match.Success ? match.Groups[1].Value.Trim() : street;
+    }
+
+    private static int LevenshteinDistance(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a)) return b?.Length ?? 0;
+        if (string.IsNullOrEmpty(b)) return a.Length;
+        var d = new int[a.Length + 1, b.Length + 1];
+        for (var i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (var j = 0; j <= b.Length; j++) d[0, j] = j;
+        for (var i = 1; i <= a.Length; i++)
+            for (var j = 1; j <= b.Length; j++)
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1),
+                    d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+        return d[a.Length, b.Length];
     }
 
     /// <summary>
