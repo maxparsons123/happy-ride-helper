@@ -1581,6 +1581,24 @@ public sealed class CallSession : ICallSession
 
                     ApplyFareResult(result);
 
+                    // ── iCabbi FARE QUOTE (Phase 1 of 2) ──────────────────────────────────────
+                    if (_icabbiEnabled && _icabbi != null)
+                    {
+                        _logger.LogInformation("[{SessionId}] 🚕 [Phase 1] Requesting iCabbi fare quote (siteId={SiteId})", sessionId, _settings.Icabbi.SiteId);
+                        var quote = await _icabbi.GetFareQuoteAsync(_booking, _settings.Icabbi.SiteId);
+                        if (quote != null)
+                        {
+                            _logger.LogInformation("[{SessionId}] ✅ iCabbi quote: {OldFare} → {NewFare}, ETA: {Eta}",
+                                sessionId, _booking.Fare, quote.FareFormatted, quote.EtaFormatted);
+                            _booking.Fare = quote.FareFormatted;
+                            _booking.Eta = quote.EtaFormatted;
+                        }
+                        else
+                        {
+                            _logger.LogWarning("[{SessionId}] ⚠️ iCabbi quote unavailable — using Nominatim estimate ({Fare})", sessionId, _booking.Fare);
+                        }
+                    }
+
                     _aiClient.SetAwaitingConfirmation(true);
                     _currentStage = BookingStage.FarePresented;
                     await _aiClient.SetVadModeAsync(useSemantic: false);
