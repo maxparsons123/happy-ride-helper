@@ -306,7 +306,38 @@ public sealed class GeminiAddressClient
         ["Birmingham"] = new[] { "School Road", "Church Road", "Park Road", "Station Road", "High Street", "Victoria Road", "Albert Road", "Green Lane", "New Road", "Warwick Road", "Church Lane", "Grove Road", "Mill Lane", "King Street", "Queen Street" },
         ["Coventry"] = new[] { "Church Road", "Station Road", "High Street", "Park Road", "School Road", "Victoria Road", "Albert Road", "Green Lane", "New Road" },
         ["London"] = new[] { "Church Road", "Station Road", "High Street", "Park Road", "School Road", "Victoria Road", "Albert Road", "Green Lane", "New Road" },
-        ["Manchester"] = new[] { "Church Road", "Station Road", "High Street", "Park Road", "School Road", "Victoria Road", "Albert Road", "Green Lane", "New Road" },
+    };
+
+    // ── Known areas per multi-district street, used to build disambiguation options ──
+    // city → street → list of distinct areas/districts so Ada can offer specific choices
+    private static readonly Dictionary<string, Dictionary<string, string[]>> KnownMultiDistrictAreas = new()
+    {
+        ["Birmingham"] = new Dictionary<string, string[]>
+        {
+            ["School Road"]   = new[] { "Moseley", "Handsworth", "Acocks Green", "Yardley Wood", "Kings Heath", "Aston" },
+            ["Church Road"]   = new[] { "Erdington", "Moseley", "Yardley", "Sheldon", "Northfield" },
+            ["Park Road"]     = new[] { "Hockley", "Moseley", "Handsworth", "Solihull" },
+            ["Station Road"]  = new[] { "Erdington", "Acocks Green", "Stechford", "Kings Norton", "Handsworth" },
+            ["High Street"]   = new[] { "Erdington", "Harborne", "Kings Heath", "Selly Oak", "Handsworth" },
+            ["Victoria Road"] = new[] { "Aston", "Harborne", "Erdington", "Acocks Green" },
+            ["Albert Road"]   = new[] { "Erdington", "Acocks Green", "Handsworth", "Stechford" },
+            ["Green Lane"]    = new[] { "Small Heath", "Bordesley Green", "Erdington", "Handsworth" },
+            ["New Road"]      = new[] { "Great Barr", "Handsworth", "Perry Barr", "Sutton Coldfield" },
+            ["Warwick Road"]  = new[] { "Olton", "Acocks Green", "Tyseley", "Greet", "Sparkhill" },
+            ["Church Lane"]   = new[] { "Handsworth", "Erdington", "Moseley", "Selly Oak" },
+            ["Grove Road"]    = new[] { "Acocks Green", "Moseley", "Kings Heath", "Erdington" },
+            ["Mill Lane"]     = new[] { "Moseley", "Kings Heath", "Northfield", "Harborne" },
+            ["King Street"]   = new[] { "Birmingham City Centre", "Erdington", "Oldbury" },
+            ["Queen Street"]  = new[] { "Birmingham City Centre", "Erdington", "Walsall" },
+        },
+        ["Coventry"] = new Dictionary<string, string[]>
+        {
+            ["Church Road"]   = new[] { "Wyken", "Binley", "Holbrooks", "Ernesford Grange" },
+            ["Station Road"]  = new[] { "Canley", "Tile Hill", "Baginton", "Coventry City Centre" },
+            ["High Street"]   = new[] { "Coventry City Centre", "Earlsdon", "Stivichall" },
+            ["Park Road"]     = new[] { "Foleshill", "Wyken", "Cheylesmore" },
+            ["School Road"]   = new[] { "Wyken", "Binley", "Willenhall", "Canley" },
+        },
     };
 
     private static readonly string[] KnownCities = { "Coventry", "Birmingham", "London", "Manchester", "Leeds", "Sheffield", "Nottingham", "Leicester", "Bristol", "Reading", "Liverpool", "Newcastle", "Brighton", "Oxford", "Cambridge", "Wolverhampton", "Derby", "Stoke", "Southampton", "Portsmouth", "Edinburgh", "Glasgow", "Cardiff", "Belfast", "Warwick", "Kenilworth", "Solihull", "Sutton Coldfield", "Leamington", "Rugby", "Nuneaton", "Bedworth", "Stratford", "Redditch", "Amsterdam", "Rotterdam", "The Hague", "Utrecht", "Eindhoven", "Gent", "Ghent", "Brussels", "Antwerp", "Bruges" };
@@ -401,6 +432,8 @@ public sealed class GeminiAddressClient
         }
 
         // ── Enforce disambiguation for known multi-district streets ──
+        // Track which sides were force-flagged so the DB auto-correct step cannot clear them.
+        var forceAmbiguousSides = new HashSet<string>();
         foreach (var side in new[] { "pickup", "dropoff" })
         {
             var addr = work[side];
@@ -420,7 +453,7 @@ public sealed class GeminiAddressClient
             var hasDistrict = originalInput.Split(',').Length > 2;
             var hasPostcode = System.Text.RegularExpressions.Regex.IsMatch(originalInput, @"\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-            // Check house number discrimination
+            // Check house number discrimination: very high numbers are area-unique (e.g. 1214A Warwick Road)
             var streetNum = addr["street_number"]?.GetValue<string>() ?? "";
             var numMatch = System.Text.RegularExpressions.Regex.Match(streetNum, @"^(\d+)");
             var houseNumber = numMatch.Success ? int.Parse(numMatch.Groups[1].Value) : 0;
@@ -433,11 +466,25 @@ public sealed class GeminiAddressClient
                     continue;
                 }
 
-                _logger.LogInformation("⚠️ \"{Street}\" in {City} is multi-district — forcing disambiguation", streetName, city);
+                _logger.LogInformation("⚠️ \"{Street}\" in {City} is multi-district — forcing disambiguation (house={HouseNum})", streetName, city, houseNumber);
                 addr["is_ambiguous"] = true;
                 work["status"] = "clarification_needed";
-                if (work["clarification_message"] == null || string.IsNullOrEmpty(work["clarification_message"]?.GetValue<string>()))
-                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area or district is it in?";
+                forceAmbiguousSides.Add(side);
+
+                // Build area alternatives from the KnownMultiDistrictAreas table
+                if (KnownMultiDistrictAreas.TryGetValue(city, out var areaMap) && areaMap.TryGetValue(streetName, out var areas))
+                {
+                    var altsArr = new System.Text.Json.Nodes.JsonArray();
+                    foreach (var area in areas)
+                        altsArr.Add($"{streetName}, {area}, {city}");
+                    addr["alternatives"] = altsArr;
+                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", areas.Take(3))}.";
+                }
+                else
+                {
+                    if (work["clarification_message"] == null || string.IsNullOrEmpty(work["clarification_message"]?.GetValue<string>()))
+                        work["clarification_message"] = $"There are several {streetName}s in {city}. Which area or district is it in?";
+                }
             }
         }
 
@@ -539,8 +586,14 @@ public sealed class GeminiAddressClient
                         addr["street_name"] = best.MatchedName;
                         addr["lat"] = best.Lat.Value;
                         addr["lon"] = best.Lon.Value;
-                        addr["is_ambiguous"] = false;
-                        addr["alternatives"] = new System.Text.Json.Nodes.JsonArray();
+                        // CRITICAL: do NOT clear is_ambiguous if the multi-district guard forced it —
+                        // the street existing in the DB does NOT mean it's unambiguous (School Road
+                        // exists in many Birmingham districts). Only clear if we didn't force it.
+                        if (!forceAmbiguousSides.Contains(side))
+                        {
+                            addr["is_ambiguous"] = false;
+                            addr["alternatives"] = new System.Text.Json.Nodes.JsonArray();
+                        }
                         sanityCorrected = true;
                     }
                     else if (fuzzyMatches.Count > 1)
