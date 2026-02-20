@@ -966,14 +966,14 @@ CRITICAL: Compare the STREET NAME the user said vs the STREET NAME the geocoder 
 
 Evaluation Criteria:
 1. Street Name Phonetic Match: Compare the street names character by character. "Russell" vs "Rossville" — these are DIFFERENT streets even though they share "R-s". "David" vs "Davies" — DIFFERENT streets. "528" vs "52A" — same address, just number confusion.
-2. Regional Bias: The user is in ${contextCity || 'an unknown city'}. If GEO returns a result in a city >20 miles away, it is a MISMATCH unless the user explicitly named that distant city.
+2. Regional Bias: The user is in ${contextCity || 'an unknown city'}. The taxi may be travelling to a DIFFERENT city — this is a valid trip. Only flag a MISMATCH if the geocoder resolved to a city that is MORE THAN 50 miles away from the context city AND the user did not explicitly name that distant city. Nearby cities (e.g. Coventry → Birmingham, ~20 miles) are NORMAL taxi trips and must NOT be flagged as mismatches.
 3. STT Artifacts: "NUX" might be "MAX", "Threw up" might be "72". But "Rossville" is NOT a mishearing of "Russell" — they are genuinely different street names.
 4. Fabrication Detection: If the geocoder returned a street name that is phonetically similar but NOT identical to the input, AND you're not confident that street actually exists in that city, mark as MISMATCH. The geocoder may have fabricated a local version of a distant street.
 
 Decision Rules:
 - If the street name's core identity changed (Russell→Rossville, David→Davies): MISMATCH. Suggest what the user likely meant.
 - If only the house number changed slightly (528→52A, letter/digit confusion): MATCH
-- If the city changed to a distant city: MISMATCH
+- If the city changed to a DISTANT city (>50 miles): MISMATCH. Nearby inter-city trips within 50 miles are VALID.
 - IMPORTANT: Two streets in the SAME city can still be a MISMATCH if the street NAMES are different.
 - LANDMARK/POI RESOLUTION: If the user said a landmark or POI (e.g., "Train Station", "Hospital", "Airport", "University", "Bus Station", "Shopping Centre") and the geocoder returned the STREET where that landmark is located (e.g., "Station Square" for a train station, "Hospital Lane" for a hospital), this is a MATCH — the geocoder correctly resolved the landmark to its physical address. Do NOT flag this as a mismatch.
 

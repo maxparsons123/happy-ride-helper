@@ -1036,58 +1036,9 @@ public sealed class CallSession : ICallSession
                                             }
                                         }
 
-                                        // ── Pass 2: anchor destination to locale city as well ─────────────────
-                                        // Only if pass 1 failed and the destination has a house number
-                                        // (a numbered address in the wrong city is a very common geocoder error).
-                                        if (!retriedWithLocale && destComponents.HasHouseNumber)
-                                        {
-                                            var retryDest = !destination.Contains(localeCity, StringComparison.OrdinalIgnoreCase)
-                                                ? $"{destination}, {localeCity}" : destination;
-
-                                            if (retryDest != destination)
-                                            {
-                                                _logger.LogInformation("[{SessionId}] 🔄 Locale fallback (pass 2): both anchored — pickup='{Pickup}', dest='{Dest}' (locale: {City})",
-                                                    sessionId, retryPickup, retryDest, localeCity);
-
-                                                var retry2Task = _fareCalculator.ExtractAndCalculateWithAiAsync(
-                                                    retryPickup, retryDest, callerId, _booking.PickupTime,
-                                                    spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                                                    spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
-                                                var retry2Completed = await Task.WhenAny(retry2Task, Task.Delay(18000));
-
-                                                if (retry2Completed == retry2Task)
-                                                {
-                                                    var retry2Result = await retry2Task;
-                                                    _logger.LogInformation("[{SessionId}] 📊 Locale-retry (pass 2): NeedsClarification={Clarif}, Fare={Fare}",
-                                                        sessionId, retry2Result.NeedsClarification, retry2Result.Fare);
-
-                                                    if (!retry2Result.NeedsClarification && !string.IsNullOrWhiteSpace(retry2Result.Fare))
-                                                    {
-                                                        result = retry2Result;
-                                                        retriedWithLocale = true;
-                                                        localeRetrySuccess = true;
-                                                        // Update booking with the city-enriched destination so Ada sees it
-                                                        _booking.Destination = retryDest;
-                                                        _logger.LogInformation("[{SessionId}] ✅ Locale fallback (pass 2) resolved: {Fare}, ETA: {Eta}",
-                                                            sessionId, result.Fare, result.Eta);
-                                                    }
-                                                    else if (retry2Result.NeedsClarification && (retry2Result.PickupAlternatives?.Length > 0 || retry2Result.DestAlternatives?.Length > 0))
-                                                    {
-                                                        result = retry2Result;
-                                                        retriedWithLocale = true;
-                                                        _logger.LogInformation("[{SessionId}] ✅ Locale fallback (pass 2) produced disambiguation options", sessionId);
-                                                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                                                        _booking.Pickup      = retryPickup;
-                                                        _booking.Destination = retryDest;
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    _logger.LogWarning("[{SessionId}] ⚠️ Locale fallback (pass 2) timed out", sessionId);
-                                                }
-                                            }
-                                        }
-                                    }
+                                        // Pass 2 removed: anchoring the destination to the pickup's locale city
+                                        // is wrong for cross-city trips (e.g. Coventry pickup → Birmingham dest).
+                                        // The sanity guard now accepts inter-city trips within 50 miles.
 
                                     if (!retriedWithLocale || result.NeedsClarification)
                                     {
