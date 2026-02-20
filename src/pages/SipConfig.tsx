@@ -138,22 +138,25 @@ const SipConfig = () => {
 
   const saveIcabbiCompany = async (company: IcabbiCompany) => {
     setIcabbiSaving(company.id);
+    const patch = {
+      icabbi_enabled: company.icabbi_enabled,
+      icabbi_site_id: company.icabbi_site_id ?? null,
+      icabbi_company_id: company.icabbi_company_id || null,
+      icabbi_app_key: company.icabbi_app_key || null,
+      icabbi_secret_key: company.icabbi_secret_key || null,
+      icabbi_tenant_base: company.icabbi_tenant_base || "https://yourtenant.icabbi.net",
+      updated_at: new Date().toISOString(),
+    };
+
     const { error } = await supabase
       .from("companies")
-      .update({
-        icabbi_enabled: company.icabbi_enabled,
-        icabbi_site_id: company.icabbi_site_id,
-        icabbi_company_id: company.icabbi_company_id || null,
-        icabbi_app_key: company.icabbi_app_key || null,
-        icabbi_secret_key: company.icabbi_secret_key || null,
-        icabbi_tenant_base: company.icabbi_tenant_base || "https://yourtenant.icabbi.net",
-        updated_at: new Date().toISOString(),
-      })
+      .update(patch)
       .eq("id", company.id);
 
     if (error) {
       toast({ title: "Error saving iCabbi settings", description: error.message, variant: "destructive" });
     } else {
+      setIcabbiCompanies(prev => prev.map(c => c.id === company.id ? { ...c, ...patch } : c));
       toast({ title: "iCabbi settings saved", description: `${company.name} updated` });
     }
     setIcabbiSaving(null);
