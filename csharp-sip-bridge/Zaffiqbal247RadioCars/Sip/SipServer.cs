@@ -17,6 +17,9 @@ namespace Zaffiqbal247RadioCars.Sip;
 /// <summary>
 /// Multi-call SIP server with G.711 A-law passthrough + OpenAI SDK.
 /// Supports operator mode (manual answer/reject) and auto-answer mode.
+///
+/// Audio Pipeline: v160 — OnAudioOut pre-sliced to exact 160-byte A-law frames.
+/// Eliminates accumulator lock churn; queue receives zero-remainder frame writes only.
 /// </summary>
 public sealed class SipServer : IAsyncDisposable
 {
