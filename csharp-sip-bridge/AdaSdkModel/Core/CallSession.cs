@@ -2278,7 +2278,7 @@ public sealed class CallSession : ICallSession
         var bookingDest = _booking.Destination ?? "";
 
         // Check if the booking destination is a named place using AddressParser
-        var parsed = Services.AddressParser.Parse(bookingDest);
+        var parsed = Services.AddressParser.ParseAddress(bookingDest);
         if (!parsed.IsStreetTypeAddress && !string.IsNullOrWhiteSpace(bookingDest))
         {
             // Named place — use booking state destination, append geocoded city if available
