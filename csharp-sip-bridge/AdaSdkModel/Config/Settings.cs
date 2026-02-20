@@ -21,6 +21,7 @@ public sealed class AppSettings
     public GeminiSettings Gemini { get; set; } = new();
     public SimliSettings Simli { get; set; } = new();
     public IcabbiSettings Icabbi { get; set; } = new();
+    public ZoneGuardSettings ZoneGuard { get; set; } = new();
 }
 
 public sealed class SimliSettings
@@ -163,4 +164,44 @@ public sealed class SipAccount
     }
 
     public override string ToString() => $"{Label} ({Username}@{Server})";
+}
+
+/// <summary>
+/// Controls the Zone Guard — pickup address validation against zone POIs
+/// extracted from the Zone Editor (streets + businesses within dispatch zones).
+///
+/// FEATURE FLAG: Enabled = false by default.
+/// To activate: set "ZoneGuard": { "Enabled": true } in appsettings.json
+/// and ensure zone POIs have been extracted via the Zone Editor.
+///
+/// Plug-in point (NOT YET WIRED):
+///   CallSession.HandleSyncBookingData() → after house-number guard, before fare calc.
+/// </summary>
+public sealed class ZoneGuardSettings
+{
+    /// <summary>Master on/off switch. False = service is built but does nothing.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Minimum fuzzy similarity score to consider a POI a match (0-1).
+    /// 0.25 = loose (good recall, more false positives)
+    /// 0.35 = moderate (recommended starting point)
+    /// 0.50 = strict (low false positives, may miss valid addresses)
+    /// </summary>
+    public float MinSimilarity { get; set; } = 0.25f;
+
+    /// <summary>
+    /// When true, reject booking if pickup doesn't match any zone POI.
+    /// When false (default), only log a warning — booking still proceeds.
+    /// </summary>
+    public bool BlockOnNoMatch { get; set; } = false;
+
+    /// <summary>Maximum number of candidate POIs to return per check.</summary>
+    public int MaxCandidates { get; set; } = 10;
+
+    /// <summary>
+    /// Optional company ID to scope POI matching to a specific company's zones.
+    /// Empty = search all active zones across all companies.
+    /// </summary>
+    public string CompanyId { get; set; } = "";
 }
