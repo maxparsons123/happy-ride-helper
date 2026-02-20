@@ -11,12 +11,17 @@ using SIPSorceryMedia.Abstractions;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// Pure A-law RTP playout engine v11.0 — SMOOTH EDITION.
+/// Pure A-law RTP playout engine v12.0 — GRACE EDITION.
 ///
-/// Key improvements over v10.2:
-///   ✅ 200ms hysteresis start buffer (10 frames) — eliminates grumble/jitter from rapid Play→Silence→Play toggling
-///   ✅ Rebuffer only when queue hits 0 (not on single missed dequeue) — prevents false underruns
-///   ✅ _wasPlaying guard — suppresses spurious OnQueueEmpty events during silence padding
+/// Key improvements over v11.0 (SMOOTH EDITION):
+///   ✅ 60ms underrun grace window (3 frames) — absorbs inter-burst gaps from OpenAI without triggering rebuffer
+///   ✅ Dual resume thresholds — 200ms cold start vs 100ms warm restart for mid-call gaps
+///   ✅ OnQueueEmpty suppressed during grace window — prevents premature NotifyPlayoutComplete mid-sentence
+///   ✅ _hasPlayedAtLeastOneFrame flag — distinguishes cold start from warm resume for threshold selection
+///   ✅ _consecutiveUnderruns counter — only genuine 60ms+ stalls count as real underruns in stats
+///
+/// Retained from v11.0:
+///   ✅ 200ms hysteresis start buffer (10 frames) — eliminates grumble on first word
 ///   ✅ Drift clamping — resets clock if >100ms behind instead of accumulating slip
 ///   ✅ Circuit breaker — fires OnFault after 10 consecutive send errors
 ///   ✅ 30s stats logging — avg queue depth + underrun count for diagnostics
