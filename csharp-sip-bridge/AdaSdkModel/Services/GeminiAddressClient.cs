@@ -308,37 +308,54 @@ public sealed class GeminiAddressClient
         ["London"] = new[] { "Church Road", "Station Road", "High Street", "Park Road", "School Road", "Victoria Road", "Albert Road", "Green Lane", "New Road" },
     };
 
-    // ── Known areas per multi-district street, used to build disambiguation options ──
-    // city → street → list of distinct areas/districts so Ada can offer specific choices
-    private static readonly Dictionary<string, Dictionary<string, string[]>> KnownMultiDistrictAreas = new()
+    // ── In-memory cache: city → list of district/suburb names fetched from uk_locations ──
+    // Areas are stored in the database (uk_locations, type='district'/'suburb') and can be
+    // updated there without recompiling. Cache TTL = 60 min.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string[] Areas, DateTime ExpiresAt)> _cityAreaCache = new();
+    private static readonly TimeSpan _cityAreaCacheTtl = TimeSpan.FromMinutes(60);
+
+    /// <summary>
+    /// Fetch distinct area/district names for a city from uk_locations.
+    /// Results are cached 60 min. Returns empty array on failure (fail-open).
+    /// </summary>
+    private async Task<string[]> GetCityAreasAsync(string city)
     {
-        ["Birmingham"] = new Dictionary<string, string[]>
+        if (_cityAreaCache.TryGetValue(city, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
+            return cached.Areas;
+
+        try
         {
-            ["School Road"]   = new[] { "Moseley", "Handsworth", "Acocks Green", "Yardley Wood", "Kings Heath", "Aston" },
-            ["Church Road"]   = new[] { "Erdington", "Moseley", "Yardley", "Sheldon", "Northfield" },
-            ["Park Road"]     = new[] { "Hockley", "Moseley", "Handsworth", "Solihull" },
-            ["Station Road"]  = new[] { "Erdington", "Acocks Green", "Stechford", "Kings Norton", "Handsworth" },
-            ["High Street"]   = new[] { "Erdington", "Harborne", "Kings Heath", "Selly Oak", "Handsworth" },
-            ["Victoria Road"] = new[] { "Aston", "Harborne", "Erdington", "Acocks Green" },
-            ["Albert Road"]   = new[] { "Erdington", "Acocks Green", "Handsworth", "Stechford" },
-            ["Green Lane"]    = new[] { "Small Heath", "Bordesley Green", "Erdington", "Handsworth" },
-            ["New Road"]      = new[] { "Great Barr", "Handsworth", "Perry Barr", "Sutton Coldfield" },
-            ["Warwick Road"]  = new[] { "Olton", "Acocks Green", "Tyseley", "Greet", "Sparkhill" },
-            ["Church Lane"]   = new[] { "Handsworth", "Erdington", "Moseley", "Selly Oak" },
-            ["Grove Road"]    = new[] { "Acocks Green", "Moseley", "Kings Heath", "Erdington" },
-            ["Mill Lane"]     = new[] { "Moseley", "Kings Heath", "Northfield", "Harborne" },
-            ["King Street"]   = new[] { "Birmingham City Centre", "Erdington", "Oldbury" },
-            ["Queen Street"]  = new[] { "Birmingham City Centre", "Erdington", "Walsall" },
-        },
-        ["Coventry"] = new Dictionary<string, string[]>
+            var encoded = Uri.EscapeDataString(city);
+            var url = $"{_supabase.Url}/rest/v1/uk_locations?select=name&parent_city=ilike.{encoded}&type=in.(district,suburb,neighbourhood,area,ward)&order=name&limit=50";
+            var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Add("apikey", _supabase.AnonKey);
+            req.Headers.Add("Authorization", $"Bearer {_supabase.AnonKey}");
+
+            var resp = await _http.SendAsync(req);
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var arr = doc.RootElement;
+                if (arr.ValueKind == JsonValueKind.Array && arr.GetArrayLength() > 0)
+                {
+                    var areas = arr.EnumerateArray()
+                        .Select(e => e.GetProperty("name").GetString() ?? "")
+                        .Where(n => !string.IsNullOrWhiteSpace(n))
+                        .ToArray();
+                    _cityAreaCache[city] = (areas, DateTime.UtcNow.Add(_cityAreaCacheTtl));
+                    _logger.LogDebug("🗺️ Loaded {Count} districts for {City} from uk_locations", areas.Length, city);
+                    return areas;
+                }
+            }
+        }
+        catch (Exception ex)
         {
-            ["Church Road"]   = new[] { "Wyken", "Binley", "Holbrooks", "Ernesford Grange" },
-            ["Station Road"]  = new[] { "Canley", "Tile Hill", "Baginton", "Coventry City Centre" },
-            ["High Street"]   = new[] { "Coventry City Centre", "Earlsdon", "Stivichall" },
-            ["Park Road"]     = new[] { "Foleshill", "Wyken", "Cheylesmore" },
-            ["School Road"]   = new[] { "Wyken", "Binley", "Willenhall", "Canley" },
-        },
-    };
+            _logger.LogDebug(ex, "GetCityAreasAsync failed for {City} (non-fatal)", city);
+        }
+
+        return Array.Empty<string>();
+    }
 
     private static readonly string[] KnownCities = { "Coventry", "Birmingham", "London", "Manchester", "Leeds", "Sheffield", "Nottingham", "Leicester", "Bristol", "Reading", "Liverpool", "Newcastle", "Brighton", "Oxford", "Cambridge", "Wolverhampton", "Derby", "Stoke", "Southampton", "Portsmouth", "Edinburgh", "Glasgow", "Cardiff", "Belfast", "Warwick", "Kenilworth", "Solihull", "Sutton Coldfield", "Leamington", "Rugby", "Nuneaton", "Bedworth", "Stratford", "Redditch", "Amsterdam", "Rotterdam", "The Hague", "Utrecht", "Eindhoven", "Gent", "Ghent", "Brussels", "Antwerp", "Bruges" };
 
@@ -432,7 +449,8 @@ public sealed class GeminiAddressClient
         }
 
         // ── Enforce disambiguation for known multi-district streets ──
-        // Track which sides were force-flagged so the DB auto-correct step cannot clear them.
+        // Areas are fetched dynamically from uk_locations (cached 60 min).
+        // Track force-flagged sides so the DB auto-correct step cannot clear them.
         var forceAmbiguousSides = new HashSet<string>();
         foreach (var side in new[] { "pickup", "dropoff" })
         {
@@ -453,7 +471,7 @@ public sealed class GeminiAddressClient
             var hasDistrict = originalInput.Split(',').Length > 2;
             var hasPostcode = System.Text.RegularExpressions.Regex.IsMatch(originalInput, @"\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-            // Check house number discrimination: very high numbers are area-unique (e.g. 1214A Warwick Road)
+            // High house numbers are area-unique (e.g. 1214A Warwick Road)
             var streetNum = addr["street_number"]?.GetValue<string>() ?? "";
             var numMatch = System.Text.RegularExpressions.Regex.Match(streetNum, @"^(\d+)");
             var houseNumber = numMatch.Success ? int.Parse(numMatch.Groups[1].Value) : 0;
@@ -471,11 +489,12 @@ public sealed class GeminiAddressClient
                 work["status"] = "clarification_needed";
                 forceAmbiguousSides.Add(side);
 
-                // Build area alternatives from the KnownMultiDistrictAreas table
-                if (KnownMultiDistrictAreas.TryGetValue(city, out var areaMap) && areaMap.TryGetValue(streetName, out var areas))
+                // Fetch area list dynamically from uk_locations
+                var areas = await GetCityAreasAsync(city);
+                if (areas.Length > 0)
                 {
                     var altsArr = new System.Text.Json.Nodes.JsonArray();
-                    foreach (var area in areas)
+                    foreach (var area in areas.Take(6))
                         altsArr.Add($"{streetName}, {area}, {city}");
                     addr["alternatives"] = altsArr;
                     work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", areas.Take(3))}.";
