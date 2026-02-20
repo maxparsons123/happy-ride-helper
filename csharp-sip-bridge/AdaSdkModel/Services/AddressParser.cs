@@ -70,6 +70,23 @@ public static class AddressParser
     };
 
     /// <summary>
+    /// Adjective/qualifier prefixes that form part of a road name rather than a house number.
+    /// e.g. "Devon Russell Street", "Old Town Road", "New Street", "Upper Hill Road".
+    /// When the first word is one of these AND there is no leading digit, the address
+    /// is treated as a named road — house number not required.
+    /// </summary>
+    private static readonly HashSet<string> RoadNamePrefixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Counties / regions that prefix road names
+        "devon", "cornwall", "kent", "essex", "surrey", "sussex", "dorset",
+        "suffolk", "norfolk", "lincoln", "york", "durham", "cumbria",
+        // Common adjective road prefixes
+        "new", "old", "upper", "lower", "north", "south", "east", "west",
+        "great", "little", "long", "high", "low", "near", "far", "broad",
+        "central", "inner", "outer", "middle", "cross", "back", "front"
+    };
+
+    /// <summary>
     /// Parse a UK address string into its components.
     /// House number "0" means not found.
     /// </summary>
@@ -139,10 +156,22 @@ public static class AddressParser
             }
         }
 
+        // Road-name prefix guard:
+        // If the first word is an adjective/county prefix (e.g. "Devon", "Old", "New") and
+        // there is NO leading house number, the full phrase is a named road — not a residential
+        // address — so a house number must NOT be required.
+        // Example: "Devon Russell Street" → named road ✓
+        //          "Old Town Road"        → named road ✓
+        //          "52 Old Town Road"     → residential (has number) ✓
+        bool startsWithRoadPrefix = parts.Length > 0 && RoadNamePrefixes.Contains(parts[0]);
+        bool hasLeadingNumber = components.HouseNumber != "0";
+
         if (suffixIndex != -1)
         {
             components.StreetName = string.Join(" ", parts.Take(suffixIndex + 1));
-            components.IsStreetTypeAddress = true;
+
+            // Suppress house-number requirement for named roads (road-prefix with no number)
+            components.IsStreetTypeAddress = !(startsWithRoadPrefix && !hasLeadingNumber);
 
             if (suffixIndex + 1 < parts.Length)
                 components.BuildingName = string.Join(" ", parts.Skip(suffixIndex + 1));
@@ -150,7 +179,6 @@ public static class AddressParser
         else
         {
             components.StreetName = remaining;
-            // Named place or no recognizable street suffix — house number not required
             components.IsStreetTypeAddress = false;
         }
 
