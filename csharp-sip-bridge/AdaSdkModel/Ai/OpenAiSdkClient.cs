@@ -238,7 +238,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 OutputAudioFormat = ConversationAudioFormat.G711Alaw,
                 InputTranscriptionOptions = new ConversationInputTranscriptionOptions
                 {
-                    Model = "whisper-1"
+                    Model = "whisper-1",
+                    // Vocabulary hint: tell Whisper to expect UK alphanumeric house numbers.
+                    // Without this, "52A" is often transcribed as "52-8" because the letter
+                    // "A" is phonetically heard as "eight" in a numeric context.
+                    Prompt = "UK address. House numbers may include letter suffixes: 52A, 14B, 7C, 22D. Street names include David Road, Dovey Road, Warwick Road, High Street."
                 },
                 // SDK 2.1.0-beta.4 doesn't support semantic_vad natively.
                 // Simulate patient vs responsive modes using server_vad with different parameters.
@@ -1281,6 +1285,15 @@ CHANGE DETECTION & BOOKING STATE AWARENESS (CRITICAL)
 
 After every sync_booking_data call, you will receive a [BOOKING STATE] message showing
 exactly what is currently stored. This is your GROUND TRUTH — it overrides your memory.
+
+STT MISHEARING RECOVERY:
+Speech-to-text (Whisper) often mishears alphanumeric UK house numbers.
+When you see these patterns in a pickup or destination, silently correct before calling sync_booking_data:
+- "52-8 David Road"  → "52A David Road"   (digit-8 after hyphen = letter A)
+- "14-3 High Street" → "14B High Street"  (digit-3 after hyphen = letter B)
+- "7-4 Park Lane"    → "7D Park Lane"     (digit-4 after hyphen = letter D)
+Rule: NUMBER-HYPHEN-8 → NUMBER+A, NUMBER-HYPHEN-3 → NUMBER+B, NUMBER-HYPHEN-4 → NUMBER+D.
+Apply ONLY when a hyphen separates two number groups in a house-number position. Never alter plain numbers like "43" or "48".
 
 CHANGE DETECTION RULES:
 1. If the caller says something that DIFFERS from a field in [BOOKING STATE], it is a CORRECTION.
