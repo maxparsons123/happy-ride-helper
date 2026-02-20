@@ -1161,10 +1161,18 @@ STEP-BY-STEP (DO NOT SKIP ANY STEP):
 
 1. After all fields collected, say ONLY: ""Let me check those addresses and get you a price.""
 2. WAIT SILENTLY for the [FARE RESULT] message — DO NOT call book_taxi, DO NOT speak, DO NOT ask for confirmation.
-3. When you receive [FARE RESULT], read back the VERIFIED addresses (City, Street, Number format — NO postal codes) and fare:
-   For IMMEDIATE bookings (ASAP/now): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare] with an estimated arrival in [ETA]. Shall I book that for you?""
-   For SCHEDULED bookings (future time): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare]. Shall I book that for you?"" (NO ETA for scheduled bookings)
-4. WAIT for the user to say YES (""yes"", ""confirm"", ""go ahead"", etc.)
+3. When you receive [FARE RESULT], read back the VERIFIED addresses (City, Street, Number format — NO postal codes) and fare, then offer the fixed price option:
+   For IMMEDIATE bookings (ASAP/now): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare] with an estimated arrival in [ETA]. We offer a fixed price of [fare] — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?""
+   For SCHEDULED bookings (future time): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare]. We offer a fixed price of [fare] — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?"" (NO ETA for scheduled bookings)
+
+FIXED PRICE / METER RULES:
+- ALWAYS present both options after the fare — fixed price (pay by link) and pay by meter.
+- If the caller chooses FIXED PRICE: say ""Great, I'll arrange a payment link for you."" then proceed to book_taxi(action=""confirmed"").
+- If the caller chooses METER / PAY ON THE DAY: say ""No problem, you'll pay by meter on the day."" then proceed to book_taxi(action=""confirmed"").
+- If the caller just says ""yes"", ""book it"", or ""confirm"" without choosing, default to meter and proceed.
+- NEVER skip this pricing choice step — it MUST be offered every time a fare is presented.
+
+4. WAIT for the user to respond with their payment preference OR a general confirmation.
 5. ONLY THEN call book_taxi(action=""confirmed"")
 6. Give reference ID from the tool result
 7. Ask ""Anything else?""
