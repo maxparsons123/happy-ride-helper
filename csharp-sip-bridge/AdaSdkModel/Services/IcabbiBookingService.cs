@@ -140,34 +140,38 @@ public sealed class IcabbiBookingService : IDisposable
             try { root = JsonNode.Parse(body); }
             catch { return null; }
 
-            // iCabbi quote response: try body.quote, body.quotes[0], or body directly
-            var quoteNode = root?["body"]?["quote"]
-                         ?? root?["body"]?["quotes"]?[0]
-                         ?? root?["body"]
-                         ?? root?["quote"];
+            // Log full body for field discovery during integration
+            Log($"📋 Full quote body: {Truncate(body, 600)}");
 
-            if (quoteNode is null)
+            // iCabbi multi-quote returns: body.quotes[] array, body.quote object, or body directly
+            // Resolve to a single JsonObject to extract fare/eta from
+            JsonObject? quoteObj = ResolveQuoteObject(root, booking.Passengers ?? 1);
+
+            if (quoteObj is null)
             {
-                Log("⚠️ No quote node in response — using Gemini estimate");
+                Log("⚠️ No quote object found in response — using Gemini estimate");
                 return null;
             }
 
-            // Try common fare fields: price, total, cost, fare, amount
-            var total = TryGetDecimal(quoteNode, "price")
-                     ?? TryGetDecimal(quoteNode, "total")
-                     ?? TryGetDecimal(quoteNode, "cost")
-                     ?? TryGetDecimal(quoteNode, "fare")
-                     ?? TryGetDecimal(quoteNode, "amount");
+            // Try common fare fields across all known iCabbi response shapes
+            var total = TryGetDecimal(quoteObj, "price")
+                     ?? TryGetDecimal(quoteObj, "total")
+                     ?? TryGetDecimal(quoteObj, "cost")
+                     ?? TryGetDecimal(quoteObj, "fare")
+                     ?? TryGetDecimal(quoteObj, "amount")
+                     ?? TryGetDecimal(quoteObj, "fixed_price")
+                     ?? TryGetDecimal(quoteObj, "base_fare");
 
             if (total is null || total == 0)
             {
-                Log("⚠️ Quote returned zero/null fare — using Gemini estimate");
+                Log($"⚠️ Quote returned zero/null fare (node keys: {string.Join(", ", quoteObj.Select(k => k.Key))}) — using Gemini estimate");
                 return null;
             }
 
-            var etaMinutes = quoteNode["eta"]?.GetValue<int?>()
-                          ?? quoteNode["eta_minutes"]?.GetValue<int?>()
-                          ?? quoteNode["pickup_eta"]?.GetValue<int?>();
+            var etaMinutes = SafeGetInt(quoteObj, "eta")
+                          ?? SafeGetInt(quoteObj, "eta_minutes")
+                          ?? SafeGetInt(quoteObj, "pickup_eta")
+                          ?? SafeGetInt(quoteObj, "wait_time");
 
             Log($"✅ iCabbi quote received: £{total:F2}, ETA={etaMinutes?.ToString() ?? "unknown"} min");
             return new IcabbiFareQuote(total.Value, etaMinutes, null);
@@ -184,11 +188,70 @@ public sealed class IcabbiBookingService : IDisposable
         }
     }
 
-    private static decimal? TryGetDecimal(JsonNode node, string key)
+    /// <summary>
+    /// Resolves the iCabbi quote response (which may be an array for multi-quote or a single object)
+    /// to a single JsonObject. For multi-quote arrays, picks the entry matching the vehicle type
+    /// or falls back to the first entry.
+    /// </summary>
+    private static JsonObject? ResolveQuoteObject(JsonNode? root, int passengers)
     {
-        var val = node[key];
-        if (val is null) return null;
-        if (decimal.TryParse(val.ToString(), out var d) && d > 0) return d;
+        var vehicleType = passengers <= 4 ? "R4" : passengers <= 6 ? "R6" : "R7";
+
+        // Walk known paths to the quote data
+        var candidates = new[]
+        {
+            root?["body"]?["quotes"],
+            root?["body"]?["quote"],
+            root?["quotes"],
+            root?["quote"],
+            root?["body"]
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (candidate is null) continue;
+
+            // Array of quotes (multi-quote response)
+            if (candidate is JsonArray arr)
+            {
+                if (arr.Count == 0) continue;
+
+                // Try to find the matching vehicle type first
+                foreach (var item in arr)
+                {
+                    if (item is not JsonObject obj) continue;
+                    var vt = obj["vehicle_type"]?.GetValue<string>()
+                          ?? obj["vehicle_group"]?.GetValue<string>()
+                          ?? obj["type"]?.GetValue<string>() ?? "";
+                    if (vt.Contains(vehicleType, StringComparison.OrdinalIgnoreCase))
+                        return obj;
+                }
+
+                // Fallback: first item in array
+                return arr[0] as JsonObject;
+            }
+
+            // Single quote object
+            if (candidate is JsonObject singleObj)
+                return singleObj;
+        }
+
+        return null;
+    }
+
+    private static decimal? TryGetDecimal(JsonObject obj, string key)
+    {
+        if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
+        if (decimal.TryParse(val.ToString(), System.Globalization.NumberStyles.Any,
+                             System.Globalization.CultureInfo.InvariantCulture, out var d) && d > 0)
+            return d;
+        return null;
+    }
+
+    private static int? SafeGetInt(JsonObject obj, string key)
+    {
+        if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
+        if (int.TryParse(val.ToString(), out var i)) return i;
         return null;
     }
 
