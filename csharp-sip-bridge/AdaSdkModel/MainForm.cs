@@ -26,6 +26,10 @@ public partial class MainForm : Form
     private ILoggerFactory? _loggerFactory;
     private ICallSession? _currentSession;
 
+    // Edge function keepalive (prevents cold-start latency)
+    private System.Threading.Timer? _edgeWarmupTimer;
+    private readonly HttpClient _warmupHttpClient = new() { Timeout = TimeSpan.FromSeconds(8) };
+
     // Audio monitor (hear raw SIP audio locally)
     private WaveOutEvent? _monitorOut;
     private BufferedWaveProvider? _monitorBuffer;
@@ -338,6 +342,9 @@ public partial class MainForm : Form
             });
 
             await _sipServer.StartAsync();
+
+            // Start edge function warmup timer — pings every 55s to prevent cold-start latency
+            StartEdgeWarmupTimer();
         }
         catch (Exception ex)
         {
@@ -345,6 +352,30 @@ public partial class MainForm : Form
             SetSipConnected(false);
             _sipServer = null;
         }
+    }
+
+    private void StartEdgeWarmupTimer()
+    {
+        _edgeWarmupTimer?.Dispose();
+        var edgeUrl = $"{_settings.Supabase.Url}/functions/v1/address-dispatch";
+        var anonKey = _settings.Supabase.AnonKey;
+
+        // Fire immediately to warm up, then every 55 seconds
+        _edgeWarmupTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, edgeUrl)
+                {
+                    Content = new StringContent("{\"ping\":true}", System.Text.Encoding.UTF8, "application/json")
+                };
+                req.Headers.Add("apikey", anonKey);
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(8));
+                var resp = await _warmupHttpClient.SendAsync(req, cts.Token);
+                SafeInvoke(() => Log($"🔥 Edge warm-up → {(int)resp.StatusCode}"));
+            }
+            catch { /* silently ignore — warmup is best-effort */ }
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(55));
     }
 
     private ICallSession CreateCallSession(string sessionId, string callerId)
@@ -450,6 +481,8 @@ public partial class MainForm : Form
     private async void btnDisconnect_Click(object? sender, EventArgs e)
     {
         Log("📞 Disconnecting SIP…");
+        _edgeWarmupTimer?.Dispose();
+        _edgeWarmupTimer = null;
         try
         {
             if (_sipServer != null) { await _sipServer.StopAsync(); _sipServer = null; }
@@ -866,6 +899,9 @@ public partial class MainForm : Form
 
         try { (_currentSession as IDisposable)?.Dispose(); } catch { }
         _currentSession = null;
+        _edgeWarmupTimer?.Dispose();
+        _edgeWarmupTimer = null;
+        _warmupHttpClient.Dispose();
         if (_sipServer != null)
         {
             try { _sipServer.StopAsync().Wait(3000); } catch { }
