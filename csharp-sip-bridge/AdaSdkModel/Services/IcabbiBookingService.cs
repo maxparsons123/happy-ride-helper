@@ -144,12 +144,16 @@ public sealed class IcabbiBookingService : IDisposable
             // Log full body for field discovery during integration
             Log($"📋 Full quote body: {Truncate(body, 600)}");
 
-            // iCabbi returns HTTP 200 but with error:true for bad paths — bail early
-            var isApiError = root?["error"]?.GetValue<bool>() ?? false;
+            // iCabbi returns HTTP 200 but with error:true envelope for bad paths — bail early
+            // Use ToString() comparisons to avoid GetValue<T> type-mismatch exceptions
+            var errorNode = root?["error"];
+            var isApiError = errorNode != null &&
+                             (errorNode.ToString() == "true" ||
+                              (int.TryParse(root?["code"]?.ToString(), out var c) && c != 200));
             if (isApiError)
             {
-                var errCode = root?["code"]?.GetValue<int>() ?? 0;
-                var errMsg  = root?["message"]?.GetValue<string>() ?? "unknown";
+                var errCode = root?["code"]?.ToString() ?? "?";
+                var errMsg  = root?["message"]?.ToString() ?? "unknown";
                 Log($"⚠️ iCabbi quote API error {errCode}: {errMsg} — using Gemini estimate");
                 return null;
             }
@@ -373,24 +377,24 @@ public sealed class IcabbiBookingService : IDisposable
             try { root = JsonNode.Parse(body); }
             catch { return IcabbiBookingResult.Fail("Invalid JSON in booking response"); }
 
-            var isError = root?["error"]?.GetValue<bool>() ?? false;
+            var isError = root?["error"]?.ToString() == "true";
             if (isError)
             {
-                var errMsg = root?["message"]?.GetValue<string>() ?? "Unknown API error";
-                var errCode = root?["code"]?.GetValue<int>() ?? 0;
+                var errMsg  = root?["message"]?.ToString() ?? "Unknown API error";
+                var errCode = root?["code"]?.ToString() ?? "0";
                 return IcabbiBookingResult.Fail($"iCabbi error {errCode}: {errMsg}");
             }
 
-            var bookingNode = root?["body"]?["booking"];
+            var bookingNode = root?["body"] is JsonObject bodyObj ? bodyObj["booking"] : null;
             if (bookingNode is null)
                 return IcabbiBookingResult.Fail("No body.booking in response");
 
-            var jobId = bookingNode["id"]?.GetValue<int>();
+            var jobId     = int.TryParse(bookingNode["id"]?.ToString(), out var jid) ? jid : (int?)null;
             var journeyId = jobId?.ToString() ?? "";
-            var tripId = bookingNode["trip_id"]?.GetValue<string>();
-            var permaId = bookingNode["perma_id"]?.GetValue<string>();
-            var statusStr = bookingNode["status"]?.GetValue<string>();
-            var trackingUrl = bookingNode["tracking_url"]?.GetValue<string>()
+            var tripId    = bookingNode["trip_id"]?.ToString();
+            var permaId   = bookingNode["perma_id"]?.ToString();
+            var statusStr = bookingNode["status"]?.ToString();
+            var trackingUrl = bookingNode["tracking_url"]?.ToString()
                               ?? BuildTrackingUrl(journeyId);
 
             if (string.IsNullOrEmpty(journeyId))
