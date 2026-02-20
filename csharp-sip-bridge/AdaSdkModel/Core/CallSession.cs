@@ -1374,15 +1374,24 @@ public sealed class CallSession : ICallSession
         }
         else if (DestinationLacksCityContext(pickup))
         {
-            // First calculation — no coords yet. Try to enrich pickup from caller history
-            // so Gemini can disambiguate correctly (e.g. "52A David Road" → "52A David Road, Birmingham")
-            var cityFromHistory = TryExtractCityFromHistory(pickup);
-            if (cityFromHistory != null)
+            // Enrich pickup with caller's history city ONLY if the pickup has no house number.
+            // A numbered address (e.g. "52A David Road") is specific enough to resolve globally —
+            // the geocoder should resolve it bare first; the locale fallback handles failure.
+            var pickupComponents2 = Services.AddressParser.ParseAddress(pickup);
+            if (!pickupComponents2.HasHouseNumber)
             {
-                _logger.LogInformation("[{SessionId}] 🏙️ Enriching pickup '{Pickup}' with history city '{City}' before geocoding",
-                    SessionId, pickup, cityFromHistory);
-                pickup = $"{pickup}, {cityFromHistory}";
+                var cityFromHistory = TryExtractCityFromHistory(pickup);
+                if (cityFromHistory != null)
+                {
+                    _logger.LogInformation("[{SessionId}] 🏙️ Enriching vague pickup '{Pickup}' with history city '{City}' before geocoding",
+                        SessionId, pickup, cityFromHistory);
+                    pickup = $"{pickup}, {cityFromHistory}";
             }
+        }
+        else
+        {
+            _logger.LogInformation("[{SessionId}] 🏠 Pickup '{Pickup}' has house number — sending bare to geocoder (no city inference)",
+                SessionId, pickup);
         }
 
         // If destination has verified geocoded city, use it — otherwise conditionally enrich
