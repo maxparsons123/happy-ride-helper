@@ -693,7 +693,9 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
-                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime);
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
+                        spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -1116,6 +1118,17 @@ public sealed class CallSession : ICallSession
         return (pickup, destination);
     }
 
+    /// <summary>
+    /// Extracts the spoken house number from a raw address string using AddressParser.
+    /// Returns null if no number found or if the address is not a street-type address.
+    /// </summary>
+    private static string? GetSpokenHouseNumber(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return null;
+        var c = Services.AddressParser.ParseAddress(address);
+        return c.HasHouseNumber ? c.HouseNumber : null;
+    }
+
     private async Task TriggerFareCalculationAsync()
     {
         if (_booking.Pickup == null || _booking.Destination == null)
@@ -1128,9 +1141,9 @@ public sealed class CallSession : ICallSession
         try
         {
             _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after Address Lock resolution", sessionId);
-            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime);
-
-            // Check if re-disambiguation is needed (e.g. clarified address still ambiguous in a different way)
+            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
+                spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
             if (result.NeedsClarification)
             {
                 var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
@@ -1267,7 +1280,9 @@ public sealed class CallSession : ICallSession
                     _logger.LogInformation("[{SessionId}] 🔄 Background fare calculation starting for {Pickup} → {Dest}",
                         sessionId, pickup, destination);
 
-                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime);
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
+                        spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -1436,7 +1451,9 @@ public sealed class CallSession : ICallSession
                 try
                 {
                     var (ep, ed) = GetEnrichedAddresses();
-                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(ep, ed, CallerId, _booking.PickupTime);
+                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(ep, ed, CallerId, _booking.PickupTime,
+                        spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
                     ApplyFareResultNullSafe(result);
                 }
                 catch (Exception ex)
@@ -1514,7 +1531,9 @@ public sealed class CallSession : ICallSession
                 ? EnrichWithVerifiedCity(_booking.Destination, _booking.DestLat.HasValue && _booking.DestLat != 0 ? _booking.DestCity : null)
                 : enrichedPickup;
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
-                enrichedPickup, enrichedDest, CallerId, _booking.PickupTime);
+                enrichedPickup, enrichedDest, CallerId, _booking.PickupTime,
+                spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
             var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
             FareResult result;

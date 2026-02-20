@@ -39,7 +39,13 @@ public sealed class GeminiAddressClient
     /// Resolve addresses and calculate fare using direct Google Gemini API.
     /// Returns the same JSON structure as the address-dispatch edge function.
     /// </summary>
-    public async Task<JsonElement?> ResolveAsync(string? pickup, string? destination, string? phone, string? pickupTime = null)
+    public async Task<JsonElement?> ResolveAsync(
+        string? pickup,
+        string? destination,
+        string? phone,
+        string? pickupTime = null,
+        string? spokenPickupNumber = null,
+        string? spokenDestNumber = null)
     {
         if (string.IsNullOrWhiteSpace(_settings.ApiKey))
         {
@@ -54,7 +60,15 @@ public sealed class GeminiAddressClient
 
             // ── Step 2: Call Gemini with function calling ──
             var timePart = !string.IsNullOrWhiteSpace(pickupTime) ? $"\nPickup Time Requested: \"{pickupTime}\"\nREFERENCE_DATETIME (current UTC): {DateTime.UtcNow:o}" : "";
-            var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{timePart}{callerHistory}";
+
+            // Include spoken house numbers so Gemini is anchored to what the caller actually said
+            var houseNumberHints = "";
+            if (!string.IsNullOrWhiteSpace(spokenPickupNumber))
+                houseNumberHints += $"\nSPOKEN PICKUP HOUSE NUMBER (caller said this explicitly): \"{spokenPickupNumber}\" — your street_number for pickup MUST match this or flag is_ambiguous=true.";
+            if (!string.IsNullOrWhiteSpace(spokenDestNumber))
+                houseNumberHints += $"\nSPOKEN DESTINATION HOUSE NUMBER (caller said this explicitly): \"{spokenDestNumber}\" — your street_number for dropoff MUST match this or flag is_ambiguous=true.";
+
+            var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{timePart}{houseNumberHints}{callerHistory}";
 
             var geminiUrl = $"https://generativelanguage.googleapis.com/v1beta/models/{_settings.Model}:generateContent?key={_settings.ApiKey}";
 
@@ -82,7 +96,7 @@ public sealed class GeminiAddressClient
             }
 
             // ── Step 4: Full post-processing (matching edge function) ──
-            var result = await PostProcessAsync(parsed.Value, pickup, destination, callerHistory, phone);
+            var result = await PostProcessAsync(parsed.Value, pickup, destination, callerHistory, phone, spokenPickupNumber, spokenDestNumber);
 
             _logger.LogInformation("✅ Gemini address dispatch: area={Area}, status={Status}",
                 result.TryGetProperty("detected_area", out var area) ? area.GetString() : "unknown",
@@ -300,7 +314,7 @@ public sealed class GeminiAddressClient
         System.Text.RegularExpressions.Regex.Replace(input, @"\b[a-z]{1,2}\d{1,2}\s?\d[a-z]{2}\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
         .Split(',')[0].Trim().ToLowerInvariant();
 
-    private async Task<JsonElement> PostProcessAsync(JsonElement parsed, string? pickup, string? destination, string callerHistory, string? phone)
+    private async Task<JsonElement> PostProcessAsync(JsonElement parsed, string? pickup, string? destination, string callerHistory, string? phone, string? spokenPickupNumber = null, string? spokenDestNumber = null)
     {
         // Convert to mutable JSON using a writable stream
         var mutable = JsonSerializer.Deserialize<Dictionary<string, object>>(parsed.GetRawText(),
@@ -566,6 +580,43 @@ public sealed class GeminiAddressClient
                     _logger.LogDebug("💰 Fare recalculated after DB correction: {Fare} ({Dist:F1} miles)", fare.Fare, correctedDist);
                 }
             }
+        }
+
+        // ── SPOKEN HOUSE NUMBER GUARD ──
+        // After Gemini resolves addresses, compare each resolved street_number against
+        // the number the caller actually spoke. If Gemini returned an alphanumeric (e.g. "4B")
+        // that doesn't match the spoken integer (e.g. "43"), flag as ambiguous so Ada confirms.
+        var guardChecks = new[]
+        {
+            (side: "pickup",  spoken: spokenPickupNumber),
+            (side: "dropoff", spoken: spokenDestNumber),
+        };
+
+        foreach (var (side, spokenNum) in guardChecks)
+        {
+            if (string.IsNullOrWhiteSpace(spokenNum)) continue;
+            var addr = work[side];
+            if (addr == null) continue;
+
+            var resolvedNum = addr["street_number"]?.GetValue<string>()?.Trim() ?? "";
+            if (string.IsNullOrEmpty(resolvedNum)) continue;
+
+            var numericPrefix = System.Text.RegularExpressions.Regex.Match(resolvedNum, @"^\d+").Value;
+            var hasLetterSuffix = System.Text.RegularExpressions.Regex.IsMatch(resolvedNum, @"^\d+[A-Za-z]$");
+            if (!hasLetterSuffix) continue; // Only flag geocoded alphanumeric results
+
+            var spokenDigits = System.Text.RegularExpressions.Regex.Match(spokenNum.Trim(), @"^\d+").Value;
+            if (string.IsNullOrEmpty(spokenDigits) || spokenDigits == numericPrefix) continue;
+
+            // Spoken number differs from the geocoded numeric prefix → flag as mismatch
+            _logger.LogWarning("🏠 HOUSE NUMBER GUARD ({Side}): caller said '{Spoken}' but Gemini resolved '{Resolved}' — flagging",
+                side, spokenNum, resolvedNum);
+
+            addr["is_ambiguous"] = true;
+            addr["house_number_mismatch"] = true;
+            work["status"] = "clarification_needed";
+            work["clarification_message"] = $"I want to confirm the house number for your {(side == "pickup" ? "pickup" : "destination")} address. " +
+                $"You said {spokenNum}, but the system found {resolvedNum}. Which is correct — {spokenNum} or {resolvedNum}?";
         }
 
         // ── ADDRESS SANITY GUARD: second-pass Gemini check ──
