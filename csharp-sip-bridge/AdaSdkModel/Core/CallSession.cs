@@ -2267,31 +2267,12 @@ public sealed class CallSession : ICallSession
 
     /// <summary>
     /// Formats a destination for verbal readback.
-    /// If the booking destination is a named place/landmark (e.g. "Birmingham New Street Station",
-    /// "Aldi Supermarket"), use the booking state string directly (with geocoded city appended)
-    /// rather than the geocoder's resolved street components — which may differ significantly
-    /// from the caller's intent (e.g. "Station Street" instead of "New Street Station").
-    /// For normal street addresses, delegates to FormatAddressForReadback as usual.
+    /// The edge function (Gemini) is responsible for preserving landmark names in the address field.
+    /// e.g. "Birmingham New Street Station, New Street, Birmingham B2 4QA" — not just "New Street, Birmingham".
+    /// This method simply delegates to FormatAddressForReadback using the geocoded components.
     /// </summary>
     private string FormatDestinationForReadback(FareResult result)
     {
-        var bookingDest = _booking.Destination ?? "";
-
-        // Check if the booking destination is a named place using AddressParser
-        var parsed = Services.AddressParser.ParseAddress(bookingDest);
-        if (!parsed.IsStreetTypeAddress && !string.IsNullOrWhiteSpace(bookingDest))
-        {
-            // Named place — use booking state destination, append geocoded city if available
-            var geocodedCity = result.DestCity;
-            if (!string.IsNullOrWhiteSpace(geocodedCity)
-                && !bookingDest.Contains(geocodedCity, StringComparison.OrdinalIgnoreCase))
-            {
-                return $"{bookingDest}, {geocodedCity}";
-            }
-            return bookingDest;
-        }
-
-        // Normal street address — use geocoded components
         return FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
     }
 
