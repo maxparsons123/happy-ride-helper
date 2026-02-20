@@ -69,59 +69,59 @@ public sealed class IcabbiBookingService : IDisposable
     }
 
     // ═══════════════════════════════════════════
-    //  FARE QUOTE (pre-booking price lookup)
+    //  FARE QUOTE (dedicated quote endpoint)
     // ═══════════════════════════════════════════
 
     /// <summary>
-    /// Calls the iCabbi API to get a fare quote for a trip WITHOUT committing a booking.
-    /// Uses the same payload structure as CreateAndDispatchAsync but reads back fare/eta only.
+    /// Calls the iCabbi dedicated quote endpoint to get a fare estimate WITHOUT creating a booking.
+    /// Uses the /bookings/quote payload structure with locations array, multi-quote flag, and prebooking flag.
     /// Returns null if the API is unreachable or the response doesn't include pricing.
+    /// Only called when iCabbi is enabled (guard is in CallSession).
     /// </summary>
     public async Task<IcabbiFareQuote?> GetFareQuoteAsync(
         BookingState booking,
+        int siteId,
         CancellationToken ct = default)
     {
         try
         {
             Log("💰 Requesting iCabbi fare quote...");
 
-            var phone = "00" + (booking.CallerPhone?.Replace("+", "").Replace(" ", "").Replace("-", "") ?? "");
             var seats = Math.Max(1, booking.Passengers ?? 1);
+            var vehicleType = seats <= 4 ? "R4" : seats <= 6 ? "R6" : "R7";
 
-            var quotePayload = new IcabbiBookingRequest
+            // Scheduled prebooking = 1, ASAP = 0
+            var isPrebooking = booking.ScheduledAt.HasValue ? 1 : 0;
+            var pickupDate = (booking.ScheduledAt ?? DateTime.UtcNow.AddMinutes(2))
+                                 .ToString("yyyy-MM-dd HH:mm:ss");
+
+            var quotePayload = new IcabbiQuoteRequest
             {
-                date = booking.ScheduledAt ?? DateTime.UtcNow.AddMinutes(1),
-                name = booking.Name ?? "Customer",
-                phone = phone,
-                extras = "WHATSAPP",
-                seats = seats,
-                source = "APP",
-                vehicle_group = "Taxi",
-                site_id = 71,
-                status = "QUOTE",   // signals intent — quote only, not committed
-                address = new IcabbiAddressDto
+                src = "APP",
+                site_id = siteId,
+                prebooking = isPrebooking,
+                passengers = seats,
+                vehicle_type = vehicleType,
+                vehicle_group = "ANY VEHICLE",
+                multi_quote = 1,
+                date = pickupDate,
+                locations = new List<string>
                 {
-                    lat = booking.PickupLat ?? 0,
-                    lng = booking.PickupLon ?? 0,
-                    formatted = booking.PickupFormatted ?? booking.Pickup ?? ""
+                    $"{booking.PickupLat ?? 0},{booking.PickupLon ?? 0}",
+                    $"{booking.DestLat ?? 0},{booking.DestLon ?? 0}"
                 },
-                destination = new IcabbiAddressDto
-                {
-                    lat = booking.DestLat ?? 0,
-                    lng = booking.DestLon ?? 0,
-                    formatted = booking.DestFormatted ?? booking.Destination ?? ""
-                }
+                postcode = booking.PickupPostalCode?.Replace(" ", "") ?? "",
+                destination_postcode = booking.DestPostalCode?.Replace(" ", "") ?? ""
             };
-            quotePayload.AssignVehicleType();
 
             var json = JsonSerializer.Serialize(quotePayload, JsonOpts);
             Log($"📤 Quote payload:\n{json}");
 
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}bookings/add")
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}bookings/quote")
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
-            AddAuthHeaders(req, phone);
+            AddAuthHeaders(req);
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(8)); // tight timeout — don't hold up the call
@@ -140,25 +140,37 @@ public sealed class IcabbiBookingService : IDisposable
             try { root = JsonNode.Parse(body); }
             catch { return null; }
 
-            // iCabbi returns fare in body.booking.payment or body.booking.price
-            var bookingNode = root?["body"]?["booking"];
-            if (bookingNode is null) return null;
+            // iCabbi quote response: try body.quote, body.quotes[0], or body directly
+            var quoteNode = root?["body"]?["quote"]
+                         ?? root?["body"]?["quotes"]?[0]
+                         ?? root?["body"]
+                         ?? root?["quote"];
 
-            // Try payment.total first, then price, then cost
-            var total = bookingNode["payment"]?["total"]?.GetValue<decimal?>()
-                     ?? bookingNode["payment"]?["price"]?.GetValue<decimal?>()
-                     ?? bookingNode["price"]?.GetValue<decimal?>()
-                     ?? bookingNode["cost"]?.GetValue<decimal?>();
+            if (quoteNode is null)
+            {
+                Log("⚠️ No quote node in response — using Gemini estimate");
+                return null;
+            }
 
-            if (total is null || total == 0) return null;
+            // Try common fare fields: price, total, cost, fare, amount
+            var total = TryGetDecimal(quoteNode, "price")
+                     ?? TryGetDecimal(quoteNode, "total")
+                     ?? TryGetDecimal(quoteNode, "cost")
+                     ?? TryGetDecimal(quoteNode, "fare")
+                     ?? TryGetDecimal(quoteNode, "amount");
 
-            var etaMinutes = bookingNode["eta"]?.GetValue<int?>()
-                          ?? bookingNode["eta_minutes"]?.GetValue<int?>();
+            if (total is null || total == 0)
+            {
+                Log("⚠️ Quote returned zero/null fare — using Gemini estimate");
+                return null;
+            }
 
-            var journeyId = bookingNode["id"]?.GetValue<int>()?.ToString();
+            var etaMinutes = quoteNode["eta"]?.GetValue<int?>()
+                          ?? quoteNode["eta_minutes"]?.GetValue<int?>()
+                          ?? quoteNode["pickup_eta"]?.GetValue<int?>();
 
-            Log($"✅ Quote received: £{total:F2}, ETA={etaMinutes?.ToString() ?? "unknown"} min");
-            return new IcabbiFareQuote(total.Value, etaMinutes, journeyId);
+            Log($"✅ iCabbi quote received: £{total:F2}, ETA={etaMinutes?.ToString() ?? "unknown"} min");
+            return new IcabbiFareQuote(total.Value, etaMinutes, null);
         }
         catch (OperationCanceledException)
         {
@@ -170,6 +182,14 @@ public sealed class IcabbiBookingService : IDisposable
             Log($"⚠️ Quote error (non-fatal): {ex.Message}");
             return null;
         }
+    }
+
+    private static decimal? TryGetDecimal(JsonNode node, string key)
+    {
+        var val = node[key];
+        if (val is null) return null;
+        if (decimal.TryParse(val.ToString(), out var d) && d > 0) return d;
+        return null;
     }
 
     // ═══════════════════════════════════════════
@@ -626,4 +646,37 @@ public class IcabbiPassenger
     public string Email { get; set; } = "";
     public int Count { get; set; } = 1;
     public string Notes { get; set; } = "";
+}
+
+/// <summary>
+/// Payload for the iCabbi dedicated fare quote endpoint (POST /bookings/quote).
+/// Does NOT create a booking. Returns fare + ETA only.
+/// multi-quote = 1 requests all available vehicle class prices.
+/// </summary>
+public class IcabbiQuoteRequest
+{
+    public string src { get; set; } = "APP";
+    public int site_id { get; set; }
+    public int prebooking { get; set; } = 0;
+    public int passengers { get; set; } = 1;
+    public string vehicle_type { get; set; } = "R4";
+    public string vehicle_group { get; set; } = "ANY VEHICLE";
+
+    [JsonPropertyName("multi-quote")]
+    public int multi_quote { get; set; } = 1;
+
+    public string date { get; set; } = "";
+
+    /// <summary>["lat,lon", "lat,lon"] — pickup first, destination second.</summary>
+    public List<string> locations { get; set; } = new();
+
+    /// <summary>Pickup postcode (no spaces), e.g. "CV12BW".</summary>
+    public string? postcode { get; set; }
+
+    /// <summary>Destination postcode (no spaces), e.g. "CV12BE".</summary>
+    public string? destination_postcode { get; set; }
+
+    // Optional via waypoints (populated only if vias are used)
+    public string? via1_postcode { get; set; }
+    public string? via2_postcode { get; set; }
 }

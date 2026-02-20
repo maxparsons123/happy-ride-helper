@@ -966,7 +966,7 @@ public sealed class CallSession : ICallSession
                     if (_icabbiEnabled && _icabbi != null)
                     {
                         _logger.LogInformation("[{SessionId}] 🚕 iCabbi enabled — requesting fare quote", sessionId);
-                        var quote = await _icabbi.GetFareQuoteAsync(_booking);
+                        var quote = await _icabbi.GetFareQuoteAsync(_booking, _settings.Icabbi.SiteId);
                         if (quote != null)
                         {
                             _logger.LogInformation("[{SessionId}] ✅ iCabbi fare override: {OldFare} → {NewFare}, ETA: {Eta}",
