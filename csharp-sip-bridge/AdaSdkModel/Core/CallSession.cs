@@ -1101,10 +1101,7 @@ public sealed class CallSession : ICallSession
                                 sessionId, _booking.Fare, spokenFare, _booking.Eta);
 
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
-                    var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
-
-                    // Guard: geocoder resolved pickup and destination to the same address.
-                    // Clear destination and force Ada to re-collect it — do NOT proceed to fare.
+                    var destAddr = FormatDestinationForReadback(result);
                     if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
                     {
                         _logger.LogWarning("[{SessionId}] ⚠ Post-geocode same-address: pickup == destination ({Addr}). Clearing destination and re-asking.", sessionId, pickupAddr);
@@ -1509,7 +1506,7 @@ public sealed class CallSession : ICallSession
 
             var spokenFare = FormatFareForSpeech(_booking.Fare);
             var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
-            var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
+            var destAddr = FormatDestinationForReadback(result);
 
             // Guard: reject if geocoder resolved pickup and destination to the same address
             if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
@@ -1739,7 +1736,7 @@ public sealed class CallSession : ICallSession
                         sessionId, _booking.Fare, spokenFare, _booking.Eta);
 
                     var pickupAddr = FormatAddressForReadback(result.PickupNumber, result.PickupStreet, result.PickupPostalCode, result.PickupCity);
-                    var destAddr = FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
+                    var destAddr = FormatDestinationForReadback(result);
 
                     // Guard: reject if geocoder resolved pickup and destination to the same address
                     if (string.Equals(pickupAddr, destAddr, StringComparison.OrdinalIgnoreCase) && pickupAddr != "the address")
@@ -2266,6 +2263,36 @@ public sealed class CallSession : ICallSession
         // Postal codes intentionally omitted from verbal readback (stored in backend only)
 
         return parts.Count > 0 ? string.Join(", ", parts) : "the address";
+    }
+
+    /// <summary>
+    /// Formats a destination for verbal readback.
+    /// If the booking destination is a named place/landmark (e.g. "Birmingham New Street Station",
+    /// "Aldi Supermarket"), use the booking state string directly (with geocoded city appended)
+    /// rather than the geocoder's resolved street components — which may differ significantly
+    /// from the caller's intent (e.g. "Station Street" instead of "New Street Station").
+    /// For normal street addresses, delegates to FormatAddressForReadback as usual.
+    /// </summary>
+    private string FormatDestinationForReadback(FareResult result)
+    {
+        var bookingDest = _booking.Destination ?? "";
+
+        // Check if the booking destination is a named place using AddressParser
+        var parsed = Services.AddressParser.Parse(bookingDest);
+        if (!parsed.IsStreetTypeAddress && !string.IsNullOrWhiteSpace(bookingDest))
+        {
+            // Named place — use booking state destination, append geocoded city if available
+            var geocodedCity = result.DestCity;
+            if (!string.IsNullOrWhiteSpace(geocodedCity)
+                && !bookingDest.Contains(geocodedCity, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"{bookingDest}, {geocodedCity}";
+            }
+            return bookingDest;
+        }
+
+        // Normal street address — use geocoded components
+        return FormatAddressForReadback(result.DestNumber, result.DestStreet, result.DestPostalCode, result.DestCity);
     }
 
     // =========================
