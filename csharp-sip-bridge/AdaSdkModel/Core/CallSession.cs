@@ -348,7 +348,7 @@ public sealed class CallSession : ICallSession
             if (caller.TryGetProperty("last_destination", out var ld) && ld.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(ld.GetString()))
                 sb.AppendLine($"  Last destination (reference only): {ld.GetString()}");
 
-            var allAddresses = new HashSet<string>();
+            var allAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (caller.TryGetProperty("pickup_addresses", out var pickups) && pickups.ValueKind == System.Text.Json.JsonValueKind.Array)
                 foreach (var a in pickups.EnumerateArray())
                     if (a.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(a.GetString()))
@@ -358,6 +358,14 @@ public sealed class CallSession : ICallSession
                 foreach (var a in dropoffs.EnumerateArray())
                     if (a.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(a.GetString()))
                         allAddresses.Add(a.GetString()!);
+
+            // Also add last_pickup / last_destination (already printed above) to the programmatic set
+            if (!string.IsNullOrWhiteSpace(lp.GetString())) allAddresses.Add(lp.GetString()!);
+            if (!string.IsNullOrWhiteSpace(ld.GetString())) allAddresses.Add(ld.GetString()!);
+
+            // Store for programmatic city-context resolution in the city guard
+            _callerKnownAddresses.Clear();
+            _callerKnownAddresses.AddRange(allAddresses);
 
             if (allAddresses.Count > 0)
             {
@@ -504,6 +512,13 @@ public sealed class CallSession : ICallSession
     private bool _destDisambiguated = true;    // true = no disambiguation needed (set to false when triggered)
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
+
+    /// <summary>
+    /// Known addresses from the caller's Supabase history (pickup + dropoff combined).
+    /// Populated in LoadCallerHistoryAsync and used to infer city context when the AI
+    /// provides a city-less destination like "52A David Road".
+    /// </summary>
+    private readonly List<string> _callerKnownAddresses = new();
 
     // Fare sanity guard: track retries so legitimate long-distance trips aren't blocked forever
     private int _fareSanityAlertCount;
@@ -738,19 +753,42 @@ public sealed class CallSession : ICallSession
         // context (i.e. a city/area) so the geocoder can resolve it unambiguously.
         // A bare "52A David Road" with no city will always return NeedsClarification=true
         // and the fallback message may suggest the wrong city (e.g. pickup's city).
-        // Block here and ask Ada to collect the city NOW, before geocoding is attempted.
+        //
+        // Resolution order:
+        //   1. Try to find the street in the caller's known address history — if we find
+        //      a previous address that contains the same street name, extract the city from
+        //      it and silently enrich the destination before fare calc fires.
+        //   2. If history has no match, block and ask Ada to collect the city explicitly.
         if (allFieldsFilled && DestinationLacksCityContext(_booking.Destination))
         {
-            var destRaw = _booking.Destination;
-            _logger.LogWarning("[{SessionId}] 🏙️ Destination '{Dest}' has no city context — blocking fare calc, asking for city", SessionId, destRaw);
-            return new
+            var destRaw = _booking.Destination!;
+            var cityFromHistory = TryExtractCityFromHistory(destRaw);
+
+            if (cityFromHistory != null)
             {
-                success = false,
-                warning = $"DESTINATION CITY REQUIRED: The destination '{destRaw}' does not include a city or area. " +
-                          $"Ask the caller: 'What city or area is {destRaw} in?' " +
-                          "Once they provide the city, call sync_booking_data again with the full destination including the city (e.g. '52A David Road, Coventry'). " +
-                          "Do NOT guess the city from the pickup address."
-            };
+                // Silently enrich destination with the city from caller history
+                var enriched = $"{destRaw}, {cityFromHistory}";
+                _logger.LogInformation("[{SessionId}] 🏙️ Inferred city '{City}' from caller history for '{Dest}' → '{Enriched}'",
+                    SessionId, cityFromHistory, destRaw, enriched);
+                _booking.Destination = enriched;
+                // Inject a silent correction note so the AI's memory stays consistent
+                _ = _aiClient.InjectSystemMessageAsync(
+                    $"[CITY CONTEXT RESOLVED] The destination '{destRaw}' matched a known address from the caller's history. " +
+                    $"Update your memory: destination = '{enriched}'. Continue normally.");
+                // Allow fare calc to proceed by falling through
+            }
+            else
+            {
+                _logger.LogWarning("[{SessionId}] 🏙️ Destination '{Dest}' has no city context and no history match — asking for city", SessionId, destRaw);
+                return new
+                {
+                    success = false,
+                    warning = $"DESTINATION CITY REQUIRED: The destination '{destRaw}' does not include a city or area. " +
+                              $"Ask the caller: 'What city or area is {destRaw} in?' " +
+                              "Once they provide the city, call sync_booking_data again with the full destination including the city (e.g. '52A David Road, Coventry'). " +
+                              "Do NOT guess the city from the pickup address."
+                };
+            }
         }
 
         if (allFieldsFilled && Interlocked.CompareExchange(ref _fareAutoTriggered, 1, 0) == 0)
@@ -2159,6 +2197,70 @@ public sealed class CallSession : ICallSession
             return true;
 
         return false;
+    }
+
+    /// <summary>
+    /// Searches the caller's known address history for any address that contains the same
+    /// street name as the bare destination. If found, extracts and returns the city portion.
+    ///
+    /// Example: destination = "52A David Road" (no city)
+    ///          history contains "52A David Road, Coventry"
+    ///          → returns "Coventry"
+    ///
+    /// Matching is case-insensitive on the street-name words (ignores house numbers).
+    /// Returns null if no useful match is found.
+    /// </summary>
+    private string? TryExtractCityFromHistory(string destination)
+    {
+        if (_callerKnownAddresses.Count == 0) return null;
+
+        // Extract the street-name words from the bare destination (strip leading house number)
+        var streetWords = ExtractStreetWords(destination);
+        if (streetWords.Length == 0) return null;
+
+        foreach (var known in _callerKnownAddresses)
+        {
+            if (string.IsNullOrWhiteSpace(known)) continue;
+
+            // The known address must have at least one comma (street, city)
+            var parts = known.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length < 2) continue;
+
+            // The last segment is the city candidate
+            var cityCandidate = parts[^1];
+            if (string.IsNullOrWhiteSpace(cityCandidate)) continue;
+
+            // Skip if city candidate looks like a house number
+            if (System.Text.RegularExpressions.Regex.IsMatch(cityCandidate, @"^\d+[A-Za-z]?$"))
+                continue;
+
+            // Check if the street words from the destination appear in this known address
+            var knownStreet = string.Join(" ", parts[..^1]); // everything except the last segment
+            var matchCount = streetWords.Count(w => knownStreet.Contains(w, StringComparison.OrdinalIgnoreCase));
+
+            // Require at least half the meaningful street words to match
+            if (matchCount >= Math.Max(1, streetWords.Length / 2))
+                return cityCandidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Strips leading house numbers from an address and returns the remaining words.
+    /// "52A David Road" → ["David", "Road"]
+    /// "The Station, Platform 1" → ["The", "Station", "Platform"]
+    /// </summary>
+    private static string[] ExtractStreetWords(string address)
+    {
+        var cleaned = address.Trim();
+        // Remove leading house number (e.g. "52A ", "14-16 ", "Flat 3 ")
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"^\d+[A-Za-z]?\s+", "");
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"^(flat|apt|unit|suite)\s*\d+[A-Za-z]?\s+", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        // Remove commas and split
+        return cleaned.Replace(",", " ").Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length > 2) // Skip very short words like "A", "in"
+            .ToArray();
     }
 
     /// <summary>
