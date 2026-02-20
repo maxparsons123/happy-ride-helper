@@ -71,8 +71,10 @@ public static class AddressParser
             remaining = remaining[unitMatch.Length..];
         }
 
-        // Detect leading house number (e.g. "43 Dovey Road" → "43", "52A David Road" → "52A", "52-8 David Road" → "52-8")
-        var numberMatch = Regex.Match(remaining, @"^(\d+(?:[-A-Za-z]\d*)?)\s+(.+)");
+        // Detect leading house number:
+        // "43 Dovey Road" → "43", "52A David Road" → "52A", "52-8 David Road" → "52-8",
+        // "52-A David Road" → "52-A" (hyphen-then-letter suffix, common in UK STT output)
+        var numberMatch = Regex.Match(remaining, @"^(\d+(?:-?[A-Za-z]\d*|-\d+)?)\s+(.+)");
         if (numberMatch.Success)
         {
             houseNumber = numberMatch.Groups[1].Value;
