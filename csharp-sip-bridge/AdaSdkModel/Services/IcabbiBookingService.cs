@@ -198,6 +198,7 @@ public sealed class IcabbiBookingService : IDisposable
 
     public async Task<IcabbiBookingResult> CreateAndDispatchAsync(
         BookingState booking,
+        int siteId,
         int? icabbiDriverId = null,
         int? icabbiVehicleId = null,
         CancellationToken ct = default)
@@ -242,13 +243,13 @@ public sealed class IcabbiBookingService : IDisposable
             // Assign vehicle type based on seats (same as WinForms AssignVehicleType)
             icabbiBooking.AssignVehicleType();
 
-            // ── Post-assign fields (same as WinForms CreateAndAssignBookingAsync) ──
+            // ── Post-assign fields ──
             var driverId = icabbiDriverId ?? 2222;
             var vehicleId = icabbiVehicleId ?? 2222;
             icabbiBooking.driver_id = driverId;
             icabbiBooking.vehicle_id = vehicleId;
             icabbiBooking.vehicle_ref = $"DRV{driverId}_VEH{vehicleId}";
-            icabbiBooking.site_id = 71;
+            icabbiBooking.site_id = siteId;
             icabbiBooking.source = "APP";
             icabbiBooking.vehicle_group = "Taxi";
             icabbiBooking.vehicle_type ??= "R4";

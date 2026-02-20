@@ -160,7 +160,7 @@ public sealed class CallSession : ICallSession
 
             if (_icabbiEnabled && _icabbi != null)
             {
-                var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
+                var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId);
                 if (icabbiResult.Success)
                     _logger.LogInformation("[{SessionId}] 🚕 iCabbi (safety net): {JourneyId}", sessionId, icabbiResult.JourneyId);
                 else
@@ -960,16 +960,17 @@ public sealed class CallSession : ICallSession
 
                     ApplyFareResult(result);
 
-                    // ── iCabbi Fare Override (when iCabbi is enabled) ──────────────────────────
-                    // If iCabbi integration is active, get the official price from their API
-                    // and override Gemini's approximation before presenting to the caller.
+                    // ── iCabbi FARE QUOTE (Phase 1 of 2) ──────────────────────────────────────
+                    // Call iCabbi quote endpoint → get official fare+ETA → override Gemini estimate.
+                    // The quoted fare is stored in _booking.Fare and will be used verbatim in the
+                    // confirmed booking payload sent in Phase 2 (CreateAndDispatchAsync).
                     if (_icabbiEnabled && _icabbi != null)
                     {
-                        _logger.LogInformation("[{SessionId}] 🚕 iCabbi enabled — requesting fare quote", sessionId);
+                        _logger.LogInformation("[{SessionId}] 🚕 [Phase 1] Requesting iCabbi fare quote (siteId={SiteId})", sessionId, _settings.Icabbi.SiteId);
                         var quote = await _icabbi.GetFareQuoteAsync(_booking, _settings.Icabbi.SiteId);
                         if (quote != null)
                         {
-                            _logger.LogInformation("[{SessionId}] ✅ iCabbi fare override: {OldFare} → {NewFare}, ETA: {Eta}",
+                            _logger.LogInformation("[{SessionId}] ✅ iCabbi quote: {OldFare} → {NewFare}, ETA: {Eta}",
                                 sessionId, _booking.Fare, quote.FareFormatted, quote.EtaFormatted);
                             _booking.Fare = quote.FareFormatted;
                             _booking.Eta = quote.EtaFormatted;
@@ -1694,14 +1695,20 @@ public sealed class CallSession : ICallSession
                 await _dispatcher.SendWhatsAppAsync(callerId);
                 await SaveCallerHistoryAsync(bookingSnapshot, callerId);
 
-                // iCabbi dispatch (fire-and-forget)
+                // ── iCabbi CONFIRMED BOOKING (Phase 2 of 2) ─────────────────────────────────
+                // Phase 1 was GetFareQuoteAsync → gave Ada the official price/ETA to read back.
+                // Phase 2 (here): caller confirmed → send real booking to iCabbi dispatch.
+                // The fare in bookingSnapshot.Fare is already the iCabbi-quoted price.
                 if (_icabbiEnabled && _icabbi != null)
                 {
                     try
                     {
-                        var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
+                        _logger.LogInformation("[{SessionId}] 🚕 [Phase 2] Sending confirmed booking to iCabbi (siteId={SiteId}, fare={Fare})",
+                            sessionId, _settings.Icabbi.SiteId, bookingSnapshot.Fare);
+                        var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId);
                         if (icabbiResult.Success)
-                            _logger.LogInformation("[{SessionId}] 🚕 iCabbi booking created: {JourneyId}", sessionId, icabbiResult.JourneyId);
+                            _logger.LogInformation("[{SessionId}] ✅ iCabbi booking confirmed — JourneyId: {JourneyId}, Tracking: {TrackingUrl}",
+                                sessionId, icabbiResult.JourneyId, icabbiResult.TrackingUrl);
                         else
                             _logger.LogWarning("[{SessionId}] ⚠️ iCabbi booking failed: {Msg}", sessionId, icabbiResult.Message);
                     }
@@ -1806,7 +1813,7 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
-                    var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot);
+                    var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId);
                     if (icabbiResult.Success)
                         _logger.LogInformation("[{SessionId}] 🚕 iCabbi OK — Journey: {JourneyId}", SessionId, icabbiResult.JourneyId);
                     else
