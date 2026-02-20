@@ -712,39 +712,8 @@ public sealed class CallSession : ICallSession
                 };
             }
         }
-        // If pickup is a street-type address (Road, Avenue, Close, etc.) but has no house number,
-        // instruct Ada to ask the caller for it before proceeding.
-        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && Services.AddressParser.RequiresHouseNumber(_booking.Pickup))
-        {
-            _logger.LogWarning("[{SessionId}] 🏠 Pickup missing house number: '{Pickup}'", SessionId, _booking.Pickup);
-            // Clear fare so it recalculates once number is added
-            _booking.Fare = null;
-            _booking.Eta = null;
-            Interlocked.Exchange(ref _fareAutoTriggered, 0);
-            return new
-            {
-                success = false,
-                warning = $"HOUSE NUMBER REQUIRED: The pickup '{_booking.Pickup}' is a street address but has no house number. " +
-                          "Ask the caller: 'What is the house number on that street?' " +
-                          "Do NOT proceed to fare calculation until a house number is provided."
-            };
-        }
-
-        // Same guard for destination
-        if (!string.IsNullOrWhiteSpace(_booking.Destination) && Services.AddressParser.RequiresHouseNumber(_booking.Destination))
-        {
-            _logger.LogWarning("[{SessionId}] 🏠 Destination missing house number: '{Dest}'", SessionId, _booking.Destination);
-            _booking.Fare = null;
-            _booking.Eta = null;
-            Interlocked.Exchange(ref _fareAutoTriggered, 0);
-            return new
-            {
-                success = false,
-                warning = $"HOUSE NUMBER REQUIRED: The destination '{_booking.Destination}' is a street address but has no house number. " +
-                          "Ask the caller: 'What is the house number on that street?' " +
-                          "Do NOT proceed to fare calculation until a house number is provided."
-            };
-        }
+        // House number validation is handled by Gemini AI during geocoding/fare calculation.
+        // No pre-flight check here — Gemini will request clarification if the address is ambiguous.
 
         // AUTO-TRIGGER: When all 5 fields are filled, automatically calculate fare
         // This matches the v3.9 prompt: "When sync_booking_data is called with all 5 fields filled,
