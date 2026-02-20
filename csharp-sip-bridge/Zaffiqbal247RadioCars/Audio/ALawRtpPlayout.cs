@@ -11,11 +11,13 @@ using SIPSorceryMedia.Abstractions;
 namespace Zaffiqbal247RadioCars.Audio;
 
 /// <summary>
-/// Pure A-law RTP playout engine v11.0 — SMOOTH EDITION.
+/// Pure A-law RTP playout engine v12.0 — GRACE EDITION.
 ///
-/// Key improvements over v10.2:
+/// Key improvements over v11.0:
+///   ✅ 60ms underrun grace window (3 frames) — absorbs OpenAI inter-burst gaps
+///   ✅ Dual resume threshold: 200ms cold start / 100ms warm restart
+///   ✅ OnQueueEmpty deferred until grace window expires — no false playout-complete signals
 ///   ✅ 200ms hysteresis start buffer (10 frames) — eliminates grumble/jitter
-///   ✅ Rebuffer only when queue hits 0 — prevents false underruns
 ///   ✅ _wasPlaying guard — suppresses spurious OnQueueEmpty events
 ///   ✅ Drift clamping — resets clock if >100ms behind
 ///   ✅ Circuit breaker — fires OnFault after 10 consecutive send errors
@@ -55,7 +57,9 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5;
     private const byte PAYLOAD_TYPE_PCMA = 8;
 
-    private const int JITTER_BUFFER_START_THRESHOLD = 10; // 200ms hysteresis
+    private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms — cold start hysteresis
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 5;  // 100ms — warm restart after underrun
+    private const int UNDERRUN_GRACE_FRAMES = 3;           // 60ms grace before rebuffering
     private const int MAX_QUEUE_FRAMES = 1500;
     private const int MAX_ACCUMULATOR_SIZE = 65536;
     private const int CIRCUIT_BREAKER_LIMIT = 10;
@@ -84,6 +88,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private bool _useWaitableTimer;
 
     private bool _wasPlaying;
+    private int _consecutiveUnderruns;
+    private bool _hasPlayedAtLeastOneFrame;
     private int _consecutiveSendErrors;
     private DateTime _lastErrorLog;
     private DateTime _lastRtpSendTime = DateTime.UtcNow;
@@ -219,6 +225,8 @@ public sealed class ALawRtpPlayout : IDisposable
         _running = true;
         _isBuffering = true;
         _wasPlaying = false;
+        _consecutiveUnderruns = 0;
+        _hasPlayedAtLeastOneFrame = false;
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
         _totalUnderruns = 0;
@@ -242,10 +250,11 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.Highest,
-            Name = "ALawPlayout-v11.0"
+            Name = "ALawPlayout-v12.0"
         };
         _playoutThread.Start();
-        SafeLog($"[RTP] v11.0 SMOOTH EDITION started (hysteresis={JITTER_BUFFER_START_THRESHOLD * 20}ms, " +
+        SafeLog($"[RTP] v12.0 GRACE EDITION started (coldStart={JITTER_BUFFER_START_THRESHOLD * 20}ms, " +
+                $"warmResume={JITTER_BUFFER_RESUME_THRESHOLD * 20}ms, grace={UNDERRUN_GRACE_FRAMES * 20}ms, " +
                 $"timer={(_useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait")})");
     }
 
@@ -299,35 +308,43 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Add(ref _statsQueueSizeSum, queueCount);
         Interlocked.Increment(ref _statsQueueSizeSamples);
 
-        if (_isBuffering)
-        {
-            if (queueCount < JITTER_BUFFER_START_THRESHOLD)
-            {
-                SendRtpFrame(_silenceFrame);
-                return;
-            }
-            _isBuffering = false;
-            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
-        }
+    if (_isBuffering)
+    {
+        // Use reduced 100ms threshold for warm restarts (mid-call), 200ms for cold start only
+        int resumeThreshold = _hasPlayedAtLeastOneFrame
+            ? JITTER_BUFFER_RESUME_THRESHOLD
+            : JITTER_BUFFER_START_THRESHOLD;
 
-        if (_frameQueue.TryDequeue(out var frame))
+        if (queueCount < resumeThreshold)
         {
-            Interlocked.Decrement(ref _queueCount);
-            SendRtpFrame(frame);
-            Interlocked.Increment(ref _framesSent);
-            _wasPlaying = true;
-
-            if (Volatile.Read(ref _queueCount) == 0)
-            {
-                _isBuffering = true;
-                Interlocked.Increment(ref _totalUnderruns);
-                try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
-            }
-        }
-        else
-        {
-            _isBuffering = true;
             SendRtpFrame(_silenceFrame);
+            return;
+        }
+        _isBuffering = false;
+        _consecutiveUnderruns = 0;
+        SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout " +
+                $"(threshold={resumeThreshold * 20}ms, warm={_hasPlayedAtLeastOneFrame})");
+    }
+
+    if (_frameQueue.TryDequeue(out var frame))
+    {
+        Interlocked.Decrement(ref _queueCount);
+        SendRtpFrame(frame);
+        Interlocked.Increment(ref _framesSent);
+        _wasPlaying = true;
+        _hasPlayedAtLeastOneFrame = true;
+        _consecutiveUnderruns = 0; // Reset grace counter on successful frame
+    }
+    else
+    {
+        // Grace window: absorb up to 3 consecutive empty dequeues (60ms) before rebuffering.
+        // This prevents mid-sentence stutter from OpenAI inter-burst gaps.
+        _consecutiveUnderruns++;
+
+        if (_consecutiveUnderruns >= UNDERRUN_GRACE_FRAMES)
+        {
+            // Genuine stall — enter rebuffer mode and notify session
+            _isBuffering = true;
             Interlocked.Increment(ref _totalUnderruns);
 
             if (_wasPlaying)
@@ -335,7 +352,12 @@ public sealed class ALawRtpPlayout : IDisposable
                 _wasPlaying = false;
                 try { ThreadPool.UnsafeQueueUserWorkItem(_ => OnQueueEmpty?.Invoke(), null); } catch { }
             }
+            SafeLog($"[RTP] ⏸ Genuine underrun after {_consecutiveUnderruns * 20}ms — entering rebuffer");
         }
+        // else: transient inter-burst gap — send silence and continue without rebuffering
+
+        SendRtpFrame(_silenceFrame);
+    }
 
         if ((DateTime.UtcNow - _lastStatsLog).TotalSeconds >= STATS_LOG_INTERVAL_SEC)
         {
@@ -383,6 +405,7 @@ public sealed class ALawRtpPlayout : IDisposable
         lock (_accLock) { _accCount = 0; Array.Clear(_accumulator, 0, _accumulator.Length); }
         _isBuffering = true;
         _wasPlaying = false;
+        _consecutiveUnderruns = 0;
     }
 
     public void Stop()
