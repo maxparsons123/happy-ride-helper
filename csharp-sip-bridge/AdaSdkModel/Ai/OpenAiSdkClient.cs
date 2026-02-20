@@ -844,6 +844,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _responseActive) == 1) return;
             if (Volatile.Read(ref _toolInFlight) == 1) return;
             if (Volatile.Read(ref _callEnded) != 0) return;
+            if (Volatile.Read(ref _ignoreUserAudio) == 1) return;  // Goodbye already said — don't re-prompt
             if (!IsConnected) return;
 
             var sinceAdaFinished = NowMs() - Volatile.Read(ref _lastAdaFinishedAt);
