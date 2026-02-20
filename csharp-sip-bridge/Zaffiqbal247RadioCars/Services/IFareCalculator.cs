@@ -36,5 +36,13 @@ public sealed class FareResult
 public interface IFareCalculator
 {
     Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber);
-    Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber);
+
+    /// <param name="spokenPickupNumber">House number extracted from the caller's speech — used as a hard geocoding filter.</param>
+    /// <param name="spokenDestNumber">House number extracted from the caller's speech — used as a hard geocoding filter.</param>
+    Task<FareResult> ExtractAndCalculateWithAiAsync(
+        string? pickup,
+        string? destination,
+        string? phoneNumber,
+        string? spokenPickupNumber = null,
+        string? spokenDestNumber = null);
 }
