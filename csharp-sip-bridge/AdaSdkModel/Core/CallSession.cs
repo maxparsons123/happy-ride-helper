@@ -975,20 +975,19 @@ public sealed class CallSession : ICallSession
                                             ? result.ClarificationMessage
                                             : "I couldn't verify that destination address. Could you repeat the full destination including the street name and city?";
 
-                                        // Build context hints to help Ada ask the right question
-                                        var pickupCityHint = !string.IsNullOrWhiteSpace(_booking.PickupCity)
-                                            ? $"The pickup is in {_booking.PickupCity}."
-                                            : !string.IsNullOrWhiteSpace(pickup) && DestinationLacksCityContext(pickup)
-                                                ? ""
-                                                : $"The pickup address is '{pickup}'.";
+                                        // pickupCityHint removed — pickup is confirmed in state; Ada must not reference it during destination clarification
+
+                                        // Build confirmed pickup string for the injection (always use state, never raw STT)
+                                        var confirmedPickup = !string.IsNullOrWhiteSpace(_booking.Pickup) ? _booking.Pickup : pickup;
 
                                         await _aiClient.InjectMessageAndRespondAsync(
-                                            $"[ADDRESS CLARIFICATION NEEDED] The destination '{_booking.Destination}' could not be verified by the geocoder — the street name may be wrong or unclear. " +
-                                            $"{pickupCityHint} " +
+                                            $"[ADDRESS CLARIFICATION NEEDED] The DESTINATION '{_booking.Destination}' could not be verified by the geocoder. " +
+                                            $"CRITICAL: The PICKUP address '{confirmedPickup}' IS ALREADY CONFIRMED AND CORRECT — do NOT question it, do NOT mention it, do NOT compare it to anything the caller said. The pickup is locked in state. " +
+                                            "Your task is ONLY to clarify the DESTINATION. " +
                                             "IMPORTANT: Before asking the caller anything, first check the conversation history — did the caller already provide a DIFFERENT or CORRECTED address for the destination? " +
-                                            "If yes, call sync_booking_data immediately with that corrected address (do NOT ask again). " +
-                                            $"If no correction is found, ask the caller: \"{clarMsg}\" " +
-                                            "Once they confirm or correct it, call sync_booking_data again with the full corrected destination.");
+                                            "If yes, call sync_booking_data immediately with that corrected destination (do NOT ask again). " +
+                                            $"If no correction is found, ask the caller ONLY about the destination: \"{clarMsg}\" " +
+                                            "Once they confirm or correct the destination, call sync_booking_data again with the full corrected destination.");
 
                                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                                         return;
