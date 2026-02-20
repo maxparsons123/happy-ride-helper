@@ -24,6 +24,9 @@ public sealed class ConfigForm : Form
     private TextBox txtIcabbiTenantBase = null!, txtIcabbiAppKey = null!, txtIcabbiSecretKey = null!;
     private TextBox txtIcabbiCompanyId = null!;
     private NumericUpDown nudIcabbiSiteId = null!;
+    // SumUp
+    private CheckBox chkSumUpEnabled = null!;
+    private TextBox txtSumUpApiKey = null!, txtSumUpMerchantCode = null!, txtSumUpCurrency = null!;
 
     public ConfigForm(AppSettings settings)
     {
@@ -109,7 +112,15 @@ public sealed class ConfigForm : Form
         };
         tabIcabbi.Controls.AddRange(new Control[] { lblSiteId, nudIcabbiSiteId });
 
-        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabMaps, tabDispatch, tabAudio, tabSupabase, tabSimli, tabIcabbi });
+        // ── SumUp Tab ──
+        var tabSumUp = new TabPage("💳 SumUp") { BackColor = BackColor };
+        chkSumUpEnabled = new CheckBox { Text = "Enable SumUp payment links", Location = new Point(15, 15), AutoSize = true, ForeColor = fgInput };
+        tabSumUp.Controls.Add(chkSumUpEnabled);
+        txtSumUpApiKey = AddField(tabSumUp, "API Key:", 50, bgInput, fgInput, masked: true);
+        txtSumUpMerchantCode = AddField(tabSumUp, "Merchant Code:", 90, bgInput, fgInput);
+        txtSumUpCurrency = AddField(tabSumUp, "Currency:", 130, bgInput, fgInput);
+
+        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabMaps, tabDispatch, tabAudio, tabSupabase, tabSimli, tabIcabbi, tabSumUp });
 
         // ── OK / Cancel ──
         var pnlButtons = new Panel { Dock = DockStyle.Bottom, Height = 45, BackColor = BackColor };
@@ -163,6 +174,11 @@ public sealed class ConfigForm : Form
         txtIcabbiSecretKey.Text = Settings.Icabbi.SecretKey;
         txtIcabbiCompanyId.Text = Settings.Icabbi.CompanyId;
         nudIcabbiSiteId.Value = Settings.Icabbi.SiteId;
+        // SumUp
+        chkSumUpEnabled.Checked = Settings.SumUp.Enabled;
+        txtSumUpApiKey.Text = Settings.SumUp.ApiKey;
+        txtSumUpMerchantCode.Text = Settings.SumUp.MerchantCode;
+        txtSumUpCurrency.Text = string.IsNullOrWhiteSpace(Settings.SumUp.Currency) ? "GBP" : Settings.SumUp.Currency;
     }
 
     private void WriteToSettings()
@@ -190,6 +206,11 @@ public sealed class ConfigForm : Form
         Settings.Icabbi.SecretKey = txtIcabbiSecretKey.Text.Trim();
         Settings.Icabbi.CompanyId = txtIcabbiCompanyId.Text.Trim();
         Settings.Icabbi.SiteId = (int)nudIcabbiSiteId.Value;
+        // SumUp
+        Settings.SumUp.Enabled = chkSumUpEnabled.Checked;
+        Settings.SumUp.ApiKey = txtSumUpApiKey.Text.Trim();
+        Settings.SumUp.MerchantCode = txtSumUpMerchantCode.Text.Trim();
+        Settings.SumUp.Currency = string.IsNullOrWhiteSpace(txtSumUpCurrency.Text) ? "GBP" : txtSumUpCurrency.Text.Trim().ToUpperInvariant();
     }
 
     private static AppSettings Clone(AppSettings src)
