@@ -18,6 +18,8 @@ public class ConfigForm : Form
     private TextBox txtDeepgramKey = null!;
     private TextBox txtBsqdWebhook = null!, txtBsqdApiKey = null!, txtWhatsAppWebhook = null!;
     private TextBox txtIcabbiAppKey = null!, txtIcabbiSecretKey = null!, txtIcabbiTenantBase = null!;
+    private TextBox txtIcabbiCompanyId = null!;
+    private NumericUpDown nudIcabbiSiteId = null!;
     private CheckBox chkIcabbiEnabled = null!;
     private ComboBox cmbCodec = null!;
     private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!;
@@ -81,6 +83,10 @@ public class ConfigForm : Form
         txtIcabbiAppKey = AddField(tabIcabbi, "App Key:", 50, bgInput, fgInput, masked: true);
         txtIcabbiSecretKey = AddField(tabIcabbi, "Secret Key:", 90, bgInput, fgInput, masked: true);
         txtIcabbiTenantBase = AddField(tabIcabbi, "Tenant URL:", 130, bgInput, fgInput);
+        txtIcabbiCompanyId = AddField(tabIcabbi, "Company ID:", 170, bgInput, fgInput);
+        var lblSiteId = new Label { Text = "Site ID:", Location = new Point(15, 213), AutoSize = true };
+        nudIcabbiSiteId = new NumericUpDown { Location = new Point(120, 210), Size = new Size(100, 23), Minimum = 0, Maximum = 99999, Increment = 1, BackColor = bgInput, ForeColor = fgInput };
+        tabIcabbi.Controls.AddRange(new Control[] { lblSiteId, nudIcabbiSiteId });
 
         // ── Audio Tab ──
         var tabAudio = new TabPage("🔊 Audio") { BackColor = BackColor };
@@ -143,6 +149,8 @@ public class ConfigForm : Form
         txtIcabbiAppKey.Text = Settings.Icabbi.AppKey;
         txtIcabbiSecretKey.Text = Settings.Icabbi.SecretKey;
         txtIcabbiTenantBase.Text = Settings.Icabbi.TenantBase;
+        txtIcabbiCompanyId.Text = Settings.Icabbi.CompanyId;
+        nudIcabbiSiteId.Value = Settings.Icabbi.SiteId;
         chkIcabbiEnabled.Checked = Settings.Icabbi.Enabled;
 
         cmbCodec.SelectedItem = Settings.Audio.PreferredCodec;
@@ -170,6 +178,8 @@ public class ConfigForm : Form
         Settings.Icabbi.AppKey = txtIcabbiAppKey.Text.Trim();
         Settings.Icabbi.SecretKey = txtIcabbiSecretKey.Text.Trim();
         Settings.Icabbi.TenantBase = txtIcabbiTenantBase.Text.Trim();
+        Settings.Icabbi.CompanyId = txtIcabbiCompanyId.Text.Trim();
+        Settings.Icabbi.SiteId = (int)nudIcabbiSiteId.Value;
         Settings.Icabbi.Enabled = chkIcabbiEnabled.Checked;
 
         Settings.Audio.PreferredCodec = cmbCodec.SelectedItem?.ToString() ?? "PCMA";
