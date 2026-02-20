@@ -61,12 +61,14 @@ public sealed class GeminiAddressClient
             // ── Step 2: Call Gemini with function calling ──
             var timePart = !string.IsNullOrWhiteSpace(pickupTime) ? $"\nPickup Time Requested: \"{pickupTime}\"\nREFERENCE_DATETIME (current UTC): {DateTime.UtcNow:o}" : "";
 
-            // Include spoken house numbers so Gemini is anchored to what the caller actually said
+            // House numbers extracted from caller's speech via AddressParser — used as geocoding filters.
+            // Gemini must resolve to a location that actually has this number on the street,
+            // not just the midpoint or any random point on the road.
             var houseNumberHints = "";
             if (!string.IsNullOrWhiteSpace(spokenPickupNumber))
-                houseNumberHints += $"\nSPOKEN PICKUP HOUSE NUMBER (caller said this explicitly): \"{spokenPickupNumber}\" — your street_number for pickup MUST match this or flag is_ambiguous=true.";
+                houseNumberHints += $"\nPICKUP HOUSE NUMBER (extracted from caller's speech): \"{spokenPickupNumber}\" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number {spokenPickupNumber}. Set street_number to exactly \"{spokenPickupNumber}\". If the street has no such number, flag is_ambiguous=true.";
             if (!string.IsNullOrWhiteSpace(spokenDestNumber))
-                houseNumberHints += $"\nSPOKEN DESTINATION HOUSE NUMBER (caller said this explicitly): \"{spokenDestNumber}\" — your street_number for dropoff MUST match this or flag is_ambiguous=true.";
+                houseNumberHints += $"\nDESTINATION HOUSE NUMBER (extracted from caller's speech): \"{spokenDestNumber}\" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number {spokenDestNumber}. Set street_number to exactly \"{spokenDestNumber}\". If the street has no such number, flag is_ambiguous=true.";
 
             var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{timePart}{houseNumberHints}{callerHistory}";
 
@@ -582,10 +584,10 @@ public sealed class GeminiAddressClient
             }
         }
 
-        // ── SPOKEN HOUSE NUMBER GUARD ──
-        // After Gemini resolves addresses, compare each resolved street_number against
-        // the number the caller actually spoke. If Gemini returned an alphanumeric (e.g. "4B")
-        // that doesn't match the spoken integer (e.g. "43"), flag as ambiguous so Ada confirms.
+        // ── SPOKEN HOUSE NUMBER GUARD (post-resolution safety net) ──
+        // Since the spoken number was already passed as a geocoding filter above,
+        // Gemini should have used it. This guard catches any remaining substitution
+        // where Gemini resolved to an alphanumeric (e.g. "4B") despite being told "43".
         var guardChecks = new[]
         {
             (side: "pickup",  spoken: spokenPickupNumber),
@@ -599,24 +601,48 @@ public sealed class GeminiAddressClient
             if (addr == null) continue;
 
             var resolvedNum = addr["street_number"]?.GetValue<string>()?.Trim() ?? "";
-            if (string.IsNullOrEmpty(resolvedNum)) continue;
 
-            var numericPrefix = System.Text.RegularExpressions.Regex.Match(resolvedNum, @"^\d+").Value;
-            var hasLetterSuffix = System.Text.RegularExpressions.Regex.IsMatch(resolvedNum, @"^\d+[A-Za-z]$");
-            if (!hasLetterSuffix) continue; // Only flag geocoded alphanumeric results
+            // If Gemini did not use the spoken number, force it in
+            if (!string.IsNullOrEmpty(resolvedNum) && !string.Equals(resolvedNum, spokenNum, StringComparison.OrdinalIgnoreCase))
+            {
+                var numericPrefix = System.Text.RegularExpressions.Regex.Match(resolvedNum, @"^\d+").Value;
+                var hasLetterSuffix = System.Text.RegularExpressions.Regex.IsMatch(resolvedNum, @"^\d+[A-Za-z]$");
+                var spokenDigits = System.Text.RegularExpressions.Regex.Match(spokenNum.Trim(), @"^\d+").Value;
 
-            var spokenDigits = System.Text.RegularExpressions.Regex.Match(spokenNum.Trim(), @"^\d+").Value;
-            if (string.IsNullOrEmpty(spokenDigits) || spokenDigits == numericPrefix) continue;
+                // Geocoder substitution: spoken="43" but resolved="4B" (alphanumeric, different prefix)
+                if (hasLetterSuffix && !string.IsNullOrEmpty(spokenDigits) && spokenDigits != numericPrefix)
+                {
+                    _logger.LogWarning("🏠 HOUSE NUMBER GUARD ({Side}): caller said '{Spoken}' but Gemini resolved '{Resolved}' — forcing spoken number",
+                        side, spokenNum, resolvedNum);
 
-            // Spoken number differs from the geocoded numeric prefix → flag as mismatch
-            _logger.LogWarning("🏠 HOUSE NUMBER GUARD ({Side}): caller said '{Spoken}' but Gemini resolved '{Resolved}' — flagging",
-                side, spokenNum, resolvedNum);
-
-            addr["is_ambiguous"] = true;
-            addr["house_number_mismatch"] = true;
-            work["status"] = "clarification_needed";
-            work["clarification_message"] = $"I want to confirm the house number for your {(side == "pickup" ? "pickup" : "destination")} address. " +
-                $"You said {spokenNum}, but the system found {resolvedNum}. Which is correct — {spokenNum} or {resolvedNum}?";
+                    // Force the spoken number — the caller is the authority
+                    addr["street_number"] = spokenNum;
+                    var streetName = addr["street_name"]?.GetValue<string>() ?? "";
+                    var city = addr["city"]?.GetValue<string>() ?? "";
+                    var postal = addr["postal_code"]?.GetValue<string>() ?? "";
+                    addr["address"] = string.IsNullOrEmpty(postal)
+                        ? $"{spokenNum} {streetName}, {city}"
+                        : $"{spokenNum} {streetName}, {city} {postal}";
+                    addr["house_number_mismatch"] = true;
+                    _logger.LogInformation("🏠 GUARD: Forced address → {Addr}", addr["address"]?.GetValue<string>());
+                }
+            }
+            else if (string.IsNullOrEmpty(resolvedNum) && !string.IsNullOrEmpty(spokenNum))
+            {
+                // Gemini returned no street number — inject the spoken one
+                addr["street_number"] = spokenNum;
+                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
+                var city = addr["city"]?.GetValue<string>() ?? "";
+                var postal = addr["postal_code"]?.GetValue<string>() ?? "";
+                var currentAddr = addr["address"]?.GetValue<string>() ?? "";
+                if (!currentAddr.StartsWith(spokenNum))
+                {
+                    addr["address"] = string.IsNullOrEmpty(postal)
+                        ? $"{spokenNum} {streetName}, {city}"
+                        : $"{spokenNum} {streetName}, {city} {postal}";
+                }
+                _logger.LogInformation("🏠 GUARD: Injected missing house number '{Num}' into {Side} address", spokenNum, side);
+            }
         }
 
         // ── ADDRESS SANITY GUARD: second-pass Gemini check ──
