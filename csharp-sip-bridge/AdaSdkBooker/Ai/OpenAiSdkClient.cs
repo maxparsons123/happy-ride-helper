@@ -713,7 +713,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (!string.IsNullOrWhiteSpace(callerName))
             {
                 greeting = $"[SYSTEM] [LANG: {langName}] A returning caller named {callerName} has connected (ID: {_callerId}). " +
-                           $"Greet them BY NAME in {langName}. You MUST say EXACTLY: \"Hello {callerName}, welcome back to Taxibot. I'm Ada. Where would you like to be picked up from?\" " +
+                           $"Greet them BY NAME in {langName}. You MUST say EXACTLY: \"Welcome to 247 Radio Carz. Hello {callerName}, my name is Ada and I am here to help you with your booking today. Where would you like to be picked up from?\" " +
                            $"⚠️ Do NOT say \"Where can I take you\" or any variation. ALWAYS ask for PICKUP LOCATION first. " +
                            $"Do NOT assume any addresses from previous trips. Start the booking fresh.";
             }
@@ -778,7 +778,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         "it" => "Ciao, benvenuto a Taxibot. Sono Ada. Qual è il suo nome?",
         "pl" => "Cześć, witamy w Taxibot. Jestem Ada. Jak się Pan/Pani nazywa?",
         "pt" => "Olá, bem-vindo ao Taxibot. Sou a Ada. Qual é o seu nome?",
-        _ => "Hello, welcome to Taxibot. I'm Ada. What's your name?"
+        _ => "Welcome to 247 Radio Carz. My name is Ada and I am here to help you with your booking today. May I take your name?"
     };
 
     // =========================
