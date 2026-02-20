@@ -1583,40 +1583,17 @@ public sealed class CallSession : ICallSession
         return string.IsNullOrEmpty(num) || num == "0" ? null : num;
     }
 
-    private static readonly System.Text.RegularExpressions.Regex _houseNumberFixRegex =
-        new(@"^(\d{1,3})(8|3|4)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // NOTE: NormalizeHouseNumber was removed.
+    // The regex ^(\d{1,3})(3|4|8)\b was incorrectly rewriting valid house numbers
+    // (e.g. 43 → 4B, 34 → 3D) because digit-to-letter mappings (3→B, 4→D, 8→A)
+    // are far too broad — they fire on any number ending in those digits.
+    // The House Number Guard in the geocoder pipeline (spoken number override) is the
+    // correct place to catch alphanumeric substitutions from the STT engine.
 
     private string? NormalizeHouseNumber(string? address, string fieldName)
     {
-        if (string.IsNullOrWhiteSpace(address)) return address;
-
-        var match = _houseNumberFixRegex.Match(address.Trim());
-        if (!match.Success) return address;
-
-        var baseNum = int.Parse(match.Groups[1].Value);
-        var trailingDigit = match.Groups[2].Value;
-
-        if (baseNum < 1 || baseNum > 199) return address;
-
-        var letter = trailingDigit switch
-        {
-            "8" => "A",
-            "3" => "B",
-            "4" => "D",
-            _ => null
-        };
-
-        if (letter == null) return address;
-
-        var corrected = address.Trim();
-        var original = match.Value;
-        var replacement = $"{baseNum}{letter}";
-        corrected = replacement + corrected[original.Length..];
-
-        _logger.LogInformation("[{SessionId}] 🔤 House number auto-corrected ({Field}): '{Original}' → '{Corrected}'",
-            SessionId, fieldName, original, replacement);
-
-        return corrected;
+        // Pass-through only — no digit-to-letter rewriting.
+        return address;
     }
 
     /// <summary>
