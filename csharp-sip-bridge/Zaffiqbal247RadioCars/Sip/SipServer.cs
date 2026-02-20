@@ -497,8 +497,26 @@ public sealed class SipServer : IAsyncDisposable
             OnOperatorCallerAudio?.Invoke(alawData);
         };
 
-        // Wire AI audio out
-        session.OnAudioOut += alawFrame => playout.BufferALaw(alawFrame);
+        // Wire AI audio out — pre-slice to 160-byte frames to eliminate accumulator lock churn
+        session.OnAudioOut += frame =>
+        {
+            const int frameSize = 160;
+            int offset = 0, remaining = frame.Length;
+            while (remaining >= frameSize)
+            {
+                var slice = new byte[frameSize];
+                Buffer.BlockCopy(frame, offset, slice, 0, frameSize);
+                playout.BufferALaw(slice);
+                offset += frameSize;
+                remaining -= frameSize;
+            }
+            if (remaining > 0)
+            {
+                var tail = new byte[remaining];
+                Buffer.BlockCopy(frame, offset, tail, 0, remaining);
+                playout.BufferALaw(tail);
+            }
+        };
 
         callAgent.OnCallHungup += async (dlg) =>
         {
@@ -588,11 +606,35 @@ public sealed class SipServer : IAsyncDisposable
         bool inboundFlushComplete = false;
         int inboundPacketCount = 0;
 
+        // Pre-slice OpenAI bursts into exact 160-byte A-law frames before hitting the queue lock.
+        // This eliminates accumulator churn on the hot path: each call to BufferALaw is a
+        // zero-remainder 160-byte write, so DrainAccumulatorToQueue never loops mid-burst.
         session.OnAudioOut += frame =>
         {
             Interlocked.Exchange(ref isBotSpeaking, 1);
             Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
-            playout.BufferALaw(frame);
+
+            const int frameSize = 160;
+            int offset = 0;
+            int remaining = frame.Length;
+
+            // Fast path: burst is an exact multiple of 160 — feed whole frames directly
+            while (remaining >= frameSize)
+            {
+                var slice = new byte[frameSize];
+                Buffer.BlockCopy(frame, offset, slice, 0, frameSize);
+                playout.BufferALaw(slice);
+                offset += frameSize;
+                remaining -= frameSize;
+            }
+
+            // Tail: any leftover bytes go through the accumulator as before
+            if (remaining > 0)
+            {
+                var tail = new byte[remaining];
+                Buffer.BlockCopy(frame, offset, tail, 0, remaining);
+                playout.BufferALaw(tail);
+            }
         };
 
         session.OnBargeIn += () =>
