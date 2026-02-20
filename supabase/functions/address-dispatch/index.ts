@@ -373,13 +373,14 @@ serve(async (req) => {
     const refDatetime = new Date().toISOString();
     const timePart = pickup_time ? `\nPickup Time Requested: "${pickup_time}"\nREFERENCE_DATETIME (current UTC): ${refDatetime}` : '';
 
-    // Append spoken house number hints so Gemini is anchored to what the caller said
+    // House numbers extracted from caller's speech via AddressParser — used as geocoding filters.
+    // Gemini must resolve to a location that actually has this number on the street.
     let houseNumberHints = '';
     if (pickup_house_number) {
-      houseNumberHints += `\nSPOKEN PICKUP HOUSE NUMBER (caller said this explicitly): "${pickup_house_number}" — your street_number for pickup MUST match this or flag is_ambiguous=true.`;
+      houseNumberHints += `\nPICKUP HOUSE NUMBER (extracted from caller's speech): "${pickup_house_number}" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number ${pickup_house_number}. Set street_number to exactly "${pickup_house_number}". If no such number exists on that street, flag is_ambiguous=true.`;
     }
     if (destination_house_number) {
-      houseNumberHints += `\nSPOKEN DESTINATION HOUSE NUMBER (caller said this explicitly): "${destination_house_number}" — your street_number for dropoff MUST match this or flag is_ambiguous=true.`;
+      houseNumberHints += `\nDESTINATION HOUSE NUMBER (extracted from caller's speech): "${destination_house_number}" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number ${destination_house_number}. Set street_number to exactly "${destination_house_number}". If no such number exists on that street, flag is_ambiguous=true.`;
     }
 
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
@@ -683,28 +684,48 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
       }
     }
 
-    // ── SPOKEN HOUSE NUMBER GUARD ──
-    // If a spoken house number was provided from the C# bridge, verify Gemini's resolved
-    // street_number matches. If Gemini returned an alphanumeric (e.g. "4B") that differs
-    // from what the caller said (e.g. "43"), flag as ambiguous so Ada asks the caller.
+    // ── SPOKEN HOUSE NUMBER GUARD (post-resolution safety net) ──
+    // Since the house number was passed as a geocoding filter, Gemini should have used it.
+    // This guard catches remaining substitutions (e.g. caller said "43" but resolved "4B")
+    // and forces the spoken number rather than flagging for clarification.
     for (const [side, spoken] of [["pickup", pickup_house_number], ["dropoff", destination_house_number]] as const) {
       if (!spoken?.trim()) continue;
       const addr = parsed[side as "pickup" | "dropoff"];
       if (!addr) continue;
       const resolvedNum: string = (addr.street_number || "").trim();
-      if (!resolvedNum) continue;
-      // Only flag when Gemini returned an alphanumeric (e.g. "4B")
-      if (!/^\d+[A-Za-z]$/.test(resolvedNum)) continue;
-      const numericPrefix = resolvedNum.match(/^(\d+)/)?.[1] ?? "";
-      const spokenDigits = spoken.trim().match(/^(\d+)/)?.[1] ?? "";
-      if (!spokenDigits || spokenDigits === numericPrefix) continue;
-      // Mismatch: caller said "43" but Gemini resolved "4B"
-      console.log(`🏠 HOUSE NUMBER GUARD (${side}): caller said "${spoken}" but Gemini resolved "${resolvedNum}" — flagging`);
-      addr.is_ambiguous = true;
-      (addr as any).house_number_mismatch = true;
-      parsed.status = "clarification_needed";
-      parsed.clarification_message = `I want to confirm the house number for your ${side === "pickup" ? "pickup" : "destination"} address. ` +
-        `You said ${spoken}, but the system found ${resolvedNum}. Which is correct — ${spoken} or ${resolvedNum}?`;
+
+      if (resolvedNum && resolvedNum.toLowerCase() !== spoken.trim().toLowerCase()) {
+        // Check for geocoder substitution: spoken="43" resolved="4B" (alphanumeric, different prefix)
+        const isAlphanumeric = /^\d+[A-Za-z]$/.test(resolvedNum);
+        const numericPrefix = resolvedNum.match(/^(\d+)/)?.[1] ?? "";
+        const spokenDigits = spoken.trim().match(/^(\d+)/)?.[1] ?? "";
+
+        if (isAlphanumeric && spokenDigits && spokenDigits !== numericPrefix) {
+          // Force the spoken number — the caller is the authority
+          console.log(`🏠 HOUSE NUMBER GUARD (${side}): caller said "${spoken}" but Gemini resolved "${resolvedNum}" — forcing spoken number`);
+          addr.street_number = spoken.trim();
+          const streetName = addr.street_name || "";
+          const city = addr.city || "";
+          const postal = addr.postal_code || "";
+          addr.address = postal
+            ? `${spoken.trim()} ${streetName}, ${city} ${postal}`
+            : `${spoken.trim()} ${streetName}, ${city}`;
+          (addr as any).house_number_mismatch = true;
+          console.log(`🏠 GUARD: Forced address → ${addr.address}`);
+        }
+      } else if (!resolvedNum && spoken.trim()) {
+        // Gemini returned no street number — inject the spoken one
+        addr.street_number = spoken.trim();
+        const streetName = addr.street_name || "";
+        const city = addr.city || "";
+        const postal = addr.postal_code || "";
+        if (!addr.address?.startsWith(spoken.trim())) {
+          addr.address = postal
+            ? `${spoken.trim()} ${streetName}, ${city} ${postal}`
+            : `${spoken.trim()} ${streetName}, ${city}`;
+        }
+        console.log(`🏠 GUARD: Injected missing house number "${spoken}" into ${side} address → ${addr.address}`);
+      }
     }
 
     // ── Calculate fare from Gemini coordinates ──
