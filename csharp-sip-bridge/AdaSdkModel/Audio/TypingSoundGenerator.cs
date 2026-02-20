@@ -3,31 +3,43 @@ using System;
 namespace AdaSdkModel.Audio;
 
 /// <summary>
-/// Generates realistic keyboard tapping sounds in A-law format.
-/// Used during "thinking" pauses to give the impression Ada is typing/entering info.
-/// 
-/// Each tap is a short impulse (3-5ms) with exponential decay, randomly spaced
-/// at natural typing intervals (60-180ms between keystrokes).
+/// Generates subtle, rhythmic keyboard clicking sounds in A-law format.
+/// Used during "thinking" pauses to give a discreet impression Ada is processing.
+///
+/// v2.0 — RHYTHMIC EDITION:
+///   ✅ Burst-then-pause rhythm: 2-4 clicks, then 400-700ms silence — feels like real typing
+///   ✅ Much lower amplitude (1200 peak) — barely perceptible, sits under the noise floor
+///   ✅ Short, crisp taps (1.0-1.5ms) with fast decay — more click, less thud
+///   ✅ Only active after Ada has spoken at least once (gate set externally)
+///   ✅ Rhythmically timed: clicks land on beat-like intervals, not random scatter
 /// </summary>
 public sealed class TypingSoundGenerator
 {
-    private const int FRAME_SIZE = 160;       // 20ms @ 8kHz
-    private const int SAMPLE_RATE = 8000;
+    private const int FRAME_SIZE  = 160;        // 20ms @ 8kHz
     private const byte ALAW_SILENCE = 0xD5;
 
-    // Tap characteristics
-    private const int TAP_SAMPLES_MIN = 10;   // 1.25ms minimum tap duration
-    private const int TAP_SAMPLES_MAX = 18;   // 2.25ms maximum tap duration
-    private const double TAP_AMPLITUDE = 3000; // Very subtle taps (was 8000)
-    private const double DECAY_RATE = 0.75;    // Fast decay for barely-there clicks
+    // ── Tap characteristics — very subtle ──
+    private const int    TAP_SAMPLES_MIN  = 8;    // ~1.0ms
+    private const int    TAP_SAMPLES_MAX  = 12;   // ~1.5ms
+    private const double TAP_AMPLITUDE    = 1200; // Very discreet (was 3000)
+    private const double DECAY_RATE       = 0.65; // Faster decay — crisper click
 
-    // Timing: frames between taps (at 50fps → 140-320ms between keystrokes)
-    private const int MIN_FRAMES_BETWEEN_TAPS = 7;   // 140ms
-    private const int MAX_FRAMES_BETWEEN_TAPS = 16;  // 320ms
+    // ── Rhythm: bursts of clicks separated by longer silences ──
+    // Frames = 20ms units
+    private const int CLICK_SPACING_MIN   = 5;   // 100ms between clicks in a burst
+    private const int CLICK_SPACING_MAX   = 8;   // 160ms between clicks in a burst
+    private const int BURST_MIN_CLICKS    = 2;   // Minimum clicks per burst
+    private const int BURST_MAX_CLICKS    = 4;   // Maximum clicks per burst
+    private const int PAUSE_MIN_FRAMES    = 20;  // 400ms silence between bursts
+    private const int PAUSE_MAX_FRAMES    = 35;  // 700ms silence between bursts
+
+    private enum State { InBurst, BetweenClicks, Pausing }
 
     private readonly Random _rng = new();
-    private int _framesUntilNextTap;
-    private int _tapSamplesRemaining;
+    private State  _state = State.Pausing;
+    private int    _framesRemaining;
+    private int    _clicksRemainingInBurst;
+    private int    _tapSamplesRemaining;
     private double _tapCurrentAmplitude;
 
     // Pre-allocated frame buffer
@@ -35,72 +47,103 @@ public sealed class TypingSoundGenerator
 
     public TypingSoundGenerator()
     {
-        _framesUntilNextTap = 0; // Immediate first tap
-        _tapSamplesRemaining = TAP_SAMPLES_MIN;
-        _tapCurrentAmplitude = TAP_AMPLITUDE;
+        // Start with a short delay before first burst
+        _state = State.Pausing;
+        _framesRemaining = _rng.Next(5, 12); // 100-240ms initial delay
     }
 
     /// <summary>
-    /// Get the next 20ms A-law frame containing typing sounds.
-    /// Call this once per frame tick during the "thinking" pause.
+    /// Get the next 20ms A-law frame. Returns silence if the burst is pausing.
     /// </summary>
     public byte[] NextFrame()
     {
-        // Build PCM16 samples first, then convert to A-law
         Span<short> pcm = stackalloc short[FRAME_SIZE];
         pcm.Clear();
 
         for (int i = 0; i < FRAME_SIZE; i++)
         {
-            // Check if we need to start a new tap
-            if (_tapSamplesRemaining <= 0 && i == 0)
+            // Advance state machine at sample boundary i==0 only
+            if (i == 0 && _tapSamplesRemaining <= 0)
             {
-                _framesUntilNextTap--;
-                if (_framesUntilNextTap <= 0)
-                {
-                    // Start a new keystroke tap
-                    _tapSamplesRemaining = _rng.Next(TAP_SAMPLES_MIN, TAP_SAMPLES_MAX + 1);
-                    // Vary amplitude ±30% for natural feel
-                    _tapCurrentAmplitude = TAP_AMPLITUDE * (0.7 + _rng.NextDouble() * 0.6);
-                    _framesUntilNextTap = _rng.Next(MIN_FRAMES_BETWEEN_TAPS, MAX_FRAMES_BETWEEN_TAPS + 1);
-                }
+                AdvanceState();
             }
 
             if (_tapSamplesRemaining > 0)
             {
-                // Generate tap: band-limited noise with exponential decay
-                double noise = (_rng.NextDouble() * 2.0 - 1.0); // -1 to +1
+                double noise = _rng.NextDouble() * 2.0 - 1.0;
                 pcm[i] = (short)(_tapCurrentAmplitude * noise);
                 _tapCurrentAmplitude *= DECAY_RATE;
                 _tapSamplesRemaining--;
             }
-            // else: pcm[i] stays 0 (silence)
         }
 
-        // Convert PCM16 to A-law
         for (int i = 0; i < FRAME_SIZE; i++)
-        {
             _frame[i] = LinearToALaw(pcm[i]);
-        }
 
         var copy = new byte[FRAME_SIZE];
         Buffer.BlockCopy(_frame, 0, copy, 0, FRAME_SIZE);
         return copy;
     }
 
-    /// <summary>
-    /// Reset timing state (call when starting a new thinking pause).
-    /// </summary>
-    public void Reset()
+    private void AdvanceState()
     {
-        _framesUntilNextTap = 0;
-        _tapSamplesRemaining = TAP_SAMPLES_MIN;
-        _tapCurrentAmplitude = TAP_AMPLITUDE;
+        switch (_state)
+        {
+            case State.Pausing:
+                _framesRemaining--;
+                if (_framesRemaining <= 0)
+                {
+                    // Start a new burst
+                    _clicksRemainingInBurst = _rng.Next(BURST_MIN_CLICKS, BURST_MAX_CLICKS + 1);
+                    _state = State.InBurst;
+                    FireTap();
+                }
+                break;
+
+            case State.InBurst:
+                // Tap just finished — if more clicks to go, schedule next one
+                if (_clicksRemainingInBurst > 0)
+                {
+                    _state = State.BetweenClicks;
+                    _framesRemaining = _rng.Next(CLICK_SPACING_MIN, CLICK_SPACING_MAX + 1);
+                }
+                else
+                {
+                    // Burst done — enter pause
+                    _state = State.Pausing;
+                    _framesRemaining = _rng.Next(PAUSE_MIN_FRAMES, PAUSE_MAX_FRAMES + 1);
+                }
+                break;
+
+            case State.BetweenClicks:
+                _framesRemaining--;
+                if (_framesRemaining <= 0)
+                {
+                    _state = State.InBurst;
+                    FireTap();
+                }
+                break;
+        }
     }
 
-    /// <summary>
-    /// ITU-T G.711 A-law encoder. Converts 16-bit linear PCM to 8-bit A-law.
-    /// </summary>
+    private void FireTap()
+    {
+        _tapSamplesRemaining = _rng.Next(TAP_SAMPLES_MIN, TAP_SAMPLES_MAX + 1);
+        // Vary amplitude ±20% for natural variation
+        _tapCurrentAmplitude = TAP_AMPLITUDE * (0.80 + _rng.NextDouble() * 0.40);
+        _clicksRemainingInBurst--;
+    }
+
+    /// <summary>Reset to initial state (call when a new thinking pause begins).</summary>
+    public void Reset()
+    {
+        _state = State.Pausing;
+        _framesRemaining = _rng.Next(3, 8); // Short delay before first burst
+        _tapSamplesRemaining = 0;
+        _tapCurrentAmplitude = 0;
+        _clicksRemainingInBurst = 0;
+    }
+
     private static byte LinearToALaw(short pcm)
     {
         int sign = (~pcm >> 8) & 0x80;
@@ -120,7 +163,7 @@ public sealed class TypingSoundGenerator
         }
 
         byte alaw = (byte)(sign | (exp << 4) | mantissa);
-        return (byte)(alaw ^ 0xD5); // Toggle even bits
+        return (byte)(alaw ^ 0xD5);
     }
 
     private static readonly byte[] AlawCompressTable = {

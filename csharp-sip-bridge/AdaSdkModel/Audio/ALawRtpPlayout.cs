@@ -102,9 +102,10 @@ public sealed class ALawRtpPlayout : IDisposable
     private long _statsQueueSizeSamples;
     private DateTime _lastStatsLog = DateTime.UtcNow;
 
-    // Typing sound effect — plays during "thinking" pauses
+    // Typing sound effect — plays during "thinking" pauses, only after Ada has spoken once
     private readonly TypingSoundGenerator _typingSound = new();
     private volatile bool _typingSoundsEnabled = true;
+    private volatile bool _adaHasSpoken = false; // Gate: only click after first response
 
     public event Action<string>? OnLog;
     public event Action? OnQueueEmpty;
@@ -116,6 +117,12 @@ public sealed class ALawRtpPlayout : IDisposable
 
     /// <summary>Enable/disable keyboard tapping sounds during thinking pauses.</summary>
     public bool TypingSoundsEnabled { get => _typingSoundsEnabled; set => _typingSoundsEnabled = value; }
+
+    /// <summary>
+    /// Call once after Ada's first response has been delivered.
+    /// Typing sounds will not play until this is called.
+    /// </summary>
+    public void NotifyAdaHasSpoken() => _adaHasSpoken = true;
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
@@ -317,7 +324,8 @@ public sealed class ALawRtpPlayout : IDisposable
             if (queueCount < JITTER_BUFFER_START_THRESHOLD)
             {
                 // Fill with typing sound or silence during the buffering wait
-                var fillFrame = _typingSoundsEnabled ? _typingSound.NextFrame() : _silenceFrame;
+                // Only click after Ada has spoken — never during the initial greeting wait
+                var fillFrame = _typingSoundsEnabled && _adaHasSpoken ? _typingSound.NextFrame() : _silenceFrame;
                 SendRtpFrame(fillFrame);
                 return;
             }

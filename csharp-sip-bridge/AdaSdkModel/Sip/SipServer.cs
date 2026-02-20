@@ -576,6 +576,7 @@ public sealed class SipServer : IAsyncDisposable
         session.AiClient.OnResponseCompleted += () =>
         {
             playout.Flush();
+            playout.NotifyAdaHasSpoken(); // Enable typing sounds after first response
             Interlocked.Exchange(ref isBotSpeaking, 0);
             botStoppedSpeakingAt = DateTime.UtcNow;
             if (playout.QueuedFrames == 0) session.NotifyPlayoutComplete();
