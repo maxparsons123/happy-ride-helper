@@ -405,11 +405,25 @@ public sealed class CallSession : ICallSession
     // =========================
     // BOOKING STATE INJECTION
     // =========================
-    private async Task InjectBookingStateAsync(string? interpretation = null)
+    private async Task InjectBookingStateAsync(string? interpretation = null, List<string>? sttCorrections = null)
     {
         var sdk = _aiClient;
 
         var sb = new System.Text.StringBuilder();
+
+        // Prepend any STT house-number corrections FIRST so the AI updates its memory
+        // before reading the authoritative booking state below.
+        if (sttCorrections != null && sttCorrections.Count > 0)
+        {
+            sb.AppendLine("[STT CORRECTION — CRITICAL] Speech recognition misheard a house number.");
+            sb.AppendLine("You MUST update your internal memory with the corrected values below.");
+            sb.AppendLine("Do NOT use the value you originally put in your tool call — it was wrong.");
+            foreach (var correction in sttCorrections)
+                sb.AppendLine($"  ⚠️ {correction}");
+            sb.AppendLine("The corrected values are reflected in the [BOOKING STATE] below. Use ONLY those values in all future tool calls.");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("[BOOKING STATE] Current booking data (ground truth):");
         sb.AppendLine($"  Name: {(_booking.Name != null ? $"{_booking.Name} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Pickup: {(_booking.Pickup != null ? $"{_booking.Pickup} ✓" : "(not yet collected)")}");
@@ -443,7 +457,10 @@ public sealed class CallSession : ICallSession
         try
         {
             await sdk.InjectSystemMessageAsync(sb.ToString());
-            _logger.LogDebug("[{SessionId}] 📋 Booking state injected", SessionId);
+            if (sttCorrections?.Count > 0)
+                _logger.LogInformation("[{SessionId}] 📋 Booking state + {Count} STT correction(s) injected", SessionId, sttCorrections.Count);
+            else
+                _logger.LogDebug("[{SessionId}] 📋 Booking state injected", SessionId);
         }
         catch (Exception ex)
         {
@@ -551,9 +568,16 @@ public sealed class CallSession : ICallSession
             }
         }
 
+        // Track STT house-number corrections so we can notify the AI to update its internal memory
+        var sttCorrections = new List<string>();
+
         if (args.TryGetValue("pickup", out var p))
         {
-            var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
+            var raw = p?.ToString();
+            var incoming = NormalizeHouseNumber(raw, "pickup");
+            // If normalisation changed the value, record the correction for AI context injection
+            if (incoming != raw && raw != null)
+                sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
             // Safeguard: store previous interpretation before overwriting
             if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
             {
@@ -575,7 +599,11 @@ public sealed class CallSession : ICallSession
         }
         if (args.TryGetValue("destination", out var d))
         {
-            var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
+            var raw = d?.ToString();
+            var incoming = NormalizeHouseNumber(raw, "destination");
+            // If normalisation changed the value, record the correction for AI context injection
+            if (incoming != raw && raw != null)
+                sttCorrections.Add($"STT CORRECTION (destination): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: destination = '{incoming}'.");
             // Safeguard: store previous interpretation before overwriting
             if (!string.IsNullOrWhiteSpace(_booking.Destination) && _booking.Destination != incoming)
             {
@@ -625,8 +653,9 @@ public sealed class CallSession : ICallSession
         OnBookingUpdated?.Invoke(_booking.Clone());
 
         // ── BOOKING STATE INJECTION ──
-        // Inject current booking state into conversation so Ada always has ground truth
-        _ = InjectBookingStateAsync(interpretation);
+        // Inject current booking state into conversation so Ada always has ground truth.
+        // Also pass any STT corrections so Ada updates its internal memory.
+        _ = InjectBookingStateAsync(interpretation, sttCorrections.Count > 0 ? sttCorrections : null);
 
         // If transcript mismatch was detected, return warning to Ada
         if (mismatchWarning != null)
