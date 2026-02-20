@@ -1126,7 +1126,10 @@ public sealed class CallSession : ICallSession
                     var timePart1 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart1}. " +
-                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm the booking.");
+                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
+                            $"After reading back the addresses and fare, offer the payment choice using this EXACT script: " +
+                            $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                            $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
                 }
                 catch (Exception ex)
                 {
@@ -1138,7 +1141,9 @@ public sealed class CallSession : ICallSession
                     var fallbackTimePart1 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] The estimated fare is 8 pounds{fallbackTimePart1}. " +
-                            "Read back the details to the caller and ask them to confirm.");
+                            "Read back the details to the caller, then offer the payment choice: " +
+                            "'We offer a fixed price of 8 pounds — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                            "Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
                 }
             });
 
@@ -1531,7 +1536,10 @@ public sealed class CallSession : ICallSession
             var timePart2 = FormatScheduledTimePart();
             await _aiClient.InjectMessageAndRespondAsync(
                     $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart2}. " +
-                    "Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm.");
+                    $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
+                    $"After reading back the addresses and fare, offer the payment choice using this EXACT script: " +
+                    $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                    $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
         }
         catch (Exception ex)
         {
@@ -1543,7 +1551,9 @@ public sealed class CallSession : ICallSession
             var fallbackTimePart2 = FormatScheduledTimePart();
             await _aiClient.InjectMessageAndRespondAsync(
                     $"[FARE RESULT] The estimated fare is 8 pounds{fallbackTimePart2}. " +
-                    "Read back the details to the caller and ask them to confirm.");
+                    "Read back the details to the caller, then offer the payment choice: " +
+                    "'We offer a fixed price of 8 pounds — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                    "Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
         }
     }
 
@@ -1753,7 +1763,10 @@ public sealed class CallSession : ICallSession
                     var timePart3 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart3}. " +
-                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. Ask them to confirm the booking.");
+                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
+                            $"After reading back the addresses and fare, offer the payment choice using this EXACT script: " +
+                            $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                            $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
                 }
                 catch (Exception ex)
                 {
@@ -1765,7 +1778,9 @@ public sealed class CallSession : ICallSession
                     var fallbackTimePart3 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] The estimated fare is 8 pounds{fallbackTimePart3}. " +
-                            "Read back these details to the caller and ask them to confirm.");
+                            "Read back the details to the caller, then offer the payment choice: " +
+                            "'We offer a fixed price of 8 pounds — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                            "Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
                 }
             });
 
