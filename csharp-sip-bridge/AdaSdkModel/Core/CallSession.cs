@@ -827,7 +827,7 @@ public sealed class CallSession : ICallSession
                     var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
                         spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
-                    var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+                    var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
                     FareResult result;
                     if (completed == aiTask)
@@ -923,7 +923,7 @@ public sealed class CallSession : ICallSession
                                                 retryPickup, retryDest, callerId, _booking.PickupTime,
                                                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
                                                 spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
-                                            var retryCompleted = await Task.WhenAny(retryTask, Task.Delay(10000));
+                                            var retryCompleted = await Task.WhenAny(retryTask, Task.Delay(18000));
 
                                             if (retryCompleted == retryTask)
                                             {
@@ -1026,6 +1026,7 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
                         result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                        EnrichFallbackResultStructuredFields(result, pickup, destination);
                     }
 
                     // Clear any pending disambiguation state
@@ -1611,7 +1612,7 @@ public sealed class CallSession : ICallSession
                     var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
                         spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
-                    var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+                    var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
                     FareResult result;
                     if (completed == aiTask)
@@ -1674,6 +1675,7 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogWarning("[{SessionId}] ⚠️ Edge function timed out, using fallback", sessionId);
                         result = await _fareCalculator.CalculateAsync(pickup, destination, callerId);
+                        EnrichFallbackResultStructuredFields(result, pickup, destination);
                     }
 
                     // Clear pending disambiguation state
@@ -2003,7 +2005,7 @@ public sealed class CallSession : ICallSession
                 enrichedPickup, enrichedDest, CallerId, _booking.PickupTime,
                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
                 spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
-            var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
+            var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
             FareResult result;
             if (completed == aiTask)
@@ -2375,6 +2377,41 @@ public sealed class CallSession : ICallSession
             return true;
 
         return false;
+    }
+
+    /// <summary>
+    /// When the Nominatim fallback is used, the FareResult only has lat/lon — no structured
+    /// address fields. This method populates PickupStreet, PickupNumber, PickupCity etc. from
+    /// AddressParser on the raw address strings, and infers city from caller history when missing.
+    /// This ensures the BSQD payload always has correct street_name, street_number, city data.
+    /// </summary>
+    private void EnrichFallbackResultStructuredFields(FareResult result, string pickup, string destination)
+    {
+        // Pickup structured fields
+        if (string.IsNullOrWhiteSpace(result.PickupStreet))
+        {
+            var p = Services.AddressParser.ParseAddress(pickup);
+            result.PickupStreet  = p.StreetName;
+            result.PickupNumber  = p.HasHouseNumber ? p.HouseNumber : null;
+            if (string.IsNullOrWhiteSpace(result.PickupCity))
+                result.PickupCity = p.TownOrArea.Length > 0 ? p.TownOrArea : TryExtractCityFromHistory(pickup);
+            result.PickupFormatted = pickup;
+            _logger.LogInformation("[{SessionId}] 🏠 Fallback structured pickup: street={St} num={Num} city={City}",
+                SessionId, result.PickupStreet, result.PickupNumber, result.PickupCity);
+        }
+
+        // Destination structured fields
+        if (string.IsNullOrWhiteSpace(result.DestStreet))
+        {
+            var d = Services.AddressParser.ParseAddress(destination);
+            result.DestStreet  = d.StreetName;
+            result.DestNumber  = d.HasHouseNumber ? d.HouseNumber : null;
+            if (string.IsNullOrWhiteSpace(result.DestCity))
+                result.DestCity = d.TownOrArea.Length > 0 ? d.TownOrArea : TryExtractCityFromHistory(destination);
+            result.DestFormatted = destination;
+            _logger.LogInformation("[{SessionId}] 🏠 Fallback structured dest: street={St} num={Num} city={City}",
+                SessionId, result.DestStreet, result.DestNumber, result.DestCity);
+        }
     }
 
     private void ApplyFareResult(FareResult result)
