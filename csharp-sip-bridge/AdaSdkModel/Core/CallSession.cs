@@ -985,7 +985,7 @@ public sealed class CallSession : ICallSession
                         _booking.Fare = null; _booking.Eta = null;
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         _aiClient.SetAwaitingConfirmation(false);
-                        _currentStage = BookingStage.CollectingDetails;
+                        _currentStage = BookingStage.CollectingDestination;
                         await _aiClient.InjectMessageAndRespondAsync(
                             "[DESTINATION ERROR] The verified pickup and destination resolved to the same location. " +
                             "Ask the caller where they want to go — their destination was not captured correctly. " +
@@ -1348,7 +1348,7 @@ public sealed class CallSession : ICallSession
                 _booking.Fare = null; _booking.Eta = null;
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 _aiClient.SetAwaitingConfirmation(false);
-                _currentStage = BookingStage.CollectingDetails;
+                _currentStage = BookingStage.CollectingDestination;
                 await _aiClient.InjectMessageAndRespondAsync(
                     "[DESTINATION ERROR] The verified pickup and destination resolved to the same location. " +
                     "Ask the caller where they want to go — their destination was not captured correctly. " +
@@ -1538,7 +1538,7 @@ public sealed class CallSession : ICallSession
                         _booking.Fare = null; _booking.Eta = null;
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         _aiClient.SetAwaitingConfirmation(false);
-                        _currentStage = BookingStage.CollectingDetails;
+                        _currentStage = BookingStage.CollectingDestination;
                         await _aiClient.InjectMessageAndRespondAsync(
                             "[ADDRESS ERROR] The pickup and destination appear to be the same address. " +
                             "Ask the caller to confirm their destination again — it may have been misheard.");
