@@ -1,7 +1,6 @@
 using AdaSdkModel.Config;
 using Microsoft.Extensions.Logging;
 using SumUp;
-using SumUp.Models;
 
 namespace AdaSdkModel.Services;
 
