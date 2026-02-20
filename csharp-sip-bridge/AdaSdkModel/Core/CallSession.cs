@@ -1966,47 +1966,17 @@ public sealed class CallSession : ICallSession
         return Normalize(oldAddress) != Normalize(newAddress);
     }
 
-    /// <summary>
-    /// Fix common STT house number confusions where letter suffixes are misheard as digits.
-    /// E.g. "52A" → heard as "528", "14B" → heard as "143", "7D" → heard as "74".
-    /// UK residential house numbers rarely exceed 200, so high numbers ending in 8/3/4
-    /// are likely letter suffixes (A/B-C/D).
-    /// </summary>
-    private static readonly System.Text.RegularExpressions.Regex _houseNumberFixRegex =
-        new(@"^(\d{1,3})(8|3|4)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // NOTE: NormalizeHouseNumber (digit→letter rewriting) was removed.
+    // The regex ^(\d{1,3})(3|4|8)\b was incorrectly rewriting valid house numbers
+    // (e.g. 43 → 4B, 34 → 3D) because mappings "3"→B / "4"→D / "8"→A
+    // match any number ending in those digits, not just letter-suffix mishearings.
+    // The geocoder-level House Number Guard (DetectHouseNumberSubstitution) is the
+    // correct place to catch STT alphanumeric substitutions.
 
     private string? NormalizeHouseNumber(string? address, string fieldName)
     {
-        if (string.IsNullOrWhiteSpace(address)) return address;
-
-        var match = _houseNumberFixRegex.Match(address.Trim());
-        if (!match.Success) return address;
-
-        var baseNum = int.Parse(match.Groups[1].Value);
-        var trailingDigit = match.Groups[2].Value;
-
-        // Only apply if base number is plausible for UK residential (1-199)
-        if (baseNum < 1 || baseNum > 199) return address;
-
-        var letter = trailingDigit switch
-        {
-            "8" => "A",  // Most common: 'A' misheard as '8'
-            "3" => "B",  // 'B'/'C' misheard as '3'
-            "4" => "D",  // 'D' misheard as '4'
-            _ => null
-        };
-
-        if (letter == null) return address;
-
-        var corrected = address.Trim();
-        var original = match.Value; // e.g. "528"
-        var replacement = $"{baseNum}{letter}"; // e.g. "52A"
-        corrected = replacement + corrected[original.Length..];
-
-        _logger.LogInformation("[{SessionId}] 🔤 House number auto-corrected ({Field}): '{Original}' → '{Corrected}'",
-            SessionId, fieldName, original, replacement);
-
-        return corrected;
+        // Pass-through only — no digit-to-letter rewriting.
+        return address;
     }
 
     /// <summary>
@@ -2162,11 +2132,11 @@ public sealed class CallSession : ICallSession
             // Skip if the spoken number IS the geocoded digit-prefix (e.g. "4" → "4B" is fine, it's just the suffix being added)
             if (spokenNum == geocodedDigits) continue;
 
-            // Skip if this looks like an intentional STT letter→digit correction (e.g. "528"→"52A")
-            // That would mean spokenNum starts with geocodedDigits and ends in 8/3/4
-            if (spokenNum.StartsWith(geocodedDigits) &&
-                spokenNum.Length == geocodedDigits.Length + 1 &&
-                "834".Contains(spokenNum[^1]))
+            // Skip if the geocoded number is just the spoken number with a letter suffix added
+            // e.g. spoken "52" → geocoded "52A" — the geocoder is just being more specific
+            if (geocodedNumber.StartsWith(spokenNum, StringComparison.OrdinalIgnoreCase) &&
+                geocodedNumber.Length == spokenNum.Length + 1 &&
+                char.IsLetter(geocodedNumber[^1]))
                 continue;
 
             // The spoken number differs from the geocoded digit prefix in a non-trivial way
