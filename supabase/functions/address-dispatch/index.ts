@@ -1167,7 +1167,10 @@ Evaluate BOTH pickup and dropoff independently.` },
     const pickupLon = parsed.pickup?.lon;
     if (typeof pickupLat === "number" && typeof pickupLon === "number" && pickupLat !== 0) {
       try {
-        const { data: zoneHits } = await supabase.rpc("find_zone_for_point", {
+        const zoneSupabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const zoneSupabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+        const zoneClient = createClient(zoneSupabaseUrl, zoneSupabaseKey);
+        const { data: zoneHits } = await zoneClient.rpc("find_zone_for_point", {
           p_lat: pickupLat,
           p_lng: pickupLon,
         });
