@@ -593,8 +593,11 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
       }
       
       // CHECK 2: Does the input explicitly mention a city?
+      // NOTE: Do NOT clear ambiguity here if districts_found has 2+ entries —
+      // the multi-district safety net (Case 2 below) must still run.
       const explicitCity = KNOWN_CITIES.find(c => inputLower.includes(c.toLowerCase()));
-      if (explicitCity) {
+      const hasMultiDistricts = (addr.districts_found || []).length >= 2;
+      if (explicitCity && !hasMultiDistricts) {
         console.log(`✅ User explicitly said "${explicitCity}" in "${originalInput}" — clearing disambiguation for ${side}`);
         addr.is_ambiguous = false;
         addr.alternatives = [];
@@ -603,6 +606,8 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
           parsed.status = "ready";
           parsed.clarification_message = undefined;
         }
+      } else if (explicitCity && hasMultiDistricts) {
+        console.log(`⚠️ User said "${explicitCity}" but street has ${addr.districts_found.length} districts — deferring to multi-district safety net`);
       }
     }
 
@@ -821,11 +826,7 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
     // ── STREET EXISTENCE CHECK: verify resolved streets exist in our DB ──
     // If Gemini hallucinated a street (e.g., "Rossville Street, Coventry" when it doesn't exist),
     // use fuzzy matching to find the real local street the caller likely meant
-    const supabaseUrl2 = Deno.env.get("SUPABASE_URL");
-    const supabaseKey2 = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    
     if (supabaseUrl2 && supabaseKey2) {
-      const supabase2 = createClient(supabaseUrl2, supabaseKey2);
       
       for (const side of ["pickup", "dropoff"] as const) {
         const addr = parsed[side];
