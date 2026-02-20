@@ -69,6 +69,110 @@ public sealed class IcabbiBookingService : IDisposable
     }
 
     // ═══════════════════════════════════════════
+    //  FARE QUOTE (pre-booking price lookup)
+    // ═══════════════════════════════════════════
+
+    /// <summary>
+    /// Calls the iCabbi API to get a fare quote for a trip WITHOUT committing a booking.
+    /// Uses the same payload structure as CreateAndDispatchAsync but reads back fare/eta only.
+    /// Returns null if the API is unreachable or the response doesn't include pricing.
+    /// </summary>
+    public async Task<IcabbiFareQuote?> GetFareQuoteAsync(
+        BookingState booking,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            Log("💰 Requesting iCabbi fare quote...");
+
+            var phone = "00" + (booking.CallerPhone?.Replace("+", "").Replace(" ", "").Replace("-", "") ?? "");
+            var seats = Math.Max(1, booking.Passengers ?? 1);
+
+            var quotePayload = new IcabbiBookingRequest
+            {
+                date = booking.ScheduledAt ?? DateTime.UtcNow.AddMinutes(1),
+                name = booking.Name ?? "Customer",
+                phone = phone,
+                extras = "WHATSAPP",
+                seats = seats,
+                source = "APP",
+                vehicle_group = "Taxi",
+                site_id = 71,
+                status = "QUOTE",   // signals intent — quote only, not committed
+                address = new IcabbiAddressDto
+                {
+                    lat = booking.PickupLat ?? 0,
+                    lng = booking.PickupLon ?? 0,
+                    formatted = booking.PickupFormatted ?? booking.Pickup ?? ""
+                },
+                destination = new IcabbiAddressDto
+                {
+                    lat = booking.DestLat ?? 0,
+                    lng = booking.DestLon ?? 0,
+                    formatted = booking.DestFormatted ?? booking.Destination ?? ""
+                }
+            };
+            quotePayload.AssignVehicleType();
+
+            var json = JsonSerializer.Serialize(quotePayload, JsonOpts);
+            Log($"📤 Quote payload:\n{json}");
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}bookings/add")
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+            AddAuthHeaders(req, phone);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(8)); // tight timeout — don't hold up the call
+
+            var resp = await SendWithRetryAsync(req, cts.Token, "FareQuote", maxRetries: 1);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            Log($"📨 [Quote Response] {resp.StatusCode}: {Truncate(body)}");
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Log($"⚠️ Quote HTTP {resp.StatusCode} — using Gemini estimate");
+                return null;
+            }
+
+            JsonNode? root;
+            try { root = JsonNode.Parse(body); }
+            catch { return null; }
+
+            // iCabbi returns fare in body.booking.payment or body.booking.price
+            var bookingNode = root?["body"]?["booking"];
+            if (bookingNode is null) return null;
+
+            // Try payment.total first, then price, then cost
+            var total = bookingNode["payment"]?["total"]?.GetValue<decimal?>()
+                     ?? bookingNode["payment"]?["price"]?.GetValue<decimal?>()
+                     ?? bookingNode["price"]?.GetValue<decimal?>()
+                     ?? bookingNode["cost"]?.GetValue<decimal?>();
+
+            if (total is null || total == 0) return null;
+
+            var etaMinutes = bookingNode["eta"]?.GetValue<int?>()
+                          ?? bookingNode["eta_minutes"]?.GetValue<int?>();
+
+            var journeyId = bookingNode["id"]?.GetValue<int>()?.ToString();
+
+            Log($"✅ Quote received: £{total:F2}, ETA={etaMinutes?.ToString() ?? "unknown"} min");
+            return new IcabbiFareQuote(total.Value, etaMinutes, journeyId);
+        }
+        catch (OperationCanceledException)
+        {
+            Log("⏱️ Quote request timed out — using Gemini estimate");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Quote error (non-fatal): {ex.Message}");
+            return null;
+        }
+    }
+
+    // ═══════════════════════════════════════════
     //  CREATE & DISPATCH BOOKING
     // ═══════════════════════════════════════════
 
@@ -430,6 +534,16 @@ public sealed class IcabbiBookingService : IDisposable
 // ═══════════════════════════════════════════
 //  MODELS (aligned with production ICabbiApiClient)
 // ═══════════════════════════════════════════
+
+/// <summary>
+/// Lightweight fare quote returned by GetFareQuoteAsync.
+/// JourneyId is populated if iCabbi created a draft booking — caller should cancel it after use.
+/// </summary>
+public record IcabbiFareQuote(decimal FareDecimal, int? EtaMinutes, string? JourneyId)
+{
+    public string FareFormatted => $"£{FareDecimal:F2}";
+    public string EtaFormatted => EtaMinutes.HasValue ? $"{EtaMinutes} minutes" : "10 minutes";
+}
 
 public record IcabbiBookingResult(
     bool Success, string? JourneyId, string? TrackingUrl,

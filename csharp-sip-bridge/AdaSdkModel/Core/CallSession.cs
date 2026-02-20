@@ -960,6 +960,26 @@ public sealed class CallSession : ICallSession
 
                     ApplyFareResult(result);
 
+                    // ── iCabbi Fare Override (when iCabbi is enabled) ──────────────────────────
+                    // If iCabbi integration is active, get the official price from their API
+                    // and override Gemini's approximation before presenting to the caller.
+                    if (_icabbiEnabled && _icabbi != null)
+                    {
+                        _logger.LogInformation("[{SessionId}] 🚕 iCabbi enabled — requesting fare quote", sessionId);
+                        var quote = await _icabbi.GetFareQuoteAsync(_booking);
+                        if (quote != null)
+                        {
+                            _logger.LogInformation("[{SessionId}] ✅ iCabbi fare override: {OldFare} → {NewFare}, ETA: {Eta}",
+                                sessionId, _booking.Fare, quote.FareFormatted, quote.EtaFormatted);
+                            _booking.Fare = quote.FareFormatted;
+                            _booking.Eta = quote.EtaFormatted;
+                        }
+                        else
+                        {
+                            _logger.LogWarning("[{SessionId}] ⚠️ iCabbi quote unavailable — using Gemini estimate ({Fare})", sessionId, _booking.Fare);
+                        }
+                    }
+
             _aiClient.SetAwaitingConfirmation(true);
             _currentStage = BookingStage.FarePresented;
             await _aiClient.SetVadModeAsync(useSemantic: false);
