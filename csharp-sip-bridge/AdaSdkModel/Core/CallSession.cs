@@ -1966,17 +1966,41 @@ public sealed class CallSession : ICallSession
         return Normalize(oldAddress) != Normalize(newAddress);
     }
 
-    // NOTE: NormalizeHouseNumber (digit→letter rewriting) was removed.
-    // The regex ^(\d{1,3})(3|4|8)\b was incorrectly rewriting valid house numbers
-    // (e.g. 43 → 4B, 34 → 3D) because mappings "3"→B / "4"→D / "8"→A
-    // match any number ending in those digits, not just letter-suffix mishearings.
-    // The geocoder-level House Number Guard (DetectHouseNumberSubstitution) is the
-    // correct place to catch STT alphanumeric substitutions.
+    // NormalizeHouseNumber: corrects HYPHENATED STT mishearings only.
+    // When Whisper hears a letter suffix it sometimes inserts a hyphen+digit:
+    //   "52A" → "52-8"   (A sounds like "eight")
+    //   "14B" → "14-3"   (B sounds like "three")
+    //   "7D"  → "7-4"    (D sounds like "four")
+    // Matching ONLY the hyphenated form avoids the false-positive that destroyed
+    // "43 Dovey Road" (plain trailing digit, no hyphen → DO NOT touch).
+    private static readonly System.Text.RegularExpressions.Regex _sttHyphenFixRegex =
+        new(@"^(\d{1,3})-(8|3|4)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly Dictionary<string, string> _digitToLetter = new()
+    {
+        ["8"] = "A",   // 'A' misheard as 'eight'
+        ["3"] = "B",   // 'B' misheard as 'three'
+        ["4"] = "D",   // 'D' misheard as 'four'
+    };
 
     private string? NormalizeHouseNumber(string? address, string fieldName)
     {
-        // Pass-through only — no digit-to-letter rewriting.
-        return address;
+        if (string.IsNullOrWhiteSpace(address)) return address;
+
+        var trimmed = address.Trim();
+        var match = _sttHyphenFixRegex.Match(trimmed);
+        if (!match.Success) return address;
+
+        var baseNum = match.Groups[1].Value;
+        var digit   = match.Groups[2].Value;
+        var letter  = _digitToLetter[digit];
+        var corrected = $"{baseNum}{letter}{trimmed[(match.Length)..]}";
+
+        _logger.LogInformation(
+            "[{SessionId}] 🔤 STT hyphen fix ({Field}): '{Original}' → '{Corrected}'",
+            SessionId, fieldName, match.Value, $"{baseNum}{letter}");
+
+        return corrected;
     }
 
     /// <summary>

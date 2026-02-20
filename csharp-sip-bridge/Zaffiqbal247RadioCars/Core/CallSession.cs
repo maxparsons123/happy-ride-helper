@@ -1583,17 +1583,31 @@ public sealed class CallSession : ICallSession
         return string.IsNullOrEmpty(num) || num == "0" ? null : num;
     }
 
-    // NOTE: NormalizeHouseNumber was removed.
-    // The regex ^(\d{1,3})(3|4|8)\b was incorrectly rewriting valid house numbers
-    // (e.g. 43 → 4B, 34 → 3D) because digit-to-letter mappings (3→B, 4→D, 8→A)
-    // are far too broad — they fire on any number ending in those digits.
-    // The House Number Guard in the geocoder pipeline (spoken number override) is the
-    // correct place to catch alphanumeric substitutions from the STT engine.
+    // NormalizeHouseNumber: corrects HYPHENATED STT mishearings only.
+    // "52A" → "52-8", "14B" → "14-3", "7D" → "7-4" are common Whisper errors.
+    // Only the hyphenated form is matched — plain trailing digits (e.g. "43") are untouched.
+    private static readonly System.Text.RegularExpressions.Regex _sttHyphenFixRegex =
+        new(@"^(\d{1,3})-(8|3|4)\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly Dictionary<string, string> _digitToLetter = new()
+    {
+        ["8"] = "A",
+        ["3"] = "B",
+        ["4"] = "D",
+    };
 
     private string? NormalizeHouseNumber(string? address, string fieldName)
     {
-        // Pass-through only — no digit-to-letter rewriting.
-        return address;
+        if (string.IsNullOrWhiteSpace(address)) return address;
+        var trimmed = address.Trim();
+        var match = _sttHyphenFixRegex.Match(trimmed);
+        if (!match.Success) return address;
+        var baseNum = match.Groups[1].Value;
+        var letter  = _digitToLetter[match.Groups[2].Value];
+        var corrected = $"{baseNum}{letter}{trimmed[(match.Length)..]}";
+        _logger.LogInformation("[{SessionId}] 🔤 STT hyphen fix ({Field}): '{Original}' → '{Corrected}'",
+            SessionId, fieldName, match.Value, $"{baseNum}{letter}");
+        return corrected;
     }
 
     /// <summary>
