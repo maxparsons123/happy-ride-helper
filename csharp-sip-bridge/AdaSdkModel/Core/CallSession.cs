@@ -163,7 +163,7 @@ public sealed class CallSession : ICallSession
 
             if (_icabbiEnabled && _icabbi != null)
             {
-                var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId);
+                var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId, callerPhoneOverride: callerId);
                 if (icabbiResult.Success)
                     _logger.LogInformation("[{SessionId}] 🚕 iCabbi (safety net): {JourneyId}", sessionId, icabbiResult.JourneyId);
                 else
@@ -1433,9 +1433,13 @@ public sealed class CallSession : ICallSession
         var action = args.TryGetValue("action", out var a) ? a?.ToString() : null;
 
         // SAFETY NET: populate _booking from book_taxi args (with name validation)
-        if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString())
-            && !_rejectedNames.Contains(bn.ToString()!.Trim()))
-            _booking.Name = bn.ToString()!.Trim();
+        // Only overwrite name if we don't already have a valid one (e.g. from caller history)
+        if (string.IsNullOrWhiteSpace(_booking.Name) || _rejectedNames.Contains(_booking.Name))
+        {
+            if (args.TryGetValue("caller_name", out var bn) && !string.IsNullOrWhiteSpace(bn?.ToString())
+                && !_rejectedNames.Contains(bn.ToString()!.Trim()))
+                _booking.Name = bn.ToString()!.Trim();
+        }
 
         // Name guard — reject booking without a real name
         if (string.IsNullOrWhiteSpace(_booking.Name) || _rejectedNames.Contains(_booking.Name))
@@ -1444,8 +1448,17 @@ public sealed class CallSession : ICallSession
             _booking.Pickup = bp.ToString();
         if (args.TryGetValue("destination", out var bd) && !string.IsNullOrWhiteSpace(bd?.ToString()))
             _booking.Destination = bd.ToString();
-        if (args.TryGetValue("passengers", out var bpax) && int.TryParse(bpax?.ToString(), out var bpn))
-            _booking.Passengers = bpn;
+        // Only update passengers from book_taxi args if not already set, or if the new value is larger
+        // (prevents AI sending stale/default value of 1 from overwriting the correctly-collected count)
+        if (args.TryGetValue("passengers", out var bpax) && int.TryParse(bpax?.ToString(), out var bpn) && bpn > 0)
+        {
+            if (!_booking.Passengers.HasValue || _booking.Passengers == 0)
+                _booking.Passengers = bpn;
+            // If booking already has a passenger count, only update if the new value is different AND > 1
+            // (the AI defaults to 1 if unsure — trust the sync_booking_data value instead)
+            else if (bpn > 1 && bpn != _booking.Passengers)
+                _booking.Passengers = bpn;
+        }
         if (args.TryGetValue("pickup_time", out var bpt) && !string.IsNullOrWhiteSpace(bpt?.ToString()))
         {
             _booking.PickupTime = bpt.ToString();
@@ -1659,10 +1672,14 @@ public sealed class CallSession : ICallSession
             if (Interlocked.CompareExchange(ref _bookTaxiCompleted, 1, 0) == 1)
                 return new { success = true, booking_ref = _booking.BookingRef ?? "already-booked", message = "Already confirmed." };
 
-            // Geocode if needed
-            bool needsGeocode = string.IsNullOrWhiteSpace(_booking.PickupStreet)
+            // Geocode if needed — but skip if iCabbi already quoted (coords + fare already set)
+            // to prevent the Gemini re-estimate from overwriting the official iCabbi price.
+            bool iCabbiAlreadyQuoted = _icabbiEnabled && !string.IsNullOrWhiteSpace(_booking.Fare)
+                && (_booking.PickupLat.HasValue && _booking.PickupLat != 0)
+                && (_booking.DestLat.HasValue && _booking.DestLat != 0);
+            bool needsGeocode = !iCabbiAlreadyQuoted && (string.IsNullOrWhiteSpace(_booking.PickupStreet)
                 || (_booking.PickupLat == 0 && _booking.PickupLon == 0)
-                || (_booking.DestLat == 0 && _booking.DestLon == 0);
+                || (_booking.DestLat == 0 && _booking.DestLon == 0));
 
             if (needsGeocode)
             {
@@ -1751,7 +1768,9 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogInformation("[{SessionId}] 🚕 [Phase 2] Sending confirmed booking to iCabbi (siteId={SiteId}, fare={Fare})",
                             sessionId, _settings.Icabbi.SiteId, bookingSnapshot.Fare);
-                        var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId);
+                        // Pass callerId explicitly so the correct phone always reaches iCabbi,
+                        // even if CallerPhone in the snapshot was cleared by an early clone.
+                        var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId, callerPhoneOverride: callerId);
                         if (icabbiResult.Success)
                             _logger.LogInformation("[{SessionId}] ✅ iCabbi booking confirmed — JourneyId: {JourneyId}, Tracking: {TrackingUrl}",
                                 sessionId, icabbiResult.JourneyId, icabbiResult.TrackingUrl);
@@ -2265,9 +2284,16 @@ public sealed class CallSession : ICallSession
         _booking.Fare ??= result.Fare;
         _booking.Eta ??= result.Eta;
 
-        // Apply AI-parsed scheduled time (overrides regex parsing)
+        // Apply AI-parsed scheduled time ONLY if the caller explicitly asked for a future time.
+        // Never overwrite an ASAP booking (PickupTime = "ASAP"/null) with a geocoder-derived timestamp.
         if (result.ScheduledAt.HasValue)
-            _booking.ScheduledAt = result.ScheduledAt;
+        {
+            var isAsap = string.IsNullOrWhiteSpace(_booking.PickupTime)
+                || _booking.PickupTime.Trim().ToLowerInvariant() is "asap" or "now" or "as soon as possible"
+                    or "immediately" or "straight away" or "right now";
+            if (!isAsap)
+                _booking.ScheduledAt = result.ScheduledAt;
+        }
 
         if (_booking.PickupLat == 0 && result.PickupLat != 0) _booking.PickupLat = result.PickupLat;
         if (_booking.PickupLon == 0 && result.PickupLon != 0) _booking.PickupLon = result.PickupLon;

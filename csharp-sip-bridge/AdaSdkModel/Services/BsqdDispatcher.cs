@@ -70,7 +70,7 @@ public sealed class BsqdDispatcher : IDispatcher
                 destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? FormatStandardAddress(booking.DestCity, booking.DestStreet, booking.DestNumber, booking.Destination) },
                 departure_time = booking.ScheduledAt.HasValue ? booking.ScheduledAt.Value.ToString("yyyy-MM-ddTHH:mm:ssZ") : DateTime.UtcNow.AddMinutes(5).ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 formatted_pickup_time = FormatPickupTime(booking),
-                booking_type = booking.ScheduledAt.HasValue ? "advance" : "immediate",
+                booking_type = IsAsapBooking(booking) ? "immediate" : "advance",
                 first_name = booking.Name ?? "Customer",
                 total_price = ParseFare(booking.Fare),
                 phoneNumber = FormatE164(phoneNumber),
@@ -294,6 +294,18 @@ public sealed class BsqdDispatcher : IDispatcher
     /// </summary>
     private static string FormatPickupTime(BookingState booking)
         => booking.PickupTime ?? "ASAP";
+
+    /// <summary>
+    /// Returns true if the booking is an ASAP/immediate request rather than a scheduled advance booking.
+    /// Checks both PickupTime string and ScheduledAt — the FareCalculator may set ScheduledAt from
+    /// the current time even for ASAP calls, so we treat PickupTime as the authoritative source.
+    /// </summary>
+    private static bool IsAsapBooking(BookingState booking)
+    {
+        if (!booking.ScheduledAt.HasValue) return true;
+        var pt = booking.PickupTime?.Trim().ToLowerInvariant() ?? "asap";
+        return pt is "asap" or "now" or "as soon as possible" or "immediately" or "straight away" or "right now" or "";
+    }
 
     private static string ParseFare(string? fare)
     {
