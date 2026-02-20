@@ -246,8 +246,14 @@ public partial class FareCalculator
     public async Task<FareResult> ExtractAndCalculateWithAiAsync(
         string? pickup,
         string? destination,
-        string? phoneNumber = null)
+        string? phoneNumber = null,
+        string? spokenPickupNumber = null,
+        string? spokenDestNumber = null)
     {
+        // Auto-extract spoken numbers from address strings if not provided
+        spokenPickupNumber ??= ExtractHouseNumber(pickup);
+        spokenDestNumber ??= ExtractHouseNumber(destination);
+
         const string EDGE_FUNCTION_URL = "https://oerketnvlmptpfvttysy.supabase.co/functions/v1/address-dispatch";
         
         var result = new FareResult
@@ -262,13 +268,15 @@ public partial class FareCalculator
 
         try
         {
-            Log($"🤖 Calling Lovable AI address-dispatch: pickup='{pickup}', dest='{destination}'");
+            Log($"🤖 Calling Lovable AI address-dispatch: pickup='{pickup}', dest='{destination}' | spoken numbers: pickup={spokenPickupNumber ?? "none"}, dest={spokenDestNumber ?? "none"}");
 
             var requestBody = JsonSerializer.Serialize(new
             {
                 pickup = pickup ?? "",
                 destination = destination ?? "",
-                phone = phoneNumber ?? ""
+                phone = phoneNumber ?? "",
+                spoken_pickup_number = spokenPickupNumber ?? "",
+                spoken_dest_number = spokenDestNumber ?? ""
             });
 
             var request = new HttpRequestMessage(HttpMethod.Post, EDGE_FUNCTION_URL)

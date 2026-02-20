@@ -31,14 +31,26 @@ public sealed class FareCalculator : IFareCalculator
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkModel/1.0");
     }
 
-    public async Task<FareResult> ExtractAndCalculateWithAiAsync(string? pickup, string? destination, string? phoneNumber)
+    public async Task<FareResult> ExtractAndCalculateWithAiAsync(
+        string? pickup,
+        string? destination,
+        string? phoneNumber,
+        string? spokenPickupNumber = null,
+        string? spokenDestNumber = null)
     {
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
 
         try
         {
-            var requestBody = JsonSerializer.Serialize(new { pickup = pickup ?? "", destination = destination ?? "", phone = phoneNumber ?? "" });
+            var requestBody = JsonSerializer.Serialize(new
+            {
+                pickup = pickup ?? "",
+                destination = destination ?? "",
+                phone = phoneNumber ?? "",
+                spoken_pickup_number = spokenPickupNumber ?? "",
+                spoken_dest_number = spokenDestNumber ?? ""
+            });
             var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
                 Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
