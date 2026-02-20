@@ -301,6 +301,7 @@ public sealed class IcabbiBookingService : IDisposable
     public async Task<IcabbiBookingResult> CreateAndDispatchAsync(
         BookingState booking,
         int siteId,
+        string? callerPhoneOverride = null,
         int? icabbiDriverId = null,
         int? icabbiVehicleId = null,
         CancellationToken ct = default)
@@ -309,7 +310,10 @@ public sealed class IcabbiBookingService : IDisposable
         {
             Log("📝 Creating iCabbi booking...");
 
-            var phone = "00" + (booking.CallerPhone?.Replace("+", "").Replace(" ", "").Replace("-", "") ?? "");
+            // Prefer the explicit caller phone override (always the raw callerId from CallSession)
+            // over the cloned booking field, which can be empty if the snapshot was taken early.
+            var rawPhone = callerPhoneOverride ?? booking.CallerPhone ?? "";
+            var phone = "00" + rawPhone.Replace("+", "").Replace(" ", "").Replace("-", "");
             var seats = (booking.Passengers ?? 1) > 0 ? (booking.Passengers ?? 1) : 1;
             var fareDecimal = booking.FareDecimal;
 
