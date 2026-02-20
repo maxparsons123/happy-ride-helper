@@ -1508,12 +1508,13 @@ public sealed class CallSession : ICallSession
                     _logger.LogInformation("[{SessionId}] 🏙️ Enriching vague pickup '{Pickup}' with history city '{City}' before geocoding",
                         SessionId, pickup, cityFromHistory);
                     pickup = $"{pickup}, {cityFromHistory}";
+                }
             }
-        }
-        else
-        {
-            _logger.LogInformation("[{SessionId}] 🏠 Pickup '{Pickup}' has house number — sending bare to geocoder (no city inference)",
-                SessionId, pickup);
+            else
+            {
+                _logger.LogInformation("[{SessionId}] 🏠 Pickup '{Pickup}' has house number — sending bare to geocoder (no city inference)",
+                    SessionId, pickup);
+            }
         }
 
         // If destination has verified geocoded city, use it — otherwise conditionally enrich
