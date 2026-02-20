@@ -25,6 +25,9 @@ public sealed class BookingState
     /// <summary>Payment preference chosen by caller: "card" (fixed price via SumUp) or "meter" (pay on the day).</summary>
     public string? PaymentPreference { get; set; }
 
+    /// <summary>SumUp checkout URL generated for card-paying callers. Set before dispatch so it can be included in the BSQD payload.</summary>
+    public string? PaymentLink { get; set; }
+
     /// <summary>Previous pickup interpretations for safeguarding (most recent first).</summary>
     public List<string> PreviousPickups { get; set; } = new();
 
@@ -118,6 +121,7 @@ public sealed class BookingState
         ScheduledAt = null;
         VehicleType = "Saloon";
         PaymentPreference = null;
+        PaymentLink = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;

@@ -43,6 +43,7 @@ public sealed class BsqdDispatcher : IDispatcher
         if (string.IsNullOrEmpty(_settings.BsqdWebhookUrl)) return false;
         try
         {
+            var etaField = BuildEtaField(booking);
             var payload = new
             {
                 departure_address = new { lat = booking.PickupLat ?? 0, lon = booking.PickupLon ?? 0, street_name = booking.PickupStreet ?? "", street_number = booking.PickupNumber ?? "", postal_code = booking.PickupPostalCode ?? "", city = booking.PickupCity ?? "", formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "" },
@@ -51,7 +52,9 @@ public sealed class BsqdDispatcher : IDispatcher
                 first_name = booking.Name ?? "Customer",
                 total_price = ParseFare(booking.Fare),
                 phoneNumber = FormatE164(phoneNumber),
-                passengers = (booking.Passengers ?? 1).ToString()
+                passengers = (booking.Passengers ?? 1).ToString(),
+                eta = etaField,
+                payment_link = booking.PaymentLink
             };
             var json = JsonSerializer.Serialize(payload, JsonOptions);
             var request = new HttpRequestMessage(HttpMethod.Post, _settings.BsqdWebhookUrl);
@@ -141,6 +144,14 @@ public sealed class BsqdDispatcher : IDispatcher
             return "+" + clean;
         if (clean.StartsWith("0")) return "+31" + clean[1..];
         return "+" + clean;
+    }
+
+    private static string? BuildEtaField(BookingState booking)
+    {
+        var eta = booking.Eta;
+        var link = booking.PaymentLink;
+        if (string.IsNullOrWhiteSpace(link)) return eta;
+        return string.IsNullOrWhiteSpace(eta) ? $"Pay: {link}" : $"{eta} | Pay: {link}";
     }
 
     private static string ParseFare(string? fare)
