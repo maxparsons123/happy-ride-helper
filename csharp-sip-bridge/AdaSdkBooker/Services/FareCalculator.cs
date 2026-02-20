@@ -168,12 +168,19 @@ public sealed class FareCalculator : IFareCalculator
         }
     }
 
-    public async Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber)
+    public async Task<FareResult> CalculateAsync(string? pickup, string? destination, string? phoneNumber, string? localeCity = null)
     {
         var result = new FareResult();
         if (string.IsNullOrWhiteSpace(pickup) || string.IsNullOrWhiteSpace(destination))
         {
             result.Fare = "£4.00"; result.Eta = "5 minutes"; return result;
+        }
+
+        // Anchor bare house-number addresses to locale city to prevent Nominatim picking wrong city
+        if (!string.IsNullOrWhiteSpace(localeCity))
+        {
+            pickup      = AnchorToLocaleCity(pickup,      localeCity);
+            destination = AnchorToLocaleCity(destination, localeCity);
         }
 
         // Nominatim fallback geocoding
@@ -215,6 +222,14 @@ public sealed class FareCalculator : IFareCalculator
             Lat = double.Parse(first.GetProperty("lat").GetString()!),
             Lon = double.Parse(first.GetProperty("lon").GetString()!)
         };
+    }
+
+    private static string AnchorToLocaleCity(string address, string localeCity)
+    {
+        if (string.IsNullOrWhiteSpace(localeCity)) return address;
+        if (address.Contains(',')) return address;      // already has context
+        if (!address.Any(char.IsDigit)) return address; // no house number → vague, don't anchor
+        return $"{address}, {localeCity}";
     }
 
     private static string GetRegionBias(string? phone)
