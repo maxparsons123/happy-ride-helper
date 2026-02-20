@@ -2037,7 +2037,7 @@ public sealed class CallSession : ICallSession
     {
         var issues = new List<string>();
 
-        // Check pickup
+        // Check pickup street name
         if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
         {
             if (!AddressContainsStreet(_booking.Pickup, result.PickupStreet))
@@ -2046,7 +2046,14 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Check destination
+        // Check pickup house number: geocoded alphanumeric must not silently replace a plain integer
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupNumber))
+        {
+            var numIssue = DetectHouseNumberSubstitution(_booking.Pickup, result.PickupNumber, "pickup");
+            if (numIssue != null) issues.Add(numIssue);
+        }
+
+        // Check destination street name
         if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
         {
             if (!AddressContainsStreet(_booking.Destination, result.DestStreet))
@@ -2055,7 +2062,66 @@ public sealed class CallSession : ICallSession
             }
         }
 
+        // Check destination house number: geocoded alphanumeric must not silently replace a plain integer
+        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestNumber))
+        {
+            var numIssue = DetectHouseNumberSubstitution(_booking.Destination, result.DestNumber, "destination");
+            if (numIssue != null) issues.Add(numIssue);
+        }
+
         return issues.Count > 0 ? string.Join(" ", issues) : null;
+    }
+
+    /// <summary>
+    /// Detects when the geocoder silently substitutes a plain spoken integer with an
+    /// alphanumeric house number (e.g. caller said "43 Dovey Road" → geocoder returned "4B").
+    ///
+    /// This is the REVERSE of the STT letter→digit confusion handled by NormalizeHouseNumber.
+    /// It catches cases where:
+    ///   - The caller spoke a pure integer (e.g. "43")
+    ///   - The geocoder returned an alphanumeric (e.g. "4B") that starts with a different leading digit
+    ///     OR whose numeric prefix does not match the spoken number
+    ///
+    /// NOTE: We do NOT flag the expected STT correction cases (e.g. "528" → "52A") because
+    /// those are intentional normalizations already applied by NormalizeHouseNumber before
+    /// the fare call. A mismatch only needs flagging when the geocoded number is materially
+    /// different from what was spoken.
+    /// </summary>
+    private static string? DetectHouseNumberSubstitution(string rawAddress, string geocodedNumber, string field)
+    {
+        // Only care if geocoded result is alphanumeric (contains a letter suffix)
+        if (!System.Text.RegularExpressions.Regex.IsMatch(geocodedNumber, @"^\d+[A-Za-z]$"))
+            return null;
+
+        // Extract the leading digits of the geocoded number (e.g. "4B" → "4")
+        var geocodedDigits = System.Text.RegularExpressions.Regex.Match(geocodedNumber, @"^\d+").Value;
+        if (string.IsNullOrEmpty(geocodedDigits)) return null;
+
+        // Look for a standalone number in the raw address that is NOT the same as the geocoded digit-prefix
+        // e.g. raw = "43 Dovey Road", geocodedDigits = "4" → "43" ≠ "4" → flag it
+        // e.g. raw = "52A David Road" (already has letter) → skip (not pure integer)
+        var rawNumbers = System.Text.RegularExpressions.Regex.Matches(rawAddress, @"\b(\d+)\b");
+        foreach (System.Text.RegularExpressions.Match m in rawNumbers)
+        {
+            var spokenNum = m.Groups[1].Value;
+
+            // Skip if the spoken number IS the geocoded digit-prefix (e.g. "4" → "4B" is fine, it's just the suffix being added)
+            if (spokenNum == geocodedDigits) continue;
+
+            // Skip if this looks like an intentional STT letter→digit correction (e.g. "528"→"52A")
+            // That would mean spokenNum starts with geocodedDigits and ends in 8/3/4
+            if (spokenNum.StartsWith(geocodedDigits) &&
+                spokenNum.Length == geocodedDigits.Length + 1 &&
+                "834".Contains(spokenNum[^1]))
+                continue;
+
+            // The spoken number differs from the geocoded digit prefix in a non-trivial way
+            // e.g. "43" vs "4" → the geocoder replaced "43" with "4B"
+            return $"The caller said house number '{spokenNum}' for the {field}, but the system resolved it to '{geocodedNumber}'. " +
+                   $"Please confirm with the caller: did they mean '{spokenNum} {rawAddress.Split(' ').Skip(1).FirstOrDefault()}' or '{geocodedNumber} {rawAddress.Split(' ').Skip(1).FirstOrDefault()}'?";
+        }
+
+        return null;
     }
 
     /// <summary>

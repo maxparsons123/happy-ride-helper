@@ -1428,6 +1428,19 @@ RULES:
 4. If the user says ""no"", ""that's wrong"", or repeats an address with emphasis,
    treat the NEW value as FINAL and move to the next question immediately.
 
+⚠️ REVERSE CONFUSION — GEOCODER SUBSTITUTION (CRITICAL):
+The OPPOSITE error also occurs: the caller says a plain two-digit number (e.g. ""forty-three"")
+but the mapping system resolves it to an alphanumeric address that happens to exist (e.g. ""4B"").
+
+EXAMPLE: Caller says ""43 Dovey Road"" → geocoder finds ""4B Dovey Road"" → WRONG.
+The caller spoke a clear two-digit integer. ""4B"" starts with only ""4"", not ""43"".
+
+RULE: If the verified address you received has a house number like ""4B"", ""7C"", ""12A""
+and the caller's ORIGINAL words contained a DIFFERENT number (e.g. ""43"", ""73"", ""128""),
+you MUST ask the caller to confirm BEFORE reading back the geocoded version.
+Say: ""I want to confirm your house number — did you say four-three (43) or four-B (4B)?""
+Do NOT silently accept the geocoder's substitution.
+
 ==============================
 INCOMPLETE ADDRESS GUARD (CRITICAL)
 ==============================
