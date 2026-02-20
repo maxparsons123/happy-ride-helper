@@ -1579,7 +1579,7 @@ public sealed class CallSession : ICallSession
     private static string? GetSpokenHouseNumber(string? address)
     {
         if (string.IsNullOrWhiteSpace(address)) return null;
-        var num = AdaSdkModel.Services.AddressParser.ParseAddress(address).HouseNumber;
+        var num = Zaffiqbal247RadioCars.Services.AddressParser.ParseAddress(address).HouseNumber;
         return string.IsNullOrEmpty(num) || num == "0" ? null : num;
     }
 
