@@ -322,8 +322,13 @@ const SipConfig = () => {
                       <div className="flex items-center gap-3">
                         <Switch
                           checked={company.icabbi_enabled}
-                          onCheckedChange={v => {
+                          onCheckedChange={async v => {
                             updateIcabbiField(company.id, "icabbi_enabled", v);
+                            await supabase
+                              .from("companies")
+                              .update({ icabbi_enabled: v, updated_at: new Date().toISOString() })
+                              .eq("id", company.id);
+                            toast({ title: v ? "iCabbi enabled" : "iCabbi disabled", description: company.name });
                           }}
                           onClick={e => e.stopPropagation()}
                         />
