@@ -20,6 +20,7 @@ import Diagnostics from "./pages/Diagnostics";
 import DriverApp from "./pages/DriverApp";
 import ZoneEditor from "./pages/ZoneEditor";
 import TrackDriver from "./pages/TrackDriver";
+import IcabbiSettings from "./pages/IcabbiSettings";
 
 const queryClient = new QueryClient();
 
@@ -46,6 +47,7 @@ const App = () => (
           <Route path="/driver" element={<DriverApp />} />
           <Route path="/zones" element={<ZoneEditor />} />
           <Route path="/track" element={<TrackDriver />} />
+          <Route path="/icabbi" element={<IcabbiSettings />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

@@ -376,6 +376,12 @@ export type Database = {
           contact_name: string | null
           contact_phone: string | null
           created_at: string
+          icabbi_app_key: string | null
+          icabbi_company_id: string | null
+          icabbi_enabled: boolean
+          icabbi_secret_key: string | null
+          icabbi_site_id: number | null
+          icabbi_tenant_base: string | null
           id: string
           is_active: boolean
           name: string
@@ -392,6 +398,12 @@ export type Database = {
           contact_name?: string | null
           contact_phone?: string | null
           created_at?: string
+          icabbi_app_key?: string | null
+          icabbi_company_id?: string | null
+          icabbi_enabled?: boolean
+          icabbi_secret_key?: string | null
+          icabbi_site_id?: number | null
+          icabbi_tenant_base?: string | null
           id?: string
           is_active?: boolean
           name: string
@@ -408,6 +420,12 @@ export type Database = {
           contact_name?: string | null
           contact_phone?: string | null
           created_at?: string
+          icabbi_app_key?: string | null
+          icabbi_company_id?: string | null
+          icabbi_enabled?: boolean
+          icabbi_secret_key?: string | null
+          icabbi_site_id?: number | null
+          icabbi_tenant_base?: string | null
           id?: string
           is_active?: boolean
           name?: string

@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
-import { Phone, Plus, Trash2, Copy, Server, Eye, EyeOff } from "lucide-react";
+import { Phone, Plus, Trash2, Copy, Server, Eye, EyeOff, Car } from "lucide-react";
 import { Link } from "react-router-dom";
 
 // Credential row component for consistent display
@@ -196,6 +196,12 @@ const SipConfig = () => {
             <Button variant="outline">
               <Phone className="h-4 w-4 mr-2" />
               Live Calls
+            </Button>
+          </Link>
+          <Link to="/icabbi">
+            <Button variant="outline">
+              <Car className="h-4 w-4 mr-2" />
+              iCabbi Settings
             </Button>
           </Link>
         </div>
