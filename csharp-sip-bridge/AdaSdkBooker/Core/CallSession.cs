@@ -394,7 +394,9 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
-                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId,
+                        spokenPickupNumber: GetSpokenHouseNumber(pickup),
+                        spokenDestNumber: GetSpokenHouseNumber(destination));
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -792,7 +794,9 @@ public sealed class CallSession : ICallSession
         try
         {
             _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after Address Lock resolution", sessionId);
-            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+            var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId,
+                spokenPickupNumber: GetSpokenHouseNumber(pickup),
+                spokenDestNumber: GetSpokenHouseNumber(destination));
 
             // Check if re-disambiguation is needed (e.g. clarified address still ambiguous in a different way)
             if (result.NeedsClarification)
@@ -925,7 +929,9 @@ public sealed class CallSession : ICallSession
                     _logger.LogInformation("[{SessionId}] 🔄 Background fare calculation starting for {Pickup} → {Dest}",
                         sessionId, pickup, destination);
 
-                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId);
+                    var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId,
+                        spokenPickupNumber: GetSpokenHouseNumber(pickup),
+                        spokenDestNumber: GetSpokenHouseNumber(destination));
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -1102,7 +1108,9 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
-                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId);
+                    var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId,
+                        spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
                     ApplyFareResultNullSafe(result);
                 }
                 catch (Exception ex)
@@ -1178,7 +1186,9 @@ public sealed class CallSession : ICallSession
         try
         {
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
-                _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId);
+                _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId,
+                spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
             var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
             FareResult result;
@@ -1537,6 +1547,17 @@ public sealed class CallSession : ICallSession
         string Normalize(string s) =>
             System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"\d|[^a-z ]", "").Trim();
         return Normalize(oldAddress) != Normalize(newAddress);
+    }
+
+    /// <summary>
+    /// Extracts the spoken house number from a raw address string using AddressParser.
+    /// Returns null if no number found. Used as a hard geocoding filter sent to Gemini.
+    /// </summary>
+    private static string? GetSpokenHouseNumber(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return null;
+        var c = AddressParser.ParseAddress(address);
+        return c.HasHouseNumber ? c.HouseNumber : null;
     }
 
     private static readonly System.Text.RegularExpressions.Regex _houseNumberFixRegex =
