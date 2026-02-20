@@ -833,6 +833,7 @@ public sealed class CallSession : ICallSession
                     if (completed == aiTask)
                     {
                         result = await aiTask;
+                        bool localeRetrySuccess = false; // set true when house-number locale fallback resolves fare
                         _logger.LogInformation("[{SessionId}] 📊 Fare result: NeedsClarification={Clarif}, Fare={Fare}, Eta={Eta}, PickupAlts={PAlts}, DestAlts={DAlts}",
                             sessionId, result.NeedsClarification, result.Fare, result.Eta,
                             result.PickupAlternatives != null ? string.Join("|", result.PickupAlternatives) : "none",
@@ -936,6 +937,7 @@ public sealed class CallSession : ICallSession
                                                     // Success — use the locale-enriched result
                                                     result = retryResult;
                                                     retriedWithLocale = true;
+                                                    localeRetrySuccess = true; // signals the outer block to NOT return early
                                                     _logger.LogInformation("[{SessionId}] ✅ Locale fallback resolved: {Fare}, ETA: {Eta}",
                                                         sessionId, result.Fare, result.Eta);
                                                     // Fall through to fare presentation below
@@ -996,9 +998,13 @@ public sealed class CallSession : ICallSession
                                 }
                             }
 
-                            // Has disambiguation alternatives — already handled above, exit
-                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                            return;
+                            // Has disambiguation alternatives — already handled above, exit.
+                            // BUT: if the locale retry resolved the fare, do NOT return — fall through to fare presentation.
+                            if (!localeRetrySuccess)
+                            {
+                                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                                return;
+                            }
                         }
 
                         // Check if there are pending destination alternatives from a previous round
