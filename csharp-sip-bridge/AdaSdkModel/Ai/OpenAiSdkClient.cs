@@ -677,11 +677,19 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 if (toolName == "sync_booking_data")
                     Interlocked.Increment(ref _syncCallCount);
 
+                // Capture session locally — DisconnectAsync() may null _session on another thread
+                var session = _session;
+                if (session == null)
+                {
+                    Log($"⚠️ Session gone before tool result could be sent ({toolName}) — ignoring");
+                    return;
+                }
+
                 // Beta SDK: create function output item and add it
                 var outputItem = ConversationItem.CreateFunctionCallOutput(
                     callId: itemFinished.FunctionCallId!,
                     output: resultJson);
-                await _session!.AddItemAsync(outputItem);
+                await session.AddItemAsync(outputItem);
 
                 // Suppress response if fare calculation is in progress — the fare injection will trigger it
                 if (resultJson.Contains("\"fare_calculating\":true") || resultJson.Contains("wait SILENTLY"))
@@ -695,7 +703,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 }
                 else
                 {
-                    await _session.StartResponseAsync();
+                    await session.StartResponseAsync();
                 }
             }
         }
