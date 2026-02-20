@@ -761,8 +761,38 @@ export type Database = {
           source: string
         }[]
       }
+      fuzzy_match_zone_poi: {
+        Args: { p_address: string; p_limit?: number; p_min_similarity?: number }
+        Returns: {
+          area: string
+          company_id: string
+          lat: number
+          lng: number
+          poi_id: string
+          poi_name: string
+          poi_type: string
+          similarity_score: number
+          zone_id: string
+          zone_name: string
+        }[]
+      }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
+      word_fuzzy_match_zone_poi: {
+        Args: { p_address: string; p_limit?: number; p_min_similarity?: number }
+        Returns: {
+          area: string
+          company_id: string
+          lat: number
+          lng: number
+          poi_id: string
+          poi_name: string
+          poi_type: string
+          similarity_score: number
+          zone_id: string
+          zone_name: string
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never
