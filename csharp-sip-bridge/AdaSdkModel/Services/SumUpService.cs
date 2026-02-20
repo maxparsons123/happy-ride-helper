@@ -51,13 +51,22 @@ public sealed class SumUpService
         {
             var checkoutRef = $"{_settings.MerchantCode}-{bookingRef}-{DateTime.UtcNow:HHmmss}";
 
+            // Map currency string (e.g. "GBP") to SDK enum (e.g. Currency.Gbp)
+            var currency = _settings.Currency?.ToUpperInvariant() switch
+            {
+                "GBP" => Currency.Gbp,
+                "EUR" => Currency.Eur,
+                "USD" => Currency.Usd,
+                _ => Currency.Gbp  // default
+            };
+
             _logger.LogInformation("[SumUp] Creating checkout: ref={Ref}, amount={Amount} {Currency}",
-                checkoutRef, amount, _settings.Currency);
+                checkoutRef, amount, currency);
 
             var response = await _client.Checkouts.CreateAsync(new CheckoutCreateRequest
             {
                 Amount = (float)Math.Round(amount, 2),
-                Currency = _settings.Currency,
+                Currency = currency,
                 CheckoutReference = checkoutRef,
                 MerchantCode = _settings.MerchantCode,
                 Description = description
