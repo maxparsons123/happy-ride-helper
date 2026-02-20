@@ -20,6 +20,7 @@ public sealed class CallSession : ICallSession
     private readonly IDispatcher _dispatcher;
     private readonly IcabbiBookingService? _icabbi;
     private readonly bool _icabbiEnabled;
+    private readonly AdaSdkModel.Services.SumUpService? _sumUp;
 
     private readonly BookingState _booking = new();
     private readonly Audio.ALawThinningFilter? _thinningFilter;
@@ -54,7 +55,8 @@ public sealed class CallSession : ICallSession
         IFareCalculator fareCalculator,
         IDispatcher dispatcher,
         IcabbiBookingService? icabbi = null,
-        bool icabbiEnabled = false)
+        bool icabbiEnabled = false,
+        AdaSdkModel.Services.SumUpService? sumUp = null)
     {
         SessionId = sessionId;
         CallerId = callerId;
@@ -65,6 +67,7 @@ public sealed class CallSession : ICallSession
         _dispatcher = dispatcher;
         _icabbi = icabbi;
         _icabbiEnabled = icabbiEnabled;
+        _sumUp = sumUp;
 
         _booking.CallerPhone = callerId;
 
@@ -1448,6 +1451,9 @@ public sealed class CallSession : ICallSession
             _booking.PickupTime = bpt.ToString();
             _booking.ScheduledAt = BookingState.ParsePickupTimeToDateTime(_booking.PickupTime);
         }
+        // Capture payment preference (card = fixed price via SumUp, meter = pay on the day)
+        if (args.TryGetValue("payment_preference", out var pref) && !string.IsNullOrWhiteSpace(pref?.ToString()))
+            _booking.PaymentPreference = pref.ToString()!.Trim().ToLowerInvariant();
 
         if (action == "request_quote")
         {
@@ -1686,6 +1692,7 @@ public sealed class CallSession : ICallSession
             var callerId = CallerId;
             var sessionId = SessionId;
 
+            var sumUpRef = _sumUp;  // capture for closure
             _ = Task.Run(async () =>
             {
                 for (int i = 0; i < 50 && _aiClient.IsResponseActive; i++)
@@ -1694,6 +1701,45 @@ public sealed class CallSession : ICallSession
                 await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
                 await _dispatcher.SendWhatsAppAsync(callerId);
                 await SaveCallerHistoryAsync(bookingSnapshot, callerId);
+
+                // ── SumUp PAYMENT LINK (card payers only) ────────────────────────────────
+                // If the caller chose the fixed price / card option, generate a SumUp
+                // checkout link and send it via WhatsApp so they can pay in advance.
+                if (bookingSnapshot.PaymentPreference == "card" && sumUpRef != null)
+                {
+                    try
+                    {
+                        var fareDecimal = bookingSnapshot.FareDecimal;
+                        if (fareDecimal <= 0)
+                        {
+                            _logger.LogWarning("[{SessionId}] [SumUp] Fare is zero — skipping payment link", sessionId);
+                        }
+                        else
+                        {
+                            var description = $"Taxi: {bookingSnapshot.Pickup} → {bookingSnapshot.Destination} (Ref: {bookingSnapshot.BookingRef})";
+                            var paymentUrl = await sumUpRef.CreateCheckoutLinkAsync(
+                                bookingSnapshot.BookingRef ?? sessionId,
+                                fareDecimal,
+                                description,
+                                callerId);
+
+                            if (!string.IsNullOrWhiteSpace(paymentUrl))
+                            {
+                                _logger.LogInformation("[{SessionId}] 💳 SumUp payment link generated: {Url}", sessionId, paymentUrl);
+                                // Send the payment link via WhatsApp (BSQD webhook carries the URL as custom note)
+                                await SendSumUpLinkViaWhatsAppAsync(callerId, paymentUrl, bookingSnapshot, sessionId);
+                            }
+                            else
+                            {
+                                _logger.LogWarning("[{SessionId}] [SumUp] No payment URL returned — payment link not sent", sessionId);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[{SessionId}] SumUp payment link error", sessionId);
+                    }
+                }
 
                 // ── iCabbi CONFIRMED BOOKING (Phase 2 of 2) ─────────────────────────────────
                 // Phase 1 was GetFareQuoteAsync → gave Ada the official price/ETA to read back.
@@ -1724,6 +1770,60 @@ public sealed class CallSession : ICallSession
         }
 
         return new { error = "Invalid action" };
+    }
+
+    // =========================
+    // SUMUP PAYMENT LINK — WhatsApp delivery
+    // =========================
+    private async Task SendSumUpLinkViaWhatsAppAsync(string callerId, string paymentUrl, BookingState booking, string sessionId)
+    {
+        try
+        {
+            // Build a descriptive WhatsApp message with the payment link
+            var fare = booking.Fare ?? "the agreed fare";
+            var pickup = booking.PickupFormatted ?? booking.Pickup ?? "your pickup";
+            var destination = booking.DestFormatted ?? booking.Destination ?? "your destination";
+            var bookingRef = booking.BookingRef ?? sessionId;
+
+            _logger.LogInformation("[{SessionId}] 💳 Sending SumUp payment link to {Phone}: {Url}", sessionId, callerId, paymentUrl);
+
+            // Deliver via BSQD WhatsApp webhook — append the payment URL as a note
+            // The BSQD webhook already handles WhatsApp delivery; we embed the link in the payload.
+            if (!string.IsNullOrEmpty(_settings.Dispatch.WhatsAppWebhookUrl))
+            {
+                using var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.Dispatch.BsqdApiKey);
+
+                var message = $"Hi {booking.Name ?? "there"}! Your taxi from {pickup} to {destination} is confirmed (Ref: {bookingRef}). " +
+                              $"To guarantee your fixed price of {fare}, please complete payment here: {paymentUrl} — Thank you, 247 Radio Carz";
+
+                var body = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    phoneNumber = FormatE164ForSumUp(callerId),
+                    message = message,
+                    paymentUrl = paymentUrl,
+                    bookingRef = bookingRef
+                });
+
+                var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, _settings.Dispatch.WhatsAppWebhookUrl);
+                request.Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json");
+                var response = await httpClient.SendAsync(request);
+                _logger.LogInformation("[{SessionId}] 💳 SumUp WhatsApp delivery: {Status}", sessionId, (int)response.StatusCode);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Failed to send SumUp WhatsApp message", sessionId);
+        }
+    }
+
+    private static string FormatE164ForSumUp(string? phone)
+    {
+        if (string.IsNullOrWhiteSpace(phone)) return "+441000000000";
+        var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());
+        if (clean.StartsWith("00")) clean = "+" + clean[2..];
+        if (!clean.StartsWith("+")) clean = "+" + clean;
+        return clean;
     }
 
     // =========================

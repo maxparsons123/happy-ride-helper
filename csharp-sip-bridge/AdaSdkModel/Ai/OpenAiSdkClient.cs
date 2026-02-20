@@ -950,7 +950,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         Description = "Request a fare quote or confirm a booking. " +
                       "action='request_quote' for quotes, 'confirmed' for finalized bookings. " +
                       "CRITICAL: Never call with 'confirmed' unless the user has explicitly said 'yes' or 'confirm'. " +
-                      "CRITICAL: Never call with 'confirmed' in the same turn as an address correction or fare announcement.",
+                      "CRITICAL: Never call with 'confirmed' in the same turn as an address correction or fare announcement. " +
+                      "Include payment_preference='card' if the caller chose fixed price by card, or 'meter' if paying on the day.",
         Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
         {
             type = "object",
@@ -961,7 +962,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 destination = new { type = "string", description = "Destination address (verbatim from caller)" },
                 caller_name = new { type = "string", description = "Caller name (must be a real name, NOT 'unknown' or 'caller')" },
                 passengers = new { type = "integer", description = "Number of passengers" },
-                pickup_time = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. NEVER pass raw phrases." }
+                pickup_time = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. NEVER pass raw phrases." },
+                payment_preference = new { type = "string", @enum = new[] { "card", "meter" }, description = "Payment method chosen by caller: 'card' = fixed price paid by SumUp payment link, 'meter' = pay driver on the day" }
             },
             required = new[] { "action", "pickup", "destination", "caller_name", "passengers" }
         }))
@@ -1166,11 +1168,12 @@ STEP-BY-STEP (DO NOT SKIP ANY STEP):
    For SCHEDULED bookings (future time): ""Your pickup is [VERIFIED pickup] going to [VERIFIED destination], the fare is [fare]. We offer a fixed price of [fare] — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?"" (NO ETA for scheduled bookings)
 
 FIXED PRICE / METER RULES:
-- ALWAYS present both options after the fare — fixed price (pay by link) and pay by meter.
-- If the caller chooses FIXED PRICE: say ""Great, I'll arrange a payment link for you."" then proceed to book_taxi(action=""confirmed"").
-- If the caller chooses METER / PAY ON THE DAY: say ""No problem, you'll pay by meter on the day."" then proceed to book_taxi(action=""confirmed"").
-- If the caller just says ""yes"", ""book it"", or ""confirm"" without choosing, default to meter and proceed.
+- ALWAYS present both options after the fare — fixed price (pay by card/link) and pay by meter.
+- If the caller chooses FIXED PRICE / CARD: say ""Great, I'll send you a secure payment link by WhatsApp to lock in that price."" then call book_taxi(action=""confirmed"", payment_preference=""card"").
+- If the caller chooses METER / PAY ON THE DAY: say ""No problem, you'll pay the driver on the day."" then call book_taxi(action=""confirmed"", payment_preference=""meter"").
+- If the caller just says ""yes"", ""book it"", or ""confirm"" without specifying, default to meter: call book_taxi(action=""confirmed"", payment_preference=""meter"").
 - NEVER skip this pricing choice step — it MUST be offered every time a fare is presented.
+- NEVER tell the caller the payment link URL yourself — the system sends it automatically via WhatsApp after booking.
 
 4. WAIT for the user to respond with their payment preference OR a general confirmation.
 5. ONLY THEN call book_taxi(action=""confirmed"")

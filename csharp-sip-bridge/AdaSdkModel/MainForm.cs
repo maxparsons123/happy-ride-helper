@@ -390,9 +390,18 @@ public partial class MainForm : Form
             icabbiEnabled = false;
         }
 
+        // Create SumUp service if enabled
+        AdaSdkModel.Services.SumUpService? sumUpService = null;
+        if (_settings.SumUp.Enabled && !string.IsNullOrWhiteSpace(_settings.SumUp.ApiKey))
+        {
+            sumUpService = new AdaSdkModel.Services.SumUpService(
+                factory.CreateLogger<AdaSdkModel.Services.SumUpService>(), _settings.SumUp);
+            Log("💳 SumUp payment links enabled");
+        }
+
         var session = new CallSession(sessionId, callerId,
             factory.CreateLogger<CallSession>(), _settings, aiClient, fareCalculator, dispatcher,
-            icabbi, icabbiEnabled);
+            icabbi, icabbiEnabled, sumUpService);
 
         // Wire session events → UI
         session.OnTranscript += (role, text) => SafeInvoke(() => Log($"💬 {role}: {text}"));
