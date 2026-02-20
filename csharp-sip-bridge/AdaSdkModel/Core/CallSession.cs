@@ -753,44 +753,57 @@ public sealed class CallSession : ICallSession
 
         // ── City Context Guard ──────────────────────────────────────────────────────
         // Before triggering fare calculation, ensure the destination has enough location
-        // context (i.e. a city/area) so the geocoder can resolve it unambiguously.
-        // A bare "52A David Road" with no city will always return NeedsClarification=true
-        // and the fallback message may suggest the wrong city (e.g. pickup's city).
+        // context so the geocoder can resolve it unambiguously.
         //
-        // Resolution order:
-        //   1. Try to find the street in the caller's known address history — if we find
-        //      a previous address that contains the same street name, extract the city from
-        //      it and silently enrich the destination before fare calc fires.
-        //   2. If history has no match, block and ask Ada to collect the city explicitly.
+        // NEW Resolution order:
+        //   1. If the destination already has a house number (e.g. "1214A Warwick Road"),
+        //      it is specific enough — pass it bare to the geocoder first. The geocoder can
+        //      often resolve a numbered address globally without a city hint. City inference
+        //      from caller history is SKIPPED to avoid pinning the wrong locale
+        //      (e.g. Birmingham trips wrongly enriched with "Coventry").
+        //   2. If there is NO house number (e.g. "Warwick Road"), it's too vague — try
+        //      the caller's address history to infer a city and silently enrich.
+        //   3. If history has no match either, block and ask Ada to collect the city.
         if (allFieldsFilled && DestinationLacksCityContext(_booking.Destination))
         {
             var destRaw = _booking.Destination!;
-            var cityFromHistory = TryExtractCityFromHistory(destRaw);
+            var destComponents = Services.AddressParser.ParseAddress(destRaw);
 
-            if (cityFromHistory != null)
+            if (destComponents.HasHouseNumber)
             {
-                // Silently enrich destination with the city from caller history
-                var enriched = $"{destRaw}, {cityFromHistory}";
-                _logger.LogInformation("[{SessionId}] 🏙️ Inferred city '{City}' from caller history for '{Dest}' → '{Enriched}'",
-                    SessionId, cityFromHistory, destRaw, enriched);
-                _booking.Destination = enriched;
-                // Inject a silent correction note so the AI's memory stays consistent
-                _ = _aiClient.InjectSystemMessageAsync(
-                    $"[CITY CONTEXT RESOLVED] The destination '{destRaw}' matched a known address from the caller's history. " +
-                    $"Update your memory: destination = '{enriched}'. Continue normally.");
-                // Allow fare calc to proceed by falling through
+                // House number present → geocoder can resolve this bare. Skip city inference.
+                _logger.LogInformation("[{SessionId}] 🏠 Destination '{Dest}' has house number '{Num}' — skipping city inference, letting geocoder resolve",
+                    SessionId, destRaw, destComponents.HouseNumber);
+                // Fall through to fare calculation with the bare address
             }
             else
             {
-                _logger.LogWarning("[{SessionId}] 🏙️ Destination '{Dest}' has no city context and no history match — asking for city", SessionId, destRaw);
-                return new
+                // No house number → vague street name. Try history, then block.
+                var cityFromHistory = TryExtractCityFromHistory(destRaw);
+
+                if (cityFromHistory != null)
                 {
-                    success = false,
-                    warning = $"DESTINATION CITY REQUIRED: The destination '{destRaw}' does not include a city or area. " +
-                              $"Ask the caller: 'What city or area is {destRaw} in?' " +
-                              "Once they provide the city, call sync_booking_data again with the full destination including the city (e.g. '52A David Road, Coventry'). " +
-                              "Do NOT guess the city from the pickup address."
-                };
+                    var enriched = $"{destRaw}, {cityFromHistory}";
+                    _logger.LogInformation("[{SessionId}] 🏙️ Inferred city '{City}' from caller history for '{Dest}' → '{Enriched}'",
+                        SessionId, cityFromHistory, destRaw, enriched);
+                    _booking.Destination = enriched;
+                    _ = _aiClient.InjectSystemMessageAsync(
+                        $"[CITY CONTEXT RESOLVED] The destination '{destRaw}' matched a known address from the caller's history. " +
+                        $"Update your memory: destination = '{enriched}'. Continue normally.");
+                    // Fall through to fare calculation
+                }
+                else
+                {
+                    _logger.LogWarning("[{SessionId}] 🏙️ Destination '{Dest}' has no house number, no city, and no history match — asking for city", SessionId, destRaw);
+                    return new
+                    {
+                        success = false,
+                        warning = $"DESTINATION CITY REQUIRED: The destination '{destRaw}' does not include a city or area. " +
+                                  $"Ask the caller: 'What city or area is {destRaw} in?' " +
+                                  "Once they provide the city, call sync_booking_data again with the full destination including the city (e.g. 'Warwick Road, Coventry'). " +
+                                  "Do NOT guess the city from the pickup address."
+                    };
+                }
             }
         }
 
@@ -1279,19 +1292,32 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // If destination has verified geocoded city, use it — otherwise fall back to history inference
+        // If destination has verified geocoded city, use it — otherwise conditionally enrich
         if (_booking.DestLat.HasValue && _booking.DestLat != 0)
         {
             destination = EnrichWithVerifiedCity(destination, _booking.DestCity);
         }
         else if (DestinationLacksCityContext(destination))
         {
-            var cityFromHistory = TryExtractCityFromHistory(destination);
-            if (cityFromHistory != null)
+            // Only infer city from history if there is NO house number.
+            // A numbered address (e.g. "1214A Warwick Road") is specific enough to resolve globally —
+            // injecting the caller's local city would wrongly anchor it to their area.
+            var destComponents = Services.AddressParser.ParseAddress(destination);
+            if (!destComponents.HasHouseNumber)
             {
-                _logger.LogInformation("[{SessionId}] 🏙️ Enriching destination '{Dest}' with history city '{City}' before geocoding",
-                    SessionId, destination, cityFromHistory);
-                destination = $"{destination}, {cityFromHistory}";
+                var cityFromHistory = TryExtractCityFromHistory(destination);
+                if (cityFromHistory != null)
+                {
+                    _logger.LogInformation("[{SessionId}] 🏙️ Enriching destination '{Dest}' with history city '{City}' before geocoding",
+                        SessionId, destination, cityFromHistory);
+                    destination = $"{destination}, {cityFromHistory}";
+                }
+                // else: no history match — pass bare, let geocoder try
+            }
+            else
+            {
+                _logger.LogInformation("[{SessionId}] 🏠 Destination '{Dest}' has house number — passing bare to geocoder (no city inference)",
+                    SessionId, destination);
             }
         }
 
