@@ -241,17 +241,28 @@ public sealed class IcabbiBookingService : IDisposable
 
     private static decimal? TryGetDecimal(JsonObject obj, string key)
     {
-        if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
-        if (decimal.TryParse(val.ToString(), System.Globalization.NumberStyles.Any,
-                             System.Globalization.CultureInfo.InvariantCulture, out var d) && d > 0)
-            return d;
+        try
+        {
+            if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
+            // Only parse scalar nodes (JsonValue) — skip nested objects/arrays which would throw
+            if (val is not JsonValue) return null;
+            if (decimal.TryParse(val.ToString(), System.Globalization.NumberStyles.Any,
+                                 System.Globalization.CultureInfo.InvariantCulture, out var d) && d > 0)
+                return d;
+        }
+        catch { /* non-fatal */ }
         return null;
     }
 
     private static int? SafeGetInt(JsonObject obj, string key)
     {
-        if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
-        if (int.TryParse(val.ToString(), out var i)) return i;
+        try
+        {
+            if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
+            if (val is not JsonValue) return null;
+            if (int.TryParse(val.ToString(), out var i)) return i;
+        }
+        catch { /* non-fatal */ }
         return null;
     }
 
