@@ -37,6 +37,29 @@ public sealed class FareCalculator : IFareCalculator
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "AdaSdkModel/1.0");
     }
 
+    /// <summary>
+    /// Sends a lightweight ping to the edge function to keep it warm (prevent cold-start latency).
+    /// Safe to fire-and-forget; errors are swallowed silently.
+    /// </summary>
+    public async Task WarmUpEdgeFunctionAsync()
+    {
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
+            {
+                Content = new StringContent("{\"ping\":true}", System.Text.Encoding.UTF8, "application/json")
+            };
+            request.Headers.Add("apikey", _supabaseSettings.AnonKey);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var response = await _httpClient.SendAsync(request, cts.Token);
+            _logger.LogDebug("🔥 Edge function warm-up ping → {Status}", response.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("🔥 Edge function warm-up ping failed (ok): {Msg}", ex.Message);
+        }
+    }
+
     public async Task<FareResult> ExtractAndCalculateWithAiAsync(
         string? pickup,
         string? destination,
