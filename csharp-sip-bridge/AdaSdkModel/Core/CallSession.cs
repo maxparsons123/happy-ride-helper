@@ -733,6 +733,26 @@ public sealed class CallSession : ICallSession
             && _booking.Passengers > 0
             && !string.IsNullOrWhiteSpace(_booking.PickupTime);
 
+        // ── City Context Guard ──────────────────────────────────────────────────────
+        // Before triggering fare calculation, ensure the destination has enough location
+        // context (i.e. a city/area) so the geocoder can resolve it unambiguously.
+        // A bare "52A David Road" with no city will always return NeedsClarification=true
+        // and the fallback message may suggest the wrong city (e.g. pickup's city).
+        // Block here and ask Ada to collect the city NOW, before geocoding is attempted.
+        if (allFieldsFilled && DestinationLacksCityContext(_booking.Destination))
+        {
+            var destRaw = _booking.Destination;
+            _logger.LogWarning("[{SessionId}] 🏙️ Destination '{Dest}' has no city context — blocking fare calc, asking for city", SessionId, destRaw);
+            return new
+            {
+                success = false,
+                warning = $"DESTINATION CITY REQUIRED: The destination '{destRaw}' does not include a city or area. " +
+                          $"Ask the caller: 'What city or area is {destRaw} in?' " +
+                          "Once they provide the city, call sync_booking_data again with the full destination including the city (e.g. '52A David Road, Coventry'). " +
+                          "Do NOT guess the city from the pickup address."
+            };
+        }
+
         if (allFieldsFilled && Interlocked.CompareExchange(ref _fareAutoTriggered, 1, 0) == 0)
         {
             _currentStage = BookingStage.FareCalculating;
@@ -2111,6 +2131,36 @@ public sealed class CallSession : ICallSession
     }
 
     /// <summary>
+    /// Returns true if the destination address appears to be a bare street address with no
+    /// city or area context — meaning the geocoder is very likely to fail or return
+    /// NeedsClarification=true, potentially suggesting the wrong city from the pickup.
+    ///
+    /// Blocked examples: "52A David Road", "David Road, 52A"
+    /// Allowed examples:  "52A David Road, Coventry", "Birmingham Airport"
+    /// </summary>
+    private static bool DestinationLacksCityContext(string? destination)
+    {
+        if (string.IsNullOrWhiteSpace(destination)) return false;
+
+        var dest = destination.Trim();
+
+        // No comma at all → almost certainly no city
+        if (!dest.Contains(',')) return true;
+
+        var parts = dest.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < 2) return true;
+
+        var lastPart = parts[^1];
+
+        // Last segment is a house number or flat suffix → city still missing
+        if (System.Text.RegularExpressions.Regex.IsMatch(lastPart, @"^\d+[A-Za-z]?$"))
+            return true;
+        if (System.Text.RegularExpressions.Regex.IsMatch(lastPart, @"^(flat|apt|apartment|unit|suite)\s*\d+", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+
+        return false;
+    }
+
     /// <summary>
     /// Check if Whisper STT output looks like intelligible English text.
     /// Returns false for garbled text, non-Latin scripts, very short fragments, etc.
@@ -2118,6 +2168,7 @@ public sealed class CallSession : ICallSession
     /// </summary>
     private static bool IsIntelligibleEnglish(string sttText)
     {
+
         if (string.IsNullOrWhiteSpace(sttText)) return false;
         
         var trimmed = sttText.Trim();
