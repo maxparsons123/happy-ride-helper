@@ -48,7 +48,9 @@ public sealed class FareCalculator : IFareCalculator
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
 
-        // ── Try local Gemini first (if enabled) ──
+        // ── Local Gemini disabled — use edge function directly ──
+        // (re-enable by uncommenting when local Gemini quota/latency is acceptable)
+        /*
         if (_geminiClient != null)
         {
             try
@@ -66,6 +68,7 @@ public sealed class FareCalculator : IFareCalculator
                 _logger.LogWarning(ex, "Local Gemini error — falling back to edge function");
             }
         }
+        */
 
         // ── Fall back to edge function (passes spoken house numbers as extra guard) ──
         try
