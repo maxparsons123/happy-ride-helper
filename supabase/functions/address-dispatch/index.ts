@@ -221,7 +221,13 @@ ADDRESS EXTRACTION RULES:
 1. Preserve house numbers EXACTLY as spoken (e.g., "52A" stays "52A", "1214A" stays "1214A")
 2. Do NOT invent house numbers if not provided
 3. Append detected city to addresses for clarity
-4. For landmarks, resolve to actual street addresses if known
+4. LANDMARK / NAMED PLACE ADDRESS FIELD (CRITICAL):
+   - When the input resolves to a named place (station, airport, supermarket, hospital, hotel, pub, school, university, etc.), the "address" field MUST begin with the well-known name of that place, followed by the street and postal code.
+   - CORRECT: "Birmingham New Street Station, New Street, Birmingham B2 4QA"
+   - WRONG:   "New Street, Birmingham B2 4QA"  ← drops the landmark name
+   - CORRECT: "Aldi, Warwick Road, Coventry CV3 6PT"
+   - WRONG:   "Warwick Road, Coventry CV3 6PT"  ← drops the business name
+   - The caller spoke the name for a reason — always include it in the address field so it can be read back to them accurately.
 5. ALWAYS include the postal code in the address field (e.g., "7 Russell Street, Coventry CV1 3BT")
 6. The postal_code field MUST be populated separately whenever determinable
 7. CRITICAL — INDEPENDENT POSTCODES: Each address (pickup AND dropoff) MUST have its OWN independently determined postal code. Different streets almost ALWAYS have different postcodes. NEVER copy the pickup's postal code to the dropoff or vice versa. If you cannot determine the exact postal code for an address, leave postal_code as an empty string rather than reusing the other address's postcode.
