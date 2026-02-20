@@ -143,6 +143,16 @@ public sealed class IcabbiBookingService : IDisposable
             // Log full body for field discovery during integration
             Log($"📋 Full quote body: {Truncate(body, 600)}");
 
+            // iCabbi returns HTTP 200 but with error:true for bad paths — bail early
+            var isApiError = root?["error"]?.GetValue<bool>() ?? false;
+            if (isApiError)
+            {
+                var errCode = root?["code"]?.GetValue<int>() ?? 0;
+                var errMsg  = root?["message"]?.GetValue<string>() ?? "unknown";
+                Log($"⚠️ iCabbi quote API error {errCode}: {errMsg} — using Gemini estimate");
+                return null;
+            }
+
             // iCabbi multi-quote returns: body.quotes[] array, body.quote object, or body directly
             // Resolve to a single JsonObject to extract fare/eta from
             JsonObject? quoteObj = ResolveQuoteObject(root, booking.Passengers ?? 1);
@@ -197,14 +207,18 @@ public sealed class IcabbiBookingService : IDisposable
     {
         var vehicleType = passengers <= 4 ? "R4" : passengers <= 6 ? "R6" : "R7";
 
-        // Walk known paths to the quote data
-        var candidates = new[]
+        // body could be a JsonObject or JsonArray [] — get it once and guard
+        var bodyNode = root?["body"];
+        var bodyObj  = bodyNode as JsonObject;   // null if body is [] or missing
+
+        // Walk known paths to the quote data — only subscript objects, never arrays
+        var candidates = new JsonNode?[]
         {
-            root?["body"]?["quotes"],
-            root?["body"]?["quote"],
-            root?["quotes"],
-            root?["quote"],
-            root?["body"]
+            bodyObj?["quotes"],          // body.quotes (array of vehicle quotes)
+            bodyObj?["quote"],           // body.quote  (single quote object)
+            root?["quotes"],             // top-level quotes array
+            root?["quote"],              // top-level quote object
+            bodyObj                      // body itself as a fallback object
         };
 
         foreach (var candidate in candidates)
@@ -216,7 +230,7 @@ public sealed class IcabbiBookingService : IDisposable
             {
                 if (arr.Count == 0) continue;
 
-                // Try to find the matching vehicle type first
+                // Prefer entry matching the required vehicle type
                 foreach (var item in arr)
                 {
                     if (item is not JsonObject obj) continue;
