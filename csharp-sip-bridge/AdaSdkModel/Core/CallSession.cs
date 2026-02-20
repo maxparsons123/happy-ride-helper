@@ -2176,11 +2176,32 @@ public sealed class CallSession : ICallSession
     /// Blocked examples: "52A David Road", "David Road, 52A"
     /// Allowed examples:  "52A David Road, Coventry", "Birmingham Airport"
     /// </summary>
+    // Well-known UK cities/towns — if any appear in the destination string the geocoder
+    // can resolve it without additional city context from history.
+    private static readonly string[] KnownUkCities =
+    [
+        "manchester", "london", "birmingham", "coventry", "bristol", "leeds", "liverpool",
+        "sheffield", "nottingham", "leicester", "edinburgh", "glasgow", "cardiff", "belfast",
+        "newcastle", "sunderland", "brighton", "oxford", "cambridge", "wolverhampton",
+        "stoke", "derby", "plymouth", "portsmouth", "southampton", "reading", "luton",
+        "milton keynes", "northampton", "peterborough", "hull", "york", "exeter", "bath",
+        "hertfordshire", "essex", "kent", "surrey", "hampshire", "warwickshire",
+        "heathrow", "gatwick", "stansted", "luton airport", "birmingham airport",
+        "manchester airport", "liverpool airport", "edinburgh airport", "glasgow airport",
+        "east midlands airport", "bristol airport"
+    ];
+
     private static bool DestinationLacksCityContext(string? destination)
     {
         if (string.IsNullOrWhiteSpace(destination)) return false;
 
         var dest = destination.Trim();
+
+        // If the destination explicitly contains a known UK city/airport, city context is present —
+        // do NOT let history inference overwrite it with the caller's local city.
+        var destLower = dest.ToLowerInvariant();
+        if (KnownUkCities.Any(c => destLower.Contains(c)))
+            return false;
 
         // No comma at all → almost certainly no city
         if (!dest.Contains(',')) return true;
