@@ -1,4 +1,4 @@
-// Last updated: 2026-02-20 (CallSession — Confirmed Address Immunity + Clarification Loop Breaker)
+// Last updated: 2026-02-21 (v2.8 — Descriptive ETA busy-level + SumUp payment link in BSQD)
 using AdaSdkModel.Ai;
 using AdaSdkModel.Config;
 using AdaSdkModel.Services;
