@@ -27,6 +27,9 @@
     <!-- Audio (operator mic + monitor) -->
     <PackageReference Include="NAudio" Version="2.2.1" />
 
+    <!-- SumUp payment SDK -->
+    <PackageReference Include="SumUp" Version="1.0.0" />
+
     <!-- Hosting / DI / Logging -->
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />

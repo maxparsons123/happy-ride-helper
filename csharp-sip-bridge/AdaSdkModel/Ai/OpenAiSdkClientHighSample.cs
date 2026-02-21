@@ -753,6 +753,41 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Send greeting that acknowledges the caller has an active booking.
+    /// </summary>
+    public async Task SendGreetingWithBookingAsync(string? callerName, AdaSdkModel.Core.BookingState booking)
+    {
+        if (Interlocked.Exchange(ref _greetingSent, 1) == 1) return;
+        if (_session == null) return;
+
+        try
+        {
+            var lang = OpenAiSdkClient.DetectLanguageStatic(_callerId);
+            var langName = OpenAiSdkClient.GetLanguageNameStatic(lang);
+
+            var pickup = booking.Pickup ?? "unknown";
+            var destination = booking.Destination ?? "unknown";
+            var bookingRef = booking.BookingRef ?? booking.ExistingBookingId ?? "unknown";
+
+            var greeting = $"[SYSTEM] [LANG: {langName}] A returning caller named {callerName ?? "unknown"} has connected (ID: {_callerId}). " +
+                $"They have an ACTIVE BOOKING (Ref: {bookingRef}) from {pickup} to {destination}. " +
+                $"Greet them BY NAME, then tell them about their existing booking. Say something like: " +
+                $"\"Welcome back {callerName ?? ""}. I can see you have an active booking from {pickup} to {destination}. " +
+                $"Would you like to cancel it, make any changes to it, or check the status of your driver?\" " +
+                $"Wait for their response before proceeding.";
+
+            await _session.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(greeting) }));
+            await _session.StartResponseAsync();
+            Log($"📢 Greeting with active booking sent (language: {langName})");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending greeting with booking");
+        }
+    }
+
     // =========================
     // NO-REPLY WATCHDOG
     // =========================
