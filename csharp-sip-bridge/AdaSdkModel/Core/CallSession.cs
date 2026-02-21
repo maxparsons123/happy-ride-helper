@@ -1297,6 +1297,10 @@ public sealed class CallSession : ICallSession
         if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(selected))
             return new { success = false, needs_disambiguation = false, error = "Missing target or selected address." };
 
+        // Apply the same house-number normalization used by sync_booking_data
+        // so clarify_address doesn't revert corrections (e.g. "528" → "52A")
+        selected = NormalizeHouseNumber(selected, target) ?? selected;
+
         if (target == "pickup")
         {
             // Detect if the user gave a NEW address instead of choosing from alternatives
