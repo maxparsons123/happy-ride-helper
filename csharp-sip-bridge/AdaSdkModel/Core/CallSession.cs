@@ -108,7 +108,7 @@ public sealed class CallSession : ICallSession
                 BookingStage.FareCalculating => "The fare is being calculated. Tell the caller: I'm still checking those addresses, please hold on a moment. Do NOT invent or guess any fare amount.",
                 BookingStage.FarePresented => "A fare has been presented. Ask the caller: Would you like me to go ahead and book that?",
                 BookingStage.Disambiguation => "We are waiting for the caller to choose from the address options. Repeat the options or ask: Which one was it?",
-                BookingStage.AnythingElse => "You asked if there's anything else to add. Ask again: 'Is there anything else you'd like to add — a flight number, special requests, or notes for the driver?' If they say no, say the FINAL CLOSING script and call end_call.",
+                BookingStage.AnythingElse => "You already asked if there's anything else. Do NOT repeat the question. Simply say: 'No problem, take your time.' and wait silently. If they still don't respond after this, say the FINAL CLOSING script and call end_call.",
                 _ => null // Use default generic re-prompt
             };
         };
