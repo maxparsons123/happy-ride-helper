@@ -580,6 +580,13 @@ public sealed class SipServer : IAsyncDisposable
         bool inboundFlushComplete = false;
         int inboundPacketCount = 0;
 
+        // Debounce / drain guard
+        long lastNotifyPlayoutCompleteMs = 0;
+        const int NOTIFY_DEBOUNCE_MS = 200;
+
+        // "Only notify after response completed" latch
+        int responseCompletedLatch = 0;   // 1 when ResponseCompleted fired for current turn
+
         // Pre-slice OpenAI bursts into exact 160-byte A-law frames before hitting the queue lock.
         // This eliminates accumulator churn on the hot path: each call to BufferALaw is a
         // zero-remainder 160-byte write, so DrainAccumulatorToQueue never loops mid-burst.
@@ -614,41 +621,69 @@ public sealed class SipServer : IAsyncDisposable
         session.OnBargeIn += () =>
         {
             if (Volatile.Read(ref isBotSpeaking) == 0 && playout.QueuedFrames == 0) return;
+
             playout.Clear();
+
+            // Clear any pending "notify complete" signals — barge-in is user-driven
+            Interlocked.Exchange(ref watchdogPending, 0);
+            Interlocked.Exchange(ref responseCompletedLatch, 0);
+
             Interlocked.Exchange(ref isBotSpeaking, 0);
         };
 
         // Flush partial accumulator on response end to prevent tail click
         session.AiClient.OnResponseCompleted += () =>
         {
+            // Ensure we flush any partial tail into RTP (prevents click)
             playout.Flush();
+
             playout.NotifyAdaHasSpoken(); // Enable typing sounds after first response
+
+            // IMPORTANT: do NOT call NotifyPlayoutComplete here unless queue is *actually* empty.
+            // We latch that response has completed, then wait for playout queue to drain.
+            Interlocked.Exchange(ref responseCompletedLatch, 1);
+
             Interlocked.Exchange(ref isBotSpeaking, 0);
             botStoppedSpeakingAt = DateTime.UtcNow;
-            if (playout.QueuedFrames == 0) session.NotifyPlayoutComplete();
-            else Interlocked.Exchange(ref watchdogPending, 1);
-        };
 
-        long lastDrainSignalMs = 0;
+            if (playout.QueuedFrames == 0)
+            {
+                // Debounced notify
+                var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (nowMs - Interlocked.Read(ref lastNotifyPlayoutCompleteMs) >= NOTIFY_DEBOUNCE_MS)
+                {
+                    Interlocked.Exchange(ref lastNotifyPlayoutCompleteMs, nowMs);
+                    session.NotifyPlayoutComplete();
+                }
+            }
+            else
+            {
+                // Wait for playout.OnQueueEmpty to notify completion
+                Interlocked.Exchange(ref watchdogPending, 1);
+            }
+        };
 
         playout.OnQueueEmpty += () =>
         {
-            // Debounce: OnQueueEmpty can fire multiple times while queue stays at 0.
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            if (now - Interlocked.Read(ref lastDrainSignalMs) < 200) return;
-            Interlocked.Exchange(ref lastDrainSignalMs, now);
-
-            if (Volatile.Read(ref adaHasStartedSpeaking) == 1 && Volatile.Read(ref isBotSpeaking) == 1)
-            {
-                Interlocked.Exchange(ref isBotSpeaking, 0);
-                botStoppedSpeakingAt = DateTime.UtcNow;
-                session.NotifyPlayoutComplete();
-            }
-            else if (Volatile.Read(ref watchdogPending) == 1)
+            // ONLY notify playout complete after the AI response has completed
+            // (otherwise you open mic while TTS is still coming / about to come).
+            if (Volatile.Read(ref watchdogPending) == 1 && Volatile.Read(ref responseCompletedLatch) == 1)
             {
                 Interlocked.Exchange(ref watchdogPending, 0);
+                Interlocked.Exchange(ref responseCompletedLatch, 0);
+
+                // Debounce: OnQueueEmpty may fire multiple times
+                var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (nowMs - Interlocked.Read(ref lastNotifyPlayoutCompleteMs) < NOTIFY_DEBOUNCE_MS)
+                    return;
+
+                Interlocked.Exchange(ref lastNotifyPlayoutCompleteMs, nowMs);
                 session.NotifyPlayoutComplete();
+                return;
             }
+
+            // If we get queue-empty while response is still active / not completed,
+            // DO NOTHING. This prevents reopening the mic mid-response.
         };
 
         rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
