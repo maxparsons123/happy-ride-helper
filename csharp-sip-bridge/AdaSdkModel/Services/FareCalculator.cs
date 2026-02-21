@@ -210,7 +210,24 @@ public sealed class FareCalculator : IFareCalculator
             if (fareEl.TryGetProperty("eta", out var ev)) edgeEta = ev.GetString();
         }
 
-        // Only calculate fare if disambiguation is NOT needed
+        // Always populate coordinates and address components if available,
+        // even when NeedsClarification is true — the caller can still use partial data.
+        if (pickupLat.HasValue && pickupLon.HasValue && pickupLat.Value != 0)
+        {
+            result.PickupLat = pickupLat.Value; result.PickupLon = pickupLon.Value;
+            result.PickupStreet = pickupStreet; result.PickupNumber = pickupNumber;
+            result.PickupPostalCode = pickupPostal; result.PickupCity = pickupCity ?? detectedArea;
+            result.PickupFormatted = resolvedPickup;
+        }
+        if (destLat.HasValue && destLon.HasValue && destLat.Value != 0)
+        {
+            result.DestLat = destLat.Value; result.DestLon = destLon.Value;
+            result.DestStreet = destStreet; result.DestNumber = destNumber;
+            result.DestPostalCode = destPostal; result.DestCity = destCity ?? detectedArea;
+            result.DestFormatted = resolvedDest;
+        }
+
+        // Calculate fare only when disambiguation is NOT needed and both sides have coords
         if (!result.NeedsClarification &&
             pickupLat.HasValue && pickupLon.HasValue && destLat.HasValue && destLon.HasValue &&
             pickupLat.Value != 0 && destLat.Value != 0)
@@ -228,14 +245,6 @@ public sealed class FareCalculator : IFareCalculator
                 result.Fare = $"£{fare:F2}";
                 result.Eta = $"{(int)Math.Ceiling(dist / AvgSpeedMph * 60) + BufferMinutes} minutes";
             }
-            result.PickupLat = pickupLat.Value; result.PickupLon = pickupLon.Value;
-            result.PickupStreet = pickupStreet; result.PickupNumber = pickupNumber;
-            result.PickupPostalCode = pickupPostal; result.PickupCity = pickupCity ?? detectedArea;
-            result.PickupFormatted = resolvedPickup;
-            result.DestLat = destLat.Value; result.DestLon = destLon.Value;
-            result.DestStreet = destStreet; result.DestNumber = destNumber;
-            result.DestPostalCode = destPostal; result.DestCity = destCity ?? detectedArea;
-            result.DestFormatted = resolvedDest;
         }
         return result;
     }
