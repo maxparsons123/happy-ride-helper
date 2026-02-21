@@ -63,6 +63,7 @@ public sealed class SumUpService : IDisposable
                 currency = curr,
                 checkout_reference = checkoutRef,
                 merchant_code = _settings.MerchantCode,
+                pay_to_email = _settings.PayToEmail,
                 description
             };
 
@@ -92,7 +93,11 @@ public sealed class SumUpService : IDisposable
                 return null;
             }
 
-            var paymentUrl = $"https://pay.sumup.com/b2c/checkout/{checkoutId}";
+            // Use hosted payment page with SumUp card widget instead of pay.sumup.com
+            var encodedDesc = Uri.EscapeDataString(description);
+            var paymentUrl = !string.IsNullOrWhiteSpace(_settings.PaymentPageBaseUrl)
+                ? $"{_settings.PaymentPageBaseUrl.TrimEnd('/')}/pay/{checkoutId}?amount={roundedAmount}&currency={curr}&desc={encodedDesc}"
+                : $"https://happy-ride-helper.lovable.app/pay/{checkoutId}?amount={roundedAmount}&currency={curr}&desc={encodedDesc}";
             _logger.LogInformation("[SumUp] ✅ Checkout created — id={Id}, url={Url}", checkoutId, paymentUrl);
             return paymentUrl;
         }
