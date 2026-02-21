@@ -347,8 +347,17 @@ public partial class MainForm : Form
 
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
-                // Feed caller audio to local speakers
+                // Feed caller audio to local speakers (operator mode)
                 _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+            };
+
+            // Feed caller audio to monitor speakers during AI calls too
+            _sipServer.OnCallerAudioMonitor += alawFrame =>
+            {
+                // Dispatch off network thread to prevent RTP jitter
+                var copy = new byte[alawFrame.Length];
+                Buffer.BlockCopy(alawFrame, 0, copy, 0, alawFrame.Length);
+                ThreadPool.QueueUserWorkItem(_ => _monitorBuffer?.AddSamples(copy, 0, copy.Length));
             };
 
             _sipServer.OnCallEnded += (sessionId, reason) => Invoke(() =>
@@ -443,7 +452,8 @@ public partial class MainForm : Form
             Log($"💬 {role}: {text}");
         });
         
-        // Wire Ada's audio output → Simli avatar OR monitor speakers (never both)
+        // Wire Ada's audio output → Simli avatar OR monitor speakers
+        // IMPORTANT: Dispatch monitor playback off the RTP-critical thread to prevent jitter
         session.OnAudioOut += alawFrame =>
         {
             if (_simliAvatar?.IsConnected == true)
@@ -453,8 +463,10 @@ public partial class MainForm : Form
             }
             else
             {
-                // No avatar – fall back to local monitor speakers
-                _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+                // Copy frame so RTP playout thread isn't blocked by NAudio
+                var copy = new byte[alawFrame.Length];
+                Buffer.BlockCopy(alawFrame, 0, copy, 0, alawFrame.Length);
+                ThreadPool.QueueUserWorkItem(_ => _monitorBuffer?.AddSamples(copy, 0, copy.Length));
             }
         };
         
