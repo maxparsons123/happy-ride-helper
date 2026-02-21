@@ -191,6 +191,12 @@ public sealed class SumUpSettings
 
     /// <summary>Currency for checkouts.</summary>
     public string Currency { get; set; } = "GBP";
+
+    /// <summary>SumUp merchant email for pay_to_email field.</summary>
+    public string PayToEmail { get; set; } = "";
+
+    /// <summary>Base URL of the hosted payment page (e.g. https://happy-ride-helper.lovable.app). If empty, defaults to the main app URL.</summary>
+    public string PaymentPageBaseUrl { get; set; } = "https://happy-ride-helper.lovable.app";
 }
 
 public sealed class ZoneGuardSettings

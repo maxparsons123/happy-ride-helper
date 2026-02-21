@@ -19,12 +19,14 @@ serve(async (req) => {
 
   try {
     const checkoutRef = `TEST-${Date.now()}`;
+    const amount = 1.00;
+    const currency = "GBP";
     const payload = {
-      amount: 1.00,
-      currency: "GBP",
+      amount,
+      currency,
       checkout_reference: checkoutRef,
       merchant_code: "MW93CBFR",
-      pay_to_email: "MW93CBFR@sumup.com",
+      pay_to_email: "sumup.sandbox@im-tech.co.uk",
       description: "Test checkout from edge function"
     };
 
@@ -42,10 +44,23 @@ serve(async (req) => {
     const body = await resp.text();
     console.log(`📨 SumUp response: ${resp.status} ${body}`);
 
+    let checkoutId = null;
+    let paymentUrl = null;
+    try {
+      const parsed = JSON.parse(body);
+      checkoutId = parsed.id;
+      if (checkoutId) {
+        // Use our hosted payment page with the SumUp widget
+        paymentUrl = `https://happy-ride-helper.lovable.app/pay/${checkoutId}?amount=${amount}&currency=${currency}&desc=Test+checkout`;
+      }
+    } catch {}
+
     return new Response(JSON.stringify({
       status: resp.status,
       statusText: resp.statusText,
       body: body,
+      checkoutId,
+      paymentUrl,
       keyPrefix: apiKey.substring(0, 10) + "..."
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" }
