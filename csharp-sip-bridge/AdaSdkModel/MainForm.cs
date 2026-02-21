@@ -47,6 +47,8 @@ public partial class MainForm : Form
         ApplySettingsToUi();
         InitSimliAvatar();
         Log($"AdaSdkModel v{OpenAiSdkClient.VERSION} started. Configure SIP and click Connect.");
+        Log($"📂 Settings loaded from: {SettingsPath}");
+        Log($"🚕 iCabbi config: AppKey={(string.IsNullOrWhiteSpace(_settings.Icabbi.AppKey) ? "❌ EMPTY" : "✅ SET")}, Enabled={_settings.Icabbi.Enabled}, Tenant={_settings.Icabbi.TenantBase}");
     }
 
     // ── Logger factory ──
