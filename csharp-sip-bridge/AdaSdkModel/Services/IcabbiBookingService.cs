@@ -117,8 +117,7 @@ public sealed class IcabbiBookingService : IDisposable
             var json = JsonSerializer.Serialize(quotePayload, JsonOpts);
             Log($"📤 Quote payload:\n{json}");
 
-            // Same base path as booking: {_baseUrl}bookings/quote
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}bookings/quote")
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/quote")
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
