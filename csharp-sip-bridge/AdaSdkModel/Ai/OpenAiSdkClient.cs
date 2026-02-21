@@ -98,7 +98,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private const int NO_REPLY_TIMEOUT_MS = 8_000;
     private const int CONFIRMATION_TIMEOUT_MS = 15_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
-    private const int ECHO_GUARD_MS = 300;
+    private const int ECHO_GUARD_MS = 200;
 
     // =========================
     // NON-BLOCKING LOGGER
@@ -244,13 +244,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 // Simulate patient vs responsive modes using server_vad with different parameters.
                 TurnDetectionOptions = _useSemanticVad
                     ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.3f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
-                        silenceDuration: TimeSpan.FromMilliseconds(2000))  // Patient: 2s silence for full address utterances
+                        detectionThreshold: 0.25f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
+                        silenceDuration: TimeSpan.FromMilliseconds(1400))  // Patient: 1.4s silence for full address utterances
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                        silenceDuration: TimeSpan.FromMilliseconds(900))   // Responsive: quick for short answers
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
+                        silenceDuration: TimeSpan.FromMilliseconds(600))   // Responsive: quick for short answers
             };
 
             options.Tools.Add(BuildSyncBookingDataToolStatic());
@@ -456,13 +456,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 // SDK 2.1.0-beta.4: simulate semantic-like patience using server_vad parameters
                 TurnDetectionOptions = useSemantic
                     ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.3f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
-                        silenceDuration: TimeSpan.FromMilliseconds(2000))  // Patient mode: 2s for full addresses
+                        detectionThreshold: 0.25f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
+                        silenceDuration: TimeSpan.FromMilliseconds(1400))  // Patient mode: 1.4s for full addresses
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                        silenceDuration: TimeSpan.FromMilliseconds(900))   // Responsive mode
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
+                        silenceDuration: TimeSpan.FromMilliseconds(600))   // Responsive mode
             };
 
             await _session.ConfigureSessionAsync(options);

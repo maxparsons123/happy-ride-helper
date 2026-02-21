@@ -100,7 +100,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private const int NO_REPLY_TIMEOUT_MS = 8_000;
     private const int CONFIRMATION_TIMEOUT_MS = 15_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
-    private const int ECHO_GUARD_MS = 300;
+    private const int ECHO_GUARD_MS = 200;
 
     // =========================
     // NON-BLOCKING LOGGER
@@ -253,13 +253,13 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                 },
                 TurnDetectionOptions = _useSemanticVad
                     ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.3f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
-                        silenceDuration: TimeSpan.FromMilliseconds(1500))
+                        detectionThreshold: 0.25f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
+                        silenceDuration: TimeSpan.FromMilliseconds(1400))
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                        silenceDuration: TimeSpan.FromMilliseconds(900))
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
+                        silenceDuration: TimeSpan.FromMilliseconds(600))
             };
 
             options.Tools.Add(OpenAiSdkClient.BuildSyncBookingDataToolStatic());
@@ -457,13 +457,13 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
             {
                 TurnDetectionOptions = useSemantic
                     ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.3f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(800),
-                        silenceDuration: TimeSpan.FromMilliseconds(1500))
+                        detectionThreshold: 0.25f,
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
+                        silenceDuration: TimeSpan.FromMilliseconds(1400))
                     : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
                         detectionThreshold: 0.2f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(600),
-                        silenceDuration: TimeSpan.FromMilliseconds(900))
+                        prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
+                        silenceDuration: TimeSpan.FromMilliseconds(600))
             };
 
             await _session.ConfigureSessionAsync(options);
