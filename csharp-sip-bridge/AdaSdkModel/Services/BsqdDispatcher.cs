@@ -65,14 +65,14 @@ public sealed class BsqdDispatcher : IDispatcher
         if (string.IsNullOrEmpty(_settings.BsqdWebhookUrl)) return false;
         try
         {
-            var priceField = string.IsNullOrWhiteSpace(booking.PaymentLink)
-                ? ParseFare(booking.Fare)
-                : $"{ParseFare(booking.Fare)} | Pay: {booking.PaymentLink}";
+            var fareAmount = ParseFare(booking.Fare);
 
-            // Also include payment link in the eta field for BSQD receivers that read eta for dispatch info
-            var etaField = booking.Eta;
+            // ETA field: conversational arrival message + fare + payment link
+            var etaField = booking.Eta ?? "";
+            if (!string.IsNullOrWhiteSpace(fareAmount))
+                etaField = $"{etaField} | £{fareAmount}";
             if (!string.IsNullOrWhiteSpace(booking.PaymentLink))
-                etaField = $"{etaField} | Pay: {booking.PaymentLink}";
+                etaField = $"{etaField} Pay: {booking.PaymentLink}";
 
             var payload = new
             {
@@ -82,7 +82,7 @@ public sealed class BsqdDispatcher : IDispatcher
                 formatted_pickup_time = FormatPickupTime(booking),
                 booking_type = IsAsapBooking(booking) ? "immediate" : "advance",
                 first_name = booking.Name ?? "Customer",
-                total_price = priceField,
+                total_price = fareAmount,
                 phoneNumber = FormatE164(phoneNumber),
                 passengers = (booking.Passengers ?? 1).ToString(),
                 eta = etaField,
@@ -174,10 +174,12 @@ public sealed class BsqdDispatcher : IDispatcher
 
             var fareStr = ParseFare(booking.Fare);
 
-            // Build ETA field for MQTT — use conversational ETA + payment link (same as BSQD webhook)
+            // Build ETA field for MQTT — conversational ETA + fare + payment link (same as BSQD webhook)
             var mqttEta = booking.Eta ?? "";
+            if (!string.IsNullOrWhiteSpace(booking.Fare))
+                mqttEta = $"{mqttEta} | £{ParseFare(booking.Fare)}";
             if (!string.IsNullOrWhiteSpace(booking.PaymentLink))
-                mqttEta = $"{mqttEta} | Pay: {booking.PaymentLink}";
+                mqttEta = $"{mqttEta} Pay: {booking.PaymentLink}";
 
             var payload = JsonSerializer.Serialize(new
             {
