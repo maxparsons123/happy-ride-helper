@@ -1,4 +1,4 @@
-// Last updated: 2026-02-21 (v2.8 — Descriptive ETA busy-level + SumUp payment link in BSQD)
+// Last updated: 2026-02-21 (v2.9 — Preserve caller name after cancel, fix watchdog reprompt)
 using AdaSdkModel.Ai;
 using AdaSdkModel.Config;
 using AdaSdkModel.Services;
@@ -2545,10 +2545,12 @@ public sealed class CallSession : ICallSession
 
             _logger.LogInformation("[{SessionId}] ✅ Booking {BookingId} cancelled", SessionId, bookingId);
 
-            // Reset booking state for potential new booking
+            // Reset booking state for potential new booking, but preserve caller identity
+            var knownName = _booking.Name;
             _booking.Reset();
             _booking.CallerPhone = CallerId;
-            _currentStage = BookingStage.Greeting;
+            _booking.Name = knownName; // Preserve name — we already know who this is
+            _currentStage = !string.IsNullOrWhiteSpace(knownName) ? BookingStage.CollectingPickup : BookingStage.Greeting;
             Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
