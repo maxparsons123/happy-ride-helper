@@ -2675,7 +2675,20 @@ public sealed class CallSession : ICallSession
     private string FormatScheduledTimePart()
     {
         if (IsImmediatePickup(_booking.PickupTime))
-            return $", estimated time of arrival is {_booking.Eta ?? "8 minutes"}";
+        {
+            // Use dynamic ETA text from edge function (e.g. "We're not too busy at the moment...")
+            // instead of fixed minutes. The ETA text is conversational, so embed it naturally.
+            var eta = _booking.Eta;
+            if (string.IsNullOrWhiteSpace(eta))
+                eta = "We should be able to get you a taxi quite quickly.";
+
+            // If ETA looks like a fixed "X minutes" string (from iCabbi fallback), wrap it conversationally
+            if (eta.Contains("minutes") && !eta.Contains(" "))
+                return $". {eta}";
+
+            // Dynamic ETA — just append as a natural sentence
+            return $". {eta}";
+        }
 
         if (_booking.ScheduledAt.HasValue)
         {
