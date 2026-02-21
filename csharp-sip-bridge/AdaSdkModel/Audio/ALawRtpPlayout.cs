@@ -1,4 +1,4 @@
-// Last updated: 2026-02-20 (ALawRtpPlayout v8.3 — Production Best)
+// Last updated: 2026-02-21 (v2.8 — ALawRtpPlayout v8.3)
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;

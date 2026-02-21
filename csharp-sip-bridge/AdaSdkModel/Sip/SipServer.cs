@@ -1,3 +1,4 @@
+// Last updated: 2026-02-21 (v2.8)
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;

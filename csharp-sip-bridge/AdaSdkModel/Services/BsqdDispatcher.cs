@@ -1,3 +1,4 @@
+// Last updated: 2026-02-21 (v2.8 — ASAP ETA + SumUp link in total_price)
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;

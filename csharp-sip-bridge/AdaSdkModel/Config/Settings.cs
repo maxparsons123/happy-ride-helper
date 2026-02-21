@@ -1,3 +1,4 @@
+// Last updated: 2026-02-21 (v2.8 — SumUp PayToEmail + PaymentPageBaseUrl)
 namespace AdaSdkModel.Config;
 
 /// <summary>
