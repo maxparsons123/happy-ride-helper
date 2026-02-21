@@ -77,6 +77,8 @@ public sealed class SipServer : IAsyncDisposable
     public event Action<string, string>? OnCallRinging;
     /// <summary>Fires with caller A-law audio during operator calls (for speaker output).</summary>
     public event Action<byte[]>? OnOperatorCallerAudio;
+    /// <summary>Fires with caller A-law audio during AI calls (for monitor speakers).</summary>
+    public event Action<byte[]>? OnCallerAudioMonitor;
 
     public SipServer(
         ILogger<SipServer> logger,
@@ -704,6 +706,9 @@ public sealed class SipServer : IAsyncDisposable
             {
                 session.ProcessInboundAudio(g711ToSend);
             }
+
+            // Fire caller audio for monitor speakers (off the critical path)
+            try { OnCallerAudioMonitor?.Invoke(g711ToSend); } catch { }
 
             framesForwarded++;
             if (framesForwarded % 250 == 0)
