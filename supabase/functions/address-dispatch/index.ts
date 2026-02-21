@@ -37,7 +37,20 @@ const DRIVER_ETA_MIN = 8;
 const DRIVER_ETA_MAX = 15;
 const DRIVER_ETA_DEFAULT = 10;
 
-function calculateFare(distanceMiles: number, detectedCountry?: string): { fare: string; fare_spoken: string; eta: string; driver_eta: string; driver_eta_minutes: number; trip_eta: string; trip_eta_minutes: number; distance_miles: number } {
+// Busy-level descriptive messages based on estimated driver ETA
+function getBusyLevelMessage(driverEtaMinutes: number): { busy_message: string; busy_level: string } {
+  if (driverEtaMinutes <= 10) {
+    return { busy_message: "We're not too busy at the moment, we should be able to get you a taxi quite quickly.", busy_level: "low" };
+  } else if (driverEtaMinutes <= 20) {
+    return { busy_message: "We are currently busy but we will get you a taxi as soon as possible.", busy_level: "moderate" };
+  } else if (driverEtaMinutes <= 30) {
+    return { busy_message: "We are very busy at the moment, there may be a bit of a wait but we'll do our best to get you a taxi.", busy_level: "high" };
+  } else {
+    return { busy_message: "We are extremely busy right now, it could be half an hour or more. We'd recommend you try another company if you're in a rush.", busy_level: "extreme" };
+  }
+}
+
+function calculateFare(distanceMiles: number, detectedCountry?: string): { fare: string; fare_spoken: string; eta: string; driver_eta: string; driver_eta_minutes: number; busy_message: string; busy_level: string; trip_eta: string; trip_eta_minutes: number; distance_miles: number } {
   const rawFare = Math.max(MIN_FARE, BASE_FARE + distanceMiles * PER_MILE);
   // Round to nearest 0.50
   const fare = Math.round(rawFare * 2) / 2;
@@ -45,9 +58,11 @@ function calculateFare(distanceMiles: number, detectedCountry?: string): { fare:
   // Trip ETA = how long the journey itself takes (for internal use / logging)
   const tripEtaMinutes = Math.ceil(distanceMiles / AVG_SPEED_MPH * 60) + BUFFER_MINUTES;
   
-  // Driver ETA = how long for a driver to reach the passenger (what we tell the caller)
-  // Scale slightly with distance: short trips get lower ETA, longer trips slightly higher
+  // Driver ETA = how long for a driver to reach the passenger
   const driverEtaMinutes = Math.min(DRIVER_ETA_MAX, Math.max(DRIVER_ETA_MIN, DRIVER_ETA_DEFAULT + Math.floor(distanceMiles / 20)));
+
+  // Get descriptive busy-level message instead of exact minutes
+  const { busy_message, busy_level } = getBusyLevelMessage(driverEtaMinutes);
 
   // Currency based on detected country
   const isNL = detectedCountry === "NL";
@@ -65,9 +80,11 @@ function calculateFare(distanceMiles: number, detectedCountry?: string): { fare:
   return {
     fare: fareStr,
     fare_spoken: fareSpoken,
-    eta: `${driverEtaMinutes} minutes`,           // ← this is what Ada tells the caller
-    driver_eta: `${driverEtaMinutes} minutes`,     // explicit driver arrival time
-    driver_eta_minutes: driverEtaMinutes,
+    eta: busy_message,                             // ← descriptive message for Ada to tell the caller
+    driver_eta: busy_message,                      // same descriptive message
+    driver_eta_minutes: driverEtaMinutes,          // keep raw minutes for internal logging
+    busy_message,
+    busy_level,
     trip_eta: `${tripEtaMinutes} minutes`,         // full journey duration (internal)
     trip_eta_minutes: tripEtaMinutes,
     distance_miles: Math.round(distanceMiles * 100) / 100,

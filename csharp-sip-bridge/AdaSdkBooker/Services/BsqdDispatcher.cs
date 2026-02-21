@@ -43,17 +43,21 @@ public sealed class BsqdDispatcher : IDispatcher
         if (string.IsNullOrEmpty(_settings.BsqdWebhookUrl)) return false;
         try
         {
-            var etaField = BuildEtaField(booking);
+            // Build total_price with payment link alongside the fare
+            var fareValue = ParseFare(booking.Fare);
+            var totalPriceField = !string.IsNullOrWhiteSpace(booking.PaymentLink)
+                ? $"{fareValue} | Pay: {booking.PaymentLink}"
+                : fareValue;
             var payload = new
             {
                 departure_address = new { lat = booking.PickupLat ?? 0, lon = booking.PickupLon ?? 0, street_name = booking.PickupStreet ?? "", street_number = booking.PickupNumber ?? "", postal_code = booking.PickupPostalCode ?? "", city = booking.PickupCity ?? "", formatted_depa_address = booking.PickupFormatted ?? booking.Pickup ?? "" },
                 destination_address = new { lat = booking.DestLat ?? 0, lon = booking.DestLon ?? 0, street_name = booking.DestStreet ?? "", street_number = booking.DestNumber ?? "", postal_code = booking.DestPostalCode ?? "", city = booking.DestCity ?? "", formatted_dest_address = booking.DestFormatted ?? booking.Destination ?? "" },
                 departure_time = DateTimeOffset.Now.AddMinutes(5),
                 first_name = booking.Name ?? "Customer",
-                total_price = ParseFare(booking.Fare),
+                total_price = totalPriceField,
                 phoneNumber = FormatE164(phoneNumber),
                 passengers = (booking.Passengers ?? 1).ToString(),
-                eta = etaField,
+                eta = "ASAP",
                 payment_link = booking.PaymentLink
             };
             var json = JsonSerializer.Serialize(payload, JsonOptions);
