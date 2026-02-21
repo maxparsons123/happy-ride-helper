@@ -168,7 +168,11 @@ public sealed class CallSession : ICallSession
             {
                 var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId, callerPhoneOverride: callerId);
                 if (icabbiResult.Success)
+                {
                     _logger.LogInformation("[{SessionId}] 🚕 iCabbi (safety net): {JourneyId}", sessionId, icabbiResult.JourneyId);
+                    bookingSnapshot.IcabbiJourneyId = icabbiResult.JourneyId;
+                    _ = SaveIcabbiJourneyIdAsync(bookingSnapshot.BookingRef, icabbiResult.JourneyId);
+                }
                 else
                     _logger.LogWarning("[{SessionId}] ⚠️ iCabbi (safety net) failed: {Msg}", sessionId, icabbiResult.Message);
             }
@@ -439,7 +443,7 @@ public sealed class CallSession : ICallSession
             var normalized = phone.Trim().Replace(" ", "");
             var phoneVariants = new[] { phone, normalized, $"+{normalized}" };
             var orFilter = string.Join(",", phoneVariants.Select(p => $"caller_phone.eq.{Uri.EscapeDataString(p)}"));
-            var url = $"{_settings.Supabase.Url}/rest/v1/bookings?or=({orFilter})&status=in.(active,confirmed)&order=booked_at.desc&limit=1&select=id,pickup,destination,passengers,fare,eta,status,caller_name,booked_at,pickup_lat,pickup_lng,dest_lat,dest_lng,scheduled_for";
+            var url = $"{_settings.Supabase.Url}/rest/v1/bookings?or=({orFilter})&status=in.(active,confirmed)&order=booked_at.desc&limit=1&select=id,pickup,destination,passengers,fare,eta,status,caller_name,booked_at,pickup_lat,pickup_lng,dest_lat,dest_lng,scheduled_for,booking_details";
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Add("apikey", _settings.Supabase.AnonKey);
             request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
@@ -469,6 +473,10 @@ public sealed class CallSession : ICallSession
                 _booking.DestLat = dlat.GetDouble();
             if (b.TryGetProperty("dest_lng", out var dlng) && dlng.ValueKind == System.Text.Json.JsonValueKind.Number)
                 _booking.DestLon = dlng.GetDouble();
+            // Extract iCabbi journey ID from booking_details JSON
+            if (b.TryGetProperty("booking_details", out var bd) && bd.ValueKind == System.Text.Json.JsonValueKind.Object
+                && bd.TryGetProperty("icabbi_journey_id", out var jid) && jid.ValueKind == System.Text.Json.JsonValueKind.String)
+                _booking.IcabbiJourneyId = jid.GetString();
             _booking.BookingRef = _booking.ExistingBookingId;
 
             _currentStage = BookingStage.ManagingExistingBooking;
@@ -1267,7 +1275,7 @@ public sealed class CallSession : ICallSession
                     // Call iCabbi quote endpoint → get official fare+ETA → override Gemini estimate.
                     // The quoted fare is stored in _booking.Fare and will be used verbatim in the
                     // confirmed booking payload sent in Phase 2 (CreateAndDispatchAsync).
-                    if (_icabbiEnabled && _icabbi != null)
+                    if (_icabbi != null)
                     {
                         _logger.LogInformation("[{SessionId}] 🚕 [Phase 1] Requesting iCabbi fare quote (siteId={SiteId})", sessionId, _settings.Icabbi.SiteId);
                         var quote = await _icabbi.GetFareQuoteAsync(_booking, _settings.Icabbi.SiteId);
@@ -1920,7 +1928,7 @@ public sealed class CallSession : ICallSession
                     ApplyFareResult(result);
 
                     // ── iCabbi FARE QUOTE (Phase 1 of 2) ──────────────────────────────────────
-                    if (_icabbiEnabled && _icabbi != null)
+                    if (_icabbi != null)
                     {
                         _logger.LogInformation("[{SessionId}] 🚕 [Phase 1] Requesting iCabbi fare quote (siteId={SiteId})", sessionId, _settings.Icabbi.SiteId);
                         var quote = await _icabbi.GetFareQuoteAsync(_booking, _settings.Icabbi.SiteId);
@@ -2139,8 +2147,12 @@ public sealed class CallSession : ICallSession
                         // even if CallerPhone in the snapshot was cleared by an early clone.
                         var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId, callerPhoneOverride: callerId);
                         if (icabbiResult.Success)
+                        {
                             _logger.LogInformation("[{SessionId}] ✅ iCabbi booking confirmed — JourneyId: {JourneyId}, Tracking: {TrackingUrl}",
                                 sessionId, icabbiResult.JourneyId, icabbiResult.TrackingUrl);
+                            _booking.IcabbiJourneyId = icabbiResult.JourneyId;
+                            _ = SaveIcabbiJourneyIdAsync(bookingSnapshot.BookingRef, icabbiResult.JourneyId);
+                        }
                         else
                             _logger.LogWarning("[{SessionId}] ⚠️ iCabbi booking failed: {Msg}", sessionId, icabbiResult.Message);
                     }
@@ -2302,7 +2314,11 @@ public sealed class CallSession : ICallSession
                 {
                     var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId);
                     if (icabbiResult.Success)
+                    {
                         _logger.LogInformation("[{SessionId}] 🚕 iCabbi OK — Journey: {JourneyId}", SessionId, icabbiResult.JourneyId);
+                        _booking.IcabbiJourneyId = icabbiResult.JourneyId;
+                        _ = SaveIcabbiJourneyIdAsync(bookingSnapshot.BookingRef, icabbiResult.JourneyId);
+                    }
                     else
                         _logger.LogWarning("[{SessionId}] ⚠ iCabbi failed: {Message}", SessionId, icabbiResult.Message);
                 }
@@ -2381,6 +2397,18 @@ public sealed class CallSession : ICallSession
 
         try
         {
+            // Cancel in iCabbi first if we have a journey ID
+            if (_icabbi != null && !string.IsNullOrWhiteSpace(_booking.IcabbiJourneyId))
+            {
+                _logger.LogInformation("[{SessionId}] 🚕 Cancelling iCabbi journey {JourneyId}", SessionId, _booking.IcabbiJourneyId);
+                var (icabbiOk, icabbiMsg) = await _icabbi.CancelBookingAsync(_booking.IcabbiJourneyId, reason);
+                if (icabbiOk)
+                    _logger.LogInformation("[{SessionId}] ✅ iCabbi journey {JourneyId} cancelled", SessionId, _booking.IcabbiJourneyId);
+                else
+                    _logger.LogWarning("[{SessionId}] ⚠️ iCabbi cancel failed for {JourneyId}: {Msg}", SessionId, _booking.IcabbiJourneyId, icabbiMsg);
+            }
+
+            // Cancel in Supabase
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
             var url = $"{_settings.Supabase.Url}/rest/v1/bookings?id=eq.{Uri.EscapeDataString(bookingId)}";
             var request = new HttpRequestMessage(HttpMethod.Patch, url);
@@ -3292,6 +3320,39 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[{SessionId}] ⚠️ Caller history save error (non-fatal)", SessionId);
+        }
+    }
+
+    /// <summary>
+    /// Fire-and-forget: saves the iCabbi journey ID into the booking_details JSONB column
+    /// so it can be retrieved on returning-caller lookup for cancellation/status queries.
+    /// </summary>
+    private async Task SaveIcabbiJourneyIdAsync(string? bookingRef, string? journeyId)
+    {
+        if (string.IsNullOrWhiteSpace(bookingRef) || string.IsNullOrWhiteSpace(journeyId)) return;
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            // Match by call_id which stores the booking ref (TAXI-...) — bookings don't always have a UUID id at this point
+            var url = $"{_settings.Supabase.Url}/rest/v1/bookings?call_id=eq.{Uri.EscapeDataString(bookingRef)}";
+            var request = new HttpRequestMessage(HttpMethod.Patch, url);
+            request.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            request.Headers.Add("Authorization", $"Bearer {_settings.Supabase.AnonKey}");
+            request.Headers.Add("Prefer", "return=minimal");
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                booking_details = new { icabbi_journey_id = journeyId }
+            });
+            request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+            var resp = await http.SendAsync(request);
+            if (resp.IsSuccessStatusCode)
+                _logger.LogInformation("[{SessionId}] ✅ iCabbi journey ID {JourneyId} saved to booking {Ref}", SessionId, journeyId, bookingRef);
+            else
+                _logger.LogWarning("[{SessionId}] ⚠️ Failed to save iCabbi journey ID: HTTP {Status}", SessionId, (int)resp.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] ⚠️ SaveIcabbiJourneyId error (non-fatal)", SessionId);
         }
     }
 }

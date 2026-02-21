@@ -31,6 +31,9 @@ public sealed class BookingState
     /// <summary>UUID of an existing active booking loaded from the database for returning callers. Null = new booking.</summary>
     public string? ExistingBookingId { get; set; }
 
+    /// <summary>iCabbi journey ID returned by CreateAndDispatchAsync. Used for cancellation and status queries.</summary>
+    public string? IcabbiJourneyId { get; set; }
+
     /// <summary>Previous pickup interpretations for safeguarding (most recent first).</summary>
     public List<string> PreviousPickups { get; set; } = new();
 
@@ -121,6 +124,7 @@ public sealed class BookingState
     {
         Name = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         ExistingBookingId = null;
+        IcabbiJourneyId = null;
         Passengers = null;
         ScheduledAt = null;
         VehicleType = "Saloon";
