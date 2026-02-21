@@ -507,7 +507,6 @@ public sealed class IcabbiBookingService : IDisposable
 
         if (update.Phone != null) payload["phone"] = update.Phone;
         if (update.Name != null) payload["name"] = update.Name;
-        if (update.Date != null) payload["date"] = update.Date;
         if (update.Instructions != null) payload["instructions"] = update.Instructions;
         if (update.FlightNumber != null) payload["flight_number"] = update.FlightNumber;
         if (update.Payment != null) payload["payment"] = update.Payment;
@@ -515,6 +514,11 @@ public sealed class IcabbiBookingService : IDisposable
         if (update.VehicleType != null) payload["vehicle_type"] = update.VehicleType;
         if (update.VehicleGroup != null) payload["vehicle_group"] = update.VehicleGroup;
         if (update.Passengers != null) payload["passengers"] = update.Passengers;
+        if (update.PlannedDate != null) payload["planned_date"] = update.PlannedDate;
+        if (update.PlannedDropoffDate != null) payload["planned_dropoff_date"] = update.PlannedDropoffDate;
+        if (update.AppointmentDate != null) payload["appointment_date"] = update.AppointmentDate;
+        if (update.RouteBy != null) payload["route_by"] = update.RouteBy;
+        if (update.ExternalBookingId != null) payload["external_booking_id"] = update.ExternalBookingId;
 
         if (update.Destination != null)
             payload["destination"] = update.Destination;
@@ -878,9 +882,6 @@ public sealed class IcabbiBookingUpdate
     /// <summary>Customer name.</summary>
     public string? Name { get; set; }
 
-    /// <summary>Pickup date/time (ISO 8601). Cannot be updated once booking is released.</summary>
-    public string? Date { get; set; }
-
     /// <summary>Special instructions for the driver.</summary>
     public string? Instructions { get; set; }
 
@@ -902,10 +903,25 @@ public sealed class IcabbiBookingUpdate
     /// <summary>Number of passengers.</summary>
     public int? Passengers { get; set; }
 
-    /// <summary>Destination address object. Cannot be updated once driver is assigned in some statuses.</summary>
+    /// <summary>Planned pickup date/time (ISO 8601). Cannot be updated once booking is released.</summary>
+    public string? PlannedDate { get; set; }
+
+    /// <summary>Planned dropoff date/time (ISO 8601).</summary>
+    public string? PlannedDropoffDate { get; set; }
+
+    /// <summary>Appointment date/time (ISO 8601).</summary>
+    public string? AppointmentDate { get; set; }
+
+    /// <summary>Routing mode: "appt" for appointment time, "default" for standard.</summary>
+    public string? RouteBy { get; set; }
+
+    /// <summary>External booking reference ID.</summary>
+    public string? ExternalBookingId { get; set; }
+
+    /// <summary>Destination address with lat/lng/formatted. Cannot be updated once driver assigned in some statuses.</summary>
     public IcabbiAddressPatch? Destination { get; set; }
 
-    /// <summary>Pickup address object. Cannot be updated once booking is released.</summary>
+    /// <summary>Pickup address with lat/lng/formatted. Cannot be updated once booking is released.</summary>
     public IcabbiAddressPatch? Address { get; set; }
 
     /// <summary>Metadata key-value pairs. Existing keys are updated; new keys are created. Cannot delete metadata.</summary>
@@ -913,13 +929,11 @@ public sealed class IcabbiBookingUpdate
 }
 
 /// <summary>
-/// Address patch for iCabbi update requests.
+/// Address object for iCabbi update requests matching v2 API format.
 /// </summary>
 public sealed class IcabbiAddressPatch
 {
-    public string? Street { get; set; }
-    public string? Town { get; set; }
-    public string? Postcode { get; set; }
     public double? Lat { get; set; }
     public double? Lng { get; set; }
+    public string? Formatted { get; set; }
 }
