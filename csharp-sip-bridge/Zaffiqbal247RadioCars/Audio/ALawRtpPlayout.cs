@@ -58,8 +58,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte PAYLOAD_TYPE_PCMA = 8;
 
     private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms — cold start hysteresis
-    private const int JITTER_BUFFER_RESUME_THRESHOLD = 5;  // 100ms — warm restart after underrun
-    private const int UNDERRUN_GRACE_FRAMES = 3;           // 60ms grace before rebuffering
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 3;  // 60ms — warm restart after underrun (was 100ms)
+    private const int UNDERRUN_GRACE_FRAMES = 5;           // 100ms grace before rebuffering (was 60ms)
     private const int MAX_QUEUE_FRAMES = 1500;
     private const int MAX_ACCUMULATOR_SIZE = 65536;
     private const int CIRCUIT_BREAKER_LIMIT = 10;
