@@ -198,6 +198,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         Volatile.Write(ref _micGateUntilMs, 0);
         Interlocked.Exchange(ref _drainGateTaskId, 0);
         Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 0);
+        Interlocked.Exchange(ref _playoutCompleteHandled, 0);
     }
 
     // =========================
@@ -433,9 +434,15 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // PLAYOUT COMPLETION (echo guard)
     // =========================
+    private int _playoutCompleteHandled; // debounce: prevents duplicate fires from OnQueueEmpty
+
     public void NotifyPlayoutComplete()
     {
-        // If your RTP layer calls this reliably when queue hits 0, we arm the mic gate tail here too.
+        // Debounce: OnQueueEmpty can fire multiple times while queue stays at 0.
+        // Only handle the first fire after audio was enqueued.
+        if (Interlocked.CompareExchange(ref _playoutCompleteHandled, 1, 0) == 1)
+            return; // Already handled this drain cycle
+
         var now = NowMs();
         Volatile.Write(ref _lastAdaFinishedAt, now);
         Volatile.Write(ref _micGateUntilMs, now + ECHO_TAIL_MS);
@@ -689,6 +696,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     private void ArmMicGateAfterDrain()
     {
+        // Reset the playout-complete debounce so the next NotifyPlayoutComplete fires.
+        Interlocked.Exchange(ref _playoutCompleteHandled, 0);
+
         // Ensure only the latest drain task controls the gate.
         var taskId = Interlocked.Increment(ref _drainGateTaskId);
 
@@ -719,8 +729,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                     }
                 }
 
-                // Only apply if still the latest task
-                if (Interlocked.CompareExchange(ref _drainGateTaskId, taskId, taskId) != taskId)
+                // Only apply if still the latest task (simple read check, not CAS)
+                if (Volatile.Read(ref _drainGateTaskId) != taskId)
                     return;
 
                 var now = NowMs();
