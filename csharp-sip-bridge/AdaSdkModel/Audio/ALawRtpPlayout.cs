@@ -1,8 +1,8 @@
-// Last updated: 2026-02-21 (ALawRtpPlayout v8.6 — Balanced Latency)
-// Changes from v8.5:
-// - MAX_QUEUE_FRAMES raised to 500 (10s) — 80 was too aggressive, caused frame drops mid-speech
-// - NAT keepalive, circuit breaker, stats logging restored
-// - Stable drain signaling preserved
+// Last updated: 2026-02-21 (ALawRtpPlayout v8.7 — Underrun Grace)
+// Changes from v8.6:
+// - Added UNDERRUN_GRACE_FRAMES=5 (100ms) — prevents re-entering 200ms buffering mode on momentary queue gaps
+// - Eliminates mid-speech jitter caused by aggressive re-buffering
+// - MAX_QUEUE_FRAMES stays at 500
 
 using System;
 using System.Collections.Concurrent;
@@ -47,7 +47,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte PAYLOAD_TYPE_PCMA = 8;
 
     private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms cold-start
-    private const int MAX_QUEUE_FRAMES = 500;              // 10s safety cap (was 80 — too aggressive)
+    private const int MAX_QUEUE_FRAMES = 500;              // 10s safety cap
+    private const int UNDERRUN_GRACE_FRAMES = 5;           // 100ms grace — send silence instead of re-buffering
     private const int MAX_ACCUMULATOR_SIZE = 65536;
     private const int STATS_LOG_INTERVAL_SEC = 30;
 
@@ -82,6 +83,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private volatile bool _natBindingEstablished;
     private bool _wasPlaying;
     private int _drainSignaled;
+    private int _underrunGraceRemaining;  // frames of silence before re-entering buffering
 
     private long _totalUnderruns;
     private long _totalFramesEnqueued;
@@ -315,6 +317,7 @@ public sealed class ALawRtpPlayout : IDisposable
             }
 
             _isBuffering = false;
+            _underrunGraceRemaining = 0;
             Interlocked.Exchange(ref _drainSignaled, 0);
             SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
         }
@@ -325,9 +328,17 @@ public sealed class ALawRtpPlayout : IDisposable
             SendRtpFrame(frame);
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
+            _underrunGraceRemaining = UNDERRUN_GRACE_FRAMES; // reset grace on every real frame
+        }
+        else if (_underrunGraceRemaining > 0)
+        {
+            // Queue empty but within grace period — send silence, don't re-buffer
+            _underrunGraceRemaining--;
+            SendRtpFrame(_silenceFrame);
 
-            if (Volatile.Read(ref _queueCount) == 0)
+            if (_underrunGraceRemaining == 0)
             {
+                // Grace exhausted — now re-enter buffering
                 _isBuffering = true;
                 Interlocked.Increment(ref _totalUnderruns);
                 FireDrainOnce();
@@ -415,6 +426,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _isBuffering = true;
         _wasPlaying = false;
+        _underrunGraceRemaining = 0;
         Interlocked.Exchange(ref _drainSignaled, 0);
     }
 
