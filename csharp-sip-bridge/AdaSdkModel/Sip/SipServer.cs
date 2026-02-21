@@ -569,7 +569,7 @@ public sealed class SipServer : IAsyncDisposable
 
     private void WireAudioPipeline(ActiveCall call, AudioCodecsEnum negotiatedCodec, bool isOperator = false)
     {
-        var session = call.Session;
+        var session = call.Session!;
         var playout = call.Playout!;
         var rtpSession = call.RtpSession;
         var sid = call.SessionId;
@@ -580,16 +580,12 @@ public sealed class SipServer : IAsyncDisposable
         bool inboundFlushComplete = false;
         int inboundPacketCount = 0;
 
-        // Debounce / drain guard
+        // ---- NEW: playout-complete debounce + "only after response completed" latch ----
         long lastNotifyPlayoutCompleteMs = 0;
         const int NOTIFY_DEBOUNCE_MS = 200;
-
-        // "Only notify after response completed" latch
-        int responseCompletedLatch = 0;   // 1 when ResponseCompleted fired for current turn
+        int responseCompletedLatch = 0; // 1 when OnResponseCompleted fired for the current turn
 
         // Pre-slice OpenAI bursts into exact 160-byte A-law frames before hitting the queue lock.
-        // This eliminates accumulator churn on the hot path: each call to BufferALaw is a
-        // zero-remainder 160-byte write, so DrainAccumulatorToQueue never loops mid-burst.
         session.OnAudioOut += frame =>
         {
             Interlocked.Exchange(ref isBotSpeaking, 1);
@@ -599,7 +595,6 @@ public sealed class SipServer : IAsyncDisposable
             int offset = 0;
             int remaining = frame.Length;
 
-            // Fast path: burst is an exact multiple of 160 — feed whole frames directly
             while (remaining >= frameSize)
             {
                 var slice = new byte[frameSize];
@@ -609,7 +604,6 @@ public sealed class SipServer : IAsyncDisposable
                 remaining -= frameSize;
             }
 
-            // Tail: any leftover bytes go through the accumulator as before
             if (remaining > 0)
             {
                 var tail = new byte[remaining];
@@ -624,7 +618,7 @@ public sealed class SipServer : IAsyncDisposable
 
             playout.Clear();
 
-            // Clear any pending "notify complete" signals — barge-in is user-driven
+            // IMPORTANT: clear pending completion latches on barge-in
             Interlocked.Exchange(ref watchdogPending, 0);
             Interlocked.Exchange(ref responseCompletedLatch, 0);
 
@@ -634,56 +628,56 @@ public sealed class SipServer : IAsyncDisposable
         // Flush partial accumulator on response end to prevent tail click
         session.AiClient.OnResponseCompleted += () =>
         {
-            // Ensure we flush any partial tail into RTP (prevents click)
+            // Flush any tail bytes so RTP drains cleanly
             playout.Flush();
+            playout.NotifyAdaHasSpoken();
 
-            playout.NotifyAdaHasSpoken(); // Enable typing sounds after first response
-
-            // IMPORTANT: do NOT call NotifyPlayoutComplete here unless queue is *actually* empty.
-            // We latch that response has completed, then wait for playout queue to drain.
+            // Latch: AI response is finished (audio may still be in RTP queue)
             Interlocked.Exchange(ref responseCompletedLatch, 1);
 
             Interlocked.Exchange(ref isBotSpeaking, 0);
             botStoppedSpeakingAt = DateTime.UtcNow;
 
+            // If queue is empty right now, we can notify immediately (debounced).
             if (playout.QueuedFrames == 0)
             {
-                // Debounced notify
                 var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (nowMs - Interlocked.Read(ref lastNotifyPlayoutCompleteMs) >= NOTIFY_DEBOUNCE_MS)
                 {
                     Interlocked.Exchange(ref lastNotifyPlayoutCompleteMs, nowMs);
+                    Interlocked.Exchange(ref responseCompletedLatch, 0);
                     session.NotifyPlayoutComplete();
                 }
             }
             else
             {
-                // Wait for playout.OnQueueEmpty to notify completion
+                // Wait for playout.OnQueueEmpty to confirm drain.
                 Interlocked.Exchange(ref watchdogPending, 1);
             }
         };
 
         playout.OnQueueEmpty += () =>
         {
-            // ONLY notify playout complete after the AI response has completed
-            // (otherwise you open mic while TTS is still coming / about to come).
+            // ONLY notify completion once:
+            // - Response has completed (latch set)
+            // - We were waiting for drain (watchdogPending)
             if (Volatile.Read(ref watchdogPending) == 1 && Volatile.Read(ref responseCompletedLatch) == 1)
             {
-                Interlocked.Exchange(ref watchdogPending, 0);
-                Interlocked.Exchange(ref responseCompletedLatch, 0);
-
-                // Debounce: OnQueueEmpty may fire multiple times
+                // Debounce: OnQueueEmpty can fire more than once
                 var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (nowMs - Interlocked.Read(ref lastNotifyPlayoutCompleteMs) < NOTIFY_DEBOUNCE_MS)
                     return;
 
                 Interlocked.Exchange(ref lastNotifyPlayoutCompleteMs, nowMs);
+                Interlocked.Exchange(ref watchdogPending, 0);
+                Interlocked.Exchange(ref responseCompletedLatch, 0);
+
+                // This is the ONLY safe moment to open mic / start watchdog
                 session.NotifyPlayoutComplete();
-                return;
             }
 
-            // If we get queue-empty while response is still active / not completed,
-            // DO NOTHING. This prevents reopening the mic mid-response.
+            // If queue-empty happens before response completed, DO NOTHING.
+            // That prevents reopening mic mid-stream.
         };
 
         rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
@@ -692,33 +686,52 @@ public sealed class SipServer : IAsyncDisposable
             var payload = rtpPacket.Payload;
             if (payload == null || payload.Length == 0) return;
 
-            if (!inboundFlushComplete) { inboundPacketCount++; if (inboundPacketCount < 20) return; inboundFlushComplete = true; }
+            // Initial inbound flush to avoid early RTP garbage
+            if (!inboundFlushComplete)
+            {
+                inboundPacketCount++;
+                if (inboundPacketCount < 20) return;
+                inboundFlushComplete = true;
+            }
+
             if ((DateTime.UtcNow - callStartedAt).TotalMilliseconds < 500) return;
 
-            byte[] g711ToSend = negotiatedCodec == AudioCodecsEnum.PCMU ? G711Transcode.MuLawToALaw(payload) : payload;
+            byte[] g711ToSend = negotiatedCodec == AudioCodecsEnum.PCMU
+                ? G711Transcode.MuLawToALaw(payload)
+                : payload;
 
             // In operator mode, forward caller audio to local speaker monitor
             if (isOperator)
                 OnOperatorCallerAudio?.Invoke(g711ToSend);
 
+            // Soft gate while bot speaking or shortly after stop
             bool applySoftGate = Volatile.Read(ref isBotSpeaking) == 1;
             if (!applySoftGate && Volatile.Read(ref adaHasStartedSpeaking) == 1 && botStoppedSpeakingAt != DateTime.MinValue)
             {
-                if ((DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds < 300) applySoftGate = true;
+                if ((DateTime.UtcNow - botStoppedSpeakingAt).TotalMilliseconds < 300)
+                    applySoftGate = true;
             }
 
             if (applySoftGate)
             {
                 double sumSq = 0;
-                for (int i = 0; i < g711ToSend.Length; i++) { short pcm = ALawDecode(g711ToSend[i]); sumSq += (double)pcm * pcm; }
+                for (int i = 0; i < g711ToSend.Length; i++)
+                {
+                    short pcm = ALawDecode(g711ToSend[i]);
+                    sumSq += (double)pcm * pcm;
+                }
                 float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
-                if (rms < (_audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200))
+                var thresh = (_audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200);
+
+                // If it's quiet (likely echo/tail), send silence instead of real mic audio
+                if (rms < thresh)
                 {
                     g711ToSend = new byte[payload.Length];
                     Array.Fill(g711ToSend, (byte)0xD5);
                 }
             }
 
+            // Apply ingress gain before passing to AI
             var ingressGain = (float)_audioSettings.IngressVolumeBoost;
             if (ingressGain > 1.01f)
             {
@@ -733,7 +746,10 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
-        session.OnEnded += (s, reason) => { try { playout.Dispose(); } catch { } };
+        session.OnEnded += (s, reason) =>
+        {
+            try { playout.Dispose(); } catch { }
+        };
     }
 
     private async Task RemoveAndCleanupAsync(string sessionId, string reason)
