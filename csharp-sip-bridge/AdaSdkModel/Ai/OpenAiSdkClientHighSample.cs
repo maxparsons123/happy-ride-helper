@@ -155,7 +155,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     {
         _logger = logger;
         _settings = settings;
-        _systemPrompt = systemPrompt ?? OpenAiSdkClient.GetDefaultSystemPromptStatic();
+        _systemPrompt = systemPrompt ?? AdaSystemPrompt.Build();
 
         // Configure resampler gains from settings
         _ingressResampler.IngressGain = (float)settings.IngressGain;
