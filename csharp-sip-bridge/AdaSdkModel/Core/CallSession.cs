@@ -671,6 +671,7 @@ public sealed class CallSession : ICallSession
     // ── Clarification loop breaker: track no-alt clarification attempts per address ──
     private int _noAltClarificationCount;
     private string? _lastNoAltClarificationAddress;
+    private bool _suffixRetryAttempted; // prevent retrying suffix strip more than once per fare calc
 
     private object HandleSyncBookingData(Dictionary<string, object?> args)
     {
@@ -737,27 +738,41 @@ public sealed class CallSession : ICallSession
             var raw = p?.ToString();
             var incoming = NormalizeHouseNumber(raw, "pickup");
 
-            // ── STAGE-AWARE GUARD ──
-            // If we're past pickup collection and the AI sends a NEW pickup address
-            // but no destination in the same call, it's almost certainly a misrouted destination.
-            // Redirect it to the destination field instead.
+            // ── STAGE-AWARE PICKUP LOCK ──
+            // Once we've moved past CollectingPickup, the pickup address is LOCKED.
+            // Any incoming pickup that differs from the current value is either:
+            //   a) STT noise re-transmitting a corrupted version of the same address, or
+            //   b) A misrouted destination (when destination is still empty).
+            // In case (b) redirect to destination; in case (a) silently reject.
             bool redirectedToDestination = false;
+            bool pickupBlockedByStage = false;
             if (_currentStage >= BookingStage.CollectingDestination
-                && !args.ContainsKey("destination")
-                && string.IsNullOrWhiteSpace(_booking.Destination)
                 && !string.IsNullOrWhiteSpace(_booking.Pickup)
                 && !string.IsNullOrWhiteSpace(incoming)
                 && StreetNameChanged(_booking.Pickup, incoming))
             {
-                _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION",
-                    SessionId, incoming, _currentStage);
-                _booking.Destination = incoming;
-                sttCorrections.Add($"STAGE CORRECTION: You sent '{incoming}' as pickup, but the pickup is already '{_booking.Pickup}' and no destination was set. " +
-                    $"The system has assigned '{incoming}' as the DESTINATION. Use destination='{incoming}' in future tool calls.");
-                redirectedToDestination = true;
+                if (!args.ContainsKey("destination") && string.IsNullOrWhiteSpace(_booking.Destination))
+                {
+                    // Case (b): No destination yet — redirect this value to destination
+                    _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION",
+                        SessionId, incoming, _currentStage);
+                    _booking.Destination = incoming;
+                    sttCorrections.Add($"STAGE CORRECTION: You sent '{incoming}' as pickup, but the pickup is already '{_booking.Pickup}' and no destination was set. " +
+                        $"The system has assigned '{incoming}' as the DESTINATION. Use destination='{incoming}' in future tool calls.");
+                    redirectedToDestination = true;
+                }
+                else
+                {
+                    // Case (a): Destination already exists — this is STT noise corrupting pickup. Block it.
+                    _logger.LogWarning("[{SessionId}] 🛡️ STAGE LOCK: Rejected pickup update '{Incoming}' — stage={Stage}, pickup is locked to '{Locked}'",
+                        SessionId, incoming, _currentStage, _booking.Pickup);
+                    sttCorrections.Add($"STAGE LOCK: You sent pickup '{incoming}' but the pickup is already confirmed as '{_booking.Pickup}' and cannot be changed at this stage. " +
+                        $"Use pickup='{_booking.Pickup}' in all future tool calls.");
+                    pickupBlockedByStage = true;
+                }
             }
 
-            if (!redirectedToDestination)
+            if (!redirectedToDestination && !pickupBlockedByStage)
             {
                 // ── CLARIFY LOCK GUARD ──
                 // If clarify_address already locked the pickup, reject any sync_booking_data overwrites
@@ -806,6 +821,7 @@ public sealed class CallSession : ICallSession
                         _booking.Eta = null;
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                        _suffixRetryAttempted = false;
                     }
                     _booking.Pickup = incoming;
                 }
@@ -847,6 +863,7 @@ public sealed class CallSession : ICallSession
                     _booking.Eta = null;
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
                     Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                    _suffixRetryAttempted = false;
                 }
                 _booking.Destination = incoming;
             }
@@ -1148,6 +1165,48 @@ public sealed class CallSession : ICallSession
                                     }
 
                                     if (!retriedWithLocale || result.NeedsClarification)
+                                    {
+                                        // ── HOUSE NUMBER SUFFIX RETRY ──
+                                        // If destination has an alphanumeric suffix (e.g. "1214A"), strip the
+                                        // letter and retry with just the number (e.g. "1214 Warwick Road").
+                                        // Many geocoders don't index sub-unit letters and fail on "1214A" while
+                                        // successfully resolving "1214".
+                                        var destForSuffix = _booking.Destination ?? destination;
+                                        var suffixMatch = System.Text.RegularExpressions.Regex.Match(
+                                            destForSuffix, @"^(\d+)[A-Za-z]\b");
+                                        if (suffixMatch.Success && !_suffixRetryAttempted)
+                                        {
+                                            _suffixRetryAttempted = true;
+                                            var strippedDest = destForSuffix.Substring(0, suffixMatch.Groups[1].Length)
+                                                + destForSuffix.Substring(suffixMatch.Index + suffixMatch.Length);
+                                            _logger.LogInformation("[{SessionId}] 🔢 SUFFIX RETRY: '{Original}' → '{Stripped}' (removed letter suffix)",
+                                                sessionId, destForSuffix, strippedDest);
+
+                                            var suffixTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
+                                                pickup, strippedDest, callerId, _booking.PickupTime,
+                                                spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                                                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                                            var suffixCompleted = await Task.WhenAny(suffixTask, Task.Delay(18000));
+
+                                            if (suffixCompleted == suffixTask)
+                                            {
+                                                var suffixResult = await suffixTask;
+                                                _logger.LogInformation("[{SessionId}] 📊 Suffix-retry result: NeedsClarification={Clarif}, Fare={Fare}",
+                                                    sessionId, suffixResult.NeedsClarification, suffixResult.Fare);
+
+                                                if (!suffixResult.NeedsClarification && !string.IsNullOrWhiteSpace(suffixResult.Fare))
+                                                {
+                                                    result = suffixResult;
+                                                    localeRetrySuccess = true;
+                                                    _logger.LogInformation("[{SessionId}] ✅ Suffix retry resolved: {Fare}, ETA: {Eta}",
+                                                        sessionId, result.Fare, result.Eta);
+                                                    // Fall through to fare presentation
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (!localeRetrySuccess && (!retriedWithLocale || result.NeedsClarification))
                                     {
                                         // ── CLARIFICATION LOOP BREAKER ──
                                         // Track how many times we've hit no-alt clarification for the same address.
