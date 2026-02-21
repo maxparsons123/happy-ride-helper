@@ -254,6 +254,8 @@ public sealed class CallSession : ICallSession
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
                     _pickupDisambiguated = true;
                     _destDisambiguated = true;
+                    _pickupLockedByClarify = false;
+                    _destLockedByClarify = false;
                     break;
             }
         }
@@ -518,6 +520,8 @@ public sealed class CallSession : ICallSession
     private int _fareAutoTriggered;
     private bool _pickupDisambiguated = true;  // true = no disambiguation needed (set to false when triggered)
     private bool _destDisambiguated = true;    // true = no disambiguation needed (set to false when triggered)
+    private bool _pickupLockedByClarify;       // true = clarify_address locked the pickup — sync_booking_data cannot overwrite
+    private bool _destLockedByClarify;         // true = clarify_address locked the destination — sync_booking_data cannot overwrite
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
 
@@ -625,14 +629,22 @@ public sealed class CallSession : ICallSession
 
             if (!redirectedToDestination)
             {
-                // If normalisation changed the value, record the correction for AI context injection
-                if (incoming != raw && raw != null)
-                    sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
-
+                // ── CLARIFY LOCK GUARD ──
+                // If clarify_address already locked the pickup, reject any sync_booking_data overwrites
+                // unless the street name is identical (e.g. just adding passengers in the same call).
+                if (_pickupLockedByClarify
+                    && !string.IsNullOrWhiteSpace(_booking.Pickup)
+                    && !string.IsNullOrWhiteSpace(incoming)
+                    && StreetNameChanged(_booking.Pickup, incoming))
+                {
+                    _logger.LogWarning("[{SessionId}] 🛡️ CLARIFY LOCK: Rejected pickup update '{Incoming}' — clarify_address locked pickup to '{Locked}'",
+                        SessionId, incoming, _booking.Pickup);
+                    sttCorrections.Add($"CLARIFY LOCK: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}' (locked by clarify_address). Use '{_booking.Pickup}' in all future tool calls.");
+                    // Do NOT update _booking.Pickup
+                }
                 // ── CONFIRMED ADDRESS IMMUNITY ──
                 // If pickup is already geocoded (has lat/lon), reject phonetic mishearings.
-                // E.g., "David Rose" should not overwrite verified "David Road".
-                if (_booking.PickupLat.HasValue && _booking.PickupLon.HasValue
+                else if (_booking.PickupLat.HasValue && _booking.PickupLon.HasValue
                     && !string.IsNullOrWhiteSpace(_booking.Pickup)
                     && !string.IsNullOrWhiteSpace(incoming)
                     && StreetNameChanged(_booking.Pickup, incoming)
@@ -641,10 +653,13 @@ public sealed class CallSession : ICallSession
                     _logger.LogWarning("[{SessionId}] 🛡️ CONFIRMED ADDRESS IMMUNITY: Rejected pickup update '{Incoming}' — verified pickup '{Verified}' is locked",
                         SessionId, incoming, _booking.Pickup);
                     sttCorrections.Add($"STT IMMUNITY: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}'. The pickup is LOCKED — use '{_booking.Pickup}' in all future tool calls.");
-                    // Do NOT update _booking.Pickup — keep the verified value
                 }
                 else
                 {
+                    // If normalisation changed the value, record the correction for AI context injection
+                    if (incoming != raw && raw != null)
+                        sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
+
                     // Safeguard: store previous interpretation before overwriting
                     if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
                     {
@@ -670,27 +685,41 @@ public sealed class CallSession : ICallSession
         {
             var raw = d?.ToString();
             var incoming = NormalizeHouseNumber(raw, "destination");
-            // If normalisation changed the value, record the correction for AI context injection
-            if (incoming != raw && raw != null)
-                sttCorrections.Add($"STT CORRECTION (destination): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: destination = '{incoming}'.");
-            // Safeguard: store previous interpretation before overwriting
-            if (!string.IsNullOrWhiteSpace(_booking.Destination) && _booking.Destination != incoming)
+
+            // ── CLARIFY LOCK GUARD (destination) ──
+            if (_destLockedByClarify
+                && !string.IsNullOrWhiteSpace(_booking.Destination)
+                && !string.IsNullOrWhiteSpace(incoming)
+                && StreetNameChanged(_booking.Destination, incoming))
             {
-                if (!_booking.PreviousDestinations.Contains(_booking.Destination))
-                    _booking.PreviousDestinations.Insert(0, _booking.Destination);
-                _logger.LogInformation("[{SessionId}] 📝 Dest history: [{History}] → new: '{New}'",
-                    SessionId, string.Join(" | ", _booking.PreviousDestinations), incoming);
+                _logger.LogWarning("[{SessionId}] 🛡️ CLARIFY LOCK: Rejected dest update '{Incoming}' — clarify_address locked dest to '{Locked}'",
+                    SessionId, incoming, _booking.Destination);
+                sttCorrections.Add($"CLARIFY LOCK: You sent destination '{incoming}' but the verified destination is '{_booking.Destination}' (locked by clarify_address). Use '{_booking.Destination}' in all future tool calls.");
             }
-            if (StreetNameChanged(_booking.Destination, incoming))
+            else
             {
-                _booking.DestLat = _booking.DestLon = null;
-                _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
-                _booking.Fare = null;
-                _booking.Eta = null;
-                Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                // If normalisation changed the value, record the correction for AI context injection
+                if (incoming != raw && raw != null)
+                    sttCorrections.Add($"STT CORRECTION (destination): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: destination = '{incoming}'.");
+                // Safeguard: store previous interpretation before overwriting
+                if (!string.IsNullOrWhiteSpace(_booking.Destination) && _booking.Destination != incoming)
+                {
+                    if (!_booking.PreviousDestinations.Contains(_booking.Destination))
+                        _booking.PreviousDestinations.Insert(0, _booking.Destination);
+                    _logger.LogInformation("[{SessionId}] 📝 Dest history: [{History}] → new: '{New}'",
+                        SessionId, string.Join(" | ", _booking.PreviousDestinations), incoming);
+                }
+                if (StreetNameChanged(_booking.Destination, incoming))
+                {
+                    _booking.DestLat = _booking.DestLon = null;
+                    _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                    _booking.Fare = null;
+                    _booking.Eta = null;
+                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                    Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                }
+                _booking.Destination = incoming;
             }
-            _booking.Destination = incoming;
         }
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
         {
@@ -1075,6 +1104,8 @@ public sealed class CallSession : ICallSession
                     _pendingDestClarificationMessage = null;
                     _pickupDisambiguated = true;
                     _destDisambiguated = true;
+                    _pickupLockedByClarify = false;
+                    _destLockedByClarify = false;
 
                     // FARE SANITY CHECK: If fare is absurdly high, the destination is likely wrong (STT error)
                     if (!IsFareSane(result))
@@ -1292,6 +1323,7 @@ public sealed class CallSession : ICallSession
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
             _disambiguationPerformed = true;
+            _pickupLockedByClarify = true;
             _logger.LogInformation("[{SessionId}] 🔒 Pickup LOCKED: {Pickup}", SessionId, selected);
 
             // Check if dest still needs disambiguation
@@ -1337,6 +1369,7 @@ public sealed class CallSession : ICallSession
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
 
             _disambiguationPerformed = true;
+            _destLockedByClarify = true;
             _logger.LogInformation("[{SessionId}] 🔒 Destination LOCKED: {Destination}", SessionId, selected);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
