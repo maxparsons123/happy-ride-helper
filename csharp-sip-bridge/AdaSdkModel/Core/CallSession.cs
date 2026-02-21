@@ -1329,6 +1329,10 @@ public sealed class CallSession : ICallSession
                         return;
                     }
 
+                    // Enrich structured fields if edge function failed internally and returned Nominatim-only result
+                    if (string.IsNullOrWhiteSpace(result.PickupStreet) || string.IsNullOrWhiteSpace(result.DestStreet))
+                        EnrichFallbackResultStructuredFields(result, pickup, destination);
+
                     ApplyFareResult(result);
 
                     // ── iCabbi FARE QUOTE (Phase 1 of 2) ──────────────────────────────────────
@@ -1984,6 +1988,10 @@ public sealed class CallSession : ICallSession
                                 "When they respond, call sync_booking_data with the destination INCLUDING the city name (e.g. '7 Russell Street, Coventry').");
                         return;
                     }
+
+                    // Enrich structured fields if edge function failed internally and returned Nominatim-only result
+                    if (string.IsNullOrWhiteSpace(result.PickupStreet) || string.IsNullOrWhiteSpace(result.DestStreet))
+                        EnrichFallbackResultStructuredFields(result, pickup, destination);
 
                     ApplyFareResult(result);
 
