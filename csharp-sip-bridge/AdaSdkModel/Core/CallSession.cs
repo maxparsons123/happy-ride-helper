@@ -602,44 +602,68 @@ public sealed class CallSession : ICallSession
         {
             var raw = p?.ToString();
             var incoming = NormalizeHouseNumber(raw, "pickup");
-            // If normalisation changed the value, record the correction for AI context injection
-            if (incoming != raw && raw != null)
-                sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
 
-            // ── CONFIRMED ADDRESS IMMUNITY ──
-            // If pickup is already geocoded (has lat/lon), reject phonetic mishearings.
-            // E.g., "David Rose" should not overwrite verified "David Road".
-            if (_booking.PickupLat.HasValue && _booking.PickupLon.HasValue
+            // ── STAGE-AWARE GUARD ──
+            // If we're past pickup collection and the AI sends a NEW pickup address
+            // but no destination in the same call, it's almost certainly a misrouted destination.
+            // Redirect it to the destination field instead.
+            bool redirectedToDestination = false;
+            if (_currentStage >= BookingStage.CollectingDestination
+                && !args.ContainsKey("destination")
+                && string.IsNullOrWhiteSpace(_booking.Destination)
                 && !string.IsNullOrWhiteSpace(_booking.Pickup)
                 && !string.IsNullOrWhiteSpace(incoming)
-                && StreetNameChanged(_booking.Pickup, incoming)
-                && IsPhoneticMishearing(_booking.Pickup, incoming))
+                && StreetNameChanged(_booking.Pickup, incoming))
             {
-                _logger.LogWarning("[{SessionId}] 🛡️ CONFIRMED ADDRESS IMMUNITY: Rejected pickup update '{Incoming}' — verified pickup '{Verified}' is locked",
-                    SessionId, incoming, _booking.Pickup);
-                sttCorrections.Add($"STT IMMUNITY: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}'. The pickup is LOCKED — use '{_booking.Pickup}' in all future tool calls.");
-                // Do NOT update _booking.Pickup — keep the verified value
+                _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION",
+                    SessionId, incoming, _currentStage);
+                _booking.Destination = incoming;
+                sttCorrections.Add($"STAGE CORRECTION: You sent '{incoming}' as pickup, but the pickup is already '{_booking.Pickup}' and no destination was set. " +
+                    $"The system has assigned '{incoming}' as the DESTINATION. Use destination='{incoming}' in future tool calls.");
+                redirectedToDestination = true;
             }
-            else
+
+            if (!redirectedToDestination)
             {
-                // Safeguard: store previous interpretation before overwriting
-                if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
+                // If normalisation changed the value, record the correction for AI context injection
+                if (incoming != raw && raw != null)
+                    sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
+
+                // ── CONFIRMED ADDRESS IMMUNITY ──
+                // If pickup is already geocoded (has lat/lon), reject phonetic mishearings.
+                // E.g., "David Rose" should not overwrite verified "David Road".
+                if (_booking.PickupLat.HasValue && _booking.PickupLon.HasValue
+                    && !string.IsNullOrWhiteSpace(_booking.Pickup)
+                    && !string.IsNullOrWhiteSpace(incoming)
+                    && StreetNameChanged(_booking.Pickup, incoming)
+                    && IsPhoneticMishearing(_booking.Pickup, incoming))
                 {
-                    if (!_booking.PreviousPickups.Contains(_booking.Pickup))
-                        _booking.PreviousPickups.Insert(0, _booking.Pickup);
-                    _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
-                        SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
+                    _logger.LogWarning("[{SessionId}] 🛡️ CONFIRMED ADDRESS IMMUNITY: Rejected pickup update '{Incoming}' — verified pickup '{Verified}' is locked",
+                        SessionId, incoming, _booking.Pickup);
+                    sttCorrections.Add($"STT IMMUNITY: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}'. The pickup is LOCKED — use '{_booking.Pickup}' in all future tool calls.");
+                    // Do NOT update _booking.Pickup — keep the verified value
                 }
-                if (StreetNameChanged(_booking.Pickup, incoming))
+                else
                 {
-                    _booking.PickupLat = _booking.PickupLon = null;
-                    _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
-                    _booking.Fare = null;
-                    _booking.Eta = null;
-                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                    Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                    // Safeguard: store previous interpretation before overwriting
+                    if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
+                    {
+                        if (!_booking.PreviousPickups.Contains(_booking.Pickup))
+                            _booking.PreviousPickups.Insert(0, _booking.Pickup);
+                        _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
+                            SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
+                    }
+                    if (StreetNameChanged(_booking.Pickup, incoming))
+                    {
+                        _booking.PickupLat = _booking.PickupLon = null;
+                        _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+                        _booking.Fare = null;
+                        _booking.Eta = null;
+                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                        Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                    }
+                    _booking.Pickup = incoming;
                 }
-                _booking.Pickup = incoming;
             }
         }
         if (args.TryGetValue("destination", out var d))
