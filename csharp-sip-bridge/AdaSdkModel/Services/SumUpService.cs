@@ -58,15 +58,31 @@ public sealed class SumUpService : IDisposable
             var roundedAmount = (double)Math.Round(amount, 2);
             var curr = _settings.Currency?.ToUpperInvariant() ?? "GBP";
 
-            var payload = new
+            // Build payload — omit pay_to_email if empty to avoid SumUp validation error
+            object payload;
+            if (!string.IsNullOrWhiteSpace(_settings.PayToEmail))
             {
-                amount = roundedAmount,
-                currency = curr,
-                checkout_reference = checkoutRef,
-                merchant_code = _settings.MerchantCode,
-                pay_to_email = _settings.PayToEmail,
-                description
-            };
+                payload = new
+                {
+                    amount = roundedAmount,
+                    currency = curr,
+                    checkout_reference = checkoutRef,
+                    merchant_code = _settings.MerchantCode,
+                    pay_to_email = _settings.PayToEmail,
+                    description
+                };
+            }
+            else
+            {
+                payload = new
+                {
+                    amount = roundedAmount,
+                    currency = curr,
+                    checkout_reference = checkoutRef,
+                    merchant_code = _settings.MerchantCode,
+                    description
+                };
+            }
 
             var json = JsonSerializer.Serialize(payload);
             _logger.LogInformation("[SumUp] POST payload: {Json}", json);
