@@ -679,6 +679,19 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                     output: resultJson);
                 await session.AddItemAsync(outputItem);
 
+                // ── Mid-tool goodbye guard ──
+                if (toolName != "end_call" && toolName != "book_taxi" && UserSaidGoodbyeDuringTool())
+                {
+                    Log("👋 User said goodbye during tool execution — injecting wrap-up context");
+                    await session.AddItemAsync(
+                        ConversationItem.CreateUserMessage(new[] {
+                            ConversationContentPart.CreateInputTextPart(
+                                "[SYSTEM] The caller said goodbye while you were processing. " +
+                                "Do NOT read out the full tool result. Simply say a brief goodbye: " +
+                                "\"No problem, goodbye!\" and call end_call.")
+                        }));
+                }
+
                 // Suppress response if fare calculation is in progress — the fare injection will trigger it
                 if (resultJson.Contains("\"fare_calculating\":true") || resultJson.Contains("wait SILENTLY"))
                 {
@@ -863,6 +876,17 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log($"⚠️ Keepalive error: {ex.Message}"); }
+    }
+
+    private static readonly Regex _userGoodbyePattern = new(
+        @"\b(bye|goodbye|good\s*bye|cheers|that'?s? (all|it)|thank(s| you).*bye|no.*(thank|that'?s? all))\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private bool UserSaidGoodbyeDuringTool()
+    {
+        var transcript = _lastUserTranscript;
+        if (string.IsNullOrWhiteSpace(transcript)) return false;
+        return _userGoodbyePattern.IsMatch(transcript);
     }
 
     // =========================
