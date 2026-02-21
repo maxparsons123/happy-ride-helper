@@ -163,6 +163,7 @@ public sealed class CallSession : ICallSession
             await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
             await _dispatcher.SendWhatsAppAsync(callerId);
             await SaveCallerHistoryAsync(bookingSnapshot, callerId);
+            await SaveBookingToSupabaseAsync(bookingSnapshot, callerId, sessionId);
 
             if (_icabbiEnabled && _icabbi != null)
             {
@@ -2128,6 +2129,7 @@ public sealed class CallSession : ICallSession
                 await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
                 await _dispatcher.SendWhatsAppAsync(callerId);
                 await SaveCallerHistoryAsync(bookingSnapshot, callerId);
+                await SaveBookingToSupabaseAsync(bookingSnapshot, callerId, sessionId);
 
                 // Send WhatsApp payment message if link was generated
                 if (!string.IsNullOrWhiteSpace(bookingSnapshot.PaymentLink))
@@ -2307,6 +2309,7 @@ public sealed class CallSession : ICallSession
             await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
             await _dispatcher.SendWhatsAppAsync(callerId);
             await SaveCallerHistoryAsync(bookingSnapshot, callerId);
+            await SaveBookingToSupabaseAsync(bookingSnapshot, callerId, SessionId);
 
             if (_icabbiEnabled && _icabbi != null)
             {
@@ -3353,6 +3356,69 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[{SessionId}] ⚠️ SaveIcabbiJourneyId error (non-fatal)", SessionId);
+        }
+    }
+
+    /// <summary>
+    /// Persists a confirmed booking to the Supabase bookings table.
+    /// This is critical for the returning-caller flow — without this row,
+    /// LoadActiveBookingAsync cannot detect existing bookings on callback.
+    /// </summary>
+    private async Task SaveBookingToSupabaseAsync(BookingState booking, string callerId, string sessionId)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            var url = $"{_settings.Supabase.Url}/rest/v1/bookings";
+            var request = new HttpRequestMessage(HttpMethod.Post, url);
+            request.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            request.Headers.Add("Authorization", $"Bearer {_settings.Supabase.AnonKey}");
+            request.Headers.Add("Prefer", "return=minimal");
+
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                call_id = booking.BookingRef ?? sessionId,
+                caller_phone = callerId,
+                caller_name = booking.Name,
+                pickup = booking.Pickup ?? "unknown",
+                destination = booking.Destination ?? "unknown",
+                passengers = booking.Passengers ?? 1,
+                fare = booking.Fare,
+                eta = booking.Eta,
+                status = "confirmed",
+                pickup_lat = booking.PickupLat,
+                pickup_lng = booking.PickupLon,
+                dest_lat = booking.DestLat,
+                dest_lng = booking.DestLon,
+                pickup_name = booking.PickupFormatted,
+                destination_name = booking.DestFormatted,
+                scheduled_for = booking.ScheduledAt?.ToString("o"),
+                booking_details = new
+                {
+                    vehicle_type = booking.VehicleType,
+                    payment_preference = booking.PaymentPreference,
+                    payment_link = booking.PaymentLink,
+                    special_instructions = booking.SpecialInstructions,
+                    icabbi_journey_id = booking.IcabbiJourneyId
+                }
+            });
+
+            request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+            var resp = await http.SendAsync(request);
+
+            if (resp.IsSuccessStatusCode)
+                _logger.LogInformation("[{SessionId}] ✅ Booking saved to Supabase: {Ref} for {Phone}",
+                    sessionId, booking.BookingRef, callerId);
+            else
+            {
+                var respBody = await resp.Content.ReadAsStringAsync();
+                _logger.LogWarning("[{SessionId}] ⚠️ Failed to save booking to Supabase: HTTP {Status} — {Body}",
+                    sessionId, (int)resp.StatusCode, respBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] ⚠️ SaveBookingToSupabase error (non-fatal)", sessionId);
         }
     }
 }
