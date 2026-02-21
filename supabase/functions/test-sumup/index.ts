@@ -24,6 +24,7 @@ serve(async (req) => {
       currency: "GBP",
       checkout_reference: checkoutRef,
       merchant_code: "MW93CBFR",
+      pay_to_email: "MW93CBFR@sumup.com",
       description: "Test checkout from edge function"
     };
 
