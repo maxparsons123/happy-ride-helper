@@ -258,6 +258,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             options.Tools.Add(BuildBookTaxiToolStatic());
             options.Tools.Add(BuildCreateBookingToolStatic());
             options.Tools.Add(BuildFindLocalEventsToolStatic());
+            options.Tools.Add(BuildCancelBookingToolStatic());
+            options.Tools.Add(BuildCheckBookingStatusToolStatic());
             options.Tools.Add(BuildEndCallToolStatic());
 
             await _session.ConfigureSessionAsync(options);
@@ -764,6 +766,41 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Send greeting that acknowledges the caller has an active booking.
+    /// </summary>
+    public async Task SendGreetingWithBookingAsync(string? callerName, AdaSdkModel.Core.BookingState booking)
+    {
+        if (Interlocked.Exchange(ref _greetingSent, 1) == 1) return;
+        if (_session == null) return;
+
+        try
+        {
+            var lang = DetectLanguageStatic(_callerId);
+            var langName = GetLanguageNameStatic(lang);
+
+            var pickup = booking.Pickup ?? "unknown";
+            var destination = booking.Destination ?? "unknown";
+            var bookingRef = booking.BookingRef ?? booking.ExistingBookingId ?? "unknown";
+
+            var greeting = $"[SYSTEM] [LANG: {langName}] A returning caller named {callerName ?? "unknown"} has connected (ID: {_callerId}). " +
+                $"They have an ACTIVE BOOKING (Ref: {bookingRef}) from {pickup} to {destination}. " +
+                $"Greet them BY NAME, then tell them about their existing booking. Say something like: " +
+                $"\"Welcome back {callerName ?? ""}. I can see you have an active booking from {pickup} to {destination}. " +
+                $"Would you like to cancel it, make any changes to it, or check the status of your driver?\" " +
+                $"Wait for their response before proceeding.";
+
+            await _session.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(greeting) }));
+            await _session.StartResponseAsync();
+            Log($"📢 Greeting with active booking sent (language: {langName})");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error sending greeting with booking");
+        }
+    }
+
     // =========================
     // LANGUAGE DETECTION
     // =========================
@@ -1029,6 +1066,34 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             properties = new
             {
                 reason = new { type = "string", description = "Reason for ending (e.g. 'booking_complete', 'user_hangup')" }
+            }
+        }))
+    };
+
+    public static ConversationFunctionTool BuildCancelBookingToolStatic() => new("cancel_booking")
+    {
+        Description = "Cancel an existing active booking. Use when the caller wants to cancel their current booking. " +
+                      "The booking_id will be populated from the active booking loaded at session start.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                reason = new { type = "string", description = "Reason for cancellation (e.g. 'caller_request', 'plans_changed')" }
+            }
+        }))
+    };
+
+    public static ConversationFunctionTool BuildCheckBookingStatusToolStatic() => new("check_booking_status")
+    {
+        Description = "Check the status of the caller's active booking. Use when the caller asks where their driver is, " +
+                      "how long until arrival, or any status-related question about their existing booking.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                booking_id = new { type = "string", description = "Booking ID to check (optional — will use active booking if not provided)" }
             }
         }))
     };

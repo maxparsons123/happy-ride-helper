@@ -28,6 +28,9 @@ public sealed class BookingState
     /// <summary>SumUp checkout URL generated for card-paying callers. Set before dispatch so it can be included in the BSQD payload.</summary>
     public string? PaymentLink { get; set; }
 
+    /// <summary>UUID of an existing active booking loaded from the database for returning callers. Null = new booking.</summary>
+    public string? ExistingBookingId { get; set; }
+
     /// <summary>Previous pickup interpretations for safeguarding (most recent first).</summary>
     public List<string> PreviousPickups { get; set; } = new();
 
@@ -117,6 +120,7 @@ public sealed class BookingState
     public void Reset()
     {
         Name = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
+        ExistingBookingId = null;
         Passengers = null;
         ScheduledAt = null;
         VehicleType = "Saloon";

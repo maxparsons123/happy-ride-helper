@@ -34,6 +34,9 @@ public enum BookingStage
     /// <summary>Booking confirmed, asking "anything else?".</summary>
     AnythingElse,
 
+    /// <summary>Returning caller has an active booking — deciding cancel/amend/status.</summary>
+    ManagingExistingBooking,
+
     /// <summary>Call ending / goodbye phase.</summary>
     Ending
 }
