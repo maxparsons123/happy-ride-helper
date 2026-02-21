@@ -403,17 +403,20 @@ public partial class MainForm : Form
         var fareCalculator = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase, geminiClient);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 
-        // iCabbi integration
+        // iCabbi integration — always create client if credentials exist (for quotes), but only dispatch when Enabled
         IcabbiBookingService? icabbi = null;
         var icabbiEnabled = _settings.Icabbi.Enabled;
-        if (icabbiEnabled && !string.IsNullOrWhiteSpace(_settings.Icabbi.AppKey))
+        if (!string.IsNullOrWhiteSpace(_settings.Icabbi.AppKey))
         {
             icabbi = new IcabbiBookingService(
                 _settings.Icabbi.AppKey,
                 _settings.Icabbi.SecretKey,
                 tenantBase: _settings.Icabbi.TenantBase);
             icabbi.OnLog += msg => SafeInvoke(() => Log(msg));
-            Log($"🚕 iCabbi enabled (tenant: {_settings.Icabbi.TenantBase})");
+            if (icabbiEnabled)
+                Log($"🚕 iCabbi enabled (tenant: {_settings.Icabbi.TenantBase})");
+            else
+                Log($"🚕 iCabbi quote-only mode (dispatch disabled, tenant: {_settings.Icabbi.TenantBase})");
         }
         else if (icabbiEnabled)
         {
