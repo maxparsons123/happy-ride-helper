@@ -937,7 +937,23 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
     const dropoffIsCityLevel = parsed.dropoff?.street_name && !parsed.dropoff?.street_number &&
       parsed.dropoff.street_name.toLowerCase() === (destination || "").trim().toLowerCase();
     
-    const needsSanityCheck = !dropoffIsCityLevel && (
+    // Skip sanity guard if BOTH sides were matched from caller history — the caller has used
+    // these addresses before, so even if STT garbled the name (Dabridge→David), the match is trusted.
+    const bothMatchedFromHistory = parsed.pickup?.matched_from_history && parsed.dropoff?.matched_from_history;
+    if (bothMatchedFromHistory) {
+      console.log(`✅ Both addresses matched from caller history — skipping sanity guard, clearing disambiguation`);
+      if (parsed.pickup) { parsed.pickup.is_ambiguous = false; parsed.pickup.alternatives = []; }
+      if (parsed.dropoff) { parsed.dropoff.is_ambiguous = false; parsed.dropoff.alternatives = []; }
+      parsed.status = "ready";
+      parsed.clarification_message = undefined;
+      // Ensure fare is present
+      if (!parsed.fare && distMilesPost !== null && distMilesPost < 200) {
+        parsed.fare = calculateFare(distMilesPost, detectedCountry);
+        console.log(`💰 Fare calculated (history-trusted): ${parsed.fare.fare}`);
+      }
+    }
+    
+    const needsSanityCheck = !bothMatchedFromHistory && !dropoffIsCityLevel && (
       (parsed.status === "clarification_needed" && 
       (!parsed.pickup?.alternatives?.length && !parsed.dropoff?.alternatives?.length))
       || (distMilesPost !== null && distMilesPost > 50)

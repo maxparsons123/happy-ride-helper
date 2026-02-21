@@ -54,16 +54,21 @@ public sealed class SumUpService : IDisposable
             _logger.LogInformation("[SumUp] Creating checkout: ref={Ref}, amount={Amount} {Currency}",
                 checkoutRef, amount, _settings.Currency ?? "GBP");
 
+            var roundedAmount = (double)Math.Round(amount, 2);
+            var curr = _settings.Currency?.ToUpperInvariant() ?? "GBP";
+
             var payload = new
             {
-                amount = Math.Round(amount, 2),
-                currency = _settings.Currency?.ToUpperInvariant() ?? "GBP",
+                amount = roundedAmount,
+                currency = curr,
                 checkout_reference = checkoutRef,
                 merchant_code = _settings.MerchantCode,
                 description
             };
 
             var json = JsonSerializer.Serialize(payload);
+            _logger.LogInformation("[SumUp] POST payload: {Json}", json);
+
             using var req = new HttpRequestMessage(HttpMethod.Post, "v0.1/checkouts")
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
@@ -93,7 +98,8 @@ public sealed class SumUpService : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[SumUp] Exception creating checkout for {BookingRef}", bookingRef);
+            _logger.LogError("[SumUp] Exception creating checkout for {BookingRef}: {Type}: {Msg}",
+                bookingRef, ex.GetType().Name, ex.Message);
             return null;
         }
     }
