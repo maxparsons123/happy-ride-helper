@@ -72,6 +72,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private int _greetingSent;
     private int _syncCallCount;
     private int _bookingConfirmed;
+    private int _responseCancelling;     // #4: tracks cancel-in-progress
+    private int _inGreetingPhase;        // #7: suppress watchdog until first user speech
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
 
@@ -101,7 +103,15 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private const int NO_REPLY_TIMEOUT_MS = 8_000;
     private const int CONFIRMATION_TIMEOUT_MS = 15_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
-    private const int ECHO_GUARD_MS = 200;
+    private const int ECHO_GUARD_MS = 500;  // #6: increased from 200ms
+
+    // #3: CENTRALIZED SDK TYPE NAME CONSTANTS
+    private const string TYPE_SESSION_STARTED = "SessionStarted";
+    private const string TYPE_SESSION_CREATED = "SessionCreated";
+    private const string TYPE_RESPONSE_STARTED = "ResponseStarted";
+    private const string TYPE_RESPONSE_CREATED = "ResponseCreated";
+    private const string TYPE_RESPONSE_DONE = "ResponseDone";
+    private const string TYPE_RESPONSE_FINISHED = "ResponseFinished";
 
     // =========================
     // NON-BLOCKING LOGGER
@@ -193,6 +203,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _greetingSent, 0);
         Interlocked.Exchange(ref _syncCallCount, 0);
         Interlocked.Exchange(ref _bookingConfirmed, 0);
+        Interlocked.Exchange(ref _responseCancelling, 0);
+        Interlocked.Exchange(ref _inGreetingPhase, 1);  // #7: suppress watchdog until first speech
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -367,12 +379,14 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         try
         {
             Log("🛑 Cancelling response");
+            Interlocked.Exchange(ref _responseCancelling, 1);
             await _session!.CancelResponseAsync();
-            Interlocked.Exchange(ref _responseActive, 0);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error cancelling response");
+            Interlocked.Exchange(ref _responseCancelling, 0);
+            Interlocked.Exchange(ref _responseActive, 0);
         }
     }
 
@@ -390,13 +404,12 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
             {
                 Log("🛑 Cancelling active response before critical injection");
                 await _session!.CancelResponseAsync();
-                Interlocked.Exchange(ref _responseActive, 0);
-                // Wait for the response to actually clear (poll with timeout instead of blind delay)
-                for (int i = 0; i < 10; i++)
+                for (int i = 0; i < 20; i++)
                 {
                     await Task.Delay(50);
                     if (Volatile.Read(ref _responseActive) == 0) break;
                 }
+                Interlocked.Exchange(ref _responseCancelling, 0);
             }
 
             Log($"💉 Injecting: {(message.Length > 80 ? message[..80] + "..." : message)}");
@@ -518,6 +531,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         switch (update)
         {
             case ConversationInputSpeechStartedUpdate:
+                Interlocked.Exchange(ref _inGreetingPhase, 0);
                 HandleSpeechStarted();
                 break;
 
@@ -545,7 +559,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                 {
                     Interlocked.Exchange(ref _toolInFlight, 1);
                     Interlocked.Exchange(ref _responseActive, 0);
-                    _ = HandleToolCallAsync(itemFinished);
+                    await HandleToolCallAsync(itemFinished);
                 }
                 else if (itemFinished.MessageContentParts?.Count > 0)
                 {
@@ -604,21 +618,21 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     {
         var typeName = update.GetType().Name;
 
-        if (typeName.Contains("SessionStarted") || typeName.Contains("SessionCreated"))
+        if (typeName.Contains(TYPE_SESSION_STARTED) || typeName.Contains(TYPE_SESSION_CREATED))
         {
             Log("✅ Realtime Session Started (PCM16 24kHz)");
         }
-        else if (typeName.Contains("ResponseStarted") || typeName.Contains("ResponseCreated"))
+        else if (typeName.Contains(TYPE_RESPONSE_STARTED) || typeName.Contains(TYPE_RESPONSE_CREATED))
         {
             Interlocked.Exchange(ref _responseActive, 1);
             Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
-            // Cancel any pending no-reply watchdog — Ada is about to speak
             Interlocked.Increment(ref _noReplyWatchdogId);
             Log("🎤 Response started");
         }
-        else if (typeName.Contains("ResponseDone") || typeName.Contains("ResponseFinished"))
+        else if (typeName.Contains(TYPE_RESPONSE_DONE) || typeName.Contains(TYPE_RESPONSE_FINISHED))
         {
             Interlocked.Exchange(ref _responseActive, 0);
+            Interlocked.Exchange(ref _responseCancelling, 0);
             Log("✋ Response finished");
             OnResponseCompleted?.Invoke();
 
@@ -644,6 +658,11 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                     }
                 });
             }
+        }
+        else
+        {
+            if (!typeName.Contains("InputAudio") && !typeName.Contains("RateLimit"))
+                Log($"📎 Unknown update type: {typeName}");
         }
     }
 
@@ -816,6 +835,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     {
         if (Volatile.Read(ref _callEnded) != 0) return;
         if (Volatile.Read(ref _toolInFlight) == 1) return;
+        if (Volatile.Read(ref _inGreetingPhase) == 1) return;  // #7
 
         var count = Volatile.Read(ref _noReplyCount);
         if (count >= MAX_NO_REPLY_PROMPTS)
