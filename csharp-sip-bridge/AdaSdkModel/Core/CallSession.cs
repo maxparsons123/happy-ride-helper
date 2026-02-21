@@ -401,6 +401,12 @@ public sealed class CallSession : ICallSession
             return;
 
         _logger.LogInformation("[{SessionId}] Ending session: {Reason}", SessionId, reason);
+
+        // Reset booking state so session is clean for next caller
+        _booking.Reset();
+        _currentStage = BookingStage.Greeting;
+        Volatile.Write(ref _bookTaxiCompleted, 0);
+
         await _aiClient.DisconnectAsync();
         OnEnded?.Invoke(this, reason);
     }
@@ -2271,24 +2277,26 @@ public sealed class CallSession : ICallSession
 
         _ = Task.Run(async () =>
         {
+            // Wait for AI to finish generating the goodbye speech
             var streamStart = Environment.TickCount64;
-            while (_aiClient.IsResponseActive && Environment.TickCount64 - streamStart < 15000)
-                await Task.Delay(200);
+            while (_aiClient.IsResponseActive && Environment.TickCount64 - streamStart < 10000)
+                await Task.Delay(150);
 
+            // Wait for audio frames to start being queued
             var enqueueStart = Environment.TickCount64;
-            while ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0 && Environment.TickCount64 - enqueueStart < 5000)
+            while ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0 && Environment.TickCount64 - enqueueStart < 3000)
                 await Task.Delay(100);
 
-            await Task.Delay(2000);
-
+            // Drain the playout buffer (let goodbye finish playing)
             var drainStart = Environment.TickCount64;
-            while (Environment.TickCount64 - drainStart < 20000)
+            while (Environment.TickCount64 - drainStart < 12000)
             {
                 if ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0) break;
                 await Task.Delay(100);
             }
 
-            await Task.Delay(1000);
+            // Brief pause after goodbye finishes, then hang up
+            await Task.Delay(500);
 
             await EndAsync("end_call tool");
         });
