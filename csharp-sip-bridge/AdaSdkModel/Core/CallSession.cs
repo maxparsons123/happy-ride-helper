@@ -108,6 +108,7 @@ public sealed class CallSession : ICallSession
                 BookingStage.FareCalculating => "The fare is being calculated. Tell the caller: I'm still checking those addresses, please hold on a moment. Do NOT invent or guess any fare amount.",
                 BookingStage.FarePresented => "A fare has been presented. Ask the caller: Would you like me to go ahead and book that?",
                 BookingStage.Disambiguation => "We are waiting for the caller to choose from the address options. Repeat the options or ask: Which one was it?",
+                BookingStage.AnythingElse => "You asked if there's anything else to add. Ask again: 'Is there anything else you'd like to add — a flight number, special requests, or notes for the driver?' If they say no, say the FINAL CLOSING script and call end_call.",
                 _ => null // Use default generic re-prompt
             };
         };
@@ -220,10 +221,12 @@ public sealed class CallSession : ICallSession
                         if (_booking.BookingRef != null)
                         {
                             _currentStage = BookingStage.AnythingElse;
-                            await _aiClient.InjectMessageAndRespondAsync(
-                                $"[BOOKING CONFIRMED BY SYSTEM] Reference: {_booking.BookingRef}. " +
-                                "Tell the caller their booking reference, then ask if they need anything else. " +
-                                "If they say no, say the FINAL CLOSING script and call end_call.");
+                        await _aiClient.InjectMessageAndRespondAsync(
+                            $"[BOOKING CONFIRMED BY SYSTEM] Reference: {_booking.BookingRef}. " +
+                            "Tell the caller their booking reference, then ask: 'Is there anything else you'd like to add to your booking? " +
+                            "For example, a flight number, special requests, or any notes for the driver?' " +
+                            "If they provide notes, call sync_booking_data(special_instructions='[their notes]') to save them. " +
+                            "If they say no, say the FINAL CLOSING script and call end_call.");
                         }
                     }
                     break;
@@ -445,6 +448,8 @@ public sealed class CallSession : ICallSession
         sb.AppendLine($"  Passengers: {(_booking.Passengers.HasValue ? $"{_booking.Passengers} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Time: {(_booking.PickupTime != null ? $"{_booking.PickupTime} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Vehicle: {_booking.VehicleType}");
+        if (!string.IsNullOrWhiteSpace(_booking.SpecialInstructions))
+            sb.AppendLine($"  Special Instructions: {_booking.SpecialInstructions} ✓");
         sb.AppendLine();
         sb.AppendLine("⚠️ ADDRESS CORRECTION RULE: If the caller provides TWO address utterances in a row for the same field (e.g. destination),");
         sb.AppendLine("   ALWAYS use the MOST RECENT one. The first may be a speech recognition error or a self-correction.");
@@ -737,6 +742,11 @@ public sealed class CallSession : ICallSession
         }
         if (args.TryGetValue("vehicle_type", out var vt) && !string.IsNullOrWhiteSpace(vt?.ToString()))
             _booking.VehicleType = vt.ToString()!;
+        if (args.TryGetValue("special_instructions", out var si) && !string.IsNullOrWhiteSpace(si?.ToString()))
+        {
+            _booking.SpecialInstructions = si.ToString();
+            _logger.LogInformation("[{SessionId}] 📝 Special instructions: {Notes}", SessionId, _booking.SpecialInstructions);
+        }
 
         // Extract interpretation if provided
         string? interpretation = null;
@@ -2026,7 +2036,7 @@ public sealed class CallSession : ICallSession
             });
 
             _currentStage = BookingStage.AnythingElse;
-            return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: Your booking reference is {_booking.BookingRef}. Then say the FINAL CLOSING script verbatim and immediately call end_call. Do NOT ask if they need anything else." };
+            return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: Your booking reference is {_booking.BookingRef}. Then ask: 'Is there anything else you'd like to add to your booking? For example, a flight number, special requests, or any notes for the driver?' If they provide notes, call sync_booking_data(special_instructions='[their notes]') to save them, confirm you've added it, and ask again. When they say no, say the FINAL CLOSING script and call end_call." };
         }
 
         return new { error = "Invalid action" };

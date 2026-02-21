@@ -940,7 +940,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 passengers = new { type = "integer", description = "Number of passengers" },
                 pickup_time = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. Use REFERENCE_DATETIME from system prompt to resolve relative times like 'tomorrow', 'in 30 minutes', '5pm'. NEVER pass raw phrases." },
                 vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers (1-4=Saloon, 5-6=Estate, 7+=Minibus). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." },
-                interpretation = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed and why (e.g. 'User corrected pickup from Parkhouse Street to Far Gosford Street — venue name is Sweet Spot'). This helps the system track your understanding." }
+                interpretation = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed and why (e.g. 'User corrected pickup from Parkhouse Street to Far Gosford Street — venue name is Sweet Spot'). This helps the system track your understanding." },
+                special_instructions = new { type = "string", description = "Any special requests, notes, or instructions the caller wants to add to the booking (e.g. flight number, wheelchair access, child seat, meet at arrivals, extra luggage). Only set when the caller explicitly provides special instructions." }
             }
         }))
     };
@@ -1179,7 +1180,13 @@ FIXED PRICE / METER RULES:
 4. WAIT for the user to respond with their payment preference OR a general confirmation.
 5. ONLY THEN call book_taxi(action=""confirmed"")
 6. Give reference ID from the tool result
-7. Ask ""Anything else?""
+7. Ask: ""Is there anything else you'd like to add to your booking? For example, a flight number, special requests, or any notes for the driver?""
+8. If the caller provides special notes (flight number, wheelchair, child seat, meet at arrivals, extra luggage, etc.):
+   - Call sync_booking_data(special_instructions=""[what they said]"") to persist them
+   - Confirm: ""I've added that to your booking.""
+   - Ask: ""Anything else?""
+9. If the caller says NO / nothing else / that's it:
+   - Say the FINAL CLOSING script and call end_call.
 
 ⚠️⚠️⚠️ ABSOLUTE RULE — NO PREMATURE CONFIRMATION ⚠️⚠️⚠️
 NEVER ask ""Would you like to confirm?"" or ""Shall I book?"" UNTIL you have received [FARE RESULT].
