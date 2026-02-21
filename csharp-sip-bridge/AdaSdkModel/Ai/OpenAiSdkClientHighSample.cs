@@ -612,6 +612,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         {
             Interlocked.Exchange(ref _responseActive, 1);
             Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
+            // Cancel any pending no-reply watchdog — Ada is about to speak
+            Interlocked.Increment(ref _noReplyWatchdogId);
             Log("🎤 Response started");
         }
         else if (typeName.Contains("ResponseDone") || typeName.Contains("ResponseFinished"))
