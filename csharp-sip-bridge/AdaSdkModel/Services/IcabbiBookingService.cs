@@ -482,6 +482,83 @@ public sealed class IcabbiBookingService : IDisposable
     }
 
     // ═══════════════════════════════════════════
+    //  UPDATE BOOKING
+    // ═══════════════════════════════════════════
+
+    /// <summary>
+    /// Updates an existing iCabbi booking. Sends a PATCH-style update to /v2/bookings/update/{journeyId}.
+    /// Only fields that are non-null will be included in the payload.
+    /// Depending on booking status, certain fields may be ignored by the API (returned in 'ignored_fields').
+    /// </summary>
+    public async Task<(bool success, string message, JsonNode? response)> UpdateBookingAsync(
+        string journeyId, IcabbiBookingUpdate update, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(journeyId))
+            return (false, "No journeyId provided to update.", null);
+
+        // Use v2 endpoint as per iCabbi docs
+        var v2Base = _baseUrl.Replace("/uk/", "/v2/").Replace("/v1/", "/v2/");
+        if (!v2Base.Contains("/v2/"))
+            v2Base = _baseUrl.TrimEnd('/').TrimEnd('/') + "/../v2/";
+
+        var url = $"{v2Base.TrimEnd('/')}/bookings/update/{journeyId}";
+
+        var payload = new Dictionary<string, object?>();
+
+        if (update.Phone != null) payload["phone"] = update.Phone;
+        if (update.Name != null) payload["name"] = update.Name;
+        if (update.Date != null) payload["date"] = update.Date;
+        if (update.Instructions != null) payload["instructions"] = update.Instructions;
+        if (update.FlightNumber != null) payload["flight_number"] = update.FlightNumber;
+        if (update.Payment != null) payload["payment"] = update.Payment;
+        if (update.Eta != null) payload["eta"] = update.Eta;
+        if (update.VehicleType != null) payload["vehicle_type"] = update.VehicleType;
+        if (update.VehicleGroup != null) payload["vehicle_group"] = update.VehicleGroup;
+        if (update.Passengers != null) payload["passengers"] = update.Passengers;
+
+        if (update.Destination != null)
+            payload["destination"] = update.Destination;
+
+        if (update.Address != null)
+            payload["address"] = update.Address;
+
+        if (update.Metadata != null)
+            payload["metadata"] = update.Metadata;
+
+        if (payload.Count == 0)
+            return (false, "No fields provided to update.", null);
+
+        var json = JsonSerializer.Serialize(payload, JsonOpts);
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        AddAuthHeaders(req);
+
+        Log($"✏️ Updating booking {journeyId}: {json}");
+
+        var resp = await SendWithRetryAsync(req, ct, "UpdateBooking");
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        Log($"📨 [Update Response] {resp.StatusCode}: {Truncate(body)}");
+
+        JsonNode? parsed = null;
+        try { parsed = JsonNode.Parse(body); } catch { }
+
+        if (resp.IsSuccessStatusCode)
+        {
+            // Log any ignored fields
+            var ignored = parsed?["ignored_fields"];
+            if (ignored != null)
+                Log($"⚠️ Ignored fields: {ignored.ToJsonString()}");
+
+            return (true, "Booking updated successfully.", parsed);
+        }
+
+        return (false, $"HTTP {(int)resp.StatusCode}: {body}", parsed);
+    }
+
+    // ═══════════════════════════════════════════
     //  GET BOOKING STATUS
     // ═══════════════════════════════════════════
 
@@ -786,4 +863,63 @@ public class IcabbiQuoteRequest
     // Optional via waypoints (populated only if vias are used)
     public string? via1_postcode { get; set; }
     public string? via2_postcode { get; set; }
+}
+
+/// <summary>
+/// Patch model for updating an iCabbi booking.
+/// Only non-null fields will be sent. Fields that cannot be updated
+/// (based on booking status) will be ignored by the API and returned in 'ignored_fields'.
+/// </summary>
+public sealed class IcabbiBookingUpdate
+{
+    /// <summary>Customer phone number.</summary>
+    public string? Phone { get; set; }
+
+    /// <summary>Customer name.</summary>
+    public string? Name { get; set; }
+
+    /// <summary>Pickup date/time (ISO 8601). Cannot be updated once booking is released.</summary>
+    public string? Date { get; set; }
+
+    /// <summary>Special instructions for the driver.</summary>
+    public string? Instructions { get; set; }
+
+    /// <summary>Flight number for airport pickups.</summary>
+    public string? FlightNumber { get; set; }
+
+    /// <summary>Payment method.</summary>
+    public string? Payment { get; set; }
+
+    /// <summary>ETA override.</summary>
+    public string? Eta { get; set; }
+
+    /// <summary>Vehicle type (e.g. "saloon", "estate", "mpv").</summary>
+    public string? VehicleType { get; set; }
+
+    /// <summary>Vehicle group (e.g. "Taxi").</summary>
+    public string? VehicleGroup { get; set; }
+
+    /// <summary>Number of passengers.</summary>
+    public int? Passengers { get; set; }
+
+    /// <summary>Destination address object. Cannot be updated once driver is assigned in some statuses.</summary>
+    public IcabbiAddressPatch? Destination { get; set; }
+
+    /// <summary>Pickup address object. Cannot be updated once booking is released.</summary>
+    public IcabbiAddressPatch? Address { get; set; }
+
+    /// <summary>Metadata key-value pairs. Existing keys are updated; new keys are created. Cannot delete metadata.</summary>
+    public Dictionary<string, string>? Metadata { get; set; }
+}
+
+/// <summary>
+/// Address patch for iCabbi update requests.
+/// </summary>
+public sealed class IcabbiAddressPatch
+{
+    public string? Street { get; set; }
+    public string? Town { get; set; }
+    public string? Postcode { get; set; }
+    public double? Lat { get; set; }
+    public double? Lng { get; set; }
 }
