@@ -2504,6 +2504,19 @@ public sealed class CallSession : ICallSession
     // =========================
     private async Task<object> HandleCancelBookingAsync(Dictionary<string, object?> args)
     {
+        // ── Confirmation gate: reject if caller hasn't explicitly confirmed ──
+        var confirmed = args.TryGetValue("confirmed", out var c) && c is true or "true" or "True";
+        if (!confirmed)
+        {
+            _logger.LogInformation("[{SessionId}] 🛡️ cancel_booking rejected — confirmed=false, asking Ada to confirm with caller", SessionId);
+            return new
+            {
+                success = false,
+                error = "STOP. You must verbally confirm with the caller first. Ask: 'Just to confirm, you'd like me to cancel your booking?' " +
+                        "Only call cancel_booking(confirmed=true) after the caller explicitly says yes."
+            };
+        }
+
         var reason = args.TryGetValue("reason", out var r) ? r?.ToString() ?? "caller_request" : "caller_request";
         var bookingId = _booking.ExistingBookingId;
 
