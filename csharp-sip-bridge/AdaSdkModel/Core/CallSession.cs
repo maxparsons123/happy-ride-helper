@@ -2044,7 +2044,8 @@ public sealed class CallSession : ICallSession
 
             // Geocode if needed — but skip if iCabbi already quoted (coords + fare already set)
             // to prevent the Gemini re-estimate from overwriting the official iCabbi price.
-            bool iCabbiAlreadyQuoted = _icabbiEnabled && !string.IsNullOrWhiteSpace(_booking.Fare)
+            // NOTE: Use _icabbi != null (not _icabbiEnabled) so quote-only mode also preserves the fare.
+            bool iCabbiAlreadyQuoted = _icabbi != null && !string.IsNullOrWhiteSpace(_booking.Fare)
                 && (_booking.PickupLat.HasValue && _booking.PickupLat != 0)
                 && (_booking.DestLat.HasValue && _booking.DestLat != 0);
             bool needsGeocode = !iCabbiAlreadyQuoted && (string.IsNullOrWhiteSpace(_booking.PickupStreet)
