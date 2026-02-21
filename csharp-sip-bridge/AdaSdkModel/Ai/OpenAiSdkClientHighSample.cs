@@ -900,9 +900,6 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     {
         "alloy" => ConversationVoice.Alloy,
         "echo" => ConversationVoice.Echo,
-        "fable" => ConversationVoice.Fable,
-        "onyx" => ConversationVoice.Onyx,
-        "nova" => ConversationVoice.Nova,
         "shimmer" => ConversationVoice.Shimmer,
         _ => ConversationVoice.Shimmer
     };
