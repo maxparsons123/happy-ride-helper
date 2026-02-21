@@ -629,8 +629,15 @@ public sealed class SipServer : IAsyncDisposable
             else Interlocked.Exchange(ref watchdogPending, 1);
         };
 
+        long lastDrainSignalMs = 0;
+
         playout.OnQueueEmpty += () =>
         {
+            // Debounce: OnQueueEmpty can fire multiple times while queue stays at 0.
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (now - Interlocked.Read(ref lastDrainSignalMs) < 200) return;
+            Interlocked.Exchange(ref lastDrainSignalMs, now);
+
             if (Volatile.Read(ref adaHasStartedSpeaking) == 1 && Volatile.Read(ref isBotSpeaking) == 1)
             {
                 Interlocked.Exchange(ref isBotSpeaking, 0);
