@@ -109,6 +109,7 @@ public sealed class CallSession : ICallSession
                 BookingStage.FarePresented => "A fare has been presented. Ask the caller: Would you like me to go ahead and book that?",
                 BookingStage.Disambiguation => "We are waiting for the caller to choose from the address options. Repeat the options or ask: Which one was it?",
                 BookingStage.AnythingElse => "You already asked if there's anything else. Do NOT repeat the question. Simply say: 'No problem, take your time.' and wait silently. If they still don't respond after this, say the FINAL CLOSING script and call end_call.",
+                BookingStage.ManagingExistingBooking => "The caller has an active booking. Ask them: 'Would you like to cancel your booking, make changes, or check the status of your driver?'",
                 _ => null // Use default generic re-prompt
             };
         };
@@ -293,6 +294,19 @@ public sealed class CallSession : ICallSession
             _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed (non-fatal)", SessionId);
         }
 
+        // Step 1b: Check for active bookings for this caller
+        string? activeBookingInfo = null;
+        try
+        {
+            activeBookingInfo = await LoadActiveBookingAsync(CallerId);
+            if (activeBookingInfo != null)
+                _logger.LogInformation("[{SessionId}] 📋 Active booking found for {CallerId}", SessionId, CallerId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Active booking lookup failed (non-fatal)", SessionId);
+        }
+
         // Step 2: Connect to OpenAI (session configured, event loops started, but NO greeting yet)
         await _aiClient.ConnectAsync(CallerId, ct);
 
@@ -310,8 +324,25 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Step 4: NOW send the greeting — pass caller name directly so it's in the greeting instruction
-        await _aiClient.SendGreetingAsync(_booking.Name);
+        // Step 3b: Inject active booking info if present
+        if (activeBookingInfo != null)
+        {
+            try
+            {
+                await _aiClient.InjectSystemMessageAsync(activeBookingInfo);
+                _logger.LogInformation("[{SessionId}] 📋 Active booking injected for {CallerId}", SessionId, CallerId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[{SessionId}] Active booking injection failed (non-fatal)", SessionId);
+            }
+        }
+
+        // Step 4: NOW send the greeting — pass caller name and active booking context
+        if (activeBookingInfo != null)
+            await _aiClient.SendGreetingWithBookingAsync(_booking.Name, _booking);
+        else
+            await _aiClient.SendGreetingAsync(_booking.Name);
     }
 
     private async Task<string?> LoadCallerHistoryAsync(string phone)
@@ -392,6 +423,82 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed", SessionId);
+            return null;
+        }
+    }
+
+
+    /// <summary>
+    /// Check the bookings table for any active/confirmed booking for this caller.
+    /// </summary>
+    private async Task<string?> LoadActiveBookingAsync(string phone)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var normalized = phone.Trim().Replace(" ", "");
+            var phoneVariants = new[] { phone, normalized, $"+{normalized}" };
+            var orFilter = string.Join(",", phoneVariants.Select(p => $"caller_phone.eq.{Uri.EscapeDataString(p)}"));
+            var url = $"{_settings.Supabase.Url}/rest/v1/bookings?or=({orFilter})&status=in.(active,confirmed)&order=booked_at.desc&limit=1&select=id,pickup,destination,passengers,fare,eta,status,caller_name,booked_at,pickup_lat,pickup_lng,dest_lat,dest_lng,scheduled_for";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var arr = doc.RootElement;
+            if (arr.GetArrayLength() == 0) return null;
+            var b = arr[0];
+
+            _booking.ExistingBookingId = b.TryGetProperty("id", out var id) ? id.GetString() : null;
+            _booking.Pickup = b.TryGetProperty("pickup", out var pu) && pu.ValueKind == System.Text.Json.JsonValueKind.String ? pu.GetString() : null;
+            _booking.Destination = b.TryGetProperty("destination", out var de) && de.ValueKind == System.Text.Json.JsonValueKind.String ? de.GetString() : null;
+            _booking.Passengers = b.TryGetProperty("passengers", out var px) && px.ValueKind == System.Text.Json.JsonValueKind.Number ? px.GetInt32() : null;
+            _booking.Fare = b.TryGetProperty("fare", out var fa) && fa.ValueKind == System.Text.Json.JsonValueKind.String ? fa.GetString() : null;
+            _booking.Eta = b.TryGetProperty("eta", out var et) && et.ValueKind == System.Text.Json.JsonValueKind.String ? et.GetString() : null;
+            if (b.TryGetProperty("caller_name", out var cn) && cn.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrEmpty(cn.GetString()))
+                _booking.Name = cn.GetString();
+            if (b.TryGetProperty("pickup_lat", out var plat) && plat.ValueKind == System.Text.Json.JsonValueKind.Number)
+                _booking.PickupLat = plat.GetDouble();
+            if (b.TryGetProperty("pickup_lng", out var plng) && plng.ValueKind == System.Text.Json.JsonValueKind.Number)
+                _booking.PickupLon = plng.GetDouble();
+            if (b.TryGetProperty("dest_lat", out var dlat) && dlat.ValueKind == System.Text.Json.JsonValueKind.Number)
+                _booking.DestLat = dlat.GetDouble();
+            if (b.TryGetProperty("dest_lng", out var dlng) && dlng.ValueKind == System.Text.Json.JsonValueKind.Number)
+                _booking.DestLon = dlng.GetDouble();
+            _booking.BookingRef = _booking.ExistingBookingId;
+
+            _currentStage = BookingStage.ManagingExistingBooking;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[ACTIVE BOOKING] This caller has an existing active booking.");
+            sb.AppendLine($"  Booking ID: {_booking.ExistingBookingId}");
+            sb.AppendLine($"  Pickup: {_booking.Pickup}");
+            sb.AppendLine($"  Destination: {_booking.Destination}");
+            sb.AppendLine($"  Passengers: {_booking.Passengers}");
+            sb.AppendLine($"  Fare: {_booking.Fare}");
+            sb.AppendLine($"  Status: {(b.TryGetProperty("status", out var st) ? st.GetString() : "unknown")}");
+            if (b.TryGetProperty("scheduled_for", out var sf) && sf.ValueKind == System.Text.Json.JsonValueKind.String)
+                sb.AppendLine($"  Scheduled for: {sf.GetString()}");
+            sb.AppendLine();
+            sb.AppendLine("ACTIONS AVAILABLE:");
+            sb.AppendLine("  - CANCEL: call cancel_booking(reason='caller_request')");
+            sb.AppendLine("  - AMEND: modify fields using sync_booking_data, fare will auto-recalculate");
+            sb.AppendLine("  - STATUS: call check_booking_status()");
+            sb.AppendLine("  - NEW BOOKING: reset and proceed with normal flow");
+            sb.AppendLine("⚠️ Acknowledge the existing booking FIRST before asking for new details.");
+
+            _logger.LogInformation("[{SessionId}] 📋 Active booking loaded: {Id} ({Pickup} → {Dest})",
+                SessionId, _booking.ExistingBookingId, _booking.Pickup, _booking.Destination);
+
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Active booking lookup failed", SessionId);
             return null;
         }
     }
@@ -516,6 +623,8 @@ public sealed class CallSession : ICallSession
             "book_taxi" => await HandleBookTaxiAsync(args),
             "create_booking" => await HandleCreateBookingAsync(args),
             "find_local_events" => HandleFindLocalEvents(args),
+            "cancel_booking" => await HandleCancelBookingAsync(args),
+            "check_booking_status" => HandleCheckBookingStatus(args),
             "end_call" => HandleEndCall(args),
             _ => new { error = $"Unknown tool: {name}" }
         };
@@ -2252,6 +2361,110 @@ public sealed class CallSession : ICallSession
             success = true,
             events = mockEvents,
             message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+        };
+    }
+
+    // =========================
+    // CANCEL BOOKING
+    // =========================
+    private async Task<object> HandleCancelBookingAsync(Dictionary<string, object?> args)
+    {
+        var reason = args.TryGetValue("reason", out var r) ? r?.ToString() ?? "caller_request" : "caller_request";
+        var bookingId = _booking.ExistingBookingId;
+
+        if (string.IsNullOrWhiteSpace(bookingId))
+        {
+            return new { success = false, error = "No active booking found to cancel." };
+        }
+
+        _logger.LogInformation("[{SessionId}] ❌ Cancelling booking {BookingId}: {Reason}", SessionId, bookingId, reason);
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var url = $"{_settings.Supabase.Url}/rest/v1/bookings?id=eq.{Uri.EscapeDataString(bookingId)}";
+            var request = new HttpRequestMessage(HttpMethod.Patch, url);
+            request.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            request.Headers.Add("Authorization", $"Bearer {_settings.Supabase.AnonKey}");
+            request.Headers.Add("Prefer", "return=minimal");
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                status = "cancelled",
+                cancellation_reason = reason,
+                cancelled_at = DateTime.UtcNow.ToString("o")
+            });
+            request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+
+            var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[{SessionId}] ⚠️ Failed to cancel booking {BookingId}: {Status}", SessionId, bookingId, response.StatusCode);
+                return new { success = false, error = "Failed to cancel the booking. Please try again." };
+            }
+
+            _logger.LogInformation("[{SessionId}] ✅ Booking {BookingId} cancelled", SessionId, bookingId);
+
+            // Reset booking state for potential new booking
+            _booking.Reset();
+            _booking.CallerPhone = CallerId;
+            _currentStage = BookingStage.Greeting;
+            Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+
+            return new
+            {
+                success = true,
+                message = $"Booking has been cancelled successfully. Tell the caller: 'Your booking has been cancelled. Would you like to make a new booking, or is there anything else I can help with?' If they want a new booking, proceed with the normal flow. If not, say goodbye and call end_call."
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Cancel booking error", SessionId);
+            return new { success = false, error = "An error occurred while cancelling. Please try again." };
+        }
+    }
+
+    // =========================
+    // CHECK BOOKING STATUS
+    // =========================
+    private object HandleCheckBookingStatus(Dictionary<string, object?> args)
+    {
+        var bookingId = _booking.ExistingBookingId;
+
+        if (string.IsNullOrWhiteSpace(bookingId))
+        {
+            return new { success = false, error = "No active booking found to check status for." };
+        }
+
+        _logger.LogInformation("[{SessionId}] 🔍 Status check for booking {BookingId}", SessionId, bookingId);
+
+        // TODO: Replace with real driver tracking data when dispatch integration is complete.
+        // For now, provide a realistic placeholder response based on booking state.
+        var pickup = _booking.Pickup ?? "your pickup location";
+        var eta = _booking.Eta ?? "approximately 8 minutes";
+
+        // Determine status message based on booking age and state
+        string statusMessage;
+        if (_booking.Fare != null)
+        {
+            statusMessage = $"Your driver is on the way to {pickup}. Estimated arrival is {eta}. " +
+                "You'll receive a notification when the driver is nearby. " +
+                "Is there anything else you'd like to know?";
+        }
+        else
+        {
+            statusMessage = $"Your booking from {pickup} to {_booking.Destination ?? "your destination"} is confirmed and " +
+                "we're currently assigning a driver. You'll receive updates via WhatsApp shortly. " +
+                "Is there anything else I can help with?";
+        }
+
+        return new
+        {
+            success = true,
+            booking_id = bookingId,
+            status = "driver_assigned", // TODO: Pull from real dispatch system
+            driver_eta = eta,           // TODO: Pull from real driver tracking
+            message = statusMessage
         };
     }
 

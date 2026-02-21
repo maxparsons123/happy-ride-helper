@@ -21,6 +21,9 @@ public sealed class IntentGuard
         EndCall,            // User said no to "anything else?" → force end_call
         NewBooking,         // User said yes to "anything else?" → restart flow
         SelectOption,       // User picked an option during disambiguation
+        CancelBooking,      // User wants to cancel their existing booking
+        AmendBooking,       // User wants to amend their existing booking
+        CheckStatus,        // User wants to check booking status
     }
 
     // ── Affirmative patterns ──
@@ -36,6 +39,21 @@ public sealed class IntentGuard
     // ── "Nothing else" patterns (for anything_else stage) ──
     private static readonly Regex NothingElsePattern = new(
         @"\b(no|nah|nope|nothing|that'?s? (all|it|everything)|i'?m? (good|fine|done|ok)|all good|no thank|bye|goodbye|cheers)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // ── Cancel booking patterns ──
+    private static readonly Regex CancelPattern = new(
+        @"\b(cancel|cancel\s*(it|that|the booking|my booking)|don'?t want|scrap it|forget it|remove it)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // ── Amend booking patterns ──
+    private static readonly Regex AmendPattern = new(
+        @"\b(amend|change|update|modify|alter|edit|different)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // ── Status check patterns ──
+    private static readonly Regex StatusPattern = new(
+        @"\b(status|where.*(driver|taxi|cab)|how long|eta|track|when.*(arrive|coming|here)|on.*(the |its? )?way)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // ── "Something else" patterns ──
@@ -58,7 +76,8 @@ public sealed class IntentGuard
         {
             BookingStage.FarePresented => ResolveFareResponse(text),
             BookingStage.AnythingElse => ResolveAnythingElseResponse(text),
-            BookingStage.Disambiguation => ResolvedIntent.SelectOption, // Let AI handle the specific option
+            BookingStage.Disambiguation => ResolvedIntent.SelectOption,
+            BookingStage.ManagingExistingBooking => ResolveManageBookingResponse(text),
             _ => ResolvedIntent.None
         };
     }
@@ -84,6 +103,20 @@ public sealed class IntentGuard
         if (SomethingElsePattern.IsMatch(text))
             return ResolvedIntent.NewBooking;
 
+        return ResolvedIntent.None;
+    }
+
+    private static ResolvedIntent ResolveManageBookingResponse(string text)
+    {
+        if (CancelPattern.IsMatch(text))
+            return ResolvedIntent.CancelBooking;
+        if (AmendPattern.IsMatch(text))
+            return ResolvedIntent.AmendBooking;
+        if (StatusPattern.IsMatch(text))
+            return ResolvedIntent.CheckStatus;
+        // Check if they want a new booking instead
+        if (AffirmativePattern.IsMatch(text) && !NegativePattern.IsMatch(text))
+            return ResolvedIntent.NewBooking;
         return ResolvedIntent.None;
     }
 }

@@ -15,6 +15,7 @@ public interface IOpenAiClient
     Task InjectMessageAndRespondAsync(string message);
     Task InjectSystemMessageAsync(string message);
     Task SendGreetingAsync(string? callerName = null);
+    Task SendGreetingWithBookingAsync(string? callerName, AdaSdkModel.Core.BookingState booking);
     Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f);
 
     /// <summary>Notify that playout has finished (for echo guard timing).</summary>
