@@ -86,7 +86,7 @@ public sealed class CallSession : ICallSession
             OnTranscript?.Invoke(role, text);
 
             // Track user transcripts for intent guard + input validation
-            if (role == "user" && !string.IsNullOrWhiteSpace(text))
+            if (role.Equals("user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(text))
             {
                 _lastUserTranscript = text;
                 lock (_userTranscriptHistory) { _userTranscriptHistory.Add(text); }
