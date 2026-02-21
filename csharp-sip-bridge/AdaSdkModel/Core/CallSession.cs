@@ -1388,9 +1388,11 @@ public sealed class CallSession : ICallSession
 
                     var timePart1 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart1}. " +
+                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}. " +
+                            $"Driver ETA: {_booking.Eta ?? "around 10 minutes"}. " +
                             $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
-                            $"After reading back the addresses and fare, offer the payment choice using this EXACT script: " +
+                            $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA (say the ETA text naturally, e.g. 'We''re not too busy at the moment, we should be able to get you a taxi quite quickly'), 4) payment choice. " +
+                            $"After the ETA, offer the payment choice using this EXACT script: " +
                             $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
                             $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
                 }
@@ -1804,9 +1806,11 @@ public sealed class CallSession : ICallSession
 
             var timePart2 = FormatScheduledTimePart();
             await _aiClient.InjectMessageAndRespondAsync(
-                    $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart2}. " +
+                    $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}. " +
+                    $"Driver ETA: {_booking.Eta ?? "around 10 minutes"}. " +
                     $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
-                    $"After reading back the addresses and fare, offer the payment choice using this EXACT script: " +
+                    $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA (say the ETA text naturally, e.g. 'We''re not too busy at the moment, we should be able to get you a taxi quite quickly'), 4) payment choice. " +
+                    $"After the ETA, offer the payment choice using this EXACT script: " +
                     $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
                     $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
         }
@@ -2046,9 +2050,11 @@ public sealed class CallSession : ICallSession
                     // Inject fare result into conversation — Ada will read it back
                     var timePart3 = FormatScheduledTimePart();
                     await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}{timePart3}. " +
+                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}. " +
+                            $"Driver ETA: {_booking.Eta ?? "around 10 minutes"}. " +
                             $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
-                            $"After reading back the addresses and fare, offer the payment choice using this EXACT script: " +
+                            $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA (say the ETA text naturally, e.g. 'We''re not too busy at the moment, we should be able to get you a taxi quite quickly'), 4) payment choice. " +
+                            $"After the ETA, offer the payment choice using this EXACT script: " +
                             $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
                             $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
                 }
