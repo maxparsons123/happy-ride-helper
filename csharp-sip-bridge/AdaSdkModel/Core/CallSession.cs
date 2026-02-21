@@ -2517,7 +2517,18 @@ public sealed class CallSession : ICallSession
     private async Task<object> HandleCancelBookingAsync(Dictionary<string, object?> args)
     {
         // ── Confirmation gate: reject if caller hasn't explicitly confirmed ──
-        var confirmed = args.TryGetValue("confirmed", out var c) && c is true or "true" or "True";
+        // NOTE: JsonSerializer deserializes bools as JsonElement, not native bool.
+        var confirmed = false;
+        if (args.TryGetValue("confirmed", out var c))
+        {
+            confirmed = c switch
+            {
+                bool b => b,
+                System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.True => true,
+                string s when s.Equals("true", StringComparison.OrdinalIgnoreCase) => true,
+                _ => false
+            };
+        }
         if (!confirmed)
         {
             _logger.LogInformation("[{SessionId}] 🛡️ cancel_booking rejected — confirmed=false, asking Ada to confirm with caller", SessionId);
