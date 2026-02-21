@@ -577,29 +577,30 @@ public sealed class CallSession : ICallSession
 
                     if (_aiClient is OpenAiSdkClient sdkInject)
                     {
+                        // Use descriptive busy-level message instead of exact ETA minutes
                         var etaPart = IsImmediatePickup(_booking.PickupTime)
-                            ? $", estimated time of arrival is {_booking.Eta}"
+                            ? $". {_booking.Eta}"
                             : "";
                         await sdkInject.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] The fare from {pickupAddr} to {destAddr} is {spokenFare}{etaPart}. " +
-                            $"Read back the VERIFIED addresses and fare to the caller and ask them to confirm the booking.");
+                            $"Read back the VERIFIED addresses and fare to the caller, then tell them the busy status message EXACTLY as provided above, then ask them to confirm the booking.");
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "[{SessionId}] Auto fare calculation failed", sessionId);
                     _booking.Fare = "£8.00";
-                    _booking.Eta = "8 minutes";
+                    _booking.Eta = "We're not too busy at the moment, we should be able to get you a taxi quite quickly.";
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
                     if (_aiClient is OpenAiSdkClient sdkFallback)
                     {
                         var fallbackEtaPart = IsImmediatePickup(_booking.PickupTime)
-                            ? ", estimated time of arrival is 8 minutes"
+                            ? ". We're not too busy at the moment, we should be able to get you a taxi quite quickly"
                             : "";
                         await sdkFallback.InjectMessageAndRespondAsync(
                             $"[FARE RESULT] The estimated fare is 8 pounds{fallbackEtaPart}. " +
-                            "Read back the details to the caller and ask them to confirm.");
+                            "Read back the details to the caller, tell them the busy status, then ask them to confirm.");
                     }
                 }
             });
