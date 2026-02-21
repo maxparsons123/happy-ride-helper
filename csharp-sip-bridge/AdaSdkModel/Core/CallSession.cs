@@ -1348,7 +1348,7 @@ public sealed class CallSession : ICallSession
                             _logger.LogInformation("[{SessionId}] ✅ iCabbi quote: {OldFare} → {NewFare}, ETA: {Eta}",
                                 sessionId, _booking.Fare, quote.FareFormatted, quote.EtaFormatted);
                             _booking.Fare = quote.FareFormatted;
-                            _booking.Eta = quote.EtaFormatted;
+                            // Keep dynamic ETA from edge function — iCabbi ETA is a fixed estimate, not useful for caller readback
                         }
                         else
                         {
@@ -2005,7 +2005,7 @@ public sealed class CallSession : ICallSession
                             _logger.LogInformation("[{SessionId}] ✅ iCabbi quote: {OldFare} → {NewFare}, ETA: {Eta}",
                                 sessionId, _booking.Fare, quote.FareFormatted, quote.EtaFormatted);
                             _booking.Fare = quote.FareFormatted;
-                            _booking.Eta = quote.EtaFormatted;
+                            // Keep dynamic ETA from edge function — iCabbi ETA is a fixed estimate, not useful for caller readback
                         }
                         else
                         {
