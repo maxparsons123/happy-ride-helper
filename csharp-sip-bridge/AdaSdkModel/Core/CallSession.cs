@@ -117,16 +117,63 @@ public sealed class CallSession : ICallSession
         };
 
         // ── INTENT GUARD: After AI finishes a response, check if it missed a critical tool call ──
+        // IMPORTANT: Do NOT fire immediately — Ada may still be playing out audio.
+        // Wait until playout drains so we evaluate against the user's RESPONSE, not their prior turn.
         _aiClient.OnResponseCompleted += () =>
         {
             if (string.IsNullOrWhiteSpace(_lastUserTranscript)) return;
 
-            var intent = IntentGuard.Resolve(_currentStage, _lastUserTranscript);
-            if (intent == IntentGuard.ResolvedIntent.None) return;
+            // Capture the transcript now, but defer evaluation until playout completes.
+            // If playout queue is still full, the user hasn't heard Ada yet — they can't have confirmed.
+            var capturedTranscript = _lastUserTranscript;
+            var capturedStage = _currentStage;
 
-            // Only fire if the AI didn't already handle it via tool call
-            _ = EnforceIntentAsync(intent, _lastUserTranscript);
-            _lastUserTranscript = null; // Consume — don't fire twice
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Wait for playout to drain before evaluating intent
+                    if (_aiClient.GetQueuedFrames != null)
+                    {
+                        var start = DateTime.UtcNow;
+                        while ((DateTime.UtcNow - start).TotalMilliseconds < 30_000)
+                        {
+                            try
+                            {
+                                if (_aiClient.GetQueuedFrames() <= 0) break;
+                            }
+                            catch { break; }
+                            await Task.Delay(50);
+                        }
+
+                        // After drain, wait for the echo tail so user audio can arrive
+                        await Task.Delay(1200);
+                    }
+                    else
+                    {
+                        // No queue info — use conservative delay
+                        await Task.Delay(3000);
+                    }
+
+                    // Re-check: has a NEW user transcript arrived since we captured?
+                    // If so, use the newer one (the user responded to what Ada said).
+                    var transcriptToEval = _lastUserTranscript ?? capturedTranscript;
+                    var stageToEval = _currentStage; // Stage may have advanced
+
+                    if (string.IsNullOrWhiteSpace(transcriptToEval)) return;
+
+                    var intent = IntentGuard.Resolve(stageToEval, transcriptToEval);
+                    if (intent == IntentGuard.ResolvedIntent.None) return;
+
+                    // Only fire if the AI didn't already handle it via tool call
+                    _ = EnforceIntentAsync(intent, transcriptToEval);
+                    _lastUserTranscript = null; // Consume — don't fire twice
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[{SessionId}] Intent guard deferred check error", SessionId);
+                }
+            });
         };
 
         // SAFETY NET: if Ada says goodbye but book_taxi was never called, auto-dispatch
