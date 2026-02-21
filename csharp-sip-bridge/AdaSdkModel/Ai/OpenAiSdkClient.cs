@@ -1,41 +1,28 @@
-// Last updated: 2026-02-21 (v2.9 — Anti-repetition in greeting, patience after greeting)
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Channels;
-using System.Threading.Tasks;
+// Last updated: 2026-02-21 (v3.0 — Playout-aware mic gate + greeting watchdog suppression)
+// Key fixes:
+// - Prevent Ada's own TTS audio being transcribed as "User" by gating mic input until RTP playout drains + tail
+// - Adds robust mic gate that does NOT rely solely on NotifyPlayoutComplete()
+// - Suppresses the no-reply watchdog immediately after greeting until the user speaks once
 using AdaSdkModel.Config;
 using Microsoft.Extensions.Logging;
 using OpenAI.RealtimeConversation;
+using System;
 using System.ClientModel;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 
 #pragma warning disable OPENAI002 // Experimental Realtime API
 
 namespace AdaSdkModel.Ai;
 
-/// <summary>
-/// OpenAI Realtime API client using official .NET SDK (2.1.0-beta.4) — G.711 A-law passthrough (8kHz).
-///
-/// Production features:
-/// - Native G.711 A-law codec (no resampling, direct SIP passthrough)
-/// - Tool calling with async execution (sync_booking_data, book_taxi, end_call)
-/// - Deferred response handling (queue response.create if one is active)
-/// - Barge-in detection (speech_started while audio streaming)
-/// - No-reply watchdog (15s silence → re-prompt, 30s for disambiguation)
-/// - Echo guard (playout-aware silence window after response completes)
-/// - Goodbye detection with drain-aware hangup
-/// - Keepalive heartbeat logging
-/// - Per-call state management and reset
-/// - Non-blocking channel-based logger
-/// - Confirmation-awaiting mode (extended watchdog timeout)
-///
-/// Version 2.0 — AdaSdkModel (OpenAI .NET SDK beta)
-/// </summary>
 public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "2.0-sdk-g711-beta";
+    public const string VERSION = "3.0-sdk-g711-beta-micgate";
 
     // =========================
     // CONFIG
@@ -68,8 +55,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private int _greetingSent;
     private int _syncCallCount;
     private int _bookingConfirmed;
-    private int _responseCancelling;     // #4: tracks cancel-in-progress
-    private int _inGreetingPhase;        // #7: suppress watchdog until first user speech
+
     private long _lastAdaFinishedAt;
     private long _lastUserSpeechAt;
 
@@ -77,22 +63,31 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private string? _activeResponseId;
     private string? _lastAdaTranscript;
     private bool _awaitingConfirmation;
-    private bool _useSemanticVad = true;   // default: semantic for better address collection
-    private float _semanticEagerness = 0.5f; // low = patient, high = quick
-    // Transcript comparison: stash Whisper STT for mismatch detection
-    private string? _lastUserTranscript;
+    private bool _useSemanticVad = true;
+    private float _semanticEagerness = 0.5f;
 
-    /// <summary>Last Whisper STT transcript for mismatch comparison in tool calls.</summary>
+    // Transcript comparison
+    private string? _lastUserTranscript;
     public string? LastUserTranscript => _lastUserTranscript;
 
-    /// <summary>
-    /// Optional callback that provides stage-aware context for the no-reply watchdog.
-    /// When set, the watchdog will inject contextual re-prompts instead of generic "[SILENCE]".
-    /// </summary>
     public Func<string?>? NoReplyContextProvider { get; set; }
 
     // Caller state
     private string _callerId = "";
+
+    // =========================
+    // MIC GATE / ECHO CONTROL (v3.0)
+    // =========================
+    private long _micGateUntilMs;                   // if NowMs() < this, ignore SendAudio()
+    private int _drainGateTaskId;                   // prevents overlapping drain tasks
+    private int _suppressWatchdogUntilUserSpeech;   // set to 1 after greeting; cleared once user speaks
+
+    // Tune these:
+    private const int ECHO_TAIL_MS = 800;           // SIP needs a longer tail than 200ms
+    private const int DRAIN_POLL_MS = 20;
+    private const int DRAIN_MAX_MS = 2000;          // cap waiting for playout drain
+
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     // =========================
     // CONSTANTS
@@ -101,17 +96,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private const int NO_REPLY_TIMEOUT_MS = 8_000;
     private const int CONFIRMATION_TIMEOUT_MS = 15_000;
     private const int DISAMBIGUATION_TIMEOUT_MS = 30_000;
-    private const int ECHO_GUARD_MS = 500;  // #6: increased from 200ms for SIP echo tail
 
-    // =========================
-    // #3: CENTRALIZED SDK TYPE NAME CONSTANTS (beta SDK uses internal types)
-    // =========================
-    private const string TYPE_SESSION_STARTED = "SessionStarted";
-    private const string TYPE_SESSION_CREATED = "SessionCreated";
-    private const string TYPE_RESPONSE_STARTED = "ResponseStarted";
-    private const string TYPE_RESPONSE_CREATED = "ResponseCreated";
-    private const string TYPE_RESPONSE_DONE = "ResponseDone";
-    private const string TYPE_RESPONSE_FINISHED = "ResponseFinished";
+    // (Kept, but no longer the only protection)
+    private const int ECHO_GUARD_MS = 200;
 
     // =========================
     // NON-BLOCKING LOGGER
@@ -142,8 +129,6 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
     /// <summary>Optional: query playout queue depth for drain-aware shutdown.</summary>
     public Func<int>? GetQueuedFrames { get; set; }
-
-    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     // =========================
     // CONSTRUCTOR
@@ -199,8 +184,6 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _greetingSent, 0);
         Interlocked.Exchange(ref _syncCallCount, 0);
         Interlocked.Exchange(ref _bookingConfirmed, 0);
-        Interlocked.Exchange(ref _responseCancelling, 0);
-        Interlocked.Exchange(ref _inGreetingPhase, 1);  // #7: suppress watchdog until first speech
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         _activeResponseId = null;
@@ -210,6 +193,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         Volatile.Write(ref _lastAdaFinishedAt, 0);
         Volatile.Write(ref _lastUserSpeechAt, 0);
+
+        // v3.0: mic gate reset
+        Volatile.Write(ref _micGateUntilMs, 0);
+        Interlocked.Exchange(ref _drainGateTaskId, 0);
+        Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 0);
     }
 
     // =========================
@@ -342,17 +330,30 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         if (!IsConnected || alawData == null || alawData.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
-        // Suppress user audio while a critical tool (book_taxi, end_call) is in flight
+
+        // Suppress user audio while a critical tool is in flight
         if (Volatile.Read(ref _toolInFlight) == 1) return;
-        // ── Echo suppression: block mic audio in the echo guard window after Ada finishes ──
-        // SIP has no AEC — without this, Ada's voice echo in the tail frames gets
-        // transcribed as phantom user speech ("Thank you. Thank you. Thank you.")
+
+        // v3.0: Strong mic gate — blocks while playout draining + tail
+        var gateUntil = Volatile.Read(ref _micGateUntilMs);
+        if (gateUntil > 0 && NowMs() < gateUntil) return;
+
+        // Optional: if we can query playout queue, also block while it's non-empty
+        if (GetQueuedFrames != null)
+        {
+            try
+            {
+                if (GetQueuedFrames() > 0) return;
+            }
+            catch { }
+        }
+
+        // Legacy echo guard (kept as belt-and-suspenders)
         var adaFinished = Volatile.Read(ref _lastAdaFinishedAt);
         if (adaFinished > 0 && NowMs() - adaFinished < ECHO_GUARD_MS) return;
 
         try
         {
-            // Beta SDK: SendInputAudio takes BinaryData
             _session!.SendInputAudio(new BinaryData(alawData));
             Volatile.Write(ref _lastUserSpeechAt, NowMs());
         }
@@ -371,15 +372,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         try
         {
             Log("🛑 Cancelling response");
-            Interlocked.Exchange(ref _responseCancelling, 1);  // #4: mark cancel in-progress
             await _session!.CancelResponseAsync();
-            // Don't clear _responseActive here — wait for ResponseDone event to avoid desync
+            // Don't force _responseActive=0 here; let lifecycle updates do it.
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error cancelling response");
-            Interlocked.Exchange(ref _responseCancelling, 0);
-            Interlocked.Exchange(ref _responseActive, 0);  // Fallback: clear on error
         }
     }
 
@@ -392,18 +390,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
-            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("DISAMBIGUATION") || message.Contains("[FARE SANITY ALERT]") || message.Contains("[ADDRESS DISCREPANCY]");
+            bool isCritical = message.Contains("[FARE RESULT]") || message.Contains("DISAMBIGUATION") ||
+                              message.Contains("[FARE SANITY ALERT]") || message.Contains("[ADDRESS DISCREPANCY]");
+
             if (isCritical && Volatile.Read(ref _responseActive) == 1)
             {
                 Log("🛑 Cancelling active response before critical injection");
                 await _session!.CancelResponseAsync();
-                // #4: Wait for observed response-done instead of immediately clearing
-                for (int i = 0; i < 20; i++)
-                {
-                    await Task.Delay(50);
-                    if (Volatile.Read(ref _responseActive) == 0) break;
-                }
-                Interlocked.Exchange(ref _responseCancelling, 0);
             }
 
             Log($"💉 Injecting: {(message.Length > 80 ? message[..80] + "..." : message)}");
@@ -419,7 +412,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
     /// <summary>
     /// Inject a system-level message into the conversation WITHOUT triggering a response.
-    /// Used for booking state injection so Ada has ground truth context.
+    /// NOTE: Beta SDK doesn't expose true system-role items here; this is best-effort.
     /// </summary>
     public async Task InjectSystemMessageAsync(string message)
     {
@@ -430,7 +423,6 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             Log($"📋 State inject: {(message.Length > 80 ? message[..80] + "..." : message)}");
             await _session!.AddItemAsync(
                 ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
-            // NOTE: No StartResponseAsync() — this is a silent context injection
         }
         catch (Exception ex)
         {
@@ -443,8 +435,15 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     public void NotifyPlayoutComplete()
     {
-        Volatile.Write(ref _lastAdaFinishedAt, NowMs());
+        // If your RTP layer calls this reliably when queue hits 0, we arm the mic gate tail here too.
+        var now = NowMs();
+        Volatile.Write(ref _lastAdaFinishedAt, now);
+        Volatile.Write(ref _micGateUntilMs, now + ECHO_TAIL_MS);
+        Log($"✅ Playout complete — mic gated for tail {ECHO_TAIL_MS}ms");
+
         OnPlayoutComplete?.Invoke();
+
+        // Watchdog should only start once user has spoken (post-greeting); StartNoReplyWatchdog handles suppression.
         StartNoReplyWatchdog();
     }
 
@@ -536,7 +535,6 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         {
             // ── SPEECH DETECTION ──
             case ConversationInputSpeechStartedUpdate:
-                Interlocked.Exchange(ref _inGreetingPhase, 0);  // #7: first speech clears greeting phase
                 HandleSpeechStarted();
                 break;
 
@@ -584,9 +582,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
             // ── USER TRANSCRIPT ──
             case ConversationInputTranscriptionFinishedUpdate userTranscript:
+                // First user speech seen — allow watchdog now
+                Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 0);
+
                 Interlocked.Exchange(ref _noReplyCount, 0);
                 var transcript = userTranscript.Transcript;
-                _lastUserTranscript = transcript; // Stash for mismatch comparison
+                _lastUserTranscript = transcript;
                 OnTranscript?.Invoke("User", transcript);
 
                 // TRANSCRIPT GROUNDING: inject the exact STT words back into
@@ -628,31 +629,35 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
     /// <summary>
     /// Handle response lifecycle and other events that don't have dedicated types in the beta SDK.
-    /// We match on the type name since the beta SDK generates internal types for these events.
     /// </summary>
     private void HandleGenericUpdate(ConversationUpdate update)
     {
         var typeName = update.GetType().Name;
 
-        // #3: Use centralized constants for SDK type matching
-        if (typeName.Contains(TYPE_SESSION_STARTED) || typeName.Contains(TYPE_SESSION_CREATED))
+        if (typeName.Contains("SessionStarted") || typeName.Contains("SessionCreated"))
         {
             Log("✅ Realtime Session Started");
         }
-        else if (typeName.Contains(TYPE_RESPONSE_STARTED) || typeName.Contains(TYPE_RESPONSE_CREATED))
+        else if (typeName.Contains("ResponseStarted") || typeName.Contains("ResponseCreated"))
         {
             Interlocked.Exchange(ref _responseActive, 1);
             Interlocked.Exchange(ref _hasEnqueuedAudio, 0);
-            // Cancel any pending no-reply watchdog — Ada is about to speak
+
+            // Cancel watchdog while Ada is speaking
             Interlocked.Increment(ref _noReplyWatchdogId);
+
+            // v3.0: While response is active, proactively gate mic.
+            Volatile.Write(ref _micGateUntilMs, NowMs() + 250);
             Log("🎤 Response started");
         }
-        else if (typeName.Contains(TYPE_RESPONSE_DONE) || typeName.Contains(TYPE_RESPONSE_FINISHED))
+        else if (typeName.Contains("ResponseDone") || typeName.Contains("ResponseFinished"))
         {
             Interlocked.Exchange(ref _responseActive, 0);
-            Interlocked.Exchange(ref _responseCancelling, 0);  // #4: clear cancel flag on observed done
             Log("✋ Response finished");
             OnResponseCompleted?.Invoke();
+
+            // v3.0: Arm a drain-aware mic gate even if NotifyPlayoutComplete is missing/unreliable.
+            ArmMicGateAfterDrain();
 
             if (Interlocked.CompareExchange(ref _deferredResponsePending, 0, 1) == 1)
             {
@@ -677,12 +682,55 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 });
             }
         }
-        else
+    }
+
+    // =========================
+    // MIC GATE ARMING (v3.0)
+    // =========================
+    private void ArmMicGateAfterDrain()
+    {
+        // Ensure only the latest drain task controls the gate.
+        var taskId = Interlocked.Increment(ref _drainGateTaskId);
+
+        _ = Task.Run(async () =>
         {
-            // #3: Log unknown types (sampled) to detect SDK drift early
-            if (!typeName.Contains("InputAudio") && !typeName.Contains("RateLimit"))
-                Log($"📎 Unknown update type: {typeName}");
-        }
+            try
+            {
+                var start = NowMs();
+                int lastQ = -1;
+
+                // Wait for RTP queue to drain (if available), but cap the wait
+                if (GetQueuedFrames != null)
+                {
+                    while (NowMs() - start < DRAIN_MAX_MS)
+                    {
+                        int q;
+                        try { q = GetQueuedFrames(); }
+                        catch { break; }
+
+                        if (q != lastQ)
+                        {
+                            lastQ = q;
+                            Log($"🔊 Playout queue depth: {q} frames");
+                        }
+
+                        if (q <= 0) break;
+                        await Task.Delay(DRAIN_POLL_MS);
+                    }
+                }
+
+                // Only apply if still the latest task
+                if (Interlocked.CompareExchange(ref _drainGateTaskId, taskId, taskId) != taskId)
+                    return;
+
+                var now = NowMs();
+                Volatile.Write(ref _lastAdaFinishedAt, now);
+                Volatile.Write(ref _micGateUntilMs, now + ECHO_TAIL_MS);
+
+                Log($"🔇 Mic gate armed until {DateTimeOffset.FromUnixTimeMilliseconds(now + ECHO_TAIL_MS):HH:mm:ss.fff} (tail {ECHO_TAIL_MS}ms)");
+            }
+            catch { }
+        });
     }
 
     // =========================
@@ -769,6 +817,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     private void HandleSpeechStarted()
     {
+        // User spoke: allow watchdog from here onward
+        Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 0);
+
         Interlocked.Increment(ref _noReplyWatchdogId);
 
         if (Volatile.Read(ref _responseActive) == 1 && Volatile.Read(ref _hasEnqueuedAudio) == 1)
@@ -788,6 +839,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
+            // v3.0: suppress watchdog until the user speaks once
+            Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 1);
             var lang = DetectLanguageStatic(_callerId);
             var langName = GetLanguageNameStatic(lang);
             var localizedGreeting = GetLocalizedGreetingStatic(lang);
@@ -827,6 +880,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         try
         {
+            // v3.0: suppress watchdog until the user speaks once
+            Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 1);
             var lang = DetectLanguageStatic(_callerId);
             var langName = GetLanguageNameStatic(lang);
 
@@ -912,8 +967,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         if (Volatile.Read(ref _callEnded) != 0) return;
         if (Volatile.Read(ref _toolInFlight) == 1) return;
-        // #7: Don't start watchdog during greeting phase — wait for first user speech
-        if (Volatile.Read(ref _inGreetingPhase) == 1) return;
+
+        // v3.0: After greeting, do not nag until the user speaks at least once.
+        if (Volatile.Read(ref _suppressWatchdogUntilUserSpeech) == 1)
+        {
+            Log("⏳ Watchdog suppressed (waiting for first user speech)");
+            return;
+        }
 
         var count = Volatile.Read(ref _noReplyCount);
         if (count >= MAX_NO_REPLY_PROMPTS)
@@ -934,22 +994,23 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _responseActive) == 1) return;
             if (Volatile.Read(ref _toolInFlight) == 1) return;
             if (Volatile.Read(ref _callEnded) != 0) return;
-            if (Volatile.Read(ref _ignoreUserAudio) == 1) return;  // Goodbye already said — don't re-prompt
+            if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
             if (!IsConnected) return;
 
-            var sinceAdaFinished = NowMs() - Volatile.Read(ref _lastAdaFinishedAt);
-            if (sinceAdaFinished < ECHO_GUARD_MS) return;
+            // v3.0: if mic is currently gated, don't watchdog prompt
+            var gateUntil = Volatile.Read(ref _micGateUntilMs);
+            if (gateUntil > 0 && NowMs() < gateUntil) return;
 
             Interlocked.Increment(ref _noReplyCount);
             Log($"⏰ No-reply watchdog triggered (attempt {Volatile.Read(ref _noReplyCount)}/{MAX_NO_REPLY_PROMPTS})");
 
             try
             {
-                // Use stage-aware context if available, otherwise generic re-prompt
                 var context = NoReplyContextProvider?.Invoke();
                 var message = !string.IsNullOrWhiteSpace(context)
                     ? $"[SILENCE] {context}"
                     : "[SILENCE] Hello? Are you still there?";
+
                 await _session!.AddItemAsync(
                     ConversationItem.CreateUserMessage(new[] { ConversationContentPart.CreateInputTextPart(message) }));
                 await _session.StartResponseAsync();
@@ -975,7 +1036,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 var active = Volatile.Read(ref _responseActive) == 1;
                 var ended = Volatile.Read(ref _callEnded) == 1;
                 var tool = Volatile.Read(ref _toolInFlight) == 1;
-                Log($"💓 Keepalive: connected={IsConnected}, response_active={active}, tool={tool}, ended={ended}");
+                var gate = Volatile.Read(ref _micGateUntilMs);
+                var q = -1;
+                try { if (GetQueuedFrames != null) q = GetQueuedFrames(); } catch { }
+
+                Log($"💓 Keepalive: connected={IsConnected}, response_active={active}, tool={tool}, ended={ended}, mic_gate_ms={(gate > NowMs() ? gate - NowMs() : 0)}, queued_frames={q}");
             }
         }
         catch (OperationCanceledException) { }
