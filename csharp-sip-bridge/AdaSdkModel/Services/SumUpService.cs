@@ -1,27 +1,28 @@
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using AdaSdkModel.Config;
 using Microsoft.Extensions.Logging;
-using SumUp;
 
 namespace AdaSdkModel.Services;
 
 /// <summary>
 /// Generates SumUp payment checkout links for fixed-price taxi bookings.
-/// Uses the official SumUp .NET SDK.
+/// Uses direct REST API calls for maximum compatibility with sup_sk_ API keys.
 /// </summary>
-public sealed class SumUpService
+public sealed class SumUpService : IDisposable
 {
     private readonly ILogger<SumUpService> _logger;
     private readonly SumUpSettings _settings;
-    private readonly SumUpClient _client;
+    private readonly HttpClient _http;
 
     public SumUpService(ILogger<SumUpService> logger, SumUpSettings settings)
     {
         _logger = logger;
         _settings = settings;
-        _client = new SumUpClient(new SumUpClientOptions
-        {
-            AccessToken = _settings.ApiKey
-        });
+        _http = new HttpClient { BaseAddress = new Uri("https://api.sumup.com/"), Timeout = TimeSpan.FromSeconds(10) };
+        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _settings.ApiKey);
     }
 
     /// <summary>
@@ -50,31 +51,39 @@ public sealed class SumUpService
         {
             var checkoutRef = $"{_settings.MerchantCode}-{bookingRef}-{DateTime.UtcNow:HHmmss}";
 
-            // Map currency string (e.g. "GBP") to SDK enum (e.g. Currency.Gbp)
-            var currency = _settings.Currency?.ToUpperInvariant() switch
+            _logger.LogInformation("[SumUp] Creating checkout: ref={Ref}, amount={Amount} {Currency}",
+                checkoutRef, amount, _settings.Currency ?? "GBP");
+
+            var payload = new
             {
-                "GBP" => Currency.Gbp,
-                "EUR" => Currency.Eur,
-                "USD" => Currency.Usd,
-                _ => Currency.Gbp  // default
+                amount = Math.Round(amount, 2),
+                currency = _settings.Currency?.ToUpperInvariant() ?? "GBP",
+                checkout_reference = checkoutRef,
+                merchant_code = _settings.MerchantCode,
+                description
             };
 
-            _logger.LogInformation("[SumUp] Creating checkout: ref={Ref}, amount={Amount} {Currency}",
-                checkoutRef, amount, currency);
-
-            var response = await _client.Checkouts.CreateAsync(new CheckoutCreateRequest
+            var json = JsonSerializer.Serialize(payload);
+            using var req = new HttpRequestMessage(HttpMethod.Post, "v0.1/checkouts")
             {
-                Amount = (float)Math.Round(amount, 2),
-                Currency = currency,
-                CheckoutReference = checkoutRef,
-                MerchantCode = _settings.MerchantCode,
-                Description = description
-            });
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
 
-            var checkoutId = response.Data?.Id;
+            var resp = await _http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[SumUp] HTTP {Status}: {Body}", (int)resp.StatusCode, body);
+                return null;
+            }
+
+            var result = JsonSerializer.Deserialize<SumUpCheckoutResponse>(body);
+            var checkoutId = result?.Id;
+
             if (string.IsNullOrWhiteSpace(checkoutId))
             {
-                _logger.LogWarning("[SumUp] Checkout response missing 'id'");
+                _logger.LogWarning("[SumUp] Response missing 'id': {Body}", body);
                 return null;
             }
 
@@ -87,5 +96,13 @@ public sealed class SumUpService
             _logger.LogError(ex, "[SumUp] Exception creating checkout for {BookingRef}", bookingRef);
             return null;
         }
+    }
+
+    public void Dispose() => _http?.Dispose();
+
+    private sealed class SumUpCheckoutResponse
+    {
+        [JsonPropertyName("id")]
+        public string? Id { get; set; }
     }
 }
