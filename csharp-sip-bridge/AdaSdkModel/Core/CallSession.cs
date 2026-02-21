@@ -221,6 +221,7 @@ public sealed class CallSession : ICallSession
                         if (_booking.BookingRef != null)
                         {
                             _currentStage = BookingStage.AnythingElse;
+                            _aiClient.SetAwaitingConfirmation(true);
                         await _aiClient.InjectMessageAndRespondAsync(
                             $"[BOOKING CONFIRMED BY SYSTEM] Reference: {_booking.BookingRef}. " +
                             "Tell the caller their booking reference, then ask: 'Is there anything else you'd like to add to your booking? " +
@@ -2042,6 +2043,7 @@ public sealed class CallSession : ICallSession
             });
 
             _currentStage = BookingStage.AnythingElse;
+            _aiClient.SetAwaitingConfirmation(true); // Use longer watchdog timeout for "anything else?" stage
             return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: Your booking reference is {_booking.BookingRef}. Then ask: 'Is there anything else you'd like to add to your booking? For example, a flight number, special requests, or any notes for the driver?' If they provide notes, call sync_booking_data(special_instructions='[their notes]') to save them, confirm you've added it, and ask again. When they say no, say the FINAL CLOSING script and call end_call." };
         }
 
