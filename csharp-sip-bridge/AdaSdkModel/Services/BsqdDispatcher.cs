@@ -64,9 +64,9 @@ public sealed class BsqdDispatcher : IDispatcher
         if (string.IsNullOrEmpty(_settings.BsqdWebhookUrl)) return false;
         try
         {
-            var etaField = string.IsNullOrWhiteSpace(booking.PaymentLink)
-                ? booking.Eta
-                : $"{booking.Eta} | Pay: {booking.PaymentLink}";
+            var priceField = string.IsNullOrWhiteSpace(booking.PaymentLink)
+                ? ParseFare(booking.Fare)
+                : $"{ParseFare(booking.Fare)} | Pay: {booking.PaymentLink}";
 
             var payload = new
             {
@@ -76,10 +76,10 @@ public sealed class BsqdDispatcher : IDispatcher
                 formatted_pickup_time = FormatPickupTime(booking),
                 booking_type = IsAsapBooking(booking) ? "immediate" : "advance",
                 first_name = booking.Name ?? "Customer",
-                total_price = ParseFare(booking.Fare),
+                total_price = priceField,
                 phoneNumber = FormatE164(phoneNumber),
                 passengers = (booking.Passengers ?? 1).ToString(),
-                eta = etaField,
+                eta = booking.Eta,
                 payment_link = booking.PaymentLink
             };
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, WriteIndented = true });
