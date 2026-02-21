@@ -29,6 +29,11 @@ public sealed class CallSession : ICallSession
     private int _bookTaxiCompleted;
     private long _lastAdaFinishedAt;
 
+    // Fare sanity guard
+    private int _fareSanityAlertCount;
+    private string? _lastSanityAlertDestination;
+    private volatile bool _fareSanityActive;
+
     public string SessionId { get; }
     public string CallerId { get; }
     public DateTime StartedAt { get; } = DateTime.UtcNow;

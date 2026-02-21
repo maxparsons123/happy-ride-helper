@@ -8,6 +8,7 @@ public sealed class BookingState
 {
     // Core booking fields
     public string? Name { get; set; }
+    public string? CallerName { get; set; }
     public string? CallerPhone { get; set; }
     public string? Pickup { get; set; }
     public string? Destination { get; set; }
@@ -19,6 +20,7 @@ public sealed class BookingState
     public string? BookingRef { get; set; }
     public string VehicleType { get; set; } = "Saloon";
     public string? PaymentPreference { get; set; }
+    public string? PaymentLink { get; set; }
     public int BiddingWindowSec { get; set; } = 45;
 
     public static string RecommendVehicle(int passengers) => passengers switch
@@ -50,10 +52,11 @@ public sealed class BookingState
 
     public void Reset()
     {
-        Name = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
+        Name = CallerName = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
         VehicleType = "Saloon";
         PaymentPreference = null;
+        PaymentLink = null;
         BiddingWindowSec = 45;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
