@@ -19,6 +19,8 @@ public partial class MainForm : Form
     private bool _inCall;
     private bool _muted;
     private bool _operatorMode;
+    private volatile bool _monitorAdaEnabled = true;
+    private volatile bool _monitorCallerEnabled = true;
     private bool _pttActive;
     private float _operatorMicGain = 2.0f; // Default 2x boost for operator mic output
 
@@ -351,10 +353,10 @@ public partial class MainForm : Form
                 _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             };
 
-            // Feed caller audio to monitor speakers during AI calls too
+            // Feed caller audio to monitor speakers during AI calls
             _sipServer.OnCallerAudioMonitor += alawFrame =>
             {
-                // Dispatch off network thread to prevent RTP jitter
+                if (!_monitorCallerEnabled) return;
                 var copy = new byte[alawFrame.Length];
                 Buffer.BlockCopy(alawFrame, 0, copy, 0, alawFrame.Length);
                 ThreadPool.QueueUserWorkItem(_ => _monitorBuffer?.AddSamples(copy, 0, copy.Length));
@@ -458,12 +460,10 @@ public partial class MainForm : Form
         {
             if (_simliAvatar?.IsConnected == true)
             {
-                // Avatar is active – route audio to avatar only (it has its own speaker)
                 FeedSimliAudio(alawFrame);
             }
-            else
+            else if (_monitorAdaEnabled)
             {
-                // Copy frame so RTP playout thread isn't blocked by NAudio
                 var copy = new byte[alawFrame.Length];
                 Buffer.BlockCopy(alawFrame, 0, copy, 0, alawFrame.Length);
                 ThreadPool.QueueUserWorkItem(_ => _monitorBuffer?.AddSamples(copy, 0, copy.Length));
