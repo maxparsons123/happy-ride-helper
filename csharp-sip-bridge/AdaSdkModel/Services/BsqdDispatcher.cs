@@ -67,12 +67,13 @@ public sealed class BsqdDispatcher : IDispatcher
         {
             var fareAmount = ParseFare(booking.Fare);
 
-            // ETA field: conversational arrival message + fare + payment link
-            var etaField = booking.Eta ?? "";
-            if (!string.IsNullOrWhiteSpace(fareAmount))
-                etaField = $"{etaField} | £{fareAmount}";
+            // total_price: fare + payment link
+            var priceField = fareAmount;
             if (!string.IsNullOrWhiteSpace(booking.PaymentLink))
-                etaField = $"{etaField} Pay: {booking.PaymentLink}";
+                priceField = $"{fareAmount} | Pay: {booking.PaymentLink}";
+
+            // ETA field: just the conversational arrival message
+            var etaField = booking.Eta ?? "";
 
             var payload = new
             {
@@ -82,7 +83,7 @@ public sealed class BsqdDispatcher : IDispatcher
                 formatted_pickup_time = FormatPickupTime(booking),
                 booking_type = IsAsapBooking(booking) ? "immediate" : "advance",
                 first_name = booking.Name ?? "Customer",
-                total_price = fareAmount,
+                total_price = priceField,
                 phoneNumber = FormatE164(phoneNumber),
                 passengers = (booking.Passengers ?? 1).ToString(),
                 eta = etaField,
@@ -174,12 +175,13 @@ public sealed class BsqdDispatcher : IDispatcher
 
             var fareStr = ParseFare(booking.Fare);
 
-            // Build ETA field for MQTT — conversational ETA + fare + payment link (same as BSQD webhook)
-            var mqttEta = booking.Eta ?? "";
-            if (!string.IsNullOrWhiteSpace(booking.Fare))
-                mqttEta = $"{mqttEta} | £{ParseFare(booking.Fare)}";
+            // Fare field: fare + payment link
+            var mqttFare = fareStr;
             if (!string.IsNullOrWhiteSpace(booking.PaymentLink))
-                mqttEta = $"{mqttEta} Pay: {booking.PaymentLink}";
+                mqttFare = $"{fareStr} | Pay: {booking.PaymentLink}";
+
+            // ETA field: just the conversational arrival message
+            var mqttEta = booking.Eta ?? "";
 
             var payload = JsonSerializer.Serialize(new
             {
@@ -196,8 +198,8 @@ public sealed class BsqdDispatcher : IDispatcher
                 customerPhone = FormatE164(phoneNumber),
                 callerName = booking.Name ?? "Customer",
                 callerPhone = FormatE164(phoneNumber),
-                fare = fareStr,
-                estimatedFare = fareStr,
+                fare = mqttFare,
+                estimatedFare = mqttFare,
                 eta = mqttEta,
                 notes = booking.ScheduledAt.HasValue ? "Advance booking" : (booking.PickupTime ?? "None"),
                 specialRequirements = booking.ScheduledAt.HasValue ? "Advance booking" : (booking.PickupTime ?? "None"),
