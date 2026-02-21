@@ -98,8 +98,8 @@ public sealed class SumUpService : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError("[SumUp] Exception creating checkout for {BookingRef}: {Type}: {Msg}",
-                bookingRef, ex.GetType().Name, ex.Message);
+            _logger.LogError(ex, "[SumUp] Exception creating checkout for {BookingRef}: {Type}: {Msg} | Inner: {Inner}",
+                bookingRef, ex.GetType().Name, ex.Message, ex.InnerException?.Message ?? "none");
             return null;
         }
     }
