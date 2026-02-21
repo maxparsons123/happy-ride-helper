@@ -262,7 +262,13 @@ partial class MainForm
         btnClearLogs.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         btnClearLogs.Click += (s, e) => txtLog.Clear();
 
-        grpLogs.Controls.AddRange(new Control[] { txtLog, btnClearLogs });
+        chkMonitorAda = new CheckBox { Text = "🔊 Ada", Location = new Point(100, 254), Size = new Size(80, 23), ForeColor = Color.FromArgb(100, 200, 255), Checked = true, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
+        chkMonitorAda.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+
+        chkMonitorCaller = new CheckBox { Text = "🔊 Caller", Location = new Point(185, 254), Size = new Size(90, 23), ForeColor = Color.FromArgb(255, 200, 100), Checked = true, Font = new Font("Segoe UI", 8F, FontStyle.Bold) };
+        chkMonitorCaller.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+
+        grpLogs.Controls.AddRange(new Control[] { txtLog, btnClearLogs, chkMonitorAda, chkMonitorCaller });
 
         // ══════════════════════════════════════
         //  STATUS BAR
@@ -344,6 +350,7 @@ partial class MainForm
     private GroupBox grpLogs;
     private RichTextBox txtLog;
     private Button btnClearLogs;
+    private CheckBox chkMonitorAda, chkMonitorCaller;
 
     // Status bar
     private StatusStrip statusStrip;

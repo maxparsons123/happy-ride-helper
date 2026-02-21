@@ -322,7 +322,8 @@ public partial class MainForm : Form
 
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
-                _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+                if (chkMonitorCaller.Checked)
+                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             };
 
             _sipServer.OnCallEnded += (sessionId, reason) => SafeInvoke(() =>
@@ -451,7 +452,8 @@ public partial class MainForm : Form
             else
             {
                 // No avatar – fall back to local monitor speakers
-                _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+                if (chkMonitorAda.Checked)
+                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             }
         };
 

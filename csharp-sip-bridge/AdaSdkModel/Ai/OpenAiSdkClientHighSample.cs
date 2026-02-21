@@ -267,6 +267,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
             options.Tools.Add(OpenAiSdkClient.BuildBookTaxiToolStatic());
             options.Tools.Add(OpenAiSdkClient.BuildCreateBookingToolStatic());
             options.Tools.Add(OpenAiSdkClient.BuildFindLocalEventsToolStatic());
+            options.Tools.Add(OpenAiSdkClient.BuildCancelBookingToolStatic());
+            options.Tools.Add(OpenAiSdkClient.BuildCheckBookingStatusToolStatic());
             options.Tools.Add(OpenAiSdkClient.BuildEndCallToolStatic());
 
             await _session.ConfigureSessionAsync(options);
