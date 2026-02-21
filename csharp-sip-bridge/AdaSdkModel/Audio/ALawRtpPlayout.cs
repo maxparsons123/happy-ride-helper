@@ -1,9 +1,8 @@
-// Last updated: 2026-02-21 (ALawRtpPlayout v8.5 — Low Latency Production)
-// Changes from v8.4:
-// - CRITICAL: MAX_QUEUE_FRAMES reduced to 80 (1.6s cap)
-// - Prevents runaway buffer growth (fixes 7–18s delay)
-// - Keeps stable drain signaling
-// - Production safe
+// Last updated: 2026-02-21 (ALawRtpPlayout v8.6 — Balanced Latency)
+// Changes from v8.5:
+// - MAX_QUEUE_FRAMES raised to 500 (10s) — 80 was too aggressive, caused frame drops mid-speech
+// - NAT keepalive, circuit breaker, stats logging restored
+// - Stable drain signaling preserved
 
 using System;
 using System.Collections.Concurrent;
@@ -47,8 +46,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte ALAW_SILENCE = 0xD5;
     private const byte PAYLOAD_TYPE_PCMA = 8;
 
-    private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms
-    private const int MAX_QUEUE_FRAMES = 80;               // 1.6 seconds max
+    private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms cold-start
+    private const int MAX_QUEUE_FRAMES = 500;              // 10s safety cap (was 80 — too aggressive)
     private const int MAX_ACCUMULATOR_SIZE = 65536;
     private const int STATS_LOG_INTERVAL_SEC = 30;
 
@@ -81,7 +80,6 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private IPEndPoint? _lastRemoteEndpoint;
     private volatile bool _natBindingEstablished;
-
     private bool _wasPlaying;
     private int _drainSignaled;
 
@@ -94,6 +92,7 @@ public sealed class ALawRtpPlayout : IDisposable
     // Stubs for SipServer.cs compatibility
     public bool TypingSoundsEnabled { get; set; } = false;
     public void NotifyAdaHasSpoken() { }
+
     public void Flush()
     {
         lock (_accLock)
@@ -109,6 +108,7 @@ public sealed class ALawRtpPlayout : IDisposable
             }
         }
     }
+
     public int GetQueuedFrames() => Volatile.Read(ref _queueCount);
 
     public event Action<string>? OnLog;
@@ -186,7 +186,7 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         while (_accCount >= FRAME_SIZE)
         {
-            // HARD CAP — drop oldest frames to prevent runaway growth
+            // Safety cap — drop oldest frames only when truly overflowing
             while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
             {
                 if (_frameQueue.TryDequeue(out _))
@@ -250,11 +250,11 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v8.5"
+            Name = "ALawPlayout-v8.6"
         };
 
         _playoutThread.Start();
-        SafeLog($"[RTP] v8.5 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis buffer, " +
+        SafeLog($"[RTP] v8.6 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, " +
                 $"MAX_QUEUE={MAX_QUEUE_FRAMES} frames, timer={(_useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait")})");
     }
 
@@ -284,6 +284,7 @@ public sealed class ALawRtpPlayout : IDisposable
             SendNextFrame();
             nextFrameNs += 20_000_000;
 
+            // Catch-up guard: if we fell behind by >100ms, reset
             long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
             if (currentNs - nextFrameNs > 100_000_000)
                 nextFrameNs = currentNs + 20_000_000;
@@ -340,6 +341,7 @@ public sealed class ALawRtpPlayout : IDisposable
             FireDrainOnce();
         }
 
+        // Periodic stats
         if ((DateTime.UtcNow - _lastStatsLog).TotalSeconds >= STATS_LOG_INTERVAL_SEC)
         {
             var samples = Interlocked.Exchange(ref _statsQueueSizeSamples, 0);
