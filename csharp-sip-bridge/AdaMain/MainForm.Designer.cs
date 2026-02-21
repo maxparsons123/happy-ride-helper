@@ -213,7 +213,13 @@ partial class MainForm
 
         lblCallInfo = new Label { Text = "No active call", Location = new Point(310, 82), Size = new Size(240, 15), ForeColor = Color.Gray, Font = new Font("Segoe UI", 8F) };
 
-        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, btnPtt, lblOpVolume, trkOpVolume, lblOpVolumeVal, lblCallInfo });
+        // Audio monitor switches
+        chkMonitorAda = new CheckBox { Text = "🔊 Ada", Location = new Point(15, 95), Size = new Size(80, 20), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 8F, FontStyle.Bold), Checked = true };
+        chkMonitorAda.CheckedChanged += (s, e) => { _monitorAdaEnabled = chkMonitorAda.Checked; Log($"🔊 Ada monitor: {(chkMonitorAda.Checked ? "ON" : "OFF")}"); };
+        chkMonitorCaller = new CheckBox { Text = "🔊 Caller", Location = new Point(100, 95), Size = new Size(90, 20), ForeColor = Color.LimeGreen, Font = new Font("Segoe UI", 8F, FontStyle.Bold), Checked = true };
+        chkMonitorCaller.CheckedChanged += (s, e) => { _monitorCallerEnabled = chkMonitorCaller.Checked; Log($"🔊 Caller monitor: {(chkMonitorCaller.Checked ? "ON" : "OFF")}"); };
+
+        grpCall.Controls.AddRange(new Control[] { btnAnswer, btnReject, btnHangUp, btnMute, chkManualMode, btnPtt, lblOpVolume, trkOpVolume, lblOpVolumeVal, lblCallInfo, chkMonitorAda, chkMonitorCaller });
 
         // ══════════════════════════════════════════
         //  SIMLI AVATAR GROUP (right side)
@@ -391,6 +397,8 @@ partial class MainForm
     private Label lblOpVolume;
     private TrackBar trkOpVolume;
     private Label lblOpVolumeVal;
+    private CheckBox chkMonitorAda;
+    private CheckBox chkMonitorCaller;
 
     // Avatar
     private GroupBox grpAvatar;
