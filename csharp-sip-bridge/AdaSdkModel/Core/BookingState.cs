@@ -122,6 +122,7 @@ public sealed class BookingState
         VehicleType = "Saloon";
         PaymentPreference = null;
         PaymentLink = null;
+        SpecialInstructions = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;
