@@ -338,6 +338,9 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         if (!IsConnected || alawData == null || alawData.Length == 0) return;
         if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
         if (Volatile.Read(ref _toolInFlight) == 1) return;
+        // ── Echo suppression: block mic audio in the echo guard window after Ada finishes ──
+        var adaFinished = Volatile.Read(ref _lastAdaFinishedAt);
+        if (adaFinished > 0 && NowMs() - adaFinished < ECHO_GUARD_MS) return;
 
         try
         {
