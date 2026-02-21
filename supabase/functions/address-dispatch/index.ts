@@ -330,7 +330,14 @@ serve(async (req) => {
   }
 
   try {
-    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number } = await req.json();
+    const body = await req.json();
+    
+    // Handle warm-up pings immediately
+    if (body.ping) {
+      return new Response(JSON.stringify({ status: "warm" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    
+    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number } = body;
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
