@@ -2135,32 +2135,74 @@ public sealed class CallSession : ICallSession
                 if (!string.IsNullOrWhiteSpace(bookingSnapshot.PaymentLink))
                     await SendSumUpLinkViaWhatsAppAsync(callerId, bookingSnapshot.PaymentLink, bookingSnapshot, sessionId);
 
-                // ── iCabbi CONFIRMED BOOKING (Phase 2 of 2) ─────────────────────────────────
-                // Phase 1 was GetFareQuoteAsync → gave Ada the official price/ETA to read back.
-                // Phase 2 (here): caller confirmed → send real booking to iCabbi dispatch.
-                // The fare in bookingSnapshot.Fare is already the iCabbi-quoted price.
-                if (_icabbiEnabled && _icabbi != null)
+                // ── iCabbi CONFIRMED BOOKING ─────────────────────────────────
+                if (_icabbi != null)
                 {
                     try
                     {
-                        _logger.LogInformation("[{SessionId}] 🚕 [Phase 2] Sending confirmed booking to iCabbi (siteId={SiteId}, fare={Fare})",
-                            sessionId, _settings.Icabbi.SiteId, bookingSnapshot.Fare);
-                        // Pass callerId explicitly so the correct phone always reaches iCabbi,
-                        // even if CallerPhone in the snapshot was cleared by an early clone.
-                        var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId, callerPhoneOverride: callerId);
-                        if (icabbiResult.Success)
+                        // If this is an AMENDMENT to an existing iCabbi booking, UPDATE instead of creating new
+                        if (!string.IsNullOrWhiteSpace(bookingSnapshot.IcabbiJourneyId))
                         {
-                            _logger.LogInformation("[{SessionId}] ✅ iCabbi booking confirmed — JourneyId: {JourneyId}, Tracking: {TrackingUrl}",
-                                sessionId, icabbiResult.JourneyId, icabbiResult.TrackingUrl);
-                            _booking.IcabbiJourneyId = icabbiResult.JourneyId;
-                            _ = SaveIcabbiJourneyIdAsync(bookingSnapshot.BookingRef, icabbiResult.JourneyId);
+                            _logger.LogInformation("[{SessionId}] ✏️ Updating existing iCabbi journey {JourneyId} with amended details",
+                                sessionId, bookingSnapshot.IcabbiJourneyId);
+
+                            var update = new AdaSdkModel.Services.IcabbiBookingUpdate
+                            {
+                                Name = bookingSnapshot.Name,
+                                Phone = callerId,
+                                Instructions = bookingSnapshot.SpecialInstructions,
+                                Passengers = bookingSnapshot.Passengers,
+                                PlannedDate = bookingSnapshot.ScheduledAt?.ToString("o"),
+                            };
+
+                            // Update destination if we have geocoded data
+                            if (bookingSnapshot.DestLat.HasValue && bookingSnapshot.DestLon.HasValue)
+                            {
+                                update.Destination = new AdaSdkModel.Services.IcabbiAddressPatch
+                                {
+                                    Lat = bookingSnapshot.DestLat,
+                                    Lng = bookingSnapshot.DestLon,
+                                    Formatted = bookingSnapshot.DestFormatted ?? bookingSnapshot.Destination
+                                };
+                            }
+
+                            // Update pickup address if we have geocoded data
+                            if (bookingSnapshot.PickupLat.HasValue && bookingSnapshot.PickupLon.HasValue)
+                            {
+                                update.Address = new AdaSdkModel.Services.IcabbiAddressPatch
+                                {
+                                    Lat = bookingSnapshot.PickupLat,
+                                    Lng = bookingSnapshot.PickupLon,
+                                    Formatted = bookingSnapshot.PickupFormatted ?? bookingSnapshot.Pickup
+                                };
+                            }
+
+                            var (ok, msg, _) = await _icabbi.UpdateBookingAsync(bookingSnapshot.IcabbiJourneyId, update);
+                            if (ok)
+                                _logger.LogInformation("[{SessionId}] ✅ iCabbi journey {JourneyId} updated", sessionId, bookingSnapshot.IcabbiJourneyId);
+                            else
+                                _logger.LogWarning("[{SessionId}] ⚠️ iCabbi update failed for {JourneyId}: {Msg}", sessionId, bookingSnapshot.IcabbiJourneyId, msg);
                         }
-                        else
-                            _logger.LogWarning("[{SessionId}] ⚠️ iCabbi booking failed: {Msg}", sessionId, icabbiResult.Message);
+                        // Otherwise create a NEW iCabbi booking (only if dispatch is enabled)
+                        else if (_icabbiEnabled)
+                        {
+                            _logger.LogInformation("[{SessionId}] 🚕 [Phase 2] Sending confirmed booking to iCabbi (siteId={SiteId}, fare={Fare})",
+                                sessionId, _settings.Icabbi.SiteId, bookingSnapshot.Fare);
+                            var icabbiResult = await _icabbi.CreateAndDispatchAsync(bookingSnapshot, _settings.Icabbi.SiteId, callerPhoneOverride: callerId);
+                            if (icabbiResult.Success)
+                            {
+                                _logger.LogInformation("[{SessionId}] ✅ iCabbi booking confirmed — JourneyId: {JourneyId}, Tracking: {TrackingUrl}",
+                                    sessionId, icabbiResult.JourneyId, icabbiResult.TrackingUrl);
+                                _booking.IcabbiJourneyId = icabbiResult.JourneyId;
+                                _ = SaveIcabbiJourneyIdAsync(bookingSnapshot.BookingRef, icabbiResult.JourneyId);
+                            }
+                            else
+                                _logger.LogWarning("[{SessionId}] ⚠️ iCabbi booking failed: {Msg}", sessionId, icabbiResult.Message);
+                        }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "[{SessionId}] iCabbi dispatch error", sessionId);
+                        _logger.LogWarning(ex, "[{SessionId}] iCabbi dispatch/update error", sessionId);
                     }
                 }
             });
