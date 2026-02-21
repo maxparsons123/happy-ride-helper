@@ -34,6 +34,7 @@ public sealed class CallSession : ICallSession
     // ── STAGE-AWARE INTENT GUARD ──
     private volatile BookingStage _currentStage = BookingStage.Greeting;
     private string? _lastUserTranscript;
+    private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private int _intentGuardFiring; // prevents re-entrant guard execution
 
     public string SessionId { get; }
@@ -84,10 +85,11 @@ public sealed class CallSession : ICallSession
         {
             OnTranscript?.Invoke(role, text);
 
-            // Track user transcripts for intent guard
+            // Track user transcripts for intent guard + input validation
             if (role == "user" && !string.IsNullOrWhiteSpace(text))
             {
                 _lastUserTranscript = text;
+                lock (_userTranscriptHistory) { _userTranscriptHistory.Add(text); }
             }
         };
 
@@ -494,11 +496,21 @@ public sealed class CallSession : ICallSession
                 sb.AppendLine($"  Scheduled for: {sf.GetString()}");
             sb.AppendLine();
             sb.AppendLine("ACTIONS AVAILABLE:");
-            sb.AppendLine("  - CANCEL: call cancel_booking(reason='caller_request')");
+            sb.AppendLine("  - CANCEL: call cancel_booking(confirmed=true, reason='caller_request')");
             sb.AppendLine("  - AMEND: modify fields using sync_booking_data, fare will auto-recalculate");
             sb.AppendLine("  - STATUS: call check_booking_status()");
             sb.AppendLine("  - NEW BOOKING: reset and proceed with normal flow");
-            sb.AppendLine("⚠️ Acknowledge the existing booking FIRST before asking for new details.");
+            sb.AppendLine();
+            sb.AppendLine("⚠️ CRITICAL INPUT VALIDATION RULES:");
+            sb.AppendLine("  1. Acknowledge the existing booking FIRST before asking for new details.");
+            sb.AppendLine("  2. You MUST ONLY act when the caller's response clearly matches one of the available actions.");
+            sb.AppendLine("  3. Valid cancel signals: 'cancel', 'cancel it', 'cancel the booking', 'get rid of it', 'don't need it'.");
+            sb.AppendLine("  4. Valid status signals: 'status', 'where is', 'how long', 'driver', 'ETA'.");
+            sb.AppendLine("  5. Valid amend signals: 'change', 'amend', 'update', 'different address', 'different time'.");
+            sb.AppendLine("  6. If the caller's response is UNCLEAR, GARBLED, or sounds like an ECHO of your own greeting, DO NOT assume any intent.");
+            sb.AppendLine("     Instead say: 'Sorry, I didn't quite catch that. Would you like to cancel, make changes, or check on your driver?'");
+            sb.AppendLine("  7. NEVER interpret background noise, echoes, or partial sentences as a cancellation request.");
+            sb.AppendLine("  8. For CANCEL specifically: you must ALWAYS ask for explicit verbal confirmation before calling cancel_booking.");
 
             _logger.LogInformation("[{SessionId}] 📋 Active booking loaded: {Id} ({Pickup} → {Dest})",
                 SessionId, _booking.ExistingBookingId, _booking.Pickup, _booking.Destination);
@@ -2514,6 +2526,34 @@ public sealed class CallSession : ICallSession
                 success = false,
                 error = "STOP. You must verbally confirm with the caller first. Ask: 'Just to confirm, you'd like me to cancel your booking?' " +
                         "Only call cancel_booking(confirmed=true) after the caller explicitly says yes."
+            };
+        }
+
+        // ── Transcript validation: ensure recent user messages actually contain cancellation intent ──
+        var cancelKeywords = new[] { "cancel", "don't need", "dont need", "get rid", "remove", "delete", "stop it", "no longer", "don't want", "dont want" };
+        var confirmKeywords = new[] { "yes", "yeah", "yep", "correct", "that's right", "thats right", "sure", "go ahead", "please do", "ok", "okay" };
+        List<string> recentUserMessages;
+        lock (_userTranscriptHistory)
+        {
+            recentUserMessages = _userTranscriptHistory
+                .TakeLast(3)
+                .Select(t => t.ToLowerInvariant())
+                .ToList();
+        }
+
+        var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
+        var hasConfirmation = recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
+
+        if (!hasCancelIntent && !hasConfirmation)
+        {
+            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — no cancellation keywords found in recent transcripts: [{Transcripts}]",
+                SessionId, string.Join(" | ", recentUserMessages));
+            return new
+            {
+                success = false,
+                error = "BLOCKED: The caller's recent messages do not contain any clear cancellation intent. " +
+                        "You may have misinterpreted background noise or echoed audio. " +
+                        "Ask the caller clearly: 'I'm sorry, I didn't quite catch that. Would you like to cancel your booking, make changes, or check on your driver?'"
             };
         }
 
