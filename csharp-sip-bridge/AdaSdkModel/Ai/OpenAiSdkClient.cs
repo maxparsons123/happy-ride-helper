@@ -83,7 +83,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private int _suppressWatchdogUntilUserSpeech;   // set to 1 after greeting; cleared once user speaks
 
     // Tune these:
-    private const int ECHO_TAIL_MS = 800;           // SIP needs a longer tail than 200ms
+    private const int ECHO_TAIL_MS = 600;           // Reduced from 800ms for faster turn-taking
     private const int DRAIN_POLL_MS = 20;
     private const int DRAIN_MAX_MS = 2000;          // cap waiting for playout drain
 
