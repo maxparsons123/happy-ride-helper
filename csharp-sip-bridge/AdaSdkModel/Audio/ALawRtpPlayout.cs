@@ -1,6 +1,7 @@
-// Last updated: 2026-02-21 (ALawRtpPlayout v8.7 — Underrun Grace)
+// Last updated: 2026-02-22 (ALawRtpPlayout v8.7 — Catch-up Guard + Underrun Grace)
 // Changes from v8.6:
 // - Added UNDERRUN_GRACE_FRAMES=5 (100ms) — prevents re-entering 200ms buffering mode on momentary queue gaps
+// - Tightened catch-up guard from 100ms to 40ms — prevents burst send causing audible speedup
 // - Eliminates mid-speech jitter caused by aggressive re-buffering
 // - MAX_QUEUE_FRAMES stays at 500
 
@@ -252,12 +253,12 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v8.6"
+            Name = "ALawPlayout-v8.7"
         };
 
         _playoutThread.Start();
-        SafeLog($"[RTP] v8.6 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, " +
-                $"MAX_QUEUE={MAX_QUEUE_FRAMES} frames, timer={(_useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait")})");
+        string timerType = _useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait";
+        SafeLog($"[RTP] v8.7 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, MAX_QUEUE={MAX_QUEUE_FRAMES} frames, catch-up=40ms, timer={timerType})");
     }
 
     private void PlayoutLoop()
