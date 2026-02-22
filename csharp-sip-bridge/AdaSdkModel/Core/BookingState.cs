@@ -98,7 +98,8 @@ public sealed class BookingState
     {
         <= 4 => "Saloon",
         5 or 6 => "Estate",
-        >= 7 => "Minibus",
+        7 => "MPV",
+        >= 8 => "Minibus",
     };
 
     // Geocoded coordinates

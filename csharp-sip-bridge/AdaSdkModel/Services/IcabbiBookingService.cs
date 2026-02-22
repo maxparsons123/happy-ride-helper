@@ -89,7 +89,7 @@ public sealed class IcabbiBookingService : IDisposable
             Log("💰 Requesting iCabbi fare quote...");
 
             var seats = Math.Max(1, booking.Passengers ?? 1);
-            var vehicleType = seats <= 4 ? "R4" : seats <= 6 ? "R6" : "R7";
+            var vehicleType = seats <= 4 ? "R4" : seats <= 6 ? "R6" : seats <= 7 ? "R7" : "R8";
 
             // Scheduled prebooking = 1, ASAP = 0
             var isPrebooking = booking.ScheduledAt.HasValue ? 1 : 0;
@@ -219,7 +219,7 @@ public sealed class IcabbiBookingService : IDisposable
     /// </summary>
     private static JsonObject? ResolveQuoteObject(JsonNode? root, int passengers)
     {
-        var vehicleType = passengers <= 4 ? "R4" : passengers <= 6 ? "R6" : "R7";
+        var vehicleType = passengers <= 4 ? "R4" : passengers <= 6 ? "R6" : passengers <= 7 ? "R7" : "R8";
 
         // body could be a JsonObject or JsonArray [] — get it once and guard
         var bodyNode = root?["body"];
@@ -823,7 +823,8 @@ public class IcabbiBookingRequest
     {
         if (seats <= 4) vehicle_type = "R4";
         else if (seats <= 6) vehicle_type = "R6";
-        else vehicle_type = "R7";
+        else if (seats <= 7) vehicle_type = "R7";
+        else vehicle_type = "R8";
     }
 }
 
