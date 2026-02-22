@@ -720,10 +720,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                         try { q = getQueued(); }
                         catch { break; }
 
-                        if (q != lastQ)
+                    if (q != lastQ)
                         {
+                            // Log at milestones only: first, every 100, and when empty
+                            if (lastQ == -1 || q == 0 || q % 100 == 0)
+                                Log($"🔊 Playout queue depth: {q} frames");
                             lastQ = q;
-                            Log($"🔊 Playout queue depth: {q} frames");
                         }
 
                         if (q <= 0) break;
