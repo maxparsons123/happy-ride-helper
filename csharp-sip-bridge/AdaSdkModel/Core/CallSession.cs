@@ -210,10 +210,12 @@ public sealed class CallSession : ICallSession
 
         try
         {
-            await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
-            await _dispatcher.SendWhatsAppAsync(callerId);
-            await SaveCallerHistoryAsync(bookingSnapshot, callerId);
-            await SaveBookingToSupabaseAsync(bookingSnapshot, callerId, sessionId);
+            await Task.WhenAll(
+                _dispatcher.DispatchAsync(bookingSnapshot, callerId),
+                _dispatcher.SendWhatsAppAsync(callerId),
+                SaveCallerHistoryAsync(bookingSnapshot, callerId),
+                SaveBookingToSupabaseAsync(bookingSnapshot, callerId, sessionId)
+            );
 
             if (_icabbiEnabled && _icabbi != null)
             {
@@ -2290,14 +2292,20 @@ public sealed class CallSession : ICallSession
                     }
                 }
 
-                await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
-                await _dispatcher.SendWhatsAppAsync(callerId);
-                await SaveCallerHistoryAsync(bookingSnapshot, callerId);
-                await SaveBookingToSupabaseAsync(bookingSnapshot, callerId, sessionId);
+                // Fire all post-booking tasks in parallel for speed
+                var postBookingTasks = new List<Task>
+                {
+                    _dispatcher.DispatchAsync(bookingSnapshot, callerId),
+                    _dispatcher.SendWhatsAppAsync(callerId),
+                    SaveCallerHistoryAsync(bookingSnapshot, callerId),
+                    SaveBookingToSupabaseAsync(bookingSnapshot, callerId, sessionId)
+                };
 
                 // Send WhatsApp payment message if link was generated
                 if (!string.IsNullOrWhiteSpace(bookingSnapshot.PaymentLink))
-                    await SendSumUpLinkViaWhatsAppAsync(callerId, bookingSnapshot.PaymentLink, bookingSnapshot, sessionId);
+                    postBookingTasks.Add(SendSumUpLinkViaWhatsAppAsync(callerId, bookingSnapshot.PaymentLink, bookingSnapshot, sessionId));
+
+                await Task.WhenAll(postBookingTasks);
 
                 // ── iCabbi CONFIRMED BOOKING ─────────────────────────────────
                 if (_icabbi != null)
@@ -2512,10 +2520,12 @@ public sealed class CallSession : ICallSession
 
         _ = Task.Run(async () =>
         {
-            await _dispatcher.DispatchAsync(bookingSnapshot, callerId);
-            await _dispatcher.SendWhatsAppAsync(callerId);
-            await SaveCallerHistoryAsync(bookingSnapshot, callerId);
-            await SaveBookingToSupabaseAsync(bookingSnapshot, callerId, SessionId);
+            await Task.WhenAll(
+                _dispatcher.DispatchAsync(bookingSnapshot, callerId),
+                _dispatcher.SendWhatsAppAsync(callerId),
+                SaveCallerHistoryAsync(bookingSnapshot, callerId),
+                SaveBookingToSupabaseAsync(bookingSnapshot, callerId, SessionId)
+            );
 
             if (_icabbiEnabled && _icabbi != null)
             {
