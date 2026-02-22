@@ -1455,8 +1455,8 @@ public sealed class CallSession : ICallSession
 
                     _aiClient.SetAwaitingConfirmation(true);
                     _currentStage = BookingStage.FarePresented;
-                    await _aiClient.SetVadModeAsync(useSemantic: false);
-                    _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (fare presented, awaiting yes/no) (stage→FarePresented)", sessionId);
+                    await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.20);
+                    _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (fare presented, awaiting payment choice) (stage→FarePresented)", sessionId);
 
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
