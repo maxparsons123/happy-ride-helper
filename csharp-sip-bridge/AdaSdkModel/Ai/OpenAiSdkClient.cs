@@ -664,8 +664,10 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             Log("✋ Response finished");
             OnResponseCompleted?.Invoke();
 
-            // v3.0: Arm a drain-aware mic gate even if NotifyPlayoutComplete is missing/unreliable.
-            ArmMicGateAfterDrain();
+            // Reset playout-complete debounce so the next NotifyPlayoutComplete fires.
+            // Do NOT arm mic gate here — SipServer's dual-latch drives NotifyPlayoutComplete
+            // at the correct moment (after RTP queue drains), avoiding a race condition.
+            Interlocked.Exchange(ref _playoutCompleteHandled, 0);
 
             if (Interlocked.CompareExchange(ref _deferredResponsePending, 0, 1) == 1)
             {
@@ -678,12 +680,16 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             }
             else
             {
+                // Fallback watchdog: if no reply after 10s, start no-reply prompting.
+                // Capture watchdog ID + callEnded to prevent stale fires after call cleanup.
+                var wdId = Volatile.Read(ref _noReplyWatchdogId);
                 _ = Task.Run(async () =>
                 {
                     await Task.Delay(10_000);
+                    if (Volatile.Read(ref _noReplyWatchdogId) != wdId) return;
+                    if (Volatile.Read(ref _callEnded) != 0) return;
                     if (Volatile.Read(ref _responseActive) == 0 &&
-                        Volatile.Read(ref _toolInFlight) == 0 &&
-                        Volatile.Read(ref _callEnded) == 0)
+                        Volatile.Read(ref _toolInFlight) == 0)
                     {
                         StartNoReplyWatchdog();
                     }
@@ -692,60 +698,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }
     }
 
-    // =========================
-    // MIC GATE ARMING (v3.0)
-    // =========================
-    private void ArmMicGateAfterDrain()
-    {
-        // Reset the playout-complete debounce so the next NotifyPlayoutComplete fires.
-        Interlocked.Exchange(ref _playoutCompleteHandled, 0);
-
-        // Ensure only the latest drain task controls the gate.
-        var taskId = Interlocked.Increment(ref _drainGateTaskId);
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                var start = NowMs();
-                int lastQ = -1;
-
-                // Wait for RTP queue to drain (if available), but cap the wait
-                var getQueued = GetQueuedFrames;
-                if (getQueued != null)
-                {
-                    while (NowMs() - start < DRAIN_MAX_MS)
-                    {
-                        int q;
-                        try { q = getQueued(); }
-                        catch { break; }
-
-                    if (q != lastQ)
-                        {
-                            // Log at milestones only: first, every 100, and when empty
-                            if (lastQ == -1 || q == 0 || q % 100 == 0)
-                                Log($"🔊 Playout queue depth: {q} frames");
-                            lastQ = q;
-                        }
-
-                        if (q <= 0) break;
-                        await Task.Delay(DRAIN_POLL_MS);
-                    }
-                }
-
-                // Only apply if still the latest task (simple read check, not CAS)
-                if (Volatile.Read(ref _drainGateTaskId) != taskId)
-                    return;
-
-                var now = NowMs();
-                Volatile.Write(ref _lastAdaFinishedAt, now);
-                Volatile.Write(ref _micGateUntilMs, now + ECHO_TAIL_MS);
-
-                Log($"🔇 Mic gate armed until {DateTimeOffset.FromUnixTimeMilliseconds(now + ECHO_TAIL_MS):HH:mm:ss.fff} (tail {ECHO_TAIL_MS}ms)");
-            }
-            catch { }
-        });
-    }
+    // NOTE: ArmMicGateAfterDrain removed in v3.1.
+    // The SipServer dual-latch system (responseCompletedLatch + watchdogPending + OnQueueEmpty)
+    // now drives NotifyPlayoutComplete at the correct moment after RTP queue drains.
+    // The old polling loop raced with NotifyPlayoutComplete, causing the mic gate to be
+    // overwritten with a later timestamp, extending silence unnecessarily.
 
     // =========================
     // TOOL CALL HANDLING
