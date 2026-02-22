@@ -1081,6 +1081,9 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     {
         Description = "MANDATORY: Persist booking data as collected from the caller. " +
                       "Must be called BEFORE generating any text response when user provides or amends booking details. " +
+                      "CRITICAL: Include ALL fields the caller mentioned in their utterance — if they say " +
+                      "'from X going to Y with 3 passengers', set pickup, destination, AND passengers in ONE call. " +
+                      "NEVER split a compound utterance into multiple calls or ignore mentioned fields. " +
                       "CHANGE DETECTION: If the caller corrects ANY previously provided detail, you MUST call this tool " +
                       "IMMEDIATELY with the corrected value AND explain what changed in the 'interpretation' field.",
         Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
