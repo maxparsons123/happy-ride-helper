@@ -23,6 +23,9 @@ public sealed class BookingState
     public string VehicleType { get; set; } = "Saloon";
     public string? SpecialInstructions { get; set; }
 
+    /// <summary>Luggage info: "none", "small" (hand luggage), "medium" (1-2 suitcases), "heavy" (3+ suitcases or bulky items).</summary>
+    public string? Luggage { get; set; }
+
     /// <summary>Payment preference chosen by caller: "card" (fixed price via SumUp) or "meter" (pay on the day).</summary>
     public string? PaymentPreference { get; set; }
 
@@ -94,13 +97,33 @@ public sealed class BookingState
     }
 
 
-    public static string RecommendVehicle(int passengers) => passengers switch
+    /// <summary>
+    /// Recommends vehicle type based on passenger count and luggage.
+    /// Heavy luggage upgrades: Saloon→Estate, Estate→MPV.
+    /// </summary>
+    public static string RecommendVehicle(int passengers, string? luggage = null)
     {
-        <= 4 => "Saloon",
-        5 or 6 => "Estate",
-        7 => "MPV",
-        >= 8 => "Minibus",
-    };
+        var baseType = passengers switch
+        {
+            <= 4 => "Saloon",
+            5 or 6 => "Estate",
+            7 => "MPV",
+            >= 8 => "Minibus",
+        };
+
+        // Heavy luggage upgrades the vehicle one tier
+        if (string.Equals(luggage, "heavy", StringComparison.OrdinalIgnoreCase))
+        {
+            return baseType switch
+            {
+                "Saloon" => "Estate",
+                "Estate" => "MPV",
+                _ => baseType // MPV and Minibus stay
+            };
+        }
+
+        return baseType;
+    }
 
     // Geocoded coordinates
     public double? PickupLat { get; set; }
@@ -130,6 +153,7 @@ public sealed class BookingState
         Passengers = null;
         ScheduledAt = null;
         VehicleType = "Saloon";
+        Luggage = null;
         PaymentPreference = null;
         PaymentLink = null;
         SpecialInstructions = null;
