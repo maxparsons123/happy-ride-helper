@@ -745,18 +745,26 @@ public sealed class OpenAiG711Client : IOpenAiClient, IAsyncDisposable
     {
         Name = "sync_booking_data",
         Description = "MANDATORY: Persist booking data as collected from the caller. " +
-                      "Must be called BEFORE generating any text response when user provides or amends booking details.",
+                      "Must be called BEFORE generating any text response when user provides or amends booking details. " +
+                      "CRITICAL: Include ALL fields the caller mentioned in their utterance — if they say " +
+                      "'from X going to Y with 3 passengers', set pickup, destination, AND passengers in ONE call. " +
+                      "NEVER split a compound utterance into multiple calls or ignore mentioned fields. " +
+                      "CHANGE DETECTION: If the caller corrects ANY previously provided detail, you MUST call this tool " +
+                      "IMMEDIATELY with the corrected value AND explain what changed in the 'interpretation' field.",
         Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
         {
             type = "object",
             properties = new
             {
                 caller_name = new { type = "string", description = "Caller's name" },
-                pickup = new { type = "string", description = "Pickup address (verbatim from caller)" },
-                destination = new { type = "string", description = "Destination address (verbatim from caller)" },
+                pickup = new { type = "string", description = "Pickup address ONLY — extract the address/place name from the caller's speech. Strip out unrelated info like passenger counts, times, or other details." },
+                destination = new { type = "string", description = "Destination address ONLY — extract the address/place name from the caller's speech. Strip out unrelated info like passenger counts, times, or other details. E.g. if caller says '7 Russell Street and 3 passengers', destination='7 Russell Street'." },
                 passengers = new { type = "integer", description = "Number of passengers" },
-                pickup_time = new { type = "string", description = "Requested pickup time" },
-                vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers (1-4=Saloon, 5-6=Estate, 7+=Minibus). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." }
+                pickup_time = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. Use REFERENCE_DATETIME from system prompt to resolve relative times like 'tomorrow', 'in 30 minutes', '5pm'. NEVER pass raw phrases." },
+                vehicle_type = new { type = "string", @enum = new[] { "Saloon", "Estate", "MPV", "Minibus" }, description = "Vehicle type. Auto-recommended based on passengers and luggage (1-4=Saloon, 5-6=Estate, 7=MPV, 8+=Minibus; heavy luggage upgrades one tier). Only set if caller explicitly requests a specific vehicle type (e.g. 'send an MPV')." },
+                luggage = new { type = "string", @enum = new[] { "none", "small", "medium", "heavy" }, description = "Luggage amount. MUST ask about luggage when: (1) destination is an airport, train station, coach station, or seaport, OR (2) 3 or more passengers. Values: none=no luggage, small=hand luggage/backpacks, medium=1-2 suitcases, heavy=3+ suitcases or bulky items." },
+                interpretation = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed and why (e.g. 'User corrected pickup from Parkhouse Street to Far Gosford Street — venue name is Sweet Spot'). This helps the system track your understanding." },
+                special_instructions = new { type = "string", description = "Any special requests, notes, or instructions the caller wants to add to the booking (e.g. flight number, wheelchair access, child seat, meet at arrivals, extra luggage). Only set when the caller explicitly provides special instructions." }
             }
         }))
     };
