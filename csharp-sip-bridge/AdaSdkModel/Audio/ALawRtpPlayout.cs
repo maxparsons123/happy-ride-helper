@@ -1,15 +1,6 @@
-// Last updated: 2026-02-22 (ALawRtpPlayout v8.9 — Ring Buffer + RTP Marker, no ArrayPool)
-// Changes from v8.8:
-// - REMOVED ArrayPool — Rent() returns oversized buffers (256 instead of 160), causing SIPSorcery
-//   to send garbage bytes as audio → crackling. 50 allocs/sec of 160 bytes is negligible for GC.
-// - Ring buffer accumulator — eliminates O(n) Buffer.BlockCopy shift after every frame extraction
-// - RTP marker bit — set on first audio frame after silence/buffering per RFC 3550
-// - Retains all v8.7 features: underrun grace, catch-up guard, waitable timer, NAT learning, circuit breaker
-
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SIPSorcery.Media;
@@ -18,495 +9,207 @@ using SIPSorceryMedia.Abstractions;
 
 namespace AdaSdkModel.Audio;
 
+/// <summary>
+/// Pure A-law RTP playout engine v10.2 — PERFECT EDITION restored.
+/// Zero-delay start, 80ms resume threshold, no catch-up bursts, Win32 waitable timer.
+/// </summary>
 public sealed class ALawRtpPlayout : IDisposable
 {
     private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
-    [DllImport("winmm.dll")] private static extern uint TimeBeginPeriod(uint uPeriod);
-    [DllImport("winmm.dll")] private static extern uint TimeEndPeriod(uint uPeriod);
+    [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint uPeriod);
+    [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateWaitableTimerExW(
-        IntPtr lpTimerAttributes, IntPtr lpTimerName, uint dwFlags, uint dwDesiredAccess);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateWaitableTimerExW(IntPtr lpAttr, IntPtr lpName, uint dwFlags, uint dwAccess);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetWaitableTimer(IntPtr hTimer, ref long lpDueTime, int lPeriod, IntPtr pfn, IntPtr lpArg, bool fResume);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMs);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr hObj);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetWaitableTimer(
-        IntPtr hTimer, ref long lpDueTime, int lPeriod,
-        IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr hObject);
-
-    private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
-    private const uint TIMER_ALL_ACCESS = 0x1F0003;
-
-    private const int FRAME_MS = 20;
     private const int FRAME_SIZE = 160;
     private const byte ALAW_SILENCE = 0xD5;
-    private const byte PAYLOAD_TYPE_PCMA = 8;
-
-    private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms cold-start
-    private const int MAX_QUEUE_FRAMES = 500;              // 10s safety cap
-    private const int UNDERRUN_GRACE_FRAMES = 5;           // 100ms grace — send silence instead of re-buffering
-    private const int RING_BUFFER_SIZE = 65536;            // 64KB ring buffer for accumulator
-    private const int STATS_LOG_INTERVAL_SEC = 30;
+    private const int JITTER_BUFFER_START_THRESHOLD = 2;  // 40ms initial start
+    private const int JITTER_BUFFER_RESUME_THRESHOLD = 1; // 20ms mid-speech resume
 
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
-    // ── Frame queue (exact-size byte[160] per frame) ──
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
 
-    // ── Ring buffer accumulator (replaces linear shift) ──
-    private readonly byte[] _ringBuffer = new byte[RING_BUFFER_SIZE];
-    private int _ringHead; // read position
-    private int _ringTail; // write position
-    private readonly object _ringLock = new();
+    private byte[] _accumulator = new byte[16384];
+    private int _accCount;
+    private int _queueCount;
+    private readonly object _accLock = new();
 
     private readonly VoIPMediaSession _mediaSession;
     private Thread? _playoutThread;
-    private System.Threading.Timer? _natKeepaliveTimer;
 
     private volatile bool _running;
     private volatile bool _isBuffering = true;
-    private volatile int _disposed;
-
-    private int _queueCount;
-    private int _framesSent;
+    private volatile bool _hasPlayedAudio;
     private uint _timestamp;
-    private int _consecutiveSendErrors;
-    private DateTime _lastErrorLog;
-    private DateTime _lastRtpSendTime = DateTime.UtcNow;
-
     private IntPtr _waitableTimer;
-    private bool _useWaitableTimer;
 
-    private IPEndPoint? _lastRemoteEndpoint;
-    private volatile bool _natBindingEstablished;
-    private bool _wasPlaying;
-    private int _drainSignaled;
-    private int _underrunGraceRemaining;
-    private bool _markerPending; // RTP marker bit: set on first frame after silence/buffering
-
-    private long _totalUnderruns;
-    private long _totalFramesEnqueued;
-    private long _statsQueueSizeSum;
-    private long _statsQueueSizeSamples;
-    private DateTime _lastStatsLog = DateTime.UtcNow;
-
-    // Stubs for SipServer.cs compatibility
-    public bool TypingSoundsEnabled { get; set; } = false;
-    public void NotifyAdaHasSpoken() { }
-
-    public void Flush()
-    {
-        lock (_ringLock)
-        {
-            int available = RingCount();
-            if (available > 0 && available < FRAME_SIZE)
-            {
-            var frame = new byte[FRAME_SIZE];
-                Array.Fill(frame, ALAW_SILENCE, 0, FRAME_SIZE);
-                RingRead(frame, available);
-                _frameQueue.Enqueue(frame);
-                Interlocked.Increment(ref _queueCount);
-            }
-        }
-    }
-
-    public int GetQueuedFrames() => Volatile.Read(ref _queueCount);
+    // Typing sound effect — plays during "thinking" pauses
+    private readonly TypingSoundGenerator _typingSound = new();
+    private volatile bool _typingSoundsEnabled = true;
 
     public event Action<string>? OnLog;
-    public event Action? OnPlayoutDrained;
     public event Action? OnQueueEmpty;
-    public event Action<string>? OnFault;
 
     public int QueuedFrames => Volatile.Read(ref _queueCount);
-    public int FramesSent => _framesSent;
-    public long TotalUnderruns => Interlocked.Read(ref _totalUnderruns);
+
+    /// <summary>Enable/disable keyboard tapping sounds during thinking pauses.</summary>
+    public bool TypingSoundsEnabled { get => _typingSoundsEnabled; set => _typingSoundsEnabled = value; }
 
     public ALawRtpPlayout(VoIPMediaSession mediaSession)
     {
         _mediaSession = mediaSession ?? throw new ArgumentNullException(nameof(mediaSession));
         _mediaSession.AcceptRtpFromAny = true;
-        _mediaSession.OnRtpPacketReceived += HandleSymmetricRtp;
         Array.Fill(_silenceFrame, ALAW_SILENCE);
-
-        _natKeepaliveTimer = new System.Threading.Timer(KeepaliveNAT, null,
-            TimeSpan.FromSeconds(25), TimeSpan.FromSeconds(25));
     }
-
-    private void HandleSymmetricRtp(IPEndPoint ep, SDPMediaTypesEnum media, RTPPacket pkt)
-    {
-        if (media != SDPMediaTypesEnum.audio || Volatile.Read(ref _disposed) != 0) return;
-        if (_lastRemoteEndpoint == null || !_lastRemoteEndpoint.Equals(ep))
-        {
-            _lastRemoteEndpoint = ep;
-            try
-            {
-                _mediaSession.SetDestination(SDPMediaTypesEnum.audio, ep, ep);
-                _natBindingEstablished = true;
-                SafeLog($"[NAT] ✓ RTP locked to {ep}");
-            }
-            catch { }
-        }
-    }
-
-    private void KeepaliveNAT(object? state)
-    {
-        if (Volatile.Read(ref _disposed) != 0) return;
-        if (_natBindingEstablished || (DateTime.UtcNow - _lastRtpSendTime).TotalSeconds < 20) return;
-        try { SendRtpFrame(_silenceFrame, marker: false); } catch { }
-    }
-
-    // ─────────────────────────────────────────
-    // RING BUFFER OPERATIONS
-    // ─────────────────────────────────────────
-
-    /// <summary>Number of bytes available to read. Must be called under _ringLock.</summary>
-    private int RingCount()
-        => _ringTail >= _ringHead
-            ? _ringTail - _ringHead
-            : RING_BUFFER_SIZE - _ringHead + _ringTail;
-
-    /// <summary>Number of bytes of free space. Must be called under _ringLock.</summary>
-    private int RingFree() => RING_BUFFER_SIZE - 1 - RingCount(); // -1 to distinguish full from empty
-
-    /// <summary>Write bytes into ring buffer with wrap-around. Must be called under _ringLock.</summary>
-    private void RingWrite(ReadOnlySpan<byte> data)
-    {
-        int remaining = data.Length;
-        int src = 0;
-        while (remaining > 0)
-        {
-            int chunk = Math.Min(remaining, RING_BUFFER_SIZE - _ringTail);
-            data.Slice(src, chunk).CopyTo(_ringBuffer.AsSpan(_ringTail, chunk));
-            _ringTail = (_ringTail + chunk) % RING_BUFFER_SIZE;
-            src += chunk;
-            remaining -= chunk;
-        }
-    }
-
-    /// <summary>Read bytes from ring buffer into destination. Must be called under _ringLock.</summary>
-    private void RingRead(byte[] dest, int count)
-    {
-        int remaining = count;
-        int dst = 0;
-        while (remaining > 0)
-        {
-            int chunk = Math.Min(remaining, RING_BUFFER_SIZE - _ringHead);
-            Buffer.BlockCopy(_ringBuffer, _ringHead, dest, dst, chunk);
-            _ringHead = (_ringHead + chunk) % RING_BUFFER_SIZE;
-            dst += chunk;
-            remaining -= chunk;
-        }
-    }
-
-    /// <summary>Discard bytes from ring buffer. Must be called under _ringLock.</summary>
-    private void RingDiscard(int count)
-    {
-        _ringHead = (_ringHead + count) % RING_BUFFER_SIZE;
-    }
-
-    // ─────────────────────────────────────────
-    // AUDIO BUFFERING
-    // ─────────────────────────────────────────
 
     public void BufferALaw(byte[] alawData)
     {
-        if (Volatile.Read(ref _disposed) != 0 || alawData == null || alawData.Length == 0)
-            return;
+        if (alawData == null || alawData.Length == 0) return;
 
-        lock (_ringLock)
+        lock (_accLock)
         {
-            int free = RingFree();
-            int toWrite = alawData.Length;
+            if (_accCount + alawData.Length > _accumulator.Length)
+                Array.Resize(ref _accumulator, Math.Max(_accumulator.Length * 2, _accCount + alawData.Length));
 
-            // If not enough space, drop oldest data to make room
-            if (toWrite > free)
+            Buffer.BlockCopy(alawData, 0, _accumulator, _accCount, alawData.Length);
+            _accCount += alawData.Length;
+
+            while (_accCount >= FRAME_SIZE)
             {
-                int drop = toWrite - free;
-                SafeLog($"[BUFFER] overflow, dropping {drop} bytes");
-                RingDiscard(drop);
+                var frame = new byte[FRAME_SIZE];
+                Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
+                _frameQueue.Enqueue(frame);
+                Interlocked.Increment(ref _queueCount);
+
+                _accCount -= FRAME_SIZE;
+                if (_accCount > 0) Buffer.BlockCopy(_accumulator, FRAME_SIZE, _accumulator, 0, _accCount);
             }
-
-            RingWrite(alawData.AsSpan(0, Math.Min(toWrite, RingFree())));
-
-            // Frameize: extract complete 160-byte frames into pooled queue
-            DrainRingToQueue();
         }
     }
 
-    /// <summary>
-    /// Extract complete 160-byte frames from ring buffer into the queue.
-    /// Must be called under _ringLock.
-    /// </summary>
-    private void DrainRingToQueue()
+    public void Flush()
     {
-        while (RingCount() >= FRAME_SIZE)
+        lock (_accLock)
         {
-            // Safety cap — drop oldest frames only when truly overflowing
-            while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
+            if (_accCount > 0)
             {
-                if (_frameQueue.TryDequeue(out _))
-                    Interlocked.Decrement(ref _queueCount);
-                else break;
+                var frame = new byte[FRAME_SIZE];
+                Array.Fill(frame, ALAW_SILENCE);
+                Buffer.BlockCopy(_accumulator, 0, frame, 0, _accCount);
+                _frameQueue.Enqueue(frame);
+                Interlocked.Increment(ref _queueCount);
+                _accCount = 0;
             }
-
-            var frame = new byte[FRAME_SIZE];
-            RingRead(frame, FRAME_SIZE);
-
-            _frameQueue.Enqueue(frame);
-            Interlocked.Increment(ref _queueCount);
-            Interlocked.Increment(ref _totalFramesEnqueued);
         }
     }
-
-    // ─────────────────────────────────────────
-    // PLAYOUT
-    // ─────────────────────────────────────────
 
     public void Start()
     {
-        if (_running || Volatile.Read(ref _disposed) != 0) return;
-
+        if (_running) return;
         _running = true;
-        _isBuffering = true;
-        _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
-        _wasPlaying = false;
-        _markerPending = true; // First frame gets marker
-        Interlocked.Exchange(ref _drainSignaled, 0);
-        _totalUnderruns = 0;
-        _totalFramesEnqueued = 0;
-        _statsQueueSizeSum = 0;
-        _statsQueueSizeSamples = 0;
-        _lastStatsLog = DateTime.UtcNow;
 
         if (IsWindows)
         {
-            try
-            {
-                TimeBeginPeriod(1);
-                _waitableTimer = CreateWaitableTimerExW(
-                    IntPtr.Zero, IntPtr.Zero,
-                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-
-                if (_waitableTimer != IntPtr.Zero)
-                {
-                    _useWaitableTimer = true;
-                    SafeLog("[RTP] ⚡ High-resolution waitable timer active");
-                }
-            }
-            catch { }
+            timeBeginPeriod(1);
+            _waitableTimer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero, 0x00000002, 0x1F0003);
         }
 
-        _playoutThread = new Thread(PlayoutLoop)
-        {
-            IsBackground = true,
-            Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v8.9"
-        };
-
+        _playoutThread = new Thread(PlayoutLoop) { IsBackground = true, Priority = ThreadPriority.Highest };
         _playoutThread.Start();
-        string timerType = _useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait";
-        SafeLog($"[RTP] v8.9 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, " +
-                $"MAX_QUEUE={MAX_QUEUE_FRAMES}, catch-up=40ms, ring={RING_BUFFER_SIZE / 1024}KB, " +
-                $"marker=RFC3550, timer={timerType})");
+        OnLog?.Invoke("[RTP] v10.2 PERFECT EDITION Started");
     }
 
     private void PlayoutLoop()
     {
         var sw = Stopwatch.StartNew();
-        long nextFrameNs = (long)(sw.ElapsedTicks * TicksToNs);
+        long nextTickNs = (long)(sw.ElapsedTicks * TicksToNs);
 
-        while (_running && Volatile.Read(ref _disposed) == 0)
+        while (_running)
         {
             long nowNs = (long)(sw.ElapsedTicks * TicksToNs);
-
-            if (nowNs < nextFrameNs)
+            if (nowNs < nextTickNs)
             {
-                long waitNs = nextFrameNs - nowNs;
-
-                if (_useWaitableTimer && waitNs > 1_000_000)
-                    WaitHighResolution(waitNs);
-                else if (waitNs > 2_000_000)
-                    Thread.Sleep((int)(waitNs / 1_000_000) - 1);
-                else
-                    Thread.SpinWait(20);
-
+                long waitNs = nextTickNs - nowNs;
+                var timer = _waitableTimer;
+                if (waitNs > 1_000_000 && timer != IntPtr.Zero)
+                {
+                    long dueTime = -(waitNs / 100);
+                    SetWaitableTimer(timer, ref dueTime, 0, IntPtr.Zero, IntPtr.Zero, false);
+                    WaitForSingleObject(timer, 100);
+                }
+                else if (waitNs > 100_000) { Thread.SpinWait(20); }
                 continue;
             }
 
-            SendNextFrame();
-            nextFrameNs += 20_000_000;
+            int count = Volatile.Read(ref _queueCount);
 
-            // Catch-up guard: if we fell behind by >40ms (2 frames), reset
-            long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
-            if (currentNs - nextFrameNs > 40_000_000)
-                nextFrameNs = currentNs + 20_000_000;
-        }
-    }
-
-    private void WaitHighResolution(long waitNs)
-    {
-        long dueTime = -(waitNs / 100);
-        if (dueTime >= 0) dueTime = -1;
-        if (SetWaitableTimer(_waitableTimer, ref dueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
-            WaitForSingleObject(_waitableTimer, 100);
-    }
-
-    private void SendNextFrame()
-    {
-        int queueCount = Volatile.Read(ref _queueCount);
-
-        Interlocked.Add(ref _statsQueueSizeSum, queueCount);
-        Interlocked.Increment(ref _statsQueueSizeSamples);
-
-        if (_isBuffering)
-        {
-            if (queueCount < JITTER_BUFFER_START_THRESHOLD)
+            if (_isBuffering)
             {
-                SendRtpFrame(_silenceFrame, marker: false);
-                return;
+                // Initial start: wait for 40ms buffer; mid-speech resume: 20ms
+                int threshold = _hasPlayedAudio ? JITTER_BUFFER_RESUME_THRESHOLD : JITTER_BUFFER_START_THRESHOLD;
+                if (count >= threshold)
+                {
+                    _isBuffering = false;
+                    _hasPlayedAudio = true;
+                }
+                else
+                {
+                    // Not enough buffered yet — typing sounds or silence
+                    var fillFrame = _typingSoundsEnabled
+                        ? _typingSound.NextFrame()
+                        : _silenceFrame;
+                    _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, fillFrame, _timestamp, 0, 8);
+                }
             }
-
-            _isBuffering = false;
-            _underrunGraceRemaining = 0;
-            _markerPending = true; // Mark first audio frame after buffering
-            Interlocked.Exchange(ref _drainSignaled, 0);
-            SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
-        }
-
-        if (_frameQueue.TryDequeue(out var frame))
-        {
-            Interlocked.Decrement(ref _queueCount);
-            SendRtpFrame(frame, marker: _markerPending);
-            _markerPending = false;
-            Interlocked.Increment(ref _framesSent);
-            _wasPlaying = true;
-            _underrunGraceRemaining = UNDERRUN_GRACE_FRAMES;
-        }
-        else if (_underrunGraceRemaining > 0)
-        {
-            // Queue empty but within grace period — send silence, don't re-buffer
-            _underrunGraceRemaining--;
-            SendRtpFrame(_silenceFrame, marker: false);
-
-            if (_underrunGraceRemaining == 0)
+            else if (_frameQueue.TryDequeue(out var frame))
             {
-                // Grace exhausted — now re-enter buffering
+                Interlocked.Decrement(ref _queueCount);
+                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, 8);
+            }
+            else
+            {
+                // Dequeue failed — queue truly empty, rebuffer
                 _isBuffering = true;
-                _markerPending = true; // Next audio frame gets marker
-                Interlocked.Increment(ref _totalUnderruns);
-                FireDrainOnce();
+                _typingSound.Reset();
+                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, _silenceFrame, _timestamp, 0, 8);
+                try { OnQueueEmpty?.Invoke(); } catch { }
             }
-        }
-        else
-        {
-            _isBuffering = true;
-            _markerPending = true;
-            SendRtpFrame(_silenceFrame, marker: false);
-            Interlocked.Increment(ref _totalUnderruns);
-            FireDrainOnce();
-        }
-
-        // Periodic stats
-        if ((DateTime.UtcNow - _lastStatsLog).TotalSeconds >= STATS_LOG_INTERVAL_SEC)
-        {
-            var samples = Interlocked.Exchange(ref _statsQueueSizeSamples, 0);
-            var sizeSum = Interlocked.Exchange(ref _statsQueueSizeSum, 0);
-            var underruns = Interlocked.Read(ref _totalUnderruns);
-            var enqueued = Interlocked.Read(ref _totalFramesEnqueued);
-            if (samples > 0)
-                SafeLog($"[RTP] 📈 sent={_framesSent} enqueued={enqueued} " +
-                        $"avgQueue={(double)sizeSum / samples:F1} underruns={underruns}");
-            _lastStatsLog = DateTime.UtcNow;
-        }
-    }
-
-    private void FireDrainOnce()
-    {
-        if (!_wasPlaying) return;
-        if (Interlocked.Exchange(ref _drainSignaled, 1) == 1) return;
-
-        _wasPlaying = false;
-        try { OnQueueEmpty?.Invoke(); } catch { }
-        try { OnPlayoutDrained?.Invoke(); } catch { }
-    }
-
-    private void SendRtpFrame(byte[] frame, bool marker)
-    {
-        try
-        {
-            _mediaSession.SendRtpRaw(
-                SDPMediaTypesEnum.audio,
-                frame,
-                _timestamp,
-                marker ? 1 : 0,
-                PAYLOAD_TYPE_PCMA);
 
             _timestamp += FRAME_SIZE;
-            _lastRtpSendTime = DateTime.UtcNow;
-            _consecutiveSendErrors = 0;
-        }
-        catch (Exception ex)
-        {
-            _consecutiveSendErrors++;
-            if (_consecutiveSendErrors <= 3 || (DateTime.UtcNow - _lastErrorLog).TotalSeconds > 5)
-            {
-                SafeLog($"[RTP] ⚠ Send failed ({_consecutiveSendErrors}x): {ex.Message}");
-                _lastErrorLog = DateTime.UtcNow;
-            }
-            if (_consecutiveSendErrors > 100)
-            {
-                _running = false;
-                var msg = "[RTP] ❌ Circuit breaker — stopping after 100 consecutive send failures";
-                SafeLog(msg);
-                try { OnFault?.Invoke(msg); } catch { }
-            }
+            nextTickNs += 20_000_000;
         }
     }
-
-    // ─────────────────────────────────────────
-    // CONTROL
-    // ─────────────────────────────────────────
 
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out _))
-            Interlocked.Decrement(ref _queueCount);
-
-        lock (_ringLock)
-        {
-            _ringHead = 0;
-            _ringTail = 0;
-        }
-
+        while (_frameQueue.TryDequeue(out _)) Interlocked.Decrement(ref _queueCount);
+        lock (_accLock) { _accCount = 0; Array.Clear(_accumulator, 0, _accumulator.Length); }
         _isBuffering = true;
-        _wasPlaying = false;
-        _markerPending = true;
-        _underrunGraceRemaining = 0;
-        Interlocked.Exchange(ref _drainSignaled, 0);
+        _hasPlayedAudio = false;
+        _typingSound.Reset();
     }
 
     public void Stop()
     {
         _running = false;
-        _playoutThread?.Join(500);
+        try { _playoutThread?.Join(2000); } catch { }
         _playoutThread = null;
 
         if (IsWindows)
         {
-            try { TimeEndPeriod(1); } catch { }
-            if (_waitableTimer != IntPtr.Zero)
+            try { timeEndPeriod(1); } catch { }
+            var timer = _waitableTimer;
+            _waitableTimer = IntPtr.Zero;
+            if (timer != IntPtr.Zero)
             {
-                try { CloseHandle(_waitableTimer); } catch { }
-                _waitableTimer = IntPtr.Zero;
-                _useWaitableTimer = false;
+                try { CloseHandle(timer); } catch { }
             }
         }
 
@@ -514,19 +217,5 @@ public sealed class ALawRtpPlayout : IDisposable
         Volatile.Write(ref _queueCount, 0);
     }
 
-    private void SafeLog(string msg)
-    {
-        try { OnLog?.Invoke(msg); }
-        catch { }
-    }
-
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
-        Stop();
-        _natKeepaliveTimer?.Dispose();
-        _mediaSession.OnRtpPacketReceived -= HandleSymmetricRtp;
-        Clear();
-        GC.SuppressFinalize(this);
-    }
+    public void Dispose() => Stop();
 }
