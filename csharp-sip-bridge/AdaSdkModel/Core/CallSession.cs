@@ -582,9 +582,8 @@ public sealed class CallSession : ICallSession
             sb.AppendLine("  6. If the caller's response is UNCLEAR, GARBLED, or sounds like an ECHO of your own greeting, DO NOT assume any intent.");
             sb.AppendLine("     Instead say: 'Sorry, I didn't quite catch that. Would you like to cancel, make changes, or check on your driver?'");
             sb.AppendLine("  7. NEVER interpret background noise, echoes, or partial sentences as a cancellation request.");
-            sb.AppendLine("  8. For CANCEL: If the caller explicitly says 'cancel it', 'cancel my booking', 'cancel please', or similar CLEAR cancel phrases,");
-            sb.AppendLine("     call cancel_booking(confirmed=true) IMMEDIATELY — do NOT ask for a second 'yes' confirmation.");
-            sb.AppendLine("     The caller's own words ARE the confirmation. Only ask for clarification if the intent is AMBIGUOUS.");
+            sb.AppendLine("  8. For CANCEL specifically: you must ALWAYS ask for explicit verbal confirmation before calling cancel_booking.");
+            sb.AppendLine("     Keep the confirmation prompt SHORT (e.g., 'Cancel your booking — are you sure?') so the caller can respond quickly.");
 
             _logger.LogInformation("[{SessionId}] 📋 Active booking loaded: {Id} ({Pickup} → {Dest})",
                 SessionId, _booking.ExistingBookingId, _booking.Pickup, _booking.Destination);
