@@ -2897,10 +2897,15 @@ public sealed class CallSession : ICallSession
             _logger.LogInformation("[{SessionId}] ✅ Booking link created: {Url}", SessionId, url);
 
             // Set the airport booking URL as the payment link and dispatch via BSQD (same as normal bookings)
+            // Fire-and-forget: don't block the tool result waiting for geocoding + MQTT
             if (!string.IsNullOrWhiteSpace(url))
             {
                 _booking.PaymentLink = url;
-                await _dispatcher.DispatchAsync(_booking, CallerId);
+                _ = Task.Run(async () =>
+                {
+                    try { await _dispatcher.DispatchAsync(_booking, CallerId); }
+                    catch (Exception dex) { _logger.LogError(dex, "[{SessionId}] ⚠️ Background dispatch failed", SessionId); }
+                });
             }
 
             return new
