@@ -591,8 +591,10 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                         try
                         {
                             if (_session == null || !IsConnected) return;
-                            var grounding = $"[TRANSCRIPT] The caller's exact words were: \"{transcript}\". " +
-                                            "Use these EXACT words for any tool call arguments — do NOT substitute similar-sounding names.";
+                            var grounding =
+                                "[SYSTEM: TRANSCRIPT GROUNDING — DO NOT SPEAK THIS]\n" +
+                                $"Caller exact words (verbatim): \"{transcript}\".\n" +
+                                "Use these EXACT words for tool arguments only. Never repeat them aloud.";
                             await _session.AddItemAsync(
                                 ConversationItem.CreateUserMessage(new[] {
                                     ConversationContentPart.CreateInputTextPart(grounding) }));

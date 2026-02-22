@@ -87,6 +87,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private const int DRAIN_POLL_MS = 20;
     private const int DRAIN_MAX_MS = 2000;          // cap waiting for playout drain
 
+    // =========================
+    // AUDIO FRAME ALIGNMENT (160-byte A-law frames = 20ms)
+    // =========================
+    private readonly List<byte> _audioAlignBuffer = new();
+    private const int ALAW_FRAME_SIZE = 160;
+
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     // =========================
@@ -312,6 +318,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         _sessionCts?.Dispose();
         _sessionCts = null;
 
+        _audioAlignBuffer.Clear();
         OnAudio = null;
         OnToolCall = null;
         OnEnded = null;
@@ -555,7 +562,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 if (delta.AudioBytes != null)
                 {
                     Interlocked.Exchange(ref _hasEnqueuedAudio, 1);
-                    OnAudio?.Invoke(delta.AudioBytes.ToArray());
+                    EnqueueAligned(delta.AudioBytes.ToArray());
                 }
                 break;
 
@@ -598,10 +605,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 _lastUserTranscript = transcript;
                 OnTranscript?.Invoke("User", transcript);
 
-                // TRANSCRIPT GROUNDING: inject the exact STT words back into
-                // the conversation so the AI uses verbatim text for tool args.
-                // This prevents the model from "reinterpreting" addresses
-                // (e.g. "David Road" → "Dovey Road") in its tool calls.
+                // TRANSCRIPT GROUNDING: inject as system-authority context (not user speech)
+                // so the model treats it as authoritative and doesn't argue with state.
                 if (!string.IsNullOrWhiteSpace(transcript) && transcript.Length > 2)
                 {
                     _ = Task.Run(async () =>
@@ -609,8 +614,10 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                         try
                         {
                             if (_session == null || !IsConnected) return;
-                            var grounding = $"[TRANSCRIPT] The caller's exact words were: \"{transcript}\". " +
-                                "Use these EXACT words for any tool call arguments — do NOT substitute similar-sounding names.";
+                            var grounding =
+                                "[SYSTEM: TRANSCRIPT GROUNDING — DO NOT SPEAK THIS]\n" +
+                                $"Caller exact words (verbatim): \"{transcript}\".\n" +
+                                "Use these EXACT words for tool arguments only. Never repeat them aloud.";
                             await _session.AddItemAsync(
                                 ConversationItem.CreateUserMessage(new[] {
                                     ConversationContentPart.CreateInputTextPart(grounding) }));
@@ -797,6 +804,26 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     }
 
     // =========================
+    // =========================
+    // AUDIO FRAME ALIGNMENT
+    // =========================
+    /// <summary>
+    /// Buffers incoming audio and emits exact 160-byte A-law frames (20ms).
+    /// Prevents jitter from misaligned OpenAI delta boundaries.
+    /// </summary>
+    private void EnqueueAligned(byte[] bytes)
+    {
+        _audioAlignBuffer.AddRange(bytes);
+
+        while (_audioAlignBuffer.Count >= ALAW_FRAME_SIZE)
+        {
+            var frame = _audioAlignBuffer.GetRange(0, ALAW_FRAME_SIZE).ToArray();
+            _audioAlignBuffer.RemoveRange(0, ALAW_FRAME_SIZE);
+            OnAudio?.Invoke(frame);
+        }
+    }
+
+    // =========================
     // BARGE-IN
     // =========================
     private void HandleSpeechStarted()
@@ -809,6 +836,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         if (Volatile.Read(ref _responseActive) == 1 && Volatile.Read(ref _hasEnqueuedAudio) == 1)
         {
             Log("✂️ Barge-in detected — clearing playout");
+            _audioAlignBuffer.Clear();
             OnBargeIn?.Invoke();
         }
     }
