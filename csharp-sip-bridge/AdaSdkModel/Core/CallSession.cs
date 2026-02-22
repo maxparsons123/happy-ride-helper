@@ -2815,38 +2815,10 @@ public sealed class CallSession : ICallSession
 
             _logger.LogInformation("[{SessionId}] ✅ Booking link created: {Url}", SessionId, url);
 
-            // Send the airport booking link via WhatsApp with booking-form wording (NOT payment wording)
-            if (!string.IsNullOrWhiteSpace(url) && !string.IsNullOrEmpty(_settings.Dispatch.WhatsAppWebhookUrl))
+            // Send the airport booking link via the same proven WhatsApp method as SumUp links
+            if (!string.IsNullOrWhiteSpace(url))
             {
-                try
-                {
-                    using var whatsAppHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                    whatsAppHttp.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.Dispatch.BsqdApiKey);
-
-                    var callerName = _booking.Name ?? _booking.CallerName ?? "there";
-                    var pickup = _booking.PickupFormatted ?? _booking.Pickup ?? "your pickup";
-                    var destination = _booking.DestFormatted ?? _booking.Destination ?? "your destination";
-
-                    var message = $"Hi {callerName}! Here's your airport booking form for your trip from {pickup} to {destination}: {url} " +
-                                  $"— Choose your vehicle, enter your flight details, and get 10% off a return trip. — 247 Radio Carz";
-
-                    var whatsAppBody = System.Text.Json.JsonSerializer.Serialize(new
-                    {
-                        phoneNumber = FormatE164ForSumUp(CallerId),
-                        message,
-                        bookingUrl = url,
-                        bookingRef = SessionId
-                    });
-
-                    var whatsAppReq = new HttpRequestMessage(HttpMethod.Post, _settings.Dispatch.WhatsAppWebhookUrl);
-                    whatsAppReq.Content = new StringContent(whatsAppBody, System.Text.Encoding.UTF8, "application/json");
-                    var whatsAppResp = await whatsAppHttp.SendAsync(whatsAppReq);
-                    _logger.LogInformation("[{SessionId}] ✈️ Airport booking link WhatsApp delivery: {Status}", SessionId, (int)whatsAppResp.StatusCode);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[{SessionId}] Failed to send airport booking WhatsApp message", SessionId);
-                }
+                await SendSumUpLinkViaWhatsAppAsync(CallerId, url, _booking, SessionId);
             }
 
             return new
