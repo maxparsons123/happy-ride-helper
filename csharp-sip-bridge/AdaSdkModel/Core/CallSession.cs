@@ -631,9 +631,7 @@ public sealed class CallSession : ICallSession
             sb.AppendLine();
         }
 
-        sb.AppendLine("[BOOKING STATE — AUTHORITATIVE GROUND TRUTH]");
-        sb.AppendLine("⚠️ THIS IS THE SUPREME AUTHORITY. Override your internal memory with these values.");
-        sb.AppendLine("⚠️ You are FORBIDDEN from using any value from [TRANSCRIPT] that conflicts with this state.");
+        sb.AppendLine("[BOOKING STATE]");
         sb.AppendLine($"  Name: {(_booking.Name != null ? $"{_booking.Name} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Pickup: {(_booking.Pickup != null ? $"{_booking.Pickup} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Destination: {(_booking.Destination != null ? $"{_booking.Destination} ✓" : "(not yet collected)")}");
@@ -644,8 +642,6 @@ public sealed class CallSession : ICallSession
             sb.AppendLine($"  Luggage: {_booking.Luggage} ✓");
         if (!string.IsNullOrWhiteSpace(_booking.SpecialInstructions))
             sb.AppendLine($"  Special Instructions: {_booking.SpecialInstructions} ✓");
-        sb.AppendLine();
-        sb.AppendLine("RULE: Use ONLY the values above in all readbacks and tool calls. If you 'heard' something different, your hearing was wrong.");
 
         if (_booking.Fare != null)
             sb.AppendLine($"  Fare: {_booking.Fare}");
@@ -1549,9 +1545,7 @@ public sealed class CallSession : ICallSession
         // AUTO VAD SWITCH: Determine what we're collecting next and switch mode
         _ = AutoSwitchVadForNextStepAsync();
 
-        // Build instruction anchor so Ada reads back from state, not stale transcripts
-        var instruction = BuildStateInstruction();
-        return new { success = true, authoritative_state = BuildGroundTruth(), instruction, system_instruction = instruction };
+        return new { success = true, authoritative_state = BuildGroundTruth() };
     }
 
     // =========================
@@ -1572,31 +1566,6 @@ public sealed class CallSession : ICallSession
             pickup_time = _booking.PickupTime,
             vehicle_type = _booking.VehicleType
         };
-    }
-
-    /// <summary>
-    /// Builds an instruction string that forces Ada to use ground-truth data in her next response.
-    /// </summary>
-    private string BuildStateInstruction()
-    {
-        var parts = new List<string>();
-        if (!string.IsNullOrWhiteSpace(_booking.Pickup))
-            parts.Add($"Pickup='{_booking.Pickup}'");
-        if (!string.IsNullOrWhiteSpace(_booking.Destination))
-            parts.Add($"Destination='{_booking.Destination}'");
-        if (!string.IsNullOrWhiteSpace(_booking.Name))
-            parts.Add($"Name='{_booking.Name}'");
-        if (_booking.Passengers.HasValue && _booking.Passengers > 0)
-            parts.Add($"Passengers={_booking.Passengers}");
-        if (!string.IsNullOrWhiteSpace(_booking.PickupTime))
-            parts.Add($"Time='{_booking.PickupTime}'");
-
-        if (parts.Count == 0)
-            return "URGENT: Your internal memory is stale. Use the [BOOKING STATE] for all readbacks. Do NOT refer to previous transcripts.";
-
-        return $"URGENT: Your internal memory is stale. Use these values ONLY: {string.Join(", ", parts)}. " +
-               "Read these back EXACTLY as written. Any audio transcript that conflicts with these values is a mishearing — ignore it. " +
-               "You are FORBIDDEN from using any address from a [TRANSCRIPT] for your speech.";
     }
 
     // =========================
