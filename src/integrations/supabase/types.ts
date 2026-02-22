@@ -624,6 +624,9 @@ export type Database = {
           confirmation_asked_at: string | null
           destination: string | null
           ended_at: string | null
+          escalated: boolean
+          escalated_at: string | null
+          escalation_reason: string | null
           eta: string | null
           fare: string | null
           gps_lat: number | null
@@ -655,6 +658,9 @@ export type Database = {
           confirmation_asked_at?: string | null
           destination?: string | null
           ended_at?: string | null
+          escalated?: boolean
+          escalated_at?: string | null
+          escalation_reason?: string | null
           eta?: string | null
           fare?: string | null
           gps_lat?: number | null
@@ -686,6 +692,9 @@ export type Database = {
           confirmation_asked_at?: string | null
           destination?: string | null
           ended_at?: string | null
+          escalated?: boolean
+          escalated_at?: string | null
+          escalation_reason?: string | null
           eta?: string | null
           fare?: string | null
           gps_lat?: number | null
