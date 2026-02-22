@@ -3845,6 +3845,7 @@ public sealed class CallSession : ICallSession
     }
 
 
+    public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
