@@ -264,6 +264,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             options.Tools.Add(BuildFindLocalEventsToolStatic());
             options.Tools.Add(BuildCancelBookingToolStatic());
             options.Tools.Add(BuildCheckBookingStatusToolStatic());
+            options.Tools.Add(BuildSendBookingLinkToolStatic());
             options.Tools.Add(BuildEndCallToolStatic());
 
             await _session.ConfigureSessionAsync(options);
@@ -1245,6 +1246,22 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             properties = new
             {
                 booking_id = new { type = "string", description = "Booking ID to check (optional — will use active booking if not provided)" }
+            }
+        }))
+    };
+
+    public static ConversationFunctionTool BuildSendBookingLinkToolStatic() => new("send_booking_link")
+    {
+        Description = "Send an airport/station transfer booking link to the caller via SMS/WhatsApp. " +
+                      "Use when the caller is going to/from a transport hub (airport, train station, etc.) " +
+                      "and has luggage. The link lets them choose vehicle type, enter flight details, " +
+                      "and optionally book a discounted return trip.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                reason = new { type = "string", description = "Why we're sending the link (e.g. 'airport_transfer_with_luggage')" }
             }
         }))
     };
