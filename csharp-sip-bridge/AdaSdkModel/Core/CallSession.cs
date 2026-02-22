@@ -2248,8 +2248,7 @@ public sealed class CallSession : ICallSession
             var sumUpRef = _sumUp;  // capture for closure
             _ = Task.Run(async () =>
             {
-                for (int i = 0; i < 50 && _aiClient.IsResponseActive; i++)
-                await Task.Delay(100);
+                // No wait — fire dispatch immediately while Ada speaks
 
                 // ── SumUp PAYMENT LINK — always generate if SumUp is configured ──────────
                 // Link is included in the BSQD eta field and sent via WhatsApp regardless of preference.
