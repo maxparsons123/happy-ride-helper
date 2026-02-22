@@ -552,6 +552,9 @@ public sealed class CallSession : ICallSession
             _booking.BookingRef = _booking.ExistingBookingId;
 
             _currentStage = BookingStage.ManagingExistingBooking;
+            // Server VAD for short replies (yes/no/cancel/status) — semantic VAD misses brief utterances
+            await _aiClient.SetVadModeAsync(useSemantic: false);
+            _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SERVER (managing existing booking, short replies expected)", SessionId);
 
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("[ACTIVE BOOKING] This caller has an existing active booking.");
