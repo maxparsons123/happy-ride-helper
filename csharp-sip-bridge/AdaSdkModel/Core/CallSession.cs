@@ -164,6 +164,17 @@ public sealed class CallSession : ICallSession
 
                     if (string.IsNullOrWhiteSpace(transcriptToEval)) return;
 
+                    // STAGE-DRIFT GUARD: If the stage has changed since we captured the transcript,
+                    // the transcript belongs to the OLD stage (e.g. a destination change utterance),
+                    // not the current stage (e.g. FarePresented). Only evaluate if a NEW transcript
+                    // arrived (_lastUserTranscript != null) that belongs to the current stage.
+                    if (stageToEval != capturedStage && _lastUserTranscript == null)
+                    {
+                        _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: Skipping — stage drifted from {Old} to {New}, transcript belongs to old stage",
+                            SessionId, capturedStage, stageToEval);
+                        return;
+                    }
+
                     var intent = IntentGuard.Resolve(stageToEval, transcriptToEval);
                     if (intent == IntentGuard.ResolvedIntent.None) return;
 
