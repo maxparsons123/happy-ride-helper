@@ -2912,7 +2912,12 @@ public sealed class CallSession : ICallSession
             {
                 success = true,
                 url,
-                message = "Booking link sent. Do NOT repeat what the link offers — just confirm it was sent and ask if there's anything else."
+                message = "Booking link created and sent via WhatsApp/SMS. Tell the caller: " +
+                         "'I've just sent you a booking link to your phone. When you open it, you'll be able to choose your vehicle type — " +
+                         "we have standard saloons and executive vehicles available — enter your flight details and preferred travel time, " +
+                         "specify any luggage you'll have, and if you'd like a return trip, you'll get 10% off the return fare. " +
+                         "Just fill in the details and submit, and your booking will be confirmed automatically. " +
+                         "Is there anything else I can help you with?'"
             };
         }
         catch (Exception ex)
