@@ -131,6 +131,110 @@ export type Database = {
         }
         Relationships: []
       }
+      airport_booking_links: {
+        Row: {
+          call_id: string | null
+          caller_name: string | null
+          caller_phone: string | null
+          company_id: string | null
+          created_at: string
+          dest_lat: number | null
+          dest_lon: number | null
+          destination: string | null
+          expires_at: string
+          fare_quotes: Json | null
+          flight_number: string | null
+          id: string
+          luggage_hand: number | null
+          luggage_suitcases: number | null
+          passengers: number | null
+          pickup: string | null
+          pickup_lat: number | null
+          pickup_lon: number | null
+          return_datetime: string | null
+          return_discount_pct: number | null
+          return_flight_number: string | null
+          return_trip: boolean | null
+          special_instructions: string | null
+          status: string
+          submitted_at: string | null
+          token: string
+          travel_datetime: string | null
+          updated_at: string
+          vehicle_type: string | null
+        }
+        Insert: {
+          call_id?: string | null
+          caller_name?: string | null
+          caller_phone?: string | null
+          company_id?: string | null
+          created_at?: string
+          dest_lat?: number | null
+          dest_lon?: number | null
+          destination?: string | null
+          expires_at?: string
+          fare_quotes?: Json | null
+          flight_number?: string | null
+          id?: string
+          luggage_hand?: number | null
+          luggage_suitcases?: number | null
+          passengers?: number | null
+          pickup?: string | null
+          pickup_lat?: number | null
+          pickup_lon?: number | null
+          return_datetime?: string | null
+          return_discount_pct?: number | null
+          return_flight_number?: string | null
+          return_trip?: boolean | null
+          special_instructions?: string | null
+          status?: string
+          submitted_at?: string | null
+          token?: string
+          travel_datetime?: string | null
+          updated_at?: string
+          vehicle_type?: string | null
+        }
+        Update: {
+          call_id?: string | null
+          caller_name?: string | null
+          caller_phone?: string | null
+          company_id?: string | null
+          created_at?: string
+          dest_lat?: number | null
+          dest_lon?: number | null
+          destination?: string | null
+          expires_at?: string
+          fare_quotes?: Json | null
+          flight_number?: string | null
+          id?: string
+          luggage_hand?: number | null
+          luggage_suitcases?: number | null
+          passengers?: number | null
+          pickup?: string | null
+          pickup_lat?: number | null
+          pickup_lon?: number | null
+          return_datetime?: string | null
+          return_discount_pct?: number | null
+          return_flight_number?: string | null
+          return_trip?: boolean | null
+          special_instructions?: string | null
+          status?: string
+          submitted_at?: string | null
+          token?: string
+          travel_datetime?: string | null
+          updated_at?: string
+          vehicle_type?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "airport_booking_links_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       bookings: {
         Row: {
           booked_at: string

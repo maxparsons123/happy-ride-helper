@@ -695,6 +695,7 @@ public sealed class CallSession : ICallSession
             "find_local_events" => HandleFindLocalEvents(args),
             "cancel_booking" => await HandleCancelBookingAsync(args),
             "check_booking_status" => HandleCheckBookingStatus(args),
+            "send_booking_link" => await HandleSendBookingLinkAsync(args),
             "end_call" => HandleEndCall(args),
             _ => new { error = $"Unknown tool: {name}" }
         };
@@ -2747,7 +2748,70 @@ public sealed class CallSession : ICallSession
     }
 
     // =========================
-    // END CALL
+    // SEND BOOKING LINK (Airport/Station self-service)
+    // =========================
+    private async Task<object> HandleSendBookingLinkAsync(Dictionary<string, object?> args)
+    {
+        _logger.LogInformation("[{SessionId}] 🔗 send_booking_link called", SessionId);
+
+        try
+        {
+            var supabaseUrl = Environment.GetEnvironmentVariable("SUPABASE_URL")
+                              ?? "https://oerketnvlmptpfvttysy.supabase.co";
+            var supabaseKey = Environment.GetEnvironmentVariable("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabaseKey}");
+            http.DefaultRequestHeaders.Add("apikey", supabaseKey);
+
+            var payload = new
+            {
+                action = "create",
+                caller_name = _booking.Name ?? _booking.CallerName,
+                caller_phone = _booking.CallerPhone ?? CallerId,
+                pickup = _booking.Pickup,
+                destination = _booking.Destination,
+                passengers = _booking.Passengers ?? 1,
+                pickup_lat = _booking.PickupLat,
+                pickup_lon = _booking.PickupLon,
+                dest_lat = _booking.DestLat,
+                dest_lon = _booking.DestLon,
+                call_id = SessionId,
+                company_id = (string?)null
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            var resp = await http.PostAsync($"{supabaseUrl}/functions/v1/airport-booking-link", content);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogError("[{SessionId}] ❌ Booking link creation failed: {Body}", SessionId, body);
+                return new { success = false, error = "Failed to create booking link" };
+            }
+
+            var result = System.Text.Json.JsonDocument.Parse(body);
+            var url = result.RootElement.GetProperty("url").GetString();
+
+            _logger.LogInformation("[{SessionId}] ✅ Booking link created: {Url}", SessionId, url);
+
+            return new
+            {
+                success = true,
+                url,
+                message = "Booking link has been generated and sent to the caller. " +
+                          "They can select their vehicle type, enter flight details, " +
+                          "and get 10% off a return trip."
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[{SessionId}] ❌ send_booking_link exception", SessionId);
+            return new { success = false, error = ex.Message };
+        }
+    }
+
     // =========================
     private object HandleEndCall(Dictionary<string, object?> args)
     {
