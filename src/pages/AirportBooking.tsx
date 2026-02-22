@@ -127,13 +127,28 @@ const AirportBooking = () => {
       .eq("token", token)
       .eq("status", "pending");
 
-    setSubmitting(false);
-
     if (updateErr) {
+      setSubmitting(false);
       toast({ title: "Error", description: "Failed to submit. Please try again.", variant: "destructive" });
       return;
     }
 
+    // Dispatch to iCabbi
+    try {
+      const { data: dispatchResult, error: dispatchErr } = await supabase.functions.invoke(
+        "airport-booking-dispatch",
+        { body: { token } }
+      );
+      if (dispatchErr) {
+        console.error("Dispatch error:", dispatchErr);
+      } else {
+        console.log("Dispatch result:", dispatchResult);
+      }
+    } catch (e) {
+      console.error("Dispatch call failed:", e);
+    }
+
+    setSubmitting(false);
     setSubmitted(true);
   };
 
