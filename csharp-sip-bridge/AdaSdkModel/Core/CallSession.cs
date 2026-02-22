@@ -710,7 +710,7 @@ public sealed class CallSession : ICallSession
             "clarify_address" => HandleClarifyAddress(args),
             "book_taxi" => await HandleBookTaxiAsync(args),
             "create_booking" => await HandleCreateBookingAsync(args),
-            "find_local_events" => HandleFindLocalEvents(args),
+            "find_local_events" => await HandleFindLocalEventsAsync(args),
             "cancel_booking" => await HandleCancelBookingAsync(args),
             "check_booking_status" => HandleCheckBookingStatus(args),
             "send_booking_link" => await HandleSendBookingLinkAsync(args),
@@ -2681,7 +2681,7 @@ public sealed class CallSession : ICallSession
     // =========================
     // FIND LOCAL EVENTS
     // =========================
-    private object HandleFindLocalEvents(Dictionary<string, object?> args)
+    private async Task<object> HandleFindLocalEventsAsync(Dictionary<string, object?> args)
     {
         var category = args.TryGetValue("category", out var cat) ? cat?.ToString() ?? "all" : "all";
         var near = args.TryGetValue("near", out var n) ? n?.ToString() : null;
@@ -2690,18 +2690,41 @@ public sealed class CallSession : ICallSession
         _logger.LogInformation("[{SessionId}] 🎭 Events lookup: {Category} near {Near} on {Date}",
             SessionId, category, near ?? "unknown", date);
 
-        var mockEvents = new[]
+        try
         {
-            new { name = "Live Music at The Empire", venue = near ?? "city centre", date = "Tonight, 8pm", type = "concert" },
-            new { name = "Comedy Night at The Kasbah", venue = near ?? "city centre", date = "Saturday, 9pm", type = "comedy" },
-            new { name = "Theatre Royal Show", venue = near ?? "city centre", date = "This weekend", type = "theatre" }
-        };
+            var supabaseUrl = _settings.Supabase.Url.TrimEnd('/');
+            var url = $"{supabaseUrl}/functions/v1/find-local-events";
+            var payload = System.Text.Json.JsonSerializer.Serialize(new { category, near = near ?? "nearby", date });
 
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Add("apikey", _settings.Supabase.AnonKey);
+            http.DefaultRequestHeaders.Add("Authorization", $"Bearer {_settings.Supabase.AnonKey}");
+            http.Timeout = TimeSpan.FromSeconds(15);
+
+            var response = await http.PostAsync(url,
+                new StringContent(payload, System.Text.Encoding.UTF8, "application/json"));
+            var body = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("[{SessionId}] 🎭 Events response: {Body}", SessionId, body);
+                return System.Text.Json.JsonSerializer.Deserialize<object>(body)!;
+            }
+
+            _logger.LogWarning("[{SessionId}] 🎭 Events API error {Status}: {Body}",
+                SessionId, (int)response.StatusCode, body);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] 🎭 Events lookup failed, returning fallback", SessionId);
+        }
+
+        // Fallback if edge function fails
         return new
         {
-            success = true,
-            events = mockEvents,
-            message = $"Found {mockEvents.Length} events near {near ?? "your area"}. Would you like a taxi to any of these?"
+            success = false,
+            events = Array.Empty<object>(),
+            message = $"Sorry, I couldn't look up events right now. You could try asking about specific venues near {near ?? "your area"}."
         };
     }
 

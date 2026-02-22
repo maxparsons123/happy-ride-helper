@@ -29,3 +29,6 @@ verify_jwt = false
 
 [functions.sip-openai-webhook]
 verify_jwt = false
+
+[functions.find-local-events]
+verify_jwt = false
