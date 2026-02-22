@@ -670,12 +670,8 @@ public sealed class SipServer : IAsyncDisposable
                 float thresh = _audioSettings.BargeInRmsThreshold > 0
                     ? _audioSettings.BargeInRmsThreshold : 1200f;
 
-                if (rms < thresh)
-                {
-                    // Quiet enough to be echo — replace with comfort noise
-                    g711ToSend = new byte[payload.Length];
-                    Array.Fill(g711ToSend, (byte)0xD5);
-                }
+                // Quiet enough to be echo — drop it (no allocations)
+                if (rms < thresh) return;
             }
 
             // Apply ingress gain before passing to AI
