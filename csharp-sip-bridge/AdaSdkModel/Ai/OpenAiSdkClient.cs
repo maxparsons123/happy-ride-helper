@@ -710,12 +710,13 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 int lastQ = -1;
 
                 // Wait for RTP queue to drain (if available), but cap the wait
-                if (GetQueuedFrames != null)
+                var getQueued = GetQueuedFrames;
+                if (getQueued != null)
                 {
                     while (NowMs() - start < DRAIN_MAX_MS)
                     {
                         int q;
-                        try { q = GetQueuedFrames(); }
+                        try { q = getQueued(); }
                         catch { break; }
 
                         if (q != lastQ)
