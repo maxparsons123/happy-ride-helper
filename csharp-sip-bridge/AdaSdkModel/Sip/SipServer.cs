@@ -693,9 +693,8 @@ public sealed class SipServer : IAsyncDisposable
                 ? G711Transcode.MuLawToALaw(payload)
                 : payload;
 
-            // In operator mode, forward caller audio to local speaker monitor
-            if (isOperator)
-                OnOperatorCallerAudio?.Invoke(g711ToSend);
+            // Forward caller audio to local speaker monitor (both AI and operator calls)
+            try { OnOperatorCallerAudio?.Invoke(g711ToSend); } catch { }
 
             // Soft gate while bot speaking or shortly after stop
             bool applySoftGate = Volatile.Read(ref isBotSpeaking) == 1;
