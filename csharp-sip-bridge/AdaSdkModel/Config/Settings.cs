@@ -86,7 +86,7 @@ public sealed class AudioSettings
 {
     public string PreferredCodec { get; set; } = "PCMA";
     public double VolumeBoost { get; set; } = 1.0;
-    public double IngressVolumeBoost { get; set; } = 4.0;
+    public double IngressVolumeBoost { get; set; } = 6.0;
     public int EchoGuardMs { get; set; } = 200;
     public float BargeInRmsThreshold { get; set; } = 1500f;
     public bool EnableDiagnostics { get; set; } = true;
