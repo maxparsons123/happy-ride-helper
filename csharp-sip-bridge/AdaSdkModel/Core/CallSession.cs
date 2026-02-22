@@ -630,6 +630,8 @@ public sealed class CallSession : ICallSession
         sb.AppendLine($"  Passengers: {(_booking.Passengers.HasValue ? $"{_booking.Passengers} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Time: {(_booking.PickupTime != null ? $"{_booking.PickupTime} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Vehicle: {_booking.VehicleType}");
+        if (!string.IsNullOrWhiteSpace(_booking.Luggage))
+            sb.AppendLine($"  Luggage: {_booking.Luggage} ✓");
         if (!string.IsNullOrWhiteSpace(_booking.SpecialInstructions))
             sb.AppendLine($"  Special Instructions: {_booking.SpecialInstructions} ✓");
         sb.AppendLine();
@@ -930,9 +932,17 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
         {
             _booking.Passengers = pn;
-            // Auto-recommend vehicle type based on passenger count (unless explicitly set)
+            // Auto-recommend vehicle type based on passenger count + luggage (unless explicitly set)
             if (!args.ContainsKey("vehicle_type"))
-                _booking.VehicleType = BookingState.RecommendVehicle(pn);
+                _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
+        }
+        if (args.TryGetValue("luggage", out var lug) && !string.IsNullOrWhiteSpace(lug?.ToString()))
+        {
+            _booking.Luggage = lug.ToString();
+            _logger.LogInformation("[{SessionId}] 🧳 Luggage: {Luggage}", SessionId, _booking.Luggage);
+            // Re-evaluate vehicle recommendation with luggage info
+            if (_booking.Passengers.HasValue && !args.ContainsKey("vehicle_type"))
+                _booking.VehicleType = BookingState.RecommendVehicle(_booking.Passengers.Value, _booking.Luggage);
         }
         if (args.TryGetValue("pickup_time", out var pt))
         {
