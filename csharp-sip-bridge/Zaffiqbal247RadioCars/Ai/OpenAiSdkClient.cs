@@ -617,12 +617,15 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             }
             else
             {
+                // Fallback watchdog: capture ID + callEnded guard to prevent stale fires
+                var wdId = Volatile.Read(ref _noReplyWatchdogId);
                 _ = Task.Run(async () =>
                 {
                     await Task.Delay(10_000);
+                    if (Volatile.Read(ref _noReplyWatchdogId) != wdId) return;
+                    if (Volatile.Read(ref _callEnded) != 0) return;
                     if (Volatile.Read(ref _responseActive) == 0 &&
-                        Volatile.Read(ref _toolInFlight) == 0 &&
-                        Volatile.Read(ref _callEnded) == 0)
+                        Volatile.Read(ref _toolInFlight) == 0)
                     {
                         StartNoReplyWatchdog();
                     }
