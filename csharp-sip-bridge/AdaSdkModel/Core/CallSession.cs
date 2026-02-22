@@ -2251,6 +2251,18 @@ public sealed class CallSession : ICallSession
 
         if (action == "confirmed")
         {
+            // FARE PREREQUISITE GUARD: Block confirmation if fare was never presented to the caller.
+            // The AI must NOT skip fare calculation → presentation → user confirmation.
+            if (_currentStage != BookingStage.FarePresented && _currentStage != BookingStage.AnythingElse
+                && Volatile.Read(ref _bookTaxiCompleted) == 0)
+            {
+                _logger.LogWarning("[{SessionId}] ⛔ book_taxi(confirmed) BLOCKED — fare was never presented to caller (stage={Stage}). " +
+                    "AI attempted to skip fare calculation/presentation.", SessionId, _currentStage);
+                return new { success = false, error = "Cannot confirm — the fare has not been presented to the caller yet. " +
+                    "You MUST first collect all booking details, wait for [FARE RESULT], read back the verified addresses and fare to the caller, " +
+                    "offer the payment choice (card/meter), and ONLY THEN call book_taxi(action='confirmed') after the caller agrees." };
+            }
+
             // IN-PROGRESS GUARD: Block confirmation while fare calculation is still in flight
             // This prevents the race condition where the AI calls book_taxi(confirmed) before
             // the fare/disambiguation result has been processed.
