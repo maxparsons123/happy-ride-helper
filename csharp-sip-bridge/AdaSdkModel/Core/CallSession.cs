@@ -2414,6 +2414,45 @@ public sealed class CallSession : ICallSession
     }
 
     // =========================
+    // AIRPORT BOOKING LINK — WhatsApp delivery
+    // =========================
+    private async Task SendBookingLinkViaWhatsAppAsync(string callerId, string bookingUrl, BookingState booking, string sessionId)
+    {
+        try
+        {
+            var pickup = booking.PickupFormatted ?? booking.Pickup ?? "your pickup";
+            var destination = booking.DestFormatted ?? booking.Destination ?? "your destination";
+            var name = booking.Name ?? "there";
+
+            _logger.LogInformation("[{SessionId}] 🔗 Sending airport booking link to {Phone}: {Url}", sessionId, callerId, bookingUrl);
+
+            if (!string.IsNullOrEmpty(_settings.Dispatch.WhatsAppWebhookUrl))
+            {
+                using var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.Dispatch.BsqdApiKey);
+
+                var message = $"Hi {name}! Here's your airport booking form for your trip from {pickup} to {destination}. " +
+                              $"Please select your vehicle, enter your flight details and travel time: {bookingUrl} — Thank you, 247 Radio Carz";
+
+                var body = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    phoneNumber = FormatE164ForSumUp(callerId),
+                    message = message
+                });
+
+                var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, _settings.Dispatch.WhatsAppWebhookUrl);
+                request.Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json");
+                var response = await httpClient.SendAsync(request);
+                _logger.LogInformation("[{SessionId}] 🔗 Airport booking link WhatsApp delivery: {Status}", sessionId, (int)response.StatusCode);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Failed to send airport booking link via WhatsApp", sessionId);
+        }
+    }
+
+    // =========================
     // CREATE BOOKING (straight-through, with AI extraction)
     // =========================
     private async Task<object> HandleCreateBookingAsync(Dictionary<string, object?> args)
@@ -2795,6 +2834,12 @@ public sealed class CallSession : ICallSession
             var url = result.RootElement.GetProperty("url").GetString();
 
             _logger.LogInformation("[{SessionId}] ✅ Booking link created: {Url}", SessionId, url);
+
+            // Send the airport booking link via WhatsApp (instead of SumUp payment link)
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                await SendBookingLinkViaWhatsAppAsync(CallerId, url, _booking, SessionId);
+            }
 
             return new
             {
