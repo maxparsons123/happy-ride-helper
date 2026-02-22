@@ -309,15 +309,20 @@ public sealed class CallSession : ICallSession
                 case IntentGuard.ResolvedIntent.NewBooking:
                     _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User wants another booking", SessionId);
                     _currentStage = BookingStage.CollectingPickup;
-                    // Reset for new booking
+                    // Reset for new booking — preserve only caller identity
+                    var prevName = _booking.Name;
                     _booking.Reset();
                     _booking.CallerPhone = CallerId;
+                    _booking.Name = prevName;
                     Interlocked.Exchange(ref _bookTaxiCompleted, 0);
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
                     _pickupDisambiguated = true;
                     _destDisambiguated = true;
                     _pickupLockedByClarify = false;
                     _destLockedByClarify = false;
+                    // Inject clean state so the AI knows ALL booking fields are now empty
+                    _ = InjectBookingStateAsync("[BOOKING RESET] New booking started. ALL fields are now empty except caller name. " +
+                        "Do NOT reuse any addresses from previous bookings. Ask for pickup address from scratch.");
                     break;
             }
         }
@@ -2718,11 +2723,22 @@ public sealed class CallSession : ICallSession
             _currentStage = !string.IsNullOrWhiteSpace(knownName) ? BookingStage.CollectingPickup : BookingStage.Greeting;
             Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             Interlocked.Exchange(ref _fareAutoTriggered, 0);
+            _pickupDisambiguated = true;
+            _destDisambiguated = true;
+            _pickupLockedByClarify = false;
+            _destLockedByClarify = false;
+
+            // Inject clean state so the AI knows ALL fields are now empty
+            _ = InjectBookingStateAsync("[BOOKING RESET] Previous booking was cancelled. ALL fields are now empty. " +
+                "Do NOT reuse any addresses from the cancelled booking. " +
+                "If the caller wants a new booking, you MUST ask for pickup from scratch.");
 
             return new
             {
                 success = true,
-                message = $"Booking has been cancelled successfully. Tell the caller: 'Your booking has been cancelled. Would you like to make a new booking, or is there anything else I can help with?' If they want a new booking, proceed with the normal flow. If not, say goodbye and call end_call."
+                message = $"Booking has been cancelled successfully. ALL booking fields have been cleared. " +
+                          "Tell the caller: 'Your booking has been cancelled. Would you like to make a new booking, or is there anything else I can help with?' " +
+                          "If they want a new booking, you MUST start fresh — ask for pickup address. Do NOT auto-fill any fields from the cancelled booking."
             };
         }
         catch (Exception ex)
