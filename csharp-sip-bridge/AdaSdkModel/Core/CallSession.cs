@@ -1013,6 +1013,25 @@ public sealed class CallSession : ICallSession
         // House number validation is handled by Gemini AI during geocoding/fare calculation.
         // No pre-flight check here — Gemini will request clarification if the address is ambiguous.
 
+        // ── AIRPORT DESTINATION INTERCEPT ──────────────────────────────────────────
+        // If the destination is an airport, bypass fare calculation entirely.
+        // Tell Ada to immediately call send_booking_link() instead of continuing the normal flow.
+        if (!string.IsNullOrWhiteSpace(_booking.Destination) && IsAirportDestination(_booking.Destination)
+            && !string.IsNullOrWhiteSpace(_booking.Pickup) && !IsAirportDestination(_booking.Pickup))
+        {
+            _logger.LogInformation("[{SessionId}] ✈️ Airport destination detected: '{Dest}' — bypassing fare calc, directing to booking link",
+                SessionId, _booking.Destination);
+            return new
+            {
+                success = true,
+                airport_detected = true,
+                message = "AIRPORT DESTINATION DETECTED. Do NOT ask about passengers, time, or luggage. " +
+                          "Immediately say: \"Since you're heading to the airport, I'll send you our airport booking form where you can choose your vehicle, " +
+                          "enter your flight details, and even get a discount on a return trip. I'll send that to you now.\" " +
+                          "Then call send_booking_link() immediately."
+            };
+        }
+
         // AUTO-TRIGGER: When all 5 fields are filled, automatically calculate fare
         // This matches the v3.9 prompt: "When sync_booking_data is called with all 5 fields filled,
         // the system will AUTOMATICALLY validate the addresses and calculate the fare."
@@ -3293,6 +3312,21 @@ public sealed class CallSession : ICallSession
         "manchester airport", "liverpool airport", "edinburgh airport", "glasgow airport",
         "east midlands airport", "bristol airport"
     ];
+
+    private static readonly string[] AirportKeywords =
+    [
+        "airport", "heathrow", "gatwick", "stansted", "luton", "birmingham airport",
+        "manchester airport", "liverpool airport", "edinburgh airport", "glasgow airport",
+        "east midlands airport", "bristol airport", "london city airport", "southend airport"
+    ];
+
+    /// <summary>Returns true if the address refers to an airport.</summary>
+    private static bool IsAirportDestination(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return false;
+        var lower = address.Trim().ToLowerInvariant();
+        return AirportKeywords.Any(k => lower.Contains(k));
+    }
 
     private static bool DestinationLacksCityContext(string? destination)
     {
