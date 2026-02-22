@@ -941,8 +941,9 @@ public sealed class CallSession : ICallSession
             {
                 _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — context '{Context}' doesn't resemble it (likely auto-filled from history)",
                     SessionId, incoming, contextForGuard);
-                sttCorrections.Add($"AUTO-FILL BLOCKED: You sent destination '{incoming}' but the caller said '{lastTranscript}' which doesn't match. " +
-                    $"Do NOT auto-fill from [CALLER HISTORY]. Use ONLY what the caller actually said. Ask the caller for their destination.");
+                sttCorrections.Add($"AUTO-FILL BLOCKED (THIS TURN ONLY): You sent destination '{incoming}' but the caller's utterance was '{lastTranscript}' which doesn't mention that destination. " +
+                    $"This was likely auto-filled from [CALLER HISTORY]. Ask the caller for their destination. " +
+                    $"IMPORTANT: If the caller then EXPLICITLY says a destination (even '{incoming}'), you MUST call sync_booking_data with it — this block only applied to the auto-fill attempt, not to future explicit mentions.");
             }
             else
             {
