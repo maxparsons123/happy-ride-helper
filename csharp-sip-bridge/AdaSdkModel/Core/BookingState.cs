@@ -11,6 +11,7 @@ public sealed class BookingState
 {
     // Core booking fields
     public string? Name { get; set; }
+    public string? CallerName { get; set; }
     public string? CallerPhone { get; set; }
     public string? Pickup { get; set; }
     public string? Destination { get; set; }
@@ -147,7 +148,7 @@ public sealed class BookingState
 
     public void Reset()
     {
-        Name = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
+        Name = CallerName = CallerPhone = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         ExistingBookingId = null;
         IcabbiJourneyId = null;
         Passengers = null;
