@@ -5,7 +5,8 @@ import { VehicleCard } from "@/components/airport-booking/VehicleCard";
 import { FlightDetailsForm } from "@/components/airport-booking/FlightDetailsForm";
 import { ReturnTripSection } from "@/components/airport-booking/ReturnTripSection";
 import { BookingSummary } from "@/components/airport-booking/BookingSummary";
-import { Car, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import carzLogo from "@/assets/247carz-logo.png";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 
@@ -208,9 +209,7 @@ const AirportBooking = () => {
       <header className="bg-card border-b border-border">
         <div className="max-w-4xl mx-auto px-4 py-6">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gradient-gold shadow-glow">
-              <Car className="h-5 w-5 text-primary-foreground" />
-            </div>
+            <img src={carzLogo} alt="247 Carz" className="h-12 w-12 rounded-lg object-contain" />
             <div>
               <h1 className="font-display text-xl font-bold text-foreground">Airport Transfer Booking</h1>
               <p className="text-sm text-muted-foreground">Complete your booking details below</p>
