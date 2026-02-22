@@ -29,6 +29,7 @@ public sealed class CallSession : ICallSession
     private int _disposed;
     private int _active;
     private int _bookTaxiCompleted;
+    private int _fareRejected; // Set to 1 when user explicitly rejects fare — allows end_call without booking
     private long _lastAdaFinishedAt;
 
     // ── STAGE-AWARE INTENT GUARD ──
@@ -292,9 +293,9 @@ public sealed class CallSession : ICallSession
                     break;
 
                 case IntentGuard.ResolvedIntent.RejectFare:
-                    _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User rejected fare — staying in modification flow", SessionId);
-                    // AI should handle this naturally — just ensure stage stays at FarePresented
-                    // so next affirmative after re-quote triggers correctly
+                    _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User rejected fare — allowing end_call without booking", SessionId);
+                    Interlocked.Exchange(ref _fareRejected, 1);
+                    // AI should handle this naturally — prompt instructs Ada to offer edit/cancel path
                     break;
 
                 case IntentGuard.ResolvedIntent.EndCall:
@@ -317,6 +318,7 @@ public sealed class CallSession : ICallSession
                     _booking.Name = prevName;
                     Interlocked.Exchange(ref _bookTaxiCompleted, 0);
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                    Interlocked.Exchange(ref _fareRejected, 0);
                     _pickupDisambiguated = true;
                     _destDisambiguated = true;
                     _pickupLockedByClarify = false;
@@ -888,6 +890,7 @@ public sealed class CallSession : ICallSession
                         _booking.Eta = null;
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                        Interlocked.Exchange(ref _fareRejected, 0);
                         _suffixRetryAttempted = false;
                     }
                     _booking.Pickup = incoming;
@@ -2921,8 +2924,9 @@ public sealed class CallSession : ICallSession
         // ── END-CALL GUARD: Block premature hangup if booking flow was started but never completed ──
         bool fareWasCalculated = !string.IsNullOrWhiteSpace(_booking.Fare);
         bool bookingCompleted = Volatile.Read(ref _bookTaxiCompleted) == 1;
+        bool fareWasRejected = Volatile.Read(ref _fareRejected) == 1;
 
-        if (fareWasCalculated && !bookingCompleted)
+        if (fareWasCalculated && !bookingCompleted && !fareWasRejected)
         {
             _logger.LogWarning("[{SessionId}] ⛔ END_CALL BLOCKED: fare was quoted but book_taxi(confirmed) never called", SessionId);
             return new
@@ -2930,8 +2934,14 @@ public sealed class CallSession : ICallSession
                 success = false,
                 error = "Cannot end call yet — a fare was quoted but the booking was never confirmed. " +
                         "You MUST read back the fare and ask the caller to confirm before ending. " +
-                        "If they already said yes, call book_taxi(action: 'confirmed') first."
+                        "If they already said yes, call book_taxi(action: 'confirmed') first. " +
+                        "If they said NO and want to leave, ask: 'Would you like to change anything, or shall I cancel?'"
             };
+        }
+
+        if (fareWasRejected && !bookingCompleted)
+        {
+            _logger.LogInformation("[{SessionId}] ✅ END_CALL allowed — user rejected fare, no booking forced", SessionId);
         }
 
         _ = Task.Run(async () =>
