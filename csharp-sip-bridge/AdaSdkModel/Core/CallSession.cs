@@ -48,6 +48,7 @@ public sealed class CallSession : ICallSession
     public event Action<string, string>? OnTranscript;
     public event Action<byte[]>? OnAudioOut;
     public event Action? OnBargeIn;
+    public event Action<ICallSession, string>? OnEscalate;
 
     public CallSession(
         string sessionId,
@@ -718,6 +719,7 @@ public sealed class CallSession : ICallSession
             "cancel_booking" => await HandleCancelBookingAsync(args),
             "check_booking_status" => HandleCheckBookingStatus(args),
             "send_booking_link" => await HandleSendBookingLinkAsync(args),
+            "transfer_to_operator" => await HandleTransferToOperatorAsync(args),
             "end_call" => HandleEndCall(args),
             _ => new { error = $"Unknown tool: {name}" }
         };
@@ -3019,6 +3021,52 @@ public sealed class CallSession : ICallSession
     }
 
     // =========================
+    // TRANSFER TO OPERATOR
+    // =========================
+    private async Task<object> HandleTransferToOperatorAsync(Dictionary<string, object?> args)
+    {
+        var reason = args.TryGetValue("reason", out var r) ? r?.ToString() ?? "operator_request" : "operator_request";
+        _currentStage = BookingStage.Escalated;
+
+        _logger.LogInformation("[{SessionId}] 🔀 ESCALATION: Transferring to operator — reason: {Reason}", SessionId, reason);
+
+        // Update live_calls in Supabase
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var url = $"{_settings.Supabase.Url}/rest/v1/live_calls?call_id=eq.{Uri.EscapeDataString(SessionId)}";
+            var patch = new StringContent(
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    escalated = true,
+                    escalation_reason = reason,
+                    escalated_at = DateTime.UtcNow.ToString("o"),
+                    status = "escalated"
+                }),
+                System.Text.Encoding.UTF8, "application/json");
+            patch.Headers.Add("Prefer", "return=minimal");
+            var req = new HttpRequestMessage(HttpMethod.Patch, url) { Content = patch };
+            req.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            req.Headers.Add("Authorization", $"Bearer {_settings.Supabase.ServiceRoleKey}");
+            await http.SendAsync(req);
+            _logger.LogInformation("[{SessionId}] ✅ live_calls updated with escalation status", SessionId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] Failed to update live_calls escalation (non-fatal)", SessionId);
+        }
+
+        // Fire the escalation event — SipServer will handle the SIP REFER transfer
+        OnEscalate?.Invoke(this, reason);
+
+        return new
+        {
+            success = true,
+            message = "Transferring to operator now. The call will be handed over via SIP transfer."
+        };
+    }
+
+    // =========================
     private object HandleEndCall(Dictionary<string, object?> args)
     {
         _currentStage = BookingStage.Ending;
@@ -3877,6 +3925,7 @@ public sealed class CallSession : ICallSession
         OnTranscript = null;
         OnAudioOut = null;
         OnBargeIn = null;
+        OnEscalate = null;
 
         _booking.Reset();
         Interlocked.Exchange(ref _bookTaxiCompleted, 0);
