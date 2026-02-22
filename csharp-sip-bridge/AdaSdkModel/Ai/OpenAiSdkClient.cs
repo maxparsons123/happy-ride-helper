@@ -81,9 +81,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private long _micGateUntilMs;                   // if NowMs() < this, ignore SendAudio()
     private int _drainGateTaskId;                   // prevents overlapping drain tasks
     private int _suppressWatchdogUntilUserSpeech;   // set to 1 after greeting; cleared once user speaks
+    private int _bargeInActive;                     // 1 = user barged in, reduce echo tail on next playout complete
 
     // Tune these:
     private const int ECHO_TAIL_MS = 600;           // Reduced from 800ms for faster turn-taking
+    private const int BARGE_IN_TAIL_MS = 100;       // Minimal tail after barge-in (user is actively speaking)
     private const int DRAIN_POLL_MS = 20;
     private const int DRAIN_MAX_MS = 2000;          // cap waiting for playout drain
 
@@ -453,8 +455,11 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         var now = NowMs();
         Volatile.Write(ref _lastAdaFinishedAt, now);
-        Volatile.Write(ref _micGateUntilMs, now + ECHO_TAIL_MS);
-        Log($"✅ Playout complete — mic gated for tail {ECHO_TAIL_MS}ms");
+
+        // If user barged in, use minimal echo tail — they're actively speaking
+        var tailMs = Interlocked.Exchange(ref _bargeInActive, 0) == 1 ? BARGE_IN_TAIL_MS : ECHO_TAIL_MS;
+        Volatile.Write(ref _micGateUntilMs, now + tailMs);
+        Log($"✅ Playout complete — mic gated for tail {tailMs}ms{(tailMs == BARGE_IN_TAIL_MS ? " (barge-in)" : "")}");
 
         OnPlayoutComplete?.Invoke();
 
@@ -837,6 +842,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         {
             Log("✂️ Barge-in detected — clearing playout");
             _audioAlignBuffer.Clear();
+            Interlocked.Exchange(ref _bargeInActive, 1);  // Signal reduced echo tail
             OnBargeIn?.Invoke();
         }
     }
