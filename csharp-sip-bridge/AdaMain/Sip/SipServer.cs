@@ -550,7 +550,7 @@ public sealed class SipServer : IAsyncDisposable
                 if (playout.QueuedFrames == 0)
                 {
                     Log($"[{sid}] 🔔 Queue already empty - starting watchdog now");
-                    g711Client.NotifyPlayoutComplete();
+                    Task.Run(() => g711Client.NotifyPlayoutComplete());
                 }
                 else
                 {
@@ -567,13 +567,13 @@ public sealed class SipServer : IAsyncDisposable
                 Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
                 Log($"[{sid}] 🔇 Playout queue empty - echo guard started");
-                session.NotifyPlayoutComplete();
+                Task.Run(() => session.NotifyPlayoutComplete());
             }
             else if (Volatile.Read(ref watchdogPending) == 1)
             {
                 Interlocked.Exchange(ref watchdogPending, 0);
                 Log($"[{sid}] 🔇 Playout drained post-response - starting watchdog");
-                session.NotifyPlayoutComplete();
+                Task.Run(() => session.NotifyPlayoutComplete());
             }
         };
 
@@ -625,12 +625,12 @@ public sealed class SipServer : IAsyncDisposable
                 // Barge-in detection via RMS
                 var pcmCheck = new short[g711ToSend.Length];
                 double sumSq = 0;
-                for (int i = 0; i < g711ToSend.Length; i++)
+                for (int i = 0; i < g711ToSend.Length; i += 4)
                 {
                     pcmCheck[i] = ALawDecode(g711ToSend[i]);
                     sumSq += (double)pcmCheck[i] * pcmCheck[i];
                 }
-                float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+                float rms = (float)Math.Sqrt(sumSq / (g711ToSend.Length / 4));
 
                 var bargeInThreshold = _audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200;
                 if (rms >= bargeInThreshold)
@@ -652,12 +652,12 @@ public sealed class SipServer : IAsyncDisposable
             {
                 // Audio quality diagnostics (per-call)
                 double sumSq = 0;
-                for (int i = 0; i < g711ToSend.Length; i++)
+                for (int i = 0; i < g711ToSend.Length; i += 4)
                 {
                     short pcm = ALawDecode(g711ToSend[i]);
                     sumSq += pcm * (double)pcm;
                 }
-                float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+                float rms = (float)Math.Sqrt(sumSq / (g711ToSend.Length / 4));
 
                 int rmsFixed = (int)(rms * 1000);
                 var frameCount = Interlocked.Increment(ref dqFrameCount);
