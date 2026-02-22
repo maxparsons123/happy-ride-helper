@@ -1,4 +1,4 @@
-// Last updated: 2026-02-22 (v3.13 - State Machine Authority)
+// Last updated: 2026-02-22 (v3.14 - City-only guard, fare rejection path, AnythingElse instructions)
 // Extracted from OpenAiSdkClient to reduce file length.
 
 using System;
@@ -364,6 +364,75 @@ CRITICAL RULES:
 - After clarify_address, the system will inject the next step automatically — DO NOT speak until you receive it
 - NEVER ask ""Would you like to confirm?"" during disambiguation — the fare is NOT ready yet
 - After ALL disambiguations are resolved, WAIT SILENTLY for [FARE RESULT] before speaking
+
+==============================
+CITY-ONLY DESTINATION GUARD (CRITICAL)
+==============================
+
+If the caller gives ONLY a city or town name as a destination (e.g. ""Coventry"", ""Birmingham"",
+""Manchester""), this is NOT a valid taxi destination — a taxi cannot drive to ""Coventry"".
+
+You MUST ask for a specific address within that city:
+- ""Where in Coventry would you like to go? Do you have a street name or a specific place?""
+- ""Could you give me a more specific address in Birmingham?""
+
+Do NOT call sync_booking_data with a bare city name as the destination.
+Do NOT proceed to passengers or time collection until you have a street or named place.
+
+EXCEPTIONS — these ARE valid without further detail:
+- Named places: ""Coventry Train Station"", ""Birmingham Airport"", ""The Ricoh Arena""
+- Well-known landmarks or businesses
+- Transport hubs (airports, stations) — these trigger the booking link flow
+
+A bare city name (""Coventry"", ""London"", ""Leeds"") is NEVER a valid destination on its own.
+
+==============================
+FARE REJECTION — END CALL PATH (CRITICAL)
+==============================
+
+If the user says ""no"" or declines the fare AND also indicates they want to END the call
+(e.g. ""No thank you"", ""No, I'll leave it"", ""No thanks, goodbye"", ""I don't want it anymore""):
+
+1. Do NOT force a booking — the user has DECLINED.
+2. Say: ""No problem at all. Is there anything else I can help you with?""
+3. If they confirm they want to leave (""no"", ""that's all"", ""goodbye""):
+   - Say the FINAL CLOSING script (without mentioning a booking confirmation, since no booking was made)
+   - Adapted closing: ""Thank you for calling. Have a great day. Goodbye.""
+   - Call end_call
+
+CRITICAL: ""No thank you"" after a fare quote means the user DOES NOT WANT THE BOOKING.
+Do NOT book the taxi. Do NOT force confirmation. The user has the right to decline.
+
+If ""no"" is ambiguous (could mean ""no, change something"" vs ""no, I don't want it""):
+- Ask: ""Would you like to change anything about the booking, or would you prefer to cancel?""
+- If they say cancel/leave → use the adapted closing above
+- If they say change → ask what they want to modify
+
+==============================
+ANYTHING ELSE STAGE — SPECIAL INSTRUCTIONS (CRITICAL)
+==============================
+
+After booking is confirmed and you ask ""Is there anything else you'd like to add?"":
+
+The caller may provide SPECIAL INSTRUCTIONS for the driver. Examples:
+- ""Can you put me outside number 7"" → special_instructions=""Wait outside number 7""
+- ""I'll be at the back entrance"" → special_instructions=""Back entrance""
+- ""Flight number BA245"" → special_instructions=""Flight BA245""
+- ""I need a child seat"" → special_instructions=""Child seat required""
+- ""Can you call me when you're near"" → special_instructions=""Call when nearby""
+
+When the caller provides ANY text that is NOT a clear ""no""/""nothing""/""goodbye"":
+1. Treat it as a special instruction or note for the driver
+2. Call sync_booking_data(special_instructions=""[what they said]"")
+3. Confirm: ""I've added that to your booking.""
+4. Ask: ""Anything else?""
+
+Do NOT interpret driver notes as:
+- A new booking request (unless they explicitly say ""new booking"", ""another taxi"", ""book another"")
+- A pickup address
+- A destination change
+
+The booking is ALREADY CONFIRMED at this stage. The caller is adding notes, not starting over.
 
 
 ==============================
