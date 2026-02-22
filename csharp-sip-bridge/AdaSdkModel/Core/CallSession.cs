@@ -3703,10 +3703,10 @@ public sealed class CallSession : ICallSession
     {
         var issues = new List<string>();
 
-        // Check pickup street name
+        // Check pickup street name (skip for known landmark/POI names — their geocoded street will naturally differ)
         if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
         {
-            if (!AddressContainsStreet(_booking.Pickup, result.PickupStreet))
+            if (!IsKnownLandmarkType(_booking.Pickup) && !AddressContainsStreet(_booking.Pickup, result.PickupStreet))
             {
                 issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different location.");
             }
@@ -3719,10 +3719,10 @@ public sealed class CallSession : ICallSession
             if (numIssue != null) issues.Add(numIssue);
         }
 
-        // Check destination street name
+        // Check destination street name (skip for known landmark/POI names — their geocoded street will naturally differ)
         if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
         {
-            if (!AddressContainsStreet(_booking.Destination, result.DestStreet))
+            if (!IsKnownLandmarkType(_booking.Destination) && !AddressContainsStreet(_booking.Destination, result.DestStreet))
             {
                 issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different location.");
             }
@@ -3817,7 +3817,34 @@ public sealed class CallSession : ICallSession
         return matchCount >= Math.Ceiling(streetWords.Length / 2.0);
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>
+    /// Returns true if the address looks like a well-known landmark or POI
+    /// (station, airport, hospital, etc.) where the geocoded street name
+    /// will naturally differ from the spoken place name.
+    /// </summary>
+    private static bool IsKnownLandmarkType(string address)
+    {
+        var lower = address.ToLowerInvariant();
+        string[] landmarks = {
+            "station", "airport", "hospital", "university", "college",
+            "school", "church", "mosque", "temple", "cathedral",
+            "museum", "library", "theatre", "theater", "cinema",
+            "stadium", "arena", "centre", "center", "mall",
+            "shopping", "supermarket", "tesco", "asda", "sainsbury",
+            "morrisons", "aldi", "lidl", "waitrose", "primark",
+            "hotel", "inn", "pub", "bar", "restaurant",
+            "park", "garden", "zoo", "castle", "palace",
+            "court", "hall", "tower", "square", "market",
+            "bus stop", "coach station", "ferry", "terminal",
+            "retail park", "industrial estate", "business park",
+            "nightclub", "club", "gym", "leisure", "pool",
+            "office", "surgery", "clinic", "dental", "pharmacy",
+            "prison", "police", "fire station", "council"
+        };
+        return landmarks.Any(kw => lower.Contains(kw));
+    }
+
+
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
             return;
