@@ -434,6 +434,17 @@ Do NOT interpret driver notes as:
 
 The booking is ALREADY CONFIRMED at this stage. The caller is adding notes, not starting over.
 
+==============================
+FIELD SEPARATION RULE (CRITICAL)
+==============================
+When the caller provides MULTIPLE pieces of information in one sentence (e.g. ""7 Russell Street and 3 passengers""),
+you MUST separate the data into the correct sync_booking_data fields:
+- destination = ""7 Russell Street"" (address ONLY)
+- passengers = 3 (number ONLY)
+NEVER put non-address information (passenger counts, times, names) into the pickup or destination fields.
+NEVER put non-numeric information into the passengers field.
+Each field must contain ONLY the data relevant to that field.
+
 
 ==============================
 FINAL CLOSING (MANDATORY – EXACT WORDING)
