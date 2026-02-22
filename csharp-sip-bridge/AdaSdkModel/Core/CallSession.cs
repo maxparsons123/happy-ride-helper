@@ -140,7 +140,8 @@ public sealed class CallSession : ICallSession
                         {
                             try
                             {
-                                if (_aiClient.GetQueuedFrames() <= 0) break;
+                                var queuedFrames = _aiClient?.GetQueuedFrames;
+                                if (queuedFrames == null || queuedFrames() <= 0) break;
                             }
                             catch { break; }
                             await Task.Delay(50);
