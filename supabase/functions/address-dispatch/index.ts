@@ -279,11 +279,12 @@ This is a powerful signal — a street + house number combination is often uniqu
 GEOCODING RULES (CRITICAL):
 1. You MUST provide lat/lon coordinates for EVERY resolved address
 2. Use your knowledge of real-world geography to provide accurate coordinates
-3. For specific street addresses with house numbers, provide coordinates as precisely as possible
+3. For specific street addresses with house numbers, provide coordinates as precisely as possible — place the pin AT or NEAR the house number on that street, not at the street centroid
 4. For landmarks, restaurants, hotels etc., provide their known location coordinates
 5. For ambiguous addresses, provide coordinates for the MOST LIKELY match based on phone bias AND house number plausibility
 6. Coordinates must be realistic (UK lat ~50-58, lon ~-6 to 2; NL lat ~51-53, lon ~3-7)
 7. Extract structured components: street_name, street_number, postal_code, city
+8. CRITICAL — DISTINCT COORDINATES: Pickup and dropoff are DIFFERENT locations. They MUST have DIFFERENT lat/lon values. Even if two streets are in the same neighbourhood, their coordinates will differ by at least 0.0005° (~50 metres). If you return identical coordinates for pickup and dropoff, the fare calculator and route planner will fail with "route could not be determined". Double-check that pickup lat/lon ≠ dropoff lat/lon before returning.
 
 PICKUP TIME NORMALISATION (CRITICAL):
 When a pickup_time is provided in the user message, parse it into ISO 8601 UTC: "YYYY-MM-DDTHH:MM:SSZ".
@@ -817,6 +818,79 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
     } else {
       console.log(`⚠️ No valid coordinates for fare calculation`);
       parsed.fare = null;
+    }
+
+    // ── IDENTICAL COORDINATES FIX: Nominatim fallback when Gemini returns same lat/lon for both ──
+    if (typeof pLat === "number" && typeof pLon === "number" &&
+        typeof dLat === "number" && typeof dLon === "number" &&
+        pLat === dLat && pLon === dLon &&
+        pickupStreet !== dropoffStreet) {
+      console.log(`⚠️ IDENTICAL COORDINATES: pickup and dropoff both at (${pLat}, ${pLon}) — attempting Nominatim fallback`);
+      
+      // Try to re-geocode the dropoff via Nominatim
+      const dropoffQuery = parsed.dropoff?.address || destination || "";
+      if (dropoffQuery) {
+        try {
+          const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(dropoffQuery)}&format=json&limit=1&countrycodes=gb,nl,be`;
+          const nomResp = await fetch(nominatimUrl, {
+            headers: { "User-Agent": "AdaTaxiBooker/1.0 (taxi dispatch)" }
+          });
+          if (nomResp.ok) {
+            const nomResults = await nomResp.json();
+            if (nomResults.length > 0) {
+              const newLat = parseFloat(nomResults[0].lat);
+              const newLon = parseFloat(nomResults[0].lon);
+              if (newLat !== pLat || newLon !== pLon) {
+                console.log(`✅ Nominatim fixed dropoff: (${dLat}, ${dLon}) → (${newLat}, ${newLon})`);
+                parsed.dropoff.lat = newLat;
+                parsed.dropoff.lon = newLon;
+                // Recalculate fare with corrected coordinates
+                const fixedDist = haversineDistanceMiles(pLat, pLon, newLat, newLon);
+                if (fixedDist < 200) {
+                  parsed.fare = calculateFare(fixedDist, detectedCountry);
+                  console.log(`💰 Fare recalculated after Nominatim fix: ${parsed.fare.fare} (${fixedDist.toFixed(1)} miles)`);
+                }
+              } else {
+                console.log(`⚠️ Nominatim returned same coordinates — trying pickup fallback`);
+              }
+            }
+          }
+        } catch (nomErr) {
+          console.warn(`⚠️ Nominatim dropoff fallback error (non-fatal):`, nomErr);
+        }
+      }
+      
+      // If still identical, try re-geocoding pickup
+      if (parsed.pickup.lat === parsed.dropoff.lat && parsed.pickup.lon === parsed.dropoff.lon) {
+        const pickupQuery = parsed.pickup?.address || pickup || "";
+        if (pickupQuery) {
+          try {
+            const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(pickupQuery)}&format=json&limit=1&countrycodes=gb,nl,be`;
+            const nomResp = await fetch(nominatimUrl, {
+              headers: { "User-Agent": "AdaTaxiBooker/1.0 (taxi dispatch)" }
+            });
+            if (nomResp.ok) {
+              const nomResults = await nomResp.json();
+              if (nomResults.length > 0) {
+                const newLat = parseFloat(nomResults[0].lat);
+                const newLon = parseFloat(nomResults[0].lon);
+                if (newLat !== parsed.dropoff.lat || newLon !== parsed.dropoff.lon) {
+                  console.log(`✅ Nominatim fixed pickup: (${parsed.pickup.lat}, ${parsed.pickup.lon}) → (${newLat}, ${newLon})`);
+                  parsed.pickup.lat = newLat;
+                  parsed.pickup.lon = newLon;
+                  const fixedDist = haversineDistanceMiles(newLat, newLon, parsed.dropoff.lat, parsed.dropoff.lon);
+                  if (fixedDist < 200) {
+                    parsed.fare = calculateFare(fixedDist, detectedCountry);
+                    console.log(`💰 Fare recalculated after Nominatim pickup fix: ${parsed.fare.fare} (${fixedDist.toFixed(1)} miles)`);
+                  }
+                }
+              }
+            }
+          } catch (nomErr) {
+            console.warn(`⚠️ Nominatim pickup fallback error (non-fatal):`, nomErr);
+          }
+        }
+      }
     }
 
     // ── DUPLICATE POSTCODE CHECK: different streets should almost never share a postcode ──
