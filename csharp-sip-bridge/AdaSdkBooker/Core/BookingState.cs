@@ -23,28 +23,31 @@ public sealed class BookingState
     public string VehicleType { get; set; } = "Saloon";
     public string? SpecialInstructions { get; set; }
 
-    /// <summary>Payment preference chosen by caller: "card" (fixed price via SumUp) or "meter" (pay on the day).</summary>
+    /// <summary>Luggage info: "none", "small", "medium", "heavy".</summary>
+    public string? Luggage { get; set; }
+
+    /// <summary>Payment preference: "card" or "meter".</summary>
     public string? PaymentPreference { get; set; }
 
-    /// <summary>SumUp checkout URL generated for card-paying callers.</summary>
+    /// <summary>SumUp checkout URL.</summary>
     public string? PaymentLink { get; set; }
 
-    /// <summary>UUID of an existing active booking loaded from the database for returning callers. Null = new booking.</summary>
+    /// <summary>Existing booking ID for returning callers.</summary>
     public string? ExistingBookingId { get; set; }
 
-    /// <summary>iCabbi journey ID returned by CreateAndDispatchAsync.</summary>
+    /// <summary>iCabbi journey ID.</summary>
     public string? IcabbiJourneyId { get; set; }
 
-    /// <summary>Previous pickup interpretations for safeguarding (most recent first).</summary>
+    /// <summary>Previous pickup interpretations.</summary>
     public List<string> PreviousPickups { get; set; } = new();
 
-    /// <summary>Previous destination interpretations for safeguarding (most recent first).</summary>
+    /// <summary>Previous destination interpretations.</summary>
     public List<string> PreviousDestinations { get; set; } = new();
 
-    /// <summary>Parsed scheduled pickup DateTime (UTC). Null = ASAP.</summary>
+    /// <summary>Parsed scheduled pickup DateTime (UTC).</summary>
     public DateTime? ScheduledAt { get; set; }
 
-    /// <summary>Fare as decimal for iCabbi payment payload.</summary>
+    /// <summary>Fare as decimal.</summary>
     public decimal FareDecimal => decimal.TryParse(Fare?.Replace("£", "").Trim(), out var v) ? v : 0m;
 
     public static DateTime? ParsePickupTimeToDateTime(string? pickupTime)
@@ -85,12 +88,26 @@ public sealed class BookingState
 
     public int BiddingWindowSec { get; set; } = 45;
 
-    public static string RecommendVehicle(int passengers) => passengers switch
+    public static string RecommendVehicle(int passengers, string? luggage = null)
     {
-        <= 4 => "Saloon",
-        5 or 6 => "Estate",
-        >= 7 => "Minibus",
-    };
+        var baseType = passengers switch
+        {
+            <= 4 => "Saloon",
+            5 or 6 => "Estate",
+            7 => "MPV",
+            >= 8 => "Minibus",
+        };
+        if (string.Equals(luggage, "heavy", StringComparison.OrdinalIgnoreCase))
+        {
+            return baseType switch
+            {
+                "Saloon" => "Estate",
+                "Estate" => "MPV",
+                _ => baseType
+            };
+        }
+        return baseType;
+    }
 
     // Geocoded coordinates
     public double? PickupLat { get; set; }
@@ -120,6 +137,7 @@ public sealed class BookingState
         Passengers = null;
         ScheduledAt = null;
         VehicleType = "Saloon";
+        Luggage = null;
         PaymentPreference = null;
         PaymentLink = null;
         SpecialInstructions = null;
