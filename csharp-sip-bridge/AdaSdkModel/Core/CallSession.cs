@@ -897,6 +897,7 @@ public sealed class CallSession : ICallSession
                 }
             }
         }
+        var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
         if (args.TryGetValue("destination", out var d))
         {
             var raw = d?.ToString();
@@ -959,7 +960,7 @@ public sealed class CallSession : ICallSession
             // (e.g., "That's it" → Pax=3, "Thank you bye" → Pax=3).
             // Only accept passenger values if the user's last transcript actually contains a digit
             // or a spelled-out number word. Otherwise, silently reject.
-            var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
+            // lastTranscript already defined above
             bool transcriptHasNumber = System.Text.RegularExpressions.Regex.IsMatch(
                 lastTranscript,
                 @"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
