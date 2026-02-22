@@ -2815,10 +2815,11 @@ public sealed class CallSession : ICallSession
 
             _logger.LogInformation("[{SessionId}] ✅ Booking link created: {Url}", SessionId, url);
 
-            // Send the airport booking link via the same proven WhatsApp method as SumUp links
+            // Set the airport booking URL as the payment link and dispatch via BSQD (same as normal bookings)
             if (!string.IsNullOrWhiteSpace(url))
             {
-                await SendSumUpLinkViaWhatsAppAsync(CallerId, url, _booking, SessionId);
+                _booking.PaymentLink = url;
+                await _dispatcher.DispatchAsync(_booking, CallerId);
             }
 
             return new
