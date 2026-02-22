@@ -29,8 +29,8 @@ namespace AdaSdkModel.Sip;
 /// Multi-call SIP server with G.711 A-law passthrough + OpenAI SDK.
 /// Supports operator mode (manual answer/reject) and auto-answer mode.
 ///
-/// Audio Pipeline: v160 — OnAudioOut pre-sliced to exact 160-byte A-law frames.
-/// Eliminates accumulator lock churn; queue receives zero-remainder frame writes only.
+/// Audio Pipeline: v11 — playout handles accumulator + ConcurrentBag frame pooling internally.
+/// SipServer passes raw frames; no pre-slicing needed.
 /// </summary>
 public sealed class SipServer : IAsyncDisposable
 {
@@ -549,30 +549,12 @@ public sealed class SipServer : IAsyncDisposable
 
         int responseCompletedLatch = 0;
 
-        // ── Audio out: pre-slice to exact 160-byte frames ──
+        // ── Audio out: pass raw frame to playout (v11 handles accumulator + framing internally) ──
         session.OnAudioOut += frame =>
         {
             Interlocked.Exchange(ref isBotSpeaking, 1);
             Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
-
-            const int frameSize = 160;
-            int offset = 0, remaining = frame.Length;
-
-            while (remaining >= frameSize)
-            {
-                var slice = new byte[frameSize];
-                Buffer.BlockCopy(frame, offset, slice, 0, frameSize);
-                playout.BufferALaw(slice);
-                offset += frameSize;
-                remaining -= frameSize;
-            }
-
-            if (remaining > 0)
-            {
-                var tail = new byte[remaining];
-                Buffer.BlockCopy(frame, offset, tail, 0, remaining);
-                playout.BufferALaw(tail);
-            }
+            playout.BufferALaw(frame);
         };
 
         // ── Barge-in: clear playout first, then reset latches ──
