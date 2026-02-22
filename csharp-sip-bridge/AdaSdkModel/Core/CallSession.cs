@@ -2440,7 +2440,10 @@ public sealed class CallSession : ICallSession
             _currentStage = BookingStage.AnythingElse;
             _lastUserTranscript = null; // Clear stale transcript so IntentGuard doesn't re-evaluate fare-confirmation speech as "NewBooking"
             _aiClient.SetAwaitingConfirmation(true); // Use longer watchdog timeout for "anything else?" stage
-            return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: Your booking reference is {_booking.BookingRef}. Then ask: 'Is there anything else you'd like to add to your booking? For example, a flight number, special requests, or any notes for the driver?' If they provide notes, call sync_booking_data(special_instructions='[their notes]') to save them, confirm you've added it, and ask again. When they say no, say the FINAL CLOSING script and call end_call." };
+            var paymentMsg = _booking.PaymentPreference == "card"
+                ? $" I've also sent a secure payment link to your phone — just tap it to pay the fixed price of {_booking.Fare} by card. It's quick and easy, and it guarantees your fare."
+                : "";
+            return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: 'Your booking reference is {_booking.BookingRef}.{paymentMsg}' Then ask: 'Is there anything else you'd like to add to your booking? For example, a flight number, special requests, or any notes for the driver?' If they provide notes, call sync_booking_data(special_instructions='[their notes]') to save them, confirm you've added it, and ask again. When they say no, say the FINAL CLOSING script and call end_call." };
         }
 
         return new { error = "Invalid action" };
