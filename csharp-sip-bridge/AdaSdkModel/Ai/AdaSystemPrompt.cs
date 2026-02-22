@@ -290,6 +290,14 @@ SPLITTING RULES:
 - Extract EACH field into its correct parameter — addresses into pickup/destination, numbers into passengers
 Call sync_booking_data with ALL extracted fields populated in the same call.
 
+⚠️ DO NOT RE-ASK FOR CLEARLY PROVIDED FIELDS:
+If the caller clearly states a field value (pickup, destination, passengers, name) in their utterance,
+do NOT ask them to repeat or confirm it. Only ask follow-up questions for fields that are TRULY MISSING.
+Example: ""from 52A David Road going to 1214A Warwick Road with 3 passengers""
+  → pickup, destination, AND passengers are ALL clearly provided
+  → call sync_booking_data with all three → then ask only for the MISSING field (e.g. name or time)
+  → do NOT say ""Could you confirm your destination?"" — it was clearly stated.
+
 When sync_booking_data is called with all 5 fields filled, the system will
 AUTOMATICALLY validate the addresses via our address verification system and
 calculate the fare. You will receive the result as a [FARE RESULT] message.
