@@ -355,10 +355,30 @@ public sealed class CallSession : ICallSession
         }
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
         {
-            _booking.Passengers = pn;
-            // Auto-recommend vehicle type based on passenger count (unless explicitly set)
-            if (!args.ContainsKey("vehicle_type"))
-                _booking.VehicleType = BookingState.RecommendVehicle(pn);
+            // ── PASSENGER HALLUCINATION GUARD ──
+            var lastTranscript = (_aiClient is OpenAiSdkClient sdkPax ? sdkPax.LastUserTranscript : null) ?? "";
+            bool transcriptHasNumber = System.Text.RegularExpressions.Regex.IsMatch(
+                lastTranscript,
+                @"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (transcriptHasNumber)
+            {
+                _booking.Passengers = pn;
+                if (!args.ContainsKey("vehicle_type"))
+                    _booking.VehicleType = BookingState.RecommendVehicle(pn);
+            }
+            else if (!_booking.Passengers.HasValue && pn > 0)
+            {
+                _booking.Passengers = pn;
+                if (!args.ContainsKey("vehicle_type"))
+                    _booking.VehicleType = BookingState.RecommendVehicle(pn);
+            }
+            else
+            {
+                _logger.LogWarning("[{SessionId}] 🛡️ PAX GUARD: Rejected passengers={Pax} — transcript '{Transcript}' has no number",
+                    SessionId, pn, lastTranscript);
+            }
         }
         if (args.TryGetValue("pickup_time", out var pt))
             _booking.PickupTime = pt?.ToString();

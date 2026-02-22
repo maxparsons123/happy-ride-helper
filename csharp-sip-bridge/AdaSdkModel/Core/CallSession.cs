@@ -940,10 +940,44 @@ public sealed class CallSession : ICallSession
         }
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
         {
-            _booking.Passengers = pn;
-            // Auto-recommend vehicle type based on passenger count + luggage (unless explicitly set)
-            if (!args.ContainsKey("vehicle_type"))
-                _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
+            // ── PASSENGER HALLUCINATION GUARD ──
+            // The AI model sometimes hallucinates passenger counts from non-numeric utterances
+            // (e.g., "That's it" → Pax=3, "Thank you bye" → Pax=3).
+            // Only accept passenger values if the user's last transcript actually contains a digit
+            // or a spelled-out number word. Otherwise, silently reject.
+            var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
+            bool transcriptHasNumber = System.Text.RegularExpressions.Regex.IsMatch(
+                lastTranscript,
+                @"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (transcriptHasNumber || !_booking.Passengers.HasValue)
+            {
+                // Accept: either transcript confirms a number, or we have no passengers yet (first collection)
+                if (transcriptHasNumber)
+                {
+                    _booking.Passengers = pn;
+                    if (!args.ContainsKey("vehicle_type"))
+                        _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
+                }
+                else if (!_booking.Passengers.HasValue && pn > 0)
+                {
+                    // First time — trust the AI even without transcript confirmation
+                    _booking.Passengers = pn;
+                    if (!args.ContainsKey("vehicle_type"))
+                        _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
+                }
+                else
+                {
+                    _logger.LogWarning("[{SessionId}] 🛡️ PAX GUARD: Rejected passengers={Pax} — transcript '{Transcript}' has no number and passengers already set to {Current}",
+                        SessionId, pn, lastTranscript, _booking.Passengers);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("[{SessionId}] 🛡️ PAX GUARD: Rejected passengers={Pax} — transcript '{Transcript}' has no number",
+                    SessionId, pn, lastTranscript);
+            }
         }
         if (args.TryGetValue("luggage", out var lug) && !string.IsNullOrWhiteSpace(lug?.ToString()))
         {
