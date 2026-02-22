@@ -734,7 +734,7 @@ public sealed class SipServer : IAsyncDisposable
             // Wait for Ada's "transferring you now" speech to play out
             await Task.Delay(2500);
 
-            bool transferred = await call.CallAgent.Transfer(targetUri, TimeSpan.FromSeconds(15), default);
+            bool transferred = await call.CallAgent.BlindTransfer(targetUri, TimeSpan.FromSeconds(15), default);
 
             if (transferred)
             {
