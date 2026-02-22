@@ -911,9 +911,9 @@ public sealed class CallSession : ICallSession
         var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
         // Also use the AI's 'interpretation' field as fallback context — the transcript may be stale
         // when the AI batches multiple fields from a compound utterance (e.g. "from X going to Y").
-        var interpretation = args.TryGetValue("interpretation", out var interp) ? interp?.ToString() ?? "" : "";
+        var guardInterpretation = args.TryGetValue("interpretation", out var guardInterp) ? guardInterp?.ToString() ?? "" : "";
         var contextForGuard = string.IsNullOrWhiteSpace(lastTranscript) || lastTranscript.Split(' ').Length <= 2
-            ? (lastTranscript + " " + interpretation).Trim()
+            ? (lastTranscript + " " + guardInterpretation).Trim()
             : lastTranscript;
         if (args.TryGetValue("destination", out var d))
         {
