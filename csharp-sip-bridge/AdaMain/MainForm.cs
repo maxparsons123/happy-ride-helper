@@ -350,7 +350,9 @@ public partial class MainForm : Form
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
                 // Feed caller audio to local speakers (operator mode)
-                _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+                var copy = new byte[alawFrame.Length];
+                Buffer.BlockCopy(alawFrame, 0, copy, 0, alawFrame.Length);
+                _monitorBuffer?.AddSamples(copy, 0, copy.Length);
             };
 
             // Feed caller audio to monitor speakers during AI calls
@@ -885,12 +887,12 @@ public partial class MainForm : Form
         StopAudioMonitor();
         try
         {
-            _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
+        _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
             {
-                BufferDuration = TimeSpan.FromSeconds(5),
+                BufferDuration = TimeSpan.FromSeconds(1),
                 DiscardOnBufferOverflow = true
             };
-            _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
+            _monitorOut = new WaveOutEvent { DesiredLatency = 50 };
             _monitorOut.Init(_monitorBuffer);
             if (!_muted) _monitorOut.Play();
             Log("🔊 Audio monitor started — hearing raw SIP audio");
