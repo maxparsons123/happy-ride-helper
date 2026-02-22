@@ -106,6 +106,12 @@ If transcript seems suspicious:
 - Ask the user to repeat
 - Do NOT store implausible data
 
+ZERO FABRICATION RULE:
+If the transcript does NOT contain a house number, do NOT invent one.
+Pass the street name WITHOUT a number in sync_booking_data.
+Never guess, assume, or default a house number.
+If a house number is missing, ask the user to confirm the number.
+
 ==============================
 ADDRESS READBACK RULE (ABSOLUTE)
 ==============================
