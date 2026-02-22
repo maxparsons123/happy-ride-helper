@@ -131,6 +131,9 @@ public sealed class SupabaseSettings
 {
     public string Url { get; set; } = "https://oerketnvlmptpfvttysy.supabase.co";
     public string AnonKey { get; set; } = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lcmtldG52bG1wdHBmdnR0eXN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NTg0OTAsImV4cCI6MjA4NDIzNDQ5MH0.QJPKuVmnP6P3RrzDSSBVbHGrduuDqFt7oOZ0E-cGNqU";
+
+    /// <summary>Service role key for privileged operations (e.g. updating live_calls with escalation status).</summary>
+    public string ServiceRoleKey { get; set; } = "";
 }
 
 /// <summary>
