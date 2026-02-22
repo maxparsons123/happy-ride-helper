@@ -325,11 +325,8 @@ public partial class MainForm : Form
 
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
-                if (chkMonitorCaller.Checked && _monitorBuffer != null)
-                {
-                    var pcm = DecodeAlawToPcm16(alawFrame);
-                    _monitorBuffer.AddSamples(pcm, 0, pcm.Length);
-                }
+                if (chkMonitorCaller.Checked)
+                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             };
 
             _sipServer.OnCallEnded += (sessionId, reason) => SafeInvoke(() =>
@@ -458,11 +455,8 @@ public partial class MainForm : Form
             else
             {
                 // No avatar – fall back to local monitor speakers
-                if (chkMonitorAda.Checked && _monitorBuffer != null)
-                {
-                    var pcm = DecodeAlawToPcm16(alawFrame);
-                    _monitorBuffer.AddSamples(pcm, 0, pcm.Length);
-                }
+                if (chkMonitorAda.Checked)
+                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             }
         };
 
@@ -774,49 +768,17 @@ public partial class MainForm : Form
     //  AUDIO MONITOR
     // ══════════════════════════════════════
 
-    // A-law decode table for monitor (shared, read-only)
-    private static readonly short[] _monitorAlawDecode = BuildMonitorAlawDecodeTable();
-
-    private static short[] BuildMonitorAlawDecodeTable()
-    {
-        var table = new short[256];
-        for (int i = 0; i < 256; i++)
-        {
-            int v = i ^ 0x55;
-            int sign = v & 0x80;
-            int exponent = (v >> 4) & 0x07;
-            int mantissa = v & 0x0F;
-            int sample = exponent == 0 ? (mantissa << 4) + 8 : ((mantissa << 4) + 0x108) << (exponent - 1);
-            table[i] = (short)(sign != 0 ? sample : -sample);
-        }
-        return table;
-    }
-
-    /// <summary>Decode A-law bytes to PCM16 little-endian bytes for the monitor.</summary>
-    private static byte[] DecodeAlawToPcm16(byte[] alaw)
-    {
-        var pcm = new byte[alaw.Length * 2];
-        for (int i = 0; i < alaw.Length; i++)
-        {
-            short s = _monitorAlawDecode[alaw[i]];
-            pcm[i * 2] = (byte)(s & 0xFF);
-            pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
-        }
-        return pcm;
-    }
-
     private void StartAudioMonitor()
     {
         StopAudioMonitor();
         try
         {
-            // Use PCM16 format for clean playback (decode A-law before buffering)
-            _monitorBuffer = new BufferedWaveProvider(new WaveFormat(8000, 16, 1))
-            { BufferDuration = TimeSpan.FromSeconds(3), DiscardOnBufferOverflow = true };
-            _monitorOut = new WaveOutEvent { DesiredLatency = 200 };
+            _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
+            { BufferDuration = TimeSpan.FromSeconds(5), DiscardOnBufferOverflow = true };
+            _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
             _monitorOut.Init(_monitorBuffer);
             if (!_muted) _monitorOut.Play();
-            Log("🔊 Audio monitor started (PCM16 decode)");
+            Log("🔊 Audio monitor started");
         }
         catch (Exception ex) { Log($"⚠ Audio monitor failed: {ex.Message}"); }
     }
