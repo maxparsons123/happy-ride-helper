@@ -1026,9 +1026,9 @@ public sealed class CallSession : ICallSession
                 success = true,
                 airport_detected = true,
                 message = "AIRPORT DESTINATION DETECTED. Do NOT ask about passengers, time, or luggage. " +
-                          "Immediately say: \"Since you're heading to the airport, I'll send you our airport booking form where you can choose your vehicle, " +
-                          "enter your flight details, and even get a discount on a return trip. I'll send that to you now.\" " +
-                          "Then call send_booking_link() immediately."
+                          "Do NOT say anything yet — just call send_booking_link() immediately. " +
+                          "After the tool returns, say ONE short message like: " +
+                          "\"Since you're heading to the airport, I've sent you our airport booking form. You can choose your vehicle, enter your flight details, and get a discount on a return trip. Is there anything else I can help with?\""
             };
         }
 
@@ -2853,9 +2853,7 @@ public sealed class CallSession : ICallSession
             {
                 success = true,
                 url,
-                message = "Booking link has been generated and sent to the caller. " +
-                          "They can select their vehicle type, enter flight details, " +
-                          "and get 10% off a return trip."
+                message = "Booking link sent. Do NOT repeat what the link offers — just confirm it was sent and ask if there's anything else."
             };
         }
         catch (Exception ex)
