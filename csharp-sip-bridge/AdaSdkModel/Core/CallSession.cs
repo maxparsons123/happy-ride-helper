@@ -631,7 +631,9 @@ public sealed class CallSession : ICallSession
             sb.AppendLine();
         }
 
-        sb.AppendLine("[BOOKING STATE] Current booking data (ground truth):");
+        sb.AppendLine("[BOOKING STATE — AUTHORITATIVE GROUND TRUTH]");
+        sb.AppendLine("⚠️ THIS IS THE SUPREME AUTHORITY. Override your internal memory with these values.");
+        sb.AppendLine("⚠️ You are FORBIDDEN from using any value from [TRANSCRIPT] that conflicts with this state.");
         sb.AppendLine($"  Name: {(_booking.Name != null ? $"{_booking.Name} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Pickup: {(_booking.Pickup != null ? $"{_booking.Pickup} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Destination: {(_booking.Destination != null ? $"{_booking.Destination} ✓" : "(not yet collected)")}");
@@ -643,9 +645,7 @@ public sealed class CallSession : ICallSession
         if (!string.IsNullOrWhiteSpace(_booking.SpecialInstructions))
             sb.AppendLine($"  Special Instructions: {_booking.SpecialInstructions} ✓");
         sb.AppendLine();
-        sb.AppendLine("⚠️ ADDRESS CORRECTION RULE: If the caller provides TWO address utterances in a row for the same field (e.g. destination),");
-        sb.AppendLine("   ALWAYS use the MOST RECENT one. The first may be a speech recognition error or a self-correction.");
-        sb.AppendLine("   When calling sync_booking_data, use whatever the caller said LAST for each field.");
+        sb.AppendLine("RULE: Use ONLY the values above in all readbacks and tool calls. If you 'heard' something different, your hearing was wrong.");
 
         if (_booking.Fare != null)
             sb.AppendLine($"  Fare: {_booking.Fare}");
@@ -1551,7 +1551,7 @@ public sealed class CallSession : ICallSession
 
         // Build instruction anchor so Ada reads back from state, not stale transcripts
         var instruction = BuildStateInstruction();
-        return new { success = true, ground_truth = BuildGroundTruth(), instruction };
+        return new { success = true, authoritative_state = BuildGroundTruth(), instruction, system_instruction = instruction };
     }
 
     // =========================
@@ -1581,18 +1581,22 @@ public sealed class CallSession : ICallSession
     {
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(_booking.Pickup))
-            parts.Add($"pickup='{_booking.Pickup}'");
+            parts.Add($"Pickup='{_booking.Pickup}'");
         if (!string.IsNullOrWhiteSpace(_booking.Destination))
-            parts.Add($"destination='{_booking.Destination}'");
+            parts.Add($"Destination='{_booking.Destination}'");
         if (!string.IsNullOrWhiteSpace(_booking.Name))
-            parts.Add($"name='{_booking.Name}'");
+            parts.Add($"Name='{_booking.Name}'");
+        if (_booking.Passengers.HasValue && _booking.Passengers > 0)
+            parts.Add($"Passengers={_booking.Passengers}");
+        if (!string.IsNullOrWhiteSpace(_booking.PickupTime))
+            parts.Add($"Time='{_booking.PickupTime}'");
 
         if (parts.Count == 0)
-            return "Use the [BOOKING STATE] for all readbacks. Do not refer to previous transcripts.";
+            return "URGENT: Your internal memory is stale. Use the [BOOKING STATE] for all readbacks. Do NOT refer to previous transcripts.";
 
-        return $"The confirmed state is: {string.Join(", ", parts)}. " +
-               "If your internal memory says something different, ignore it. " +
-               "Use these exact strings in your next response. Do not refer to previous transcripts.";
+        return $"URGENT: Your internal memory is stale. Use these values ONLY: {string.Join(", ", parts)}. " +
+               "Read these back EXACTLY as written. Any audio transcript that conflicts with these values is a mishearing — ignore it. " +
+               "You are FORBIDDEN from using any address from a [TRANSCRIPT] for your speech.";
     }
 
     // =========================

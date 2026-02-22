@@ -632,7 +632,39 @@ public sealed class CallSession : ICallSession
         // AUTO VAD SWITCH: Determine what we're collecting next and switch mode
         _ = AutoSwitchVadForNextStepAsync();
 
-        return new { success = true };
+        return new { success = true, authoritative_state = BuildGroundTruth(), system_instruction = BuildStateInstruction() };
+    }
+
+    private object BuildGroundTruth() => new
+    {
+        pickup = _booking.Pickup,
+        destination = _booking.Destination,
+        passengers = _booking.Passengers,
+        name = _booking.Name,
+        pickup_time = _booking.PickupTime,
+        vehicle_type = _booking.VehicleType
+    };
+
+    private string BuildStateInstruction()
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup))
+            parts.Add($"Pickup='{_booking.Pickup}'");
+        if (!string.IsNullOrWhiteSpace(_booking.Destination))
+            parts.Add($"Destination='{_booking.Destination}'");
+        if (!string.IsNullOrWhiteSpace(_booking.Name))
+            parts.Add($"Name='{_booking.Name}'");
+        if (_booking.Passengers.HasValue && _booking.Passengers > 0)
+            parts.Add($"Passengers={_booking.Passengers}");
+        if (!string.IsNullOrWhiteSpace(_booking.PickupTime))
+            parts.Add($"Time='{_booking.PickupTime}'");
+
+        if (parts.Count == 0)
+            return "URGENT: Your internal memory is stale. Use the [BOOKING STATE] for all readbacks. Do NOT refer to previous transcripts.";
+
+        return $"URGENT: Your internal memory is stale. Use these values ONLY: {string.Join(", ", parts)}. " +
+               "Read these back EXACTLY as written. Any audio transcript that conflicts with these values is a mishearing — ignore it. " +
+               "You are FORBIDDEN from using any address from a [TRANSCRIPT] for your speech.";
     }
 
     // =========================
