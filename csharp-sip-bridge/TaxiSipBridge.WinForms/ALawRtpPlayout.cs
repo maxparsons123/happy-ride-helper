@@ -1,8 +1,7 @@
-// Last updated: 2026-02-22 (ALawRtpPlayout v8.10 — Ring Buffer + RTP Marker + ArrayPool)
+// Last updated: 2026-02-22 (ALawRtpPlayout v8.11 — Ring Buffer + RTP Marker, exact-size frames)
 // Synced from AdaSdkModel/Audio/ALawRtpPlayout.cs
 
 using System;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -51,7 +50,6 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int STATS_LOG_INTERVAL_SEC = 30;
 
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
-    private static readonly ArrayPool<byte> FramePool = ArrayPool<byte>.Shared;
 
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
@@ -102,7 +100,7 @@ public sealed class ALawRtpPlayout : IDisposable
             int available = RingCount();
             if (available > 0 && available < FRAME_SIZE)
             {
-                var frame = FramePool.Rent(FRAME_SIZE);
+                var frame = new byte[FRAME_SIZE];
                 Array.Fill(frame, ALAW_SILENCE, 0, FRAME_SIZE);
                 RingRead(frame, available);
                 _frameQueue.Enqueue(frame);
@@ -229,7 +227,7 @@ public sealed class ALawRtpPlayout : IDisposable
                 else break;
             }
 
-            var frame = FramePool.Rent(FRAME_SIZE);
+            var frame = new byte[FRAME_SIZE];
             RingRead(frame, FRAME_SIZE);
 
             _frameQueue.Enqueue(frame);
@@ -277,12 +275,12 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v8.10"
+            Name = "ALawPlayout-v8.11"
         };
 
         _playoutThread.Start();
         string timerType = _useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait";
-        SafeLog($"[RTP] v8.10 started (pure A-law + ArrayPool, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, " +
+        SafeLog($"[RTP] v8.11 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, " +
                 $"MAX_QUEUE={MAX_QUEUE_FRAMES}, catch-up=40ms, ring={RING_BUFFER_SIZE / 1024}KB, " +
                 $"marker=RFC3550, timer={timerType})");
     }
@@ -356,9 +354,6 @@ public sealed class ALawRtpPlayout : IDisposable
             _markerPending = false;
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
-            _underrunGraceRemaining = UNDERRUN_GRACE_FRAMES;
-            FramePool.Return(frame);
-        }
             _underrunGraceRemaining = UNDERRUN_GRACE_FRAMES;
         }
         else if (_underrunGraceRemaining > 0)
@@ -441,11 +436,8 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out var frame))
-        {
+        while (_frameQueue.TryDequeue(out _))
             Interlocked.Decrement(ref _queueCount);
-            FramePool.Return(frame);
-        }
 
         lock (_ringLock)
         {
@@ -477,7 +469,7 @@ public sealed class ALawRtpPlayout : IDisposable
             }
         }
 
-        while (_frameQueue.TryDequeue(out var frame)) FramePool.Return(frame);
+        while (_frameQueue.TryDequeue(out _)) { }
         Volatile.Write(ref _queueCount, 0);
     }
 
