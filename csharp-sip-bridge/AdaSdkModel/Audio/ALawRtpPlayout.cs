@@ -286,9 +286,11 @@ public sealed class ALawRtpPlayout : IDisposable
             SendNextFrame();
             nextFrameNs += 20_000_000;
 
-            // Catch-up guard: if we fell behind by >100ms, reset
+            // Catch-up guard: if we fell behind by >40ms (2 frames), reset
+            // instead of bursting multiple frames back-to-back which causes
+            // audible speedup / "tripping over itself"
             long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
-            if (currentNs - nextFrameNs > 100_000_000)
+            if (currentNs - nextFrameNs > 40_000_000)
                 nextFrameNs = currentNs + 20_000_000;
         }
     }
