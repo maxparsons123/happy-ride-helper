@@ -11,7 +11,6 @@ namespace AdaSdkModel.Audio;
 
 /// <summary>
 /// ALawRtpPlayout v11 — fixed 160-byte frames ONLY (no ArrayPool tail-noise bug).
-/// Uses ConcurrentBag frame pool for exact-size buffer reuse (zero GC on hot path).
 /// Absorbs OpenAI burst audio and outputs perfect 20ms RTP cadence.
 /// </summary>
 public sealed class ALawRtpPlayout : IDisposable
@@ -89,7 +88,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
         _thread = new Thread(Loop) { IsBackground = true, Priority = ThreadPriority.AboveNormal, Name = "ALawRtpPlayout-v11" };
         _thread.Start();
-        SafeLog("[RTP] Playout v11 started (ConcurrentBag frame pool, fixed 160-byte frames).");
+        SafeLog("[RTP] Playout v11 started (fixed 160-byte frames).");
     }
 
     public void Stop()
@@ -138,14 +137,6 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         if (alaw == null || alaw.Length == 0) return;
 
-        // Fast path: perfect 160-byte frame with empty accumulator → zero-copy enqueue
-        if (alaw.Length == FrameSize && Volatile.Read(ref _accCount) == 0)
-        {
-            EnqueueFrame(alaw);
-            return;
-        }
-
-        // Slow path: accumulate and split (handles non-aligned sizes)
         lock (_accLock)
         {
             int needed = _accCount + alaw.Length;
@@ -247,7 +238,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private void Send(byte[] payload160)
     {
-        // payload160 MUST be exactly 160 bytes — guaranteed by RentFrame().
+        // payload160 MUST be exactly 160 bytes — guaranteed by this implementation.
         _media.SendRtpRaw(SDPMediaTypesEnum.audio, payload160, _ts, 0, PayloadTypePcma);
         _ts += FrameSize;
     }
@@ -277,5 +268,5 @@ public sealed class ALawRtpPlayout : IDisposable
         Interlocked.Increment(ref _queueCount);
     }
 
-    private void SafeLog(string msg) { try { OnLog?.Invoke(msg); } catch { }  }
+    private void SafeLog(string msg) { try { OnLog?.Invoke(msg); } catch { } }
 }
