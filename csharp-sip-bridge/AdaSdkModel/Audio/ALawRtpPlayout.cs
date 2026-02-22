@@ -1,11 +1,12 @@
-// Last updated: 2026-02-22 (ALawRtpPlayout v8.7 — Catch-up Guard + Underrun Grace)
-// Changes from v8.6:
-// - Added UNDERRUN_GRACE_FRAMES=5 (100ms) — prevents re-entering 200ms buffering mode on momentary queue gaps
-// - Tightened catch-up guard from 100ms to 40ms — prevents burst send causing audible speedup
-// - Eliminates mid-speech jitter caused by aggressive re-buffering
-// - MAX_QUEUE_FRAMES stays at 500
+// Last updated: 2026-02-22 (ALawRtpPlayout v8.8 — ArrayPool + Ring Buffer + RTP Marker)
+// Changes from v8.7:
+// - ArrayPool<byte>.Shared for frame allocation — eliminates new byte[160] per frame, reduces GC pressure
+// - Ring buffer accumulator — eliminates O(n) Buffer.BlockCopy shift after every frame extraction
+// - RTP marker bit — set on first audio frame after silence/buffering per RFC 3550
+// - Retains all v8.7 features: underrun grace, catch-up guard, waitable timer, NAT learning, circuit breaker
 
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -50,17 +51,21 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int JITTER_BUFFER_START_THRESHOLD = 10;  // 200ms cold-start
     private const int MAX_QUEUE_FRAMES = 500;              // 10s safety cap
     private const int UNDERRUN_GRACE_FRAMES = 5;           // 100ms grace — send silence instead of re-buffering
-    private const int MAX_ACCUMULATOR_SIZE = 65536;
+    private const int RING_BUFFER_SIZE = 65536;            // 64KB ring buffer for accumulator
     private const int STATS_LOG_INTERVAL_SEC = 30;
 
     private static readonly double TicksToNs = 1_000_000_000.0 / Stopwatch.Frequency;
 
+    // ── Frame queue (pooled via ArrayPool) ──
     private readonly ConcurrentQueue<byte[]> _frameQueue = new();
     private readonly byte[] _silenceFrame = new byte[FRAME_SIZE];
+    private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
 
-    private byte[] _accumulator = new byte[8192];
-    private int _accCount;
-    private readonly object _accLock = new();
+    // ── Ring buffer accumulator (replaces linear shift) ──
+    private readonly byte[] _ringBuffer = new byte[RING_BUFFER_SIZE];
+    private int _ringHead; // read position
+    private int _ringTail; // write position
+    private readonly object _ringLock = new();
 
     private readonly VoIPMediaSession _mediaSession;
     private Thread? _playoutThread;
@@ -84,7 +89,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private volatile bool _natBindingEstablished;
     private bool _wasPlaying;
     private int _drainSignaled;
-    private int _underrunGraceRemaining;  // frames of silence before re-entering buffering
+    private int _underrunGraceRemaining;
+    private bool _markerPending; // RTP marker bit: set on first frame after silence/buffering
 
     private long _totalUnderruns;
     private long _totalFramesEnqueued;
@@ -98,16 +104,16 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Flush()
     {
-        lock (_accLock)
+        lock (_ringLock)
         {
-            if (_accCount > 0)
+            int available = RingCount();
+            if (available > 0 && available < FRAME_SIZE)
             {
-                var frame = new byte[FRAME_SIZE];
-                Array.Fill(frame, ALAW_SILENCE);
-                Buffer.BlockCopy(_accumulator, 0, frame, 0, _accCount);
+                var frame = _pool.Rent(FRAME_SIZE);
+                Array.Fill(frame, ALAW_SILENCE, 0, FRAME_SIZE);
+                RingRead(frame, available);
                 _frameQueue.Enqueue(frame);
                 Interlocked.Increment(ref _queueCount);
-                _accCount = 0;
             }
         }
     }
@@ -154,7 +160,56 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         if (Volatile.Read(ref _disposed) != 0) return;
         if (_natBindingEstablished || (DateTime.UtcNow - _lastRtpSendTime).TotalSeconds < 20) return;
-        try { SendRtpFrame(_silenceFrame); } catch { }
+        try { SendRtpFrame(_silenceFrame, marker: false); } catch { }
+    }
+
+    // ─────────────────────────────────────────
+    // RING BUFFER OPERATIONS
+    // ─────────────────────────────────────────
+
+    /// <summary>Number of bytes available to read. Must be called under _ringLock.</summary>
+    private int RingCount()
+        => _ringTail >= _ringHead
+            ? _ringTail - _ringHead
+            : RING_BUFFER_SIZE - _ringHead + _ringTail;
+
+    /// <summary>Number of bytes of free space. Must be called under _ringLock.</summary>
+    private int RingFree() => RING_BUFFER_SIZE - 1 - RingCount(); // -1 to distinguish full from empty
+
+    /// <summary>Write bytes into ring buffer with wrap-around. Must be called under _ringLock.</summary>
+    private void RingWrite(ReadOnlySpan<byte> data)
+    {
+        int remaining = data.Length;
+        int src = 0;
+        while (remaining > 0)
+        {
+            int chunk = Math.Min(remaining, RING_BUFFER_SIZE - _ringTail);
+            data.Slice(src, chunk).CopyTo(_ringBuffer.AsSpan(_ringTail, chunk));
+            _ringTail = (_ringTail + chunk) % RING_BUFFER_SIZE;
+            src += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    /// <summary>Read bytes from ring buffer into destination. Must be called under _ringLock.</summary>
+    private void RingRead(byte[] dest, int count)
+    {
+        int remaining = count;
+        int dst = 0;
+        while (remaining > 0)
+        {
+            int chunk = Math.Min(remaining, RING_BUFFER_SIZE - _ringHead);
+            Buffer.BlockCopy(_ringBuffer, _ringHead, dest, dst, chunk);
+            _ringHead = (_ringHead + chunk) % RING_BUFFER_SIZE;
+            dst += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    /// <summary>Discard bytes from ring buffer. Must be called under _ringLock.</summary>
+    private void RingDiscard(int count)
+    {
+        _ringHead = (_ringHead + count) % RING_BUFFER_SIZE;
     }
 
     // ─────────────────────────────────────────
@@ -166,48 +221,51 @@ public sealed class ALawRtpPlayout : IDisposable
         if (Volatile.Read(ref _disposed) != 0 || alawData == null || alawData.Length == 0)
             return;
 
-        lock (_accLock)
+        lock (_ringLock)
         {
-            int needed = _accCount + alawData.Length;
+            int free = RingFree();
+            int toWrite = alawData.Length;
 
-            if (needed > _accumulator.Length)
+            // If not enough space, drop oldest data to make room
+            if (toWrite > free)
             {
-                int newSize = Math.Min(_accumulator.Length * 2, MAX_ACCUMULATOR_SIZE);
-                var newAcc = new byte[newSize];
-                Buffer.BlockCopy(_accumulator, 0, newAcc, 0, _accCount);
-                _accumulator = newAcc;
+                int drop = toWrite - free;
+                SafeLog($"[BUFFER] overflow, dropping {drop} bytes");
+                RingDiscard(drop);
             }
 
-            Buffer.BlockCopy(alawData, 0, _accumulator, _accCount, alawData.Length);
-            _accCount += alawData.Length;
+            RingWrite(alawData.AsSpan(0, Math.Min(toWrite, RingFree())));
 
-            DrainAccumulatorToQueue();
+            // Frameize: extract complete 160-byte frames into pooled queue
+            DrainRingToQueue();
         }
     }
 
-    private void DrainAccumulatorToQueue()
+    /// <summary>
+    /// Extract complete 160-byte frames from ring buffer into the queue using ArrayPool.
+    /// Must be called under _ringLock.
+    /// </summary>
+    private void DrainRingToQueue()
     {
-        while (_accCount >= FRAME_SIZE)
+        while (RingCount() >= FRAME_SIZE)
         {
             // Safety cap — drop oldest frames only when truly overflowing
             while (Volatile.Read(ref _queueCount) >= MAX_QUEUE_FRAMES)
             {
-                if (_frameQueue.TryDequeue(out _))
+                if (_frameQueue.TryDequeue(out var old))
+                {
                     Interlocked.Decrement(ref _queueCount);
-                else
-                    break;
+                    _pool.Return(old);
+                }
+                else break;
             }
 
-            var frame = new byte[FRAME_SIZE];
-            Buffer.BlockCopy(_accumulator, 0, frame, 0, FRAME_SIZE);
+            var frame = _pool.Rent(FRAME_SIZE);
+            RingRead(frame, FRAME_SIZE);
 
             _frameQueue.Enqueue(frame);
             Interlocked.Increment(ref _queueCount);
             Interlocked.Increment(ref _totalFramesEnqueued);
-
-            _accCount -= FRAME_SIZE;
-            if (_accCount > 0)
-                Buffer.BlockCopy(_accumulator, FRAME_SIZE, _accumulator, 0, _accCount);
         }
     }
 
@@ -224,6 +282,7 @@ public sealed class ALawRtpPlayout : IDisposable
         _framesSent = 0;
         _timestamp = (uint)Random.Shared.Next();
         _wasPlaying = false;
+        _markerPending = true; // First frame gets marker
         Interlocked.Exchange(ref _drainSignaled, 0);
         _totalUnderruns = 0;
         _totalFramesEnqueued = 0;
@@ -253,12 +312,14 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "ALawPlayout-v8.7"
+            Name = "ALawPlayout-v8.8"
         };
 
         _playoutThread.Start();
         string timerType = _useWaitableTimer ? "WaitableTimer" : "Sleep+SpinWait";
-        SafeLog($"[RTP] v8.7 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, MAX_QUEUE={MAX_QUEUE_FRAMES} frames, catch-up=40ms, timer={timerType})");
+        SafeLog($"[RTP] v8.8 started (pure A-law, {JITTER_BUFFER_START_THRESHOLD * FRAME_MS}ms hysteresis, " +
+                $"MAX_QUEUE={MAX_QUEUE_FRAMES}, catch-up=40ms, ring={RING_BUFFER_SIZE / 1024}KB, " +
+                $"pool=ArrayPool, marker=RFC3550, timer={timerType})");
     }
 
     private void PlayoutLoop()
@@ -288,8 +349,6 @@ public sealed class ALawRtpPlayout : IDisposable
             nextFrameNs += 20_000_000;
 
             // Catch-up guard: if we fell behind by >40ms (2 frames), reset
-            // instead of bursting multiple frames back-to-back which causes
-            // audible speedup / "tripping over itself"
             long currentNs = (long)(sw.ElapsedTicks * TicksToNs);
             if (currentNs - nextFrameNs > 40_000_000)
                 nextFrameNs = currentNs + 20_000_000;
@@ -315,12 +374,13 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             if (queueCount < JITTER_BUFFER_START_THRESHOLD)
             {
-                SendRtpFrame(_silenceFrame);
+                SendRtpFrame(_silenceFrame, marker: false);
                 return;
             }
 
             _isBuffering = false;
             _underrunGraceRemaining = 0;
+            _markerPending = true; // Mark first audio frame after buffering
             Interlocked.Exchange(ref _drainSignaled, 0);
             SafeLog($"[RTP] 🔊 Buffer ready ({queueCount} frames), resuming playout");
         }
@@ -328,21 +388,24 @@ public sealed class ALawRtpPlayout : IDisposable
         if (_frameQueue.TryDequeue(out var frame))
         {
             Interlocked.Decrement(ref _queueCount);
-            SendRtpFrame(frame);
+            SendRtpFrame(frame, marker: _markerPending);
+            _markerPending = false;
             Interlocked.Increment(ref _framesSent);
             _wasPlaying = true;
             _underrunGraceRemaining = UNDERRUN_GRACE_FRAMES; // reset grace on every real frame
+            _pool.Return(frame); // Return to pool instead of letting GC collect
         }
         else if (_underrunGraceRemaining > 0)
         {
             // Queue empty but within grace period — send silence, don't re-buffer
             _underrunGraceRemaining--;
-            SendRtpFrame(_silenceFrame);
+            SendRtpFrame(_silenceFrame, marker: false);
 
             if (_underrunGraceRemaining == 0)
             {
                 // Grace exhausted — now re-enter buffering
                 _isBuffering = true;
+                _markerPending = true; // Next audio frame gets marker
                 Interlocked.Increment(ref _totalUnderruns);
                 FireDrainOnce();
             }
@@ -350,7 +413,8 @@ public sealed class ALawRtpPlayout : IDisposable
         else
         {
             _isBuffering = true;
-            SendRtpFrame(_silenceFrame);
+            _markerPending = true;
+            SendRtpFrame(_silenceFrame, marker: false);
             Interlocked.Increment(ref _totalUnderruns);
             FireDrainOnce();
         }
@@ -379,7 +443,7 @@ public sealed class ALawRtpPlayout : IDisposable
         try { OnPlayoutDrained?.Invoke(); } catch { }
     }
 
-    private void SendRtpFrame(byte[] frame)
+    private void SendRtpFrame(byte[] frame, bool marker)
     {
         try
         {
@@ -387,7 +451,7 @@ public sealed class ALawRtpPlayout : IDisposable
                 SDPMediaTypesEnum.audio,
                 frame,
                 _timestamp,
-                0,
+                marker ? 1 : 0,
                 PAYLOAD_TYPE_PCMA);
 
             _timestamp += FRAME_SIZE;
@@ -418,17 +482,21 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Clear()
     {
-        while (_frameQueue.TryDequeue(out _))
-            Interlocked.Decrement(ref _queueCount);
-
-        lock (_accLock)
+        while (_frameQueue.TryDequeue(out var old))
         {
-            _accCount = 0;
-            Array.Clear(_accumulator, 0, _accumulator.Length);
+            Interlocked.Decrement(ref _queueCount);
+            _pool.Return(old);
+        }
+
+        lock (_ringLock)
+        {
+            _ringHead = 0;
+            _ringTail = 0;
         }
 
         _isBuffering = true;
         _wasPlaying = false;
+        _markerPending = true;
         _underrunGraceRemaining = 0;
         Interlocked.Exchange(ref _drainSignaled, 0);
     }
@@ -450,7 +518,8 @@ public sealed class ALawRtpPlayout : IDisposable
             }
         }
 
-        while (_frameQueue.TryDequeue(out _)) { }
+        while (_frameQueue.TryDequeue(out var old))
+            _pool.Return(old);
         Volatile.Write(ref _queueCount, 0);
     }
 
