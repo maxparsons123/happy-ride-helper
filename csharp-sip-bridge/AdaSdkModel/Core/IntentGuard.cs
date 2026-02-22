@@ -107,6 +107,11 @@ public sealed class IntentGuard
         return ResolvedIntent.None;
     }
 
+    // ── Explicit new booking patterns (stronger than bare "yes") ──
+    private static readonly Regex NewBookingPattern = new(
+        @"\b(new booking|another (taxi|cab|booking|one)|book (a|another)|i need a|can (i|you) book|want (a|to book))\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private static ResolvedIntent ResolveManageBookingResponse(string text)
     {
         if (CancelPattern.IsMatch(text))
@@ -115,8 +120,9 @@ public sealed class IntentGuard
             return ResolvedIntent.AmendBooking;
         if (StatusPattern.IsMatch(text))
             return ResolvedIntent.CheckStatus;
-        // Check if they want a new booking instead
-        if (AffirmativePattern.IsMatch(text) && !NegativePattern.IsMatch(text))
+        // Only resolve as NewBooking if the user explicitly mentions wanting a new booking —
+        // bare "yes" is ambiguous (could be confirming cancel/amend that Ada just asked about)
+        if (NewBookingPattern.IsMatch(text))
             return ResolvedIntent.NewBooking;
         return ResolvedIntent.None;
     }
