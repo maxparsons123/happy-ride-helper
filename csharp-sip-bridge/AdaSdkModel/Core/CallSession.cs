@@ -2599,6 +2599,14 @@ public sealed class CallSession : ICallSession
                 .ToList();
         }
 
+        // Also include _lastUserTranscript to handle race condition where
+        // the AI calls cancel_booking before the transcript is added to history
+        var lastTranscript = _lastUserTranscript?.ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(lastTranscript) && !recentUserMessages.Contains(lastTranscript))
+        {
+            recentUserMessages.Add(lastTranscript);
+        }
+
         var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
         var hasConfirmation = recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
 
