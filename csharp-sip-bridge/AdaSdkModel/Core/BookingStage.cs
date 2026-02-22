@@ -39,5 +39,8 @@ public enum BookingStage
     ManagingExistingBooking,
 
     /// <summary>Call ending / goodbye phase.</summary>
-    Ending
+    Ending,
+
+    /// <summary>Caller requested transfer to human operator (complaint, escalation).</summary>
+    Escalated
 }

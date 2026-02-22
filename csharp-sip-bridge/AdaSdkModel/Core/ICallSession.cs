@@ -24,4 +24,6 @@ public interface ICallSession : IAsyncDisposable
     event Action<BookingState>? OnBookingUpdated;
     event Action<byte[]>? OnAudioOut;
     event Action? OnBargeIn;
+    /// <summary>Raised when caller requests transfer to human operator. Args: session, reason.</summary>
+    event Action<ICallSession, string>? OnEscalate;
 }

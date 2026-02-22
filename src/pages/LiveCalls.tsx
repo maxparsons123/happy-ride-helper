@@ -57,6 +57,10 @@ interface LiveCall {
   caller_last_pickup: string | null;
   caller_last_destination: string | null;
   caller_last_booking_at: string | null;
+  // Escalation
+  escalated: boolean;
+  escalation_reason: string | null;
+  escalated_at: string | null;
 }
 
 // --- Phone Number to Country Mapping ---
@@ -1014,9 +1018,11 @@ export default function LiveCalls() {
                   <div className="flex items-start justify-between">
                     <div className="flex items-center gap-3">
                       <div className={`p-2 rounded-full ${
-                        call.status === "active" 
-                          ? "bg-green-500/20 text-green-400" 
-                          : "bg-muted text-muted-foreground"
+                        call.escalated
+                          ? "bg-orange-500/20 text-orange-400"
+                          : call.status === "active" 
+                            ? "bg-green-500/20 text-green-400" 
+                            : "bg-muted text-muted-foreground"
                       }`}>
                         <Phone className="w-4 h-4" />
                       </div>
@@ -1039,6 +1045,11 @@ export default function LiveCalls() {
                       {call.booking_confirmed && (
                         <Badge variant="outline" className="text-primary border-primary text-xs">
                           Booked
+                        </Badge>
+                      )}
+                      {call.escalated && (
+                        <Badge variant="outline" className="text-orange-400 border-orange-400 text-xs">
+                          ⚠ Escalated
                         </Badge>
                       )}
                     </div>
@@ -1087,13 +1098,27 @@ export default function LiveCalls() {
                         <p className="text-xs text-muted-foreground">Duration</p>
                       </div>
                       <Badge 
-                        variant={selectedCallData.status === "active" ? "default" : "secondary"}
-                        className={`h-8 px-4 ${selectedCallData.status === "active" ? "bg-green-600 animate-pulse" : ""}`}
+                        variant={selectedCallData.escalated ? "destructive" : selectedCallData.status === "active" ? "default" : "secondary"}
+                        className={`h-8 px-4 ${selectedCallData.escalated ? "bg-orange-600" : selectedCallData.status === "active" ? "bg-green-600 animate-pulse" : ""}`}
                       >
-                        {selectedCallData.status === "active" ? "🔴 LIVE" : selectedCallData.status}
+                        {selectedCallData.escalated ? "⚠ ESCALATED" : selectedCallData.status === "active" ? "🔴 LIVE" : selectedCallData.status}
                       </Badge>
                     </div>
                   </div>
+
+                  {/* Escalation Alert */}
+                  {selectedCallData.escalated && (
+                    <div className="mt-3 p-3 bg-orange-500/10 rounded-lg border border-orange-500/30 flex items-center gap-3">
+                      <AlertCircle className="w-5 h-5 text-orange-400 shrink-0" />
+                      <div>
+                        <p className="text-sm font-medium text-orange-400">Transferred to Operator</p>
+                        <p className="text-xs text-muted-foreground">
+                          Reason: {selectedCallData.escalation_reason || "Unknown"}
+                          {selectedCallData.escalated_at && ` • ${formatTime(selectedCallData.escalated_at)}`}
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Caller Info Card */}
                   {(selectedCallData.caller_name || selectedCallData.caller_phone) && (

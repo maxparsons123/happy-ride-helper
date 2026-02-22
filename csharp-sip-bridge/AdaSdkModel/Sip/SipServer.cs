@@ -457,6 +457,7 @@ public sealed class SipServer : IAsyncDisposable
                 await CleanupCallAsync(c, "remote_hangup");
         };
         session.OnEnded += async (s, r) => await RemoveAndCleanupAsync(sessionId, r);
+        session.OnEscalate += async (s, reason) => await HandleEscalationTransferAsync(sessionId, reason);
 
         playout.Start();
         OnCallStarted?.Invoke(sessionId, destination);
@@ -525,6 +526,7 @@ public sealed class SipServer : IAsyncDisposable
 
         callAgent.OnCallHungup += async (_) => await RemoveAndCleanupAsync(session.SessionId, "remote_hangup");
         session.OnEnded += async (s, r) => await RemoveAndCleanupAsync(s.SessionId, r);
+        session.OnEscalate += async (s, reason) => await HandleEscalationTransferAsync(s.SessionId, reason);
 
         OnCallStarted?.Invoke(session.SessionId, caller);
         Log($"📞 Call {session.SessionId} active for {caller} (total: {_activeCalls.Count})");
@@ -700,6 +702,60 @@ public sealed class SipServer : IAsyncDisposable
         if (_activeCalls.TryRemove(sessionId, out var call))
             await CleanupCallAsync(call, reason);
         OnCallEnded?.Invoke(sessionId, reason);
+    }
+
+    /// <summary>
+    /// Handle escalation: SIP REFER transfer to operator extension, then clean up AI session.
+    /// </summary>
+    private async Task HandleEscalationTransferAsync(string sessionId, string reason)
+    {
+        if (!_activeCalls.TryGetValue(sessionId, out var call))
+        {
+            Log($"⚠ Escalation for {sessionId} but call not found");
+            return;
+        }
+
+        var transferExt = _settings.OperatorTransferExtension;
+        if (string.IsNullOrWhiteSpace(transferExt))
+        {
+            Log($"⚠ No OperatorTransferExtension configured — cannot transfer {sessionId}");
+            await RemoveAndCleanupAsync(sessionId, $"escalation_no_ext:{reason}");
+            return;
+        }
+
+        try
+        {
+            var serverAddr = ResolveDns(_settings.Server);
+            var portPart = _settings.Port == 5060 ? "" : $":{_settings.Port}";
+            var targetUri = SIPURI.ParseSIPURI($"sip:{transferExt}@{serverAddr}{portPart}");
+
+            Log($"🔀 [{sessionId}] Transferring to operator ext {transferExt} (reason: {reason})...");
+
+            // Wait for Ada's "transferring you now" speech to play out
+            await Task.Delay(2500);
+
+            bool transferred = await call.CallAgent.Transfer(targetUri, TimeSpan.FromSeconds(15), default);
+
+            if (transferred)
+            {
+                Log($"✅ [{sessionId}] SIP REFER transfer successful to {transferExt}");
+                try { call.Playout?.Dispose(); } catch { }
+                if (call.Session != null)
+                    try { await call.Session.EndAsync($"escalated:{reason}"); } catch { }
+                _activeCalls.TryRemove(sessionId, out _);
+                OnCallEnded?.Invoke(sessionId, $"escalated:{reason}");
+            }
+            else
+            {
+                Log($"❌ [{sessionId}] SIP REFER failed — hanging up");
+                await RemoveAndCleanupAsync(sessionId, $"escalation_transfer_failed:{reason}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"❌ [{sessionId}] Escalation transfer error: {ex.Message}");
+            await RemoveAndCleanupAsync(sessionId, $"escalation_error:{reason}");
+        }
     }
 
     private async Task CleanupCallAsync(ActiveCall call, string reason)

@@ -63,6 +63,9 @@ public sealed class SipSettings
     public string StunServer { get; set; } = "stun.l.google.com";
     public int StunPort { get; set; } = 19302;
 
+    /// <summary>Extension/number to transfer calls to when caller requests a human operator.</summary>
+    public string? OperatorTransferExtension { get; set; }
+
     public string EffectiveAuthUser => string.IsNullOrWhiteSpace(AuthId) ? Username : AuthId;
 }
 

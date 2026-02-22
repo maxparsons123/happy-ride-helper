@@ -273,6 +273,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             options.Tools.Add(BuildCancelBookingToolStatic());
             options.Tools.Add(BuildCheckBookingStatusToolStatic());
             options.Tools.Add(BuildSendBookingLinkToolStatic());
+            options.Tools.Add(BuildTransferToOperatorToolStatic());
             options.Tools.Add(BuildEndCallToolStatic());
 
             await _session.ConfigureSessionAsync(options);
@@ -1208,6 +1209,22 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 near = new { type = "string", description = "Location or area to search near" },
                 date = new { type = "string", description = "Date or time frame (e.g. 'tonight', 'this weekend', 'Saturday')" }
             }
+        }))
+    };
+
+    public static ConversationFunctionTool BuildTransferToOperatorToolStatic() => new("transfer_to_operator")
+    {
+        Description = "Transfer the caller to a human operator. " +
+                      "Use when the caller explicitly asks to speak to a person, make a complaint, speak to a manager, " +
+                      "or requests human assistance. Say 'I'll transfer you now, one moment please' before calling this tool.",
+        Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
+        {
+            type = "object",
+            properties = new
+            {
+                reason = new { type = "string", description = "Brief reason for transfer: 'complaint', 'request_human', 'manager_request', 'frustrated', etc." }
+            },
+            required = new[] { "reason" }
         }))
     };
 
