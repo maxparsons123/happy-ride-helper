@@ -18,17 +18,36 @@ public sealed class BookingState
     public string? BookingRef { get; set; }
     public string VehicleType { get; set; } = "Saloon";
     public string? PaymentPreference { get; set; }
+    public string? Luggage { get; set; }
+    public string? SpecialInstructions { get; set; }
     public int BiddingWindowSec { get; set; } = 45;
 
     /// <summary>
-    /// Recommends vehicle type based on passenger count. Can be overridden by explicit request.
+    /// Recommends vehicle type based on passenger count and luggage. Can be overridden by explicit request.
     /// </summary>
-    public static string RecommendVehicle(int passengers) => passengers switch
+    public static string RecommendVehicle(int passengers, string? luggage = null)
     {
-        <= 4 => "Saloon",
-        5 or 6 => "Estate",
-        >= 7 => "Minibus",
-    };
+        var baseType = passengers switch
+        {
+            <= 4 => "Saloon",
+            5 or 6 => "Estate",
+            >= 7 => "Minibus",
+        };
+
+        // Heavy luggage triggers a tier upgrade
+        if (!string.IsNullOrWhiteSpace(luggage) &&
+            luggage.Contains("heavy", StringComparison.OrdinalIgnoreCase))
+        {
+            return baseType switch
+            {
+                "Saloon" => "Estate",
+                "Estate" => "Minibus",
+                _ => baseType,
+            };
+        }
+
+        return baseType;
+    }
 
     // Geocoded coordinates for dispatch
     public double? PickupLat { get; set; }
@@ -54,6 +73,7 @@ public sealed class BookingState
         Name = Pickup = Destination = PickupTime = Fare = Eta = BookingRef = null;
         Passengers = null;
         VehicleType = "Saloon";
+        Luggage = SpecialInstructions = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;
