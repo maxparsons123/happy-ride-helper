@@ -898,6 +898,12 @@ public sealed class CallSession : ICallSession
             }
         }
         var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
+        // Also use the AI's 'interpretation' field as fallback context — the transcript may be stale
+        // when the AI batches multiple fields from a compound utterance (e.g. "from X going to Y").
+        var interpretation = args.TryGetValue("interpretation", out var interp) ? interp?.ToString() ?? "" : "";
+        var contextForGuard = string.IsNullOrWhiteSpace(lastTranscript) || lastTranscript.Split(' ').Length <= 2
+            ? (lastTranscript + " " + interpretation).Trim()
+            : lastTranscript;
         if (args.TryGetValue("destination", out var d))
         {
             var raw = d?.ToString();
@@ -919,11 +925,11 @@ public sealed class CallSession : ICallSession
             // from auto-filling destinations from [CALLER HISTORY].
             else if (string.IsNullOrWhiteSpace(_booking.Destination)
                 && !string.IsNullOrWhiteSpace(incoming)
-                && !string.IsNullOrWhiteSpace(lastTranscript)
-                && !TranscriptResemblesAddress(lastTranscript, incoming))
+                && !string.IsNullOrWhiteSpace(contextForGuard)
+                && !TranscriptResemblesAddress(contextForGuard, incoming))
             {
-                _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — transcript '{Transcript}' doesn't resemble it (likely auto-filled from history)",
-                    SessionId, incoming, lastTranscript);
+                _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — context '{Context}' doesn't resemble it (likely auto-filled from history)",
+                    SessionId, incoming, contextForGuard);
                 sttCorrections.Add($"AUTO-FILL BLOCKED: You sent destination '{incoming}' but the caller said '{lastTranscript}' which doesn't match. " +
                     $"Do NOT auto-fill from [CALLER HISTORY]. Use ONLY what the caller actually said. Ask the caller for their destination.");
             }
