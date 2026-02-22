@@ -734,6 +734,7 @@ public sealed class CallSession : ICallSession
     private bool _destLockedByClarify;         // true = clarify_address locked the destination — sync_booking_data cannot overwrite
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
+    private bool _pendingAddressCorrection;  // true = address discrepancy detected, allow pickup/dest correction through stage lock
 
     /// <summary>
     /// Known addresses from the caller's Supabase history (pickup + dropoff combined).
@@ -831,7 +832,17 @@ public sealed class CallSession : ICallSession
                 && !string.IsNullOrWhiteSpace(incoming)
                 && StreetNameChanged(_booking.Pickup, incoming))
             {
-                if (!args.ContainsKey("destination") && string.IsNullOrWhiteSpace(_booking.Destination))
+                // If address discrepancy correction is pending, allow the pickup update through
+                if (_pendingAddressCorrection)
+                {
+                    _logger.LogInformation("[{SessionId}] ✅ ADDRESS CORRECTION: Allowing pickup update '{Incoming}' (discrepancy correction pending)",
+                        SessionId, incoming);
+                    _pendingAddressCorrection = false;
+                    // Reset stage to re-trigger fare calculation with corrected address
+                    _currentStage = BookingStage.CollectingDestination;
+                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                }
+                else if (!args.ContainsKey("destination") && string.IsNullOrWhiteSpace(_booking.Destination))
                 {
                     // Case (b): No destination yet — redirect this value to destination
                     _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION",
@@ -1484,6 +1495,8 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                        _pendingAddressCorrection = true;  // Allow pickup/dest correction through stage lock
+                        _currentStage = BookingStage.CollectingDestination;  // Unlock stage for corrections
 
                         await _aiClient.InjectMessageAndRespondAsync(
                             $"[ADDRESS DISCREPANCY] {discrepancy} " +
