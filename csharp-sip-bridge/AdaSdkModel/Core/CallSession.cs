@@ -1515,7 +1515,50 @@ public sealed class CallSession : ICallSession
         // AUTO VAD SWITCH: Determine what we're collecting next and switch mode
         _ = AutoSwitchVadForNextStepAsync();
 
-        return new { success = true };
+        // Build instruction anchor so Ada reads back from state, not stale transcripts
+        var instruction = BuildStateInstruction();
+        return new { success = true, ground_truth = BuildGroundTruth(), instruction };
+    }
+
+    // =========================
+    // STATE INSTRUCTION ANCHOR
+    // =========================
+    
+    /// <summary>
+    /// Builds a ground-truth object reflecting the current booking state for Ada's tool result.
+    /// </summary>
+    private object BuildGroundTruth()
+    {
+        return new
+        {
+            pickup = _booking.Pickup,
+            destination = _booking.Destination,
+            passengers = _booking.Passengers,
+            name = _booking.Name,
+            pickup_time = _booking.PickupTime,
+            vehicle_type = _booking.VehicleType
+        };
+    }
+
+    /// <summary>
+    /// Builds an instruction string that forces Ada to use ground-truth data in her next response.
+    /// </summary>
+    private string BuildStateInstruction()
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup))
+            parts.Add($"pickup='{_booking.Pickup}'");
+        if (!string.IsNullOrWhiteSpace(_booking.Destination))
+            parts.Add($"destination='{_booking.Destination}'");
+        if (!string.IsNullOrWhiteSpace(_booking.Name))
+            parts.Add($"name='{_booking.Name}'");
+
+        if (parts.Count == 0)
+            return "Use the [BOOKING STATE] for all readbacks. Do not refer to previous transcripts.";
+
+        return $"The confirmed state is: {string.Join(", ", parts)}. " +
+               "If your internal memory says something different, ignore it. " +
+               "Use these exact strings in your next response. Do not refer to previous transcripts.";
     }
 
     // =========================
