@@ -138,6 +138,14 @@ public sealed class ALawRtpPlayout : IDisposable
     {
         if (alaw == null || alaw.Length == 0) return;
 
+        // Fast path: perfect 160-byte frame with empty accumulator → zero-copy enqueue
+        if (alaw.Length == FrameSize && Volatile.Read(ref _accCount) == 0)
+        {
+            EnqueueFrame(alaw);
+            return;
+        }
+
+        // Slow path: accumulate and split (handles non-aligned sizes)
         lock (_accLock)
         {
             int needed = _accCount + alaw.Length;
