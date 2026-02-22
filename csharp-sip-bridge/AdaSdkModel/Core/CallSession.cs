@@ -2426,25 +2426,28 @@ public sealed class CallSession : ICallSession
 
             _logger.LogInformation("[{SessionId}] 🔗 Sending airport booking link to {Phone}: {Url}", sessionId, callerId, bookingUrl);
 
-            if (!string.IsNullOrEmpty(_settings.Dispatch.WhatsAppWebhookUrl))
+            if (string.IsNullOrEmpty(_settings.Dispatch.WhatsAppWebhookUrl))
             {
-                using var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.Dispatch.BsqdApiKey);
-
-                var message = $"Hi {name}! Here's your airport booking form for your trip from {pickup} to {destination}. " +
-                              $"Please select your vehicle, enter your flight details and travel time: {bookingUrl} — Thank you, 247 Radio Carz";
-
-                var body = System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    phoneNumber = FormatE164ForSumUp(callerId),
-                    message = message
-                });
-
-                var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, _settings.Dispatch.WhatsAppWebhookUrl);
-                request.Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json");
-                var response = await httpClient.SendAsync(request);
-                _logger.LogInformation("[{SessionId}] 🔗 Airport booking link WhatsApp delivery: {Status}", sessionId, (int)response.StatusCode);
+                _logger.LogWarning("[{SessionId}] ⚠️ WhatsAppWebhookUrl not configured — cannot send airport booking link", sessionId);
+                return;
             }
+
+            using var httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _settings.Dispatch.BsqdApiKey);
+
+            var message = $"Hi {name}! Here's your airport booking form for your trip from {pickup} to {destination}. " +
+                          $"Please select your vehicle, enter your flight details and travel time: {bookingUrl} — Thank you, 247 Radio Carz";
+
+            var body = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                phoneNumber = FormatE164ForSumUp(callerId),
+                message = message
+            });
+
+            var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, _settings.Dispatch.WhatsAppWebhookUrl);
+            request.Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json");
+            var response = await httpClient.SendAsync(request);
+            _logger.LogInformation("[{SessionId}] 🔗 Airport booking link WhatsApp delivery: {Status}", sessionId, (int)response.StatusCode);
         }
         catch (Exception ex)
         {
