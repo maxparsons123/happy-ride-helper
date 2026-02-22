@@ -1,4 +1,4 @@
-// Last updated: 2026-02-21 (v2.8)
+// Last updated: 2026-02-22 (v2.9 — synced Luggage + RecommendVehicle across all projects)
 using System.Text.RegularExpressions;
 
 namespace AdaSdkModel.Core;
