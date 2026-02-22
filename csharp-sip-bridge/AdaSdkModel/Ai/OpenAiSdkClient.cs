@@ -680,11 +680,24 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             }
             else
             {
-                // Fallback watchdog: if no reply after 10s, start no-reply prompting.
-                // Capture watchdog ID + callEnded to prevent stale fires after call cleanup.
+                // Fallback watchdog: wait for playout to drain, then if no reply after 10s,
+                // start no-reply prompting. This prevents premature firing during long audio.
                 var wdId = Volatile.Read(ref _noReplyWatchdogId);
                 _ = Task.Run(async () =>
                 {
+                    // Wait for playout queue to drain before starting the 10s countdown
+                    for (int i = 0; i < 600; i++) // max 60s
+                    {
+                        if (Volatile.Read(ref _noReplyWatchdogId) != wdId) return;
+                        if (Volatile.Read(ref _callEnded) != 0) return;
+                        try
+                        {
+                            if (GetQueuedFrames == null || GetQueuedFrames() <= 0) break;
+                        }
+                        catch { break; }
+                        await Task.Delay(100);
+                    }
+                    
                     await Task.Delay(10_000);
                     if (Volatile.Read(ref _noReplyWatchdogId) != wdId) return;
                     if (Volatile.Read(ref _callEnded) != 0) return;
