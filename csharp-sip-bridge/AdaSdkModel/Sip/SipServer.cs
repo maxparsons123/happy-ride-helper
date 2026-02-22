@@ -1,4 +1,4 @@
-// Last updated: 2026-02-21 (v2.8)
+// Last updated: 2026-02-22 (v2.9 — Task.Run playout notify, RMS 4x sampling)
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -646,7 +646,7 @@ public sealed class SipServer : IAsyncDisposable
                 {
                     Interlocked.Exchange(ref lastNotifyPlayoutCompleteMs, nowMs);
                     Interlocked.Exchange(ref responseCompletedLatch, 0);
-                    session.NotifyPlayoutComplete();
+                    Task.Run(() => session.NotifyPlayoutComplete());
                 }
             }
             else
@@ -658,12 +658,8 @@ public sealed class SipServer : IAsyncDisposable
 
         playout.OnQueueEmpty += () =>
         {
-            // ONLY notify completion once:
-            // - Response has completed (latch set)
-            // - We were waiting for drain (watchdogPending)
             if (Volatile.Read(ref watchdogPending) == 1 && Volatile.Read(ref responseCompletedLatch) == 1)
             {
-                // Debounce: OnQueueEmpty can fire more than once
                 var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (nowMs - Interlocked.Read(ref lastNotifyPlayoutCompleteMs) < NOTIFY_DEBOUNCE_MS)
                     return;
@@ -672,12 +668,9 @@ public sealed class SipServer : IAsyncDisposable
                 Interlocked.Exchange(ref watchdogPending, 0);
                 Interlocked.Exchange(ref responseCompletedLatch, 0);
 
-                // This is the ONLY safe moment to open mic / start watchdog
-                session.NotifyPlayoutComplete();
+                // Dispatch off playout thread so it can't block the 20ms tick
+                Task.Run(() => session.NotifyPlayoutComplete());
             }
-
-            // If queue-empty happens before response completed, DO NOTHING.
-            // That prevents reopening mic mid-stream.
         };
 
         rtpSession.OnRtpPacketReceived += (ep, mediaType, rtpPacket) =>
@@ -715,12 +708,12 @@ public sealed class SipServer : IAsyncDisposable
             if (applySoftGate)
             {
                 double sumSq = 0;
-                for (int i = 0; i < g711ToSend.Length; i++)
+                for (int i = 0; i < g711ToSend.Length; i += 4)
                 {
                     short pcm = ALawDecode(g711ToSend[i]);
                     sumSq += (double)pcm * pcm;
                 }
-                float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+                float rms = (float)Math.Sqrt(sumSq / (g711ToSend.Length / 4));
                 var thresh = (_audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200);
 
                 // If it's quiet (likely echo/tail), send silence instead of real mic audio

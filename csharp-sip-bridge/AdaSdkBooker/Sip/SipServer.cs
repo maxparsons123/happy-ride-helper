@@ -485,7 +485,7 @@ public sealed class SipServer : IAsyncDisposable
             {
                 Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
-                if (playout.QueuedFrames == 0) sdkClient.NotifyPlayoutComplete();
+                if (playout.QueuedFrames == 0) Task.Run(() => sdkClient.NotifyPlayoutComplete());
                 else Interlocked.Exchange(ref watchdogPending, 1);
             };
         }
@@ -496,12 +496,12 @@ public sealed class SipServer : IAsyncDisposable
             {
                 Interlocked.Exchange(ref isBotSpeaking, 0);
                 botStoppedSpeakingAt = DateTime.UtcNow;
-                session.NotifyPlayoutComplete();
+                Task.Run(() => session.NotifyPlayoutComplete());
             }
             else if (Volatile.Read(ref watchdogPending) == 1)
             {
                 Interlocked.Exchange(ref watchdogPending, 0);
-                session.NotifyPlayoutComplete();
+                Task.Run(() => session.NotifyPlayoutComplete());
             }
         };
 
@@ -529,8 +529,8 @@ public sealed class SipServer : IAsyncDisposable
             if (applySoftGate)
             {
                 double sumSq = 0;
-                for (int i = 0; i < g711ToSend.Length; i++) { short pcm = ALawDecode(g711ToSend[i]); sumSq += (double)pcm * pcm; }
-                float rms = (float)Math.Sqrt(sumSq / g711ToSend.Length);
+                for (int i = 0; i < g711ToSend.Length; i += 4) { short pcm = ALawDecode(g711ToSend[i]); sumSq += (double)pcm * pcm; }
+                float rms = (float)Math.Sqrt(sumSq / (g711ToSend.Length / 4));
                 if (rms < (_audioSettings.BargeInRmsThreshold > 0 ? _audioSettings.BargeInRmsThreshold : 1200))
                 {
                     g711ToSend = new byte[payload.Length];
