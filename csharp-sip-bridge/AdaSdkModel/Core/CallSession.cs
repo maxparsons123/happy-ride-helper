@@ -912,6 +912,20 @@ public sealed class CallSession : ICallSession
                     SessionId, incoming, _booking.Destination);
                 sttCorrections.Add($"CLARIFY LOCK: You sent destination '{incoming}' but the verified destination is '{_booking.Destination}' (locked by clarify_address). Use '{_booking.Destination}' in all future tool calls.");
             }
+            // ── HISTORY AUTO-FILL GUARD (destination) ──
+            // When destination is currently null (fresh start or post-cancel), verify the
+            // incoming value actually resembles what the user said. This prevents the model
+            // from auto-filling destinations from [CALLER HISTORY].
+            else if (string.IsNullOrWhiteSpace(_booking.Destination)
+                && !string.IsNullOrWhiteSpace(incoming)
+                && !string.IsNullOrWhiteSpace(lastTranscript)
+                && !TranscriptResemblesAddress(lastTranscript, incoming))
+            {
+                _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — transcript '{Transcript}' doesn't resemble it (likely auto-filled from history)",
+                    SessionId, incoming, lastTranscript);
+                sttCorrections.Add($"AUTO-FILL BLOCKED: You sent destination '{incoming}' but the caller said '{lastTranscript}' which doesn't match. " +
+                    $"Do NOT auto-fill from [CALLER HISTORY]. Use ONLY what the caller actually said. Ask the caller for their destination.");
+            }
             else
             {
                 // If normalisation changed the value, record the correction for AI context injection
@@ -2788,15 +2802,19 @@ public sealed class CallSession : ICallSession
 
             // Inject clean state so the AI knows ALL fields are now empty
             _ = InjectBookingStateAsync("[BOOKING RESET] Previous booking was cancelled. ALL fields are now empty. " +
-                "Do NOT reuse any addresses from the cancelled booking. " +
-                "If the caller wants a new booking, you MUST ask for pickup from scratch.");
+                "Do NOT reuse any addresses, passenger counts, or times from the cancelled booking or from [CALLER HISTORY]. " +
+                "You MUST collect EVERY field fresh from what the caller SAYS in this conversation. " +
+                "If the caller wants a new booking, ask for pickup from scratch. " +
+                "CRITICAL: When calling sync_booking_data, ONLY include fields the caller has EXPLICITLY stated in their speech. " +
+                "The system will REJECT any destination or pickup that doesn't match the caller's transcript.");
 
             return new
             {
                 success = true,
                 message = $"Booking has been cancelled successfully. ALL booking fields have been cleared. " +
                           "Tell the caller: 'Your booking has been cancelled. Would you like to make a new booking, or is there anything else I can help with?' " +
-                          "If they want a new booking, you MUST start fresh — ask for pickup address. Do NOT auto-fill any fields from the cancelled booking."
+                          "If they want a new booking, you MUST start fresh — ask for pickup address. Do NOT auto-fill ANY fields from the cancelled booking or caller history. " +
+                          "ONLY pass values to sync_booking_data that the caller has EXPLICITLY said in their speech."
             };
         }
         catch (Exception ex)
@@ -3310,7 +3328,36 @@ public sealed class CallSession : ICallSession
         return Normalize(oldAddress) != Normalize(newAddress);
     }
 
-    // NormalizeHouseNumber: corrects HYPHENATED STT mishearings only.
+    /// <summary>
+    /// Checks if the user's transcript contains at least one significant word from the address.
+    /// Used to detect when the model auto-fills an address from caller history rather than
+    /// using what the user actually said. Requires at least one word (3+ chars) overlap.
+    /// </summary>
+    private static bool TranscriptResemblesAddress(string transcript, string address)
+    {
+        var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "the", "to", "from", "at", "on", "in", "a", "an", "and", "or", "my", "please",
+            "can", "could", "would", "like", "want", "need", "go", "going", "get", "take",
+            "me", "us", "it", "is", "for", "of", "up", "yes", "yeah", "no", "not", "thank",
+            "thanks", "bye", "okay", "ok", "right", "that", "this", "just", "with"
+        };
+
+        // Extract meaningful words from the address (3+ chars, not stop words)
+        var addressWords = System.Text.RegularExpressions.Regex
+            .Split(address.ToLowerInvariant(), @"[^a-z]+")
+            .Where(w => w.Length >= 3 && !stopWords.Contains(w))
+            .ToHashSet();
+
+        if (addressWords.Count == 0)
+            return true; // Can't validate, allow it
+
+        var transcriptLower = transcript.ToLowerInvariant();
+
+        // Check if any significant address word appears in the transcript
+        return addressWords.Any(w => transcriptLower.Contains(w));
+    }
+
     // When Whisper hears a letter suffix it sometimes inserts a hyphen+digit:
     //   "52A" → "52-8"   (A sounds like "eight")
     //   "14B" → "14-3"   (B sounds like "three")
