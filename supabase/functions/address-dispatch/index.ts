@@ -244,10 +244,18 @@ ADDRESS EXTRACTION RULES:
    - WRONG:   "New Street, Birmingham B2 4QA"  ← drops the landmark name
    - CORRECT: "Aldi, Warwick Road, Coventry CV3 6PT"
    - WRONG:   "Warwick Road, Coventry CV3 6PT"  ← drops the business name
-   - The caller spoke the name for a reason — always include it in the address field so it can be read back to them accurately.
-5. ALWAYS include the postal code in the address field (e.g., "7 Russell Street, Coventry CV1 3BT")
-6. The postal_code field MUST be populated separately whenever determinable
+    - The caller spoke the name for a reason — always include it in the address field so it can be read back to them accurately.
+5. ALWAYS include the FULL postal code in the address field (e.g., "7 Russell Street, Coventry CV1 3BT")
+6. The postal_code field MUST be populated with the FULL postcode (e.g., "CV1 3BT", NOT just "CV1") whenever determinable
 7. CRITICAL — INDEPENDENT POSTCODES: Each address (pickup AND dropoff) MUST have its OWN independently determined postal code. Different streets almost ALWAYS have different postcodes. NEVER copy the pickup's postal code to the dropoff or vice versa. If you cannot determine the exact postal code for an address, leave postal_code as an empty string rather than reusing the other address's postcode.
+
+USER-PROVIDED POSTCODE ANCHOR (HIGHEST GEOCODING PRIORITY):
+When the user provides a FULL postcode (e.g., "B13 9NT", "CV1 4QN"), this is the STRONGEST geocoding signal available:
+- A UK postcode like "B13 9NT" identifies an area of ~15 houses. It is MORE precise than a street name.
+- If the user says "43 Dovey Road, Birmingham, B13 9NT", you MUST resolve to coordinates within the B13 9NT postcode area.
+- NEVER resolve to a location whose postcode differs from the user-provided one. If "Dovey Road" doesn't exist in B13 9NT, flag as address_modified and explain why.
+- If the street name you resolve to DIFFERS from what the user said, set "address_modified": true, "original_input": the user's exact text, and "modification_reason": why you changed it.
+- The postcode takes priority over your street name knowledge — if the user says B13 9NT, the coordinates MUST be in B13 9NT even if you think the street name is wrong.
 
 INTRA-CITY DISTRICT DISAMBIGUATION (CRITICAL):
 Even when the CITY is known (e.g., Birmingham from landline 0121), many street names exist in MULTIPLE districts within that city.
@@ -461,12 +469,15 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
                     lon: { type: "number" },
                     street_name: { type: "string" },
                     street_number: { type: "string" },
-                    postal_code: { type: "string" },
+                    postal_code: { type: "string", description: "FULL postcode e.g. 'B13 9NT' not just 'B13'" },
                     city: { type: "string" },
                     is_ambiguous: { type: "boolean" },
                     alternatives: { type: "array", items: { type: "string" } },
                     districts_found: { type: "array", items: { type: "string" }, description: "List of districts/areas this street appears in within the city (e.g. ['Hall Green', 'Moseley', 'Yardley']). Populate when is_ambiguous=true due to multi-district street." },
-                    matched_from_history: { type: "boolean" }
+                    matched_from_history: { type: "boolean" },
+                    address_modified: { type: "boolean", description: "True if the resolved street name differs from user input" },
+                    original_input: { type: "string", description: "The exact text the user spoke, if address was modified" },
+                    modification_reason: { type: "string", description: "Why the address was changed from user input" }
                   },
                   required: ["address", "lat", "lon", "city", "is_ambiguous"]
                 },
@@ -478,12 +489,15 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
                     lon: { type: "number" },
                     street_name: { type: "string" },
                     street_number: { type: "string" },
-                    postal_code: { type: "string" },
+                    postal_code: { type: "string", description: "FULL postcode e.g. 'B13 9NT' not just 'B13'" },
                     city: { type: "string" },
                     is_ambiguous: { type: "boolean" },
                     alternatives: { type: "array", items: { type: "string" } },
                     districts_found: { type: "array", items: { type: "string" }, description: "List of districts/areas this street appears in within the city (e.g. ['Hall Green', 'Moseley', 'Yardley']). Populate when is_ambiguous=true due to multi-district street." },
-                    matched_from_history: { type: "boolean" }
+                    matched_from_history: { type: "boolean" },
+                    address_modified: { type: "boolean", description: "True if the resolved street name differs from user input" },
+                    original_input: { type: "string", description: "The exact text the user spoke, if address was modified" },
+                    modification_reason: { type: "string", description: "Why the address was changed from user input" }
                   },
                   required: ["address", "lat", "lon", "city", "is_ambiguous"]
                 },
@@ -775,6 +789,99 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
       }
     }
 
+    // ── USER POSTCODE VALIDATION: re-geocode if user's postcode doesn't match resolved one ──
+    for (const side of ["pickup", "dropoff"] as const) {
+      const originalInput = side === "pickup" ? (pickup || "") : (destination || "");
+      const addr = parsed[side];
+      if (!addr) continue;
+      
+      // Extract full postcode from user input (e.g., "B13 9NT" from "43 Dovey Road, Birmingham, B13 9NT")
+      const userPostcodeMatch = originalInput.match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})\b/i);
+      if (!userPostcodeMatch) continue;
+      
+      const userPostcode = userPostcodeMatch[1].toUpperCase().replace(/\s+/g, " ").trim();
+      const resolvedPostcode = (addr.postal_code || "").toUpperCase().replace(/\s+/g, " ").trim();
+      
+      // Normalize for comparison: remove spaces
+      const userPC = userPostcode.replace(/\s/g, "");
+      const resolvedPC = resolvedPostcode.replace(/\s/g, "");
+      
+      if (resolvedPC && userPC === resolvedPC) {
+        console.log(`✅ POSTCODE MATCH (${side}): user="${userPostcode}" == resolved="${resolvedPostcode}"`);
+        continue;
+      }
+      
+      console.log(`⚠️ POSTCODE MISMATCH (${side}): user="${userPostcode}" ≠ resolved="${resolvedPostcode}" — re-geocoding with user postcode`);
+      
+      // Re-geocode using Nominatim with the user's postcode as anchor
+      try {
+        const streetName = addr.street_name || "";
+        const streetNumber = addr.street_number || "";
+        const city = addr.city || "";
+        
+        // Build query prioritizing postcode
+        const postcodeQuery = `${streetNumber} ${streetName}, ${userPostcode}, UK`.trim();
+        const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(postcodeQuery)}&format=json&limit=3&countrycodes=gb`;
+        const nomResp = await fetch(nominatimUrl, {
+          headers: { "User-Agent": "AdaTaxiBooker/1.0 (taxi dispatch)" }
+        });
+        
+        if (nomResp.ok) {
+          const nomResults = await nomResp.json();
+          if (nomResults.length > 0) {
+            const best = nomResults[0];
+            const newLat = parseFloat(best.lat);
+            const newLon = parseFloat(best.lon);
+            const displayName = best.display_name || "";
+            
+            console.log(`✅ POSTCODE RE-GEOCODE (${side}): "${postcodeQuery}" → (${newLat}, ${newLon}) — ${displayName}`);
+            addr.lat = newLat;
+            addr.lon = newLon;
+            addr.postal_code = userPostcode;
+            
+            // Check if the street name in Nominatim result differs from what user said
+            const inputStreetLower = streetName.toLowerCase();
+            const nomStreetLower = displayName.toLowerCase();
+            if (inputStreetLower && !nomStreetLower.includes(inputStreetLower)) {
+              // The street the user said might not exist at this postcode
+              addr.address_modified = true;
+              addr.original_input = originalInput;
+              addr.modification_reason = `Re-geocoded to postcode ${userPostcode}. Street "${streetName}" may not exist at this postcode.`;
+              console.log(`⚠️ POSTCODE RE-GEOCODE: street "${streetName}" not found at ${userPostcode} — flagged as modified`);
+            }
+            
+            // Update address string with user's postcode
+            const houseNum = streetNumber ? `${streetNumber} ` : "";
+            addr.address = `${houseNum}${streetName}, ${city}, ${userPostcode}`;
+          } else {
+            // Nominatim found nothing — try postcode-only search
+            console.log(`⚠️ POSTCODE RE-GEOCODE: no results for "${postcodeQuery}", trying postcode-only`);
+            const pcOnlyUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(userPostcode)}&format=json&limit=1&countrycodes=gb`;
+            const pcResp = await fetch(pcOnlyUrl, {
+              headers: { "User-Agent": "AdaTaxiBooker/1.0 (taxi dispatch)" }
+            });
+            if (pcResp.ok) {
+              const pcResults = await pcResp.json();
+              if (pcResults.length > 0) {
+                const pcBest = pcResults[0];
+                addr.lat = parseFloat(pcBest.lat);
+                addr.lon = parseFloat(pcBest.lon);
+                addr.postal_code = userPostcode;
+                const houseNum = streetNumber ? `${streetNumber} ` : "";
+                addr.address = `${houseNum}${streetName}, ${city}, ${userPostcode}`;
+                addr.address_modified = true;
+                addr.original_input = originalInput;
+                addr.modification_reason = `Geocoded to postcode centroid ${userPostcode}. Street "${streetName}" not verified at this location.`;
+                console.log(`✅ POSTCODE CENTROID (${side}): ${userPostcode} → (${addr.lat}, ${addr.lon})`);
+              }
+            }
+          }
+        }
+      } catch (nomErr) {
+        console.warn(`⚠️ Postcode re-geocode error (non-fatal):`, nomErr);
+      }
+    }
+
     // ── Calculate fare from Gemini coordinates ──
     const pLat = parsed.pickup?.lat;
     const pLon = parsed.pickup?.lon;
@@ -821,6 +928,8 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
     }
 
     // ── IDENTICAL COORDINATES FIX: Nominatim fallback when Gemini returns same lat/lon for both ──
+    const pickupStreet = (parsed.pickup?.street_name || "").toLowerCase();
+    const dropoffStreet = (parsed.dropoff?.street_name || "").toLowerCase();
     if (typeof pLat === "number" && typeof pLon === "number" &&
         typeof dLat === "number" && typeof dLon === "number" &&
         pLat === dLat && pLon === dLon &&
@@ -896,8 +1005,6 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHist
     // ── DUPLICATE POSTCODE CHECK: different streets should almost never share a postcode ──
     const pickupPostal = (parsed.pickup?.postal_code || "").trim().toUpperCase();
     const dropoffPostal = (parsed.dropoff?.postal_code || "").trim().toUpperCase();
-    const pickupStreet = (parsed.pickup?.street_name || "").toLowerCase();
-    const dropoffStreet = (parsed.dropoff?.street_name || "").toLowerCase();
     
     if (pickupPostal && dropoffPostal && pickupPostal === dropoffPostal && 
         pickupStreet && dropoffStreet && pickupStreet !== dropoffStreet) {
