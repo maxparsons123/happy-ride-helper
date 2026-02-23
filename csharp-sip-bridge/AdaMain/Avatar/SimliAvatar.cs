@@ -1,9 +1,10 @@
+// Last updated: 2026-02-21 (v2.8)
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace AdaMain.Avatar;
+namespace AdaSdkModel.Avatar;
 
 /// <summary>
 /// Simli avatar integration using WebView2 and the Simli JavaScript SDK.
@@ -218,7 +219,7 @@ public sealed class SimliAvatar : UserControl
 
     private async Task ExecAsync(string script)
     {
-        if (IsDisposed) return;
+        if (IsDisposed || !IsHandleCreated) return;
 
         if (InvokeRequired)
         {
@@ -252,15 +253,16 @@ public sealed class SimliAvatar : UserControl
 
     private void SetStatus(string text, System.Drawing.Color color)
     {
-        if (InvokeRequired) { try { Invoke(() => SetStatus(text, color)); } catch { } return; }
+        if (IsDisposed || !IsHandleCreated) return;
+        if (InvokeRequired) { try { BeginInvoke(() => SetStatus(text, color)); } catch { } return; }
         _statusLabel.Text = text;
         _statusLabel.ForeColor = color;
     }
 
     private void SafeInvoke(Action action)
     {
-        if (IsDisposed) return;
-        if (InvokeRequired) { try { Invoke(action); } catch { } }
+        if (IsDisposed || !IsHandleCreated) return;
+        if (InvokeRequired) { try { BeginInvoke(action); } catch { } }
         else action();
     }
 
@@ -288,6 +290,7 @@ public sealed class SimliAvatar : UserControl
     </div>
     <script>
         let pc=null, ws=null, audioQueue=[], isSending=false, audioBytesSent=0;
+        let drainTimer=null;
         function log(msg){ chrome.webview.postMessage({type:'log',message:msg}); }
 
         function handleCommand(cmd){
@@ -295,7 +298,7 @@ public sealed class SimliAvatar : UserControl
                 case 'connect': connect(cmd.apiKey,cmd.faceId); break;
                 case 'audio': queueAudio(cmd.data); break;
                 case 'disconnect': disconnect(); break;
-                case 'clear': audioQueue=[]; break;
+                case 'clear': audioQueue=[]; if(drainTimer){clearTimeout(drainTimer);drainTimer=null;} break;
             }
         }
 
@@ -343,15 +346,31 @@ public sealed class SimliAvatar : UserControl
 
         function queueAudio(b64){
             if(!ws||ws.readyState!==WebSocket.OPEN) return;
-            try{const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);audioBytesSent+=bytes.length;audioQueue.push(bytes);processQueue();}catch(e){}
+            try{
+                const bin=atob(b64);
+                const bytes=new Uint8Array(bin.length);
+                for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                audioBytesSent+=bytes.length;
+                audioQueue.push(bytes);
+                // Drain immediately — batching is done C#-side now
+                drainQueue();
+            }catch(e){}
         }
-        function processQueue(){
-            if(isSending||!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0) return;
-            isSending=true;const chunk=audioQueue.shift();
-            try{ws.send(chunk);chrome.webview.postMessage({type:'speaking'});}catch(e){}
-            setTimeout(()=>{isSending=false;if(audioQueue.length>0)processQueue();else chrome.webview.postMessage({type:'silent'});},20);
+
+        function drainQueue(){
+            if(!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0) return;
+            // Send all queued chunks in order without artificial delays
+            while(audioQueue.length>0){
+                const chunk=audioQueue.shift();
+                try{ws.send(chunk);}catch(e){break;}
+            }
+            chrome.webview.postMessage({type:'speaking'});
+            // Set a timer to signal silent when no new audio arrives for 100ms
+            if(drainTimer) clearTimeout(drainTimer);
+            drainTimer=setTimeout(()=>{chrome.webview.postMessage({type:'silent'});drainTimer=null;},100);
         }
-        function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
+
+        function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];if(drainTimer){clearTimeout(drainTimer);drainTimer=null;}document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
     </script>
 </body>
 </html>
