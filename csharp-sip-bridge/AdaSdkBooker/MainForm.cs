@@ -958,9 +958,10 @@ public partial class MainForm : Form
             try
             {
                 var pcm16at16k = AlawToSimliResampler.Convert(frame);
-                _simliAvatar?.SendAudioAsync(pcm16at16k).GetAwaiter().GetResult();
+                _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
             }
             catch { }
+            Thread.Sleep(18);
         }
     }
 

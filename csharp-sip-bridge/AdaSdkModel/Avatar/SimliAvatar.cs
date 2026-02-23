@@ -351,18 +351,12 @@ public sealed class SimliAvatar : UserControl
                 const bytes=new Uint8Array(bin.length);
                 for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
                 audioBytesSent+=bytes.length;
-                audioQueue.push(bytes);
-                if(!isSending) drainQueue();
+                // Send immediately — pacing is handled C#-side
+                ws.send(bytes);
+                chrome.webview.postMessage({type:'speaking'});
+                if(drainTimer) clearTimeout(drainTimer);
+                drainTimer=setTimeout(()=>{chrome.webview.postMessage({type:'silent'});drainTimer=null;},200);
             }catch(e){}
-        }
-
-        function drainQueue(){
-            if(!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0){isSending=false;chrome.webview.postMessage({type:'silent'});return;}
-            isSending=true;
-            const chunk=audioQueue.shift();
-            try{ws.send(chunk);}catch(e){isSending=false;return;}
-            chrome.webview.postMessage({type:'speaking'});
-            drainTimer=setTimeout(drainQueue,20);
         }
 
         function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];if(drainTimer){clearTimeout(drainTimer);drainTimer=null;}document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
