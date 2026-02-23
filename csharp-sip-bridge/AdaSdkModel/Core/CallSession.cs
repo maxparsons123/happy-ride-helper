@@ -638,24 +638,11 @@ public sealed class CallSession : ICallSession
     // =========================
     // BOOKING STATE INJECTION
     // =========================
-    private async Task InjectBookingStateAsync(string? interpretation = null, List<string>? sttCorrections = null)
+    private async Task InjectBookingStateAsync(string? interpretation = null)
     {
         var sdk = _aiClient;
 
         var sb = new System.Text.StringBuilder();
-
-        // Prepend any STT house-number corrections FIRST so the AI updates its memory
-        // before reading the authoritative booking state below.
-        if (sttCorrections != null && sttCorrections.Count > 0)
-        {
-            sb.AppendLine("[STT CORRECTION — CRITICAL] Speech recognition misheard a house number.");
-            sb.AppendLine("You MUST update your internal memory with the corrected values below.");
-            sb.AppendLine("Do NOT use the value you originally put in your tool call — it was wrong.");
-            foreach (var correction in sttCorrections)
-                sb.AppendLine($"  ⚠️ {correction}");
-            sb.AppendLine("The corrected values are reflected in the [BOOKING STATE] below. Use ONLY those values in all future tool calls.");
-            sb.AppendLine();
-        }
 
         sb.AppendLine("[BOOKING STATE]");
         sb.AppendLine($"  Name: {(_booking.Name != null ? $"{_booking.Name} ✓" : "(not yet collected)")}");
@@ -694,10 +681,7 @@ public sealed class CallSession : ICallSession
         try
         {
             await sdk.InjectSystemMessageAsync(sb.ToString());
-            if (sttCorrections?.Count > 0)
-                _logger.LogInformation("[{SessionId}] 📋 Booking state + {Count} STT correction(s) injected", SessionId, sttCorrections.Count);
-            else
-                _logger.LogDebug("[{SessionId}] 📋 Booking state injected", SessionId);
+            _logger.LogDebug("[{SessionId}] 📋 Booking state injected", SessionId);
         }
         catch (Exception ex)
         {
@@ -829,272 +813,48 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Track STT house-number corrections so we can notify the AI to update its internal memory
-        var sttCorrections = new List<string>();
-        var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
+
+
 
         if (args.TryGetValue("pickup", out var p))
         {
-            var raw = p?.ToString();
-            var incoming = NormalizeHouseNumber(raw, "pickup");
-            incoming = ApplyTranscriptStreetGuard(incoming, lastTranscript, "pickup");
-
-            // ── STAGE-AWARE PICKUP LOCK ──
-            // Once we've moved past CollectingPickup, the pickup address is LOCKED.
-            // Any incoming pickup that differs from the current value is either:
-            //   a) STT noise re-transmitting a corrupted version of the same address, or
-            //   b) A misrouted destination (when destination is still empty).
-            // In case (b) redirect to destination; in case (a) silently reject.
-            bool redirectedToDestination = false;
-            bool pickupBlockedByStage = false;
-            if (_currentStage >= BookingStage.CollectingDestination
-                && !string.IsNullOrWhiteSpace(_booking.Pickup)
-                && !string.IsNullOrWhiteSpace(incoming)
-                && StreetNameChanged(_booking.Pickup, incoming))
+            var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
+            if (StreetNameChanged(_booking.Pickup, incoming))
             {
-                // Detect explicit user correction intent from transcript or AI interpretation
-                var earlyInterpretation = args.TryGetValue("interpretation", out var earlyInterp) ? earlyInterp?.ToString() : null;
-                var correctionDetected = _pendingAddressCorrection || UserRequestedAddressCorrection(lastTranscript, earlyInterpretation);
-
-                // If address discrepancy correction is pending OR user explicitly asked to change, allow through
-                if (correctionDetected)
-                {
-                    _logger.LogInformation("[{SessionId}] ✅ ADDRESS CORRECTION: Allowing pickup update '{Incoming}' → replacing '{Old}' (correction detected, pendingFlag={Pending}, userRequested={UserReq})",
-                        SessionId, incoming, _booking.Pickup, _pendingAddressCorrection, !_pendingAddressCorrection && correctionDetected);
-                    _pendingAddressCorrection = false;
-                    // Reset stage to re-trigger fare calculation with corrected address
-                    _currentStage = BookingStage.CollectingDestination;
-                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                }
-                else if (string.IsNullOrWhiteSpace(_booking.Destination))
-                {
-                    // Case (b): No destination yet — redirect this value to destination.
-                    // Also redirect if the AI sent a destination that doesn't appear in the transcript
-                    // (i.e. auto-filled from caller history while misrouting the spoken address to pickup).
-                    var aiDest = args.ContainsKey("destination") ? args["destination"]?.ToString() : null;
-                    bool aiDestFromHistory = !string.IsNullOrWhiteSpace(aiDest)
-                        && !string.IsNullOrWhiteSpace(lastTranscript)
-                        && !TranscriptContainsAddress(lastTranscript, aiDest);
-
-                    if (!args.ContainsKey("destination") || aiDestFromHistory)
-                    {
-                        _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION (aiDestFromHistory={HistFlag})",
-                            SessionId, incoming, _currentStage, aiDestFromHistory);
-                        _booking.Destination = incoming;
-                        // If AI also sent a hallucinated destination from history, discard it
-                        if (aiDestFromHistory)
-                        {
-                            _logger.LogWarning("[{SessionId}] 🛡️ HISTORY DISCARD: Discarding AI destination '{AiDest}' — not in transcript, replacing with redirected '{Incoming}'",
-                                SessionId, aiDest, incoming);
-                            args.Remove("destination"); // prevent it from being processed later
-                        }
-                        sttCorrections.Add($"STAGE CORRECTION: You sent '{incoming}' as pickup, but the pickup is already '{_booking.Pickup}' and no destination was set. " +
-                            $"The system has assigned '{incoming}' as the DESTINATION. Use destination='{incoming}' in future tool calls.");
-                        redirectedToDestination = true;
-                    }
-                    else
-                    {
-                        // Destination was explicitly provided and IS in the transcript — block the pickup change
-                        _logger.LogWarning("[{SessionId}] 🛡️ STAGE LOCK: Rejected pickup update '{Incoming}' — stage={Stage}, pickup is locked to '{Locked}'",
-                            SessionId, incoming, _currentStage, _booking.Pickup);
-                        sttCorrections.Add($"STAGE LOCK: You sent pickup '{incoming}' but the pickup is already confirmed as '{_booking.Pickup}' and cannot be changed at this stage. " +
-                            $"Use pickup='{_booking.Pickup}' in all future tool calls.");
-                        pickupBlockedByStage = true;
-                    }
-                }
-                else
-                {
-                    // Case (a): Destination already exists — this is STT noise corrupting pickup. Block it.
-                    _logger.LogWarning("[{SessionId}] 🛡️ STAGE LOCK: Rejected pickup update '{Incoming}' — stage={Stage}, pickup is locked to '{Locked}'",
-                        SessionId, incoming, _currentStage, _booking.Pickup);
-                    sttCorrections.Add($"STAGE LOCK: You sent pickup '{incoming}' but the pickup is already confirmed as '{_booking.Pickup}' and cannot be changed at this stage. " +
-                        $"Use pickup='{_booking.Pickup}' in all future tool calls.");
-                    pickupBlockedByStage = true;
-                }
+                _booking.PickupLat = _booking.PickupLon = null;
+                _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
+                // Reset fare/booking state so stale data can't bypass guards
+                _booking.Fare = null;
+                _booking.Eta = null;
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                Interlocked.Exchange(ref _fareRejected, 0);
+                _suffixRetryAttempted = false;
             }
-
-            if (!redirectedToDestination && !pickupBlockedByStage)
-            {
-                // ── CLARIFY LOCK GUARD ──
-                // If clarify_address already locked the pickup, reject any sync_booking_data overwrites
-                // unless the street name is identical (e.g. just adding passengers in the same call).
-                if (_pickupLockedByClarify
-                    && !string.IsNullOrWhiteSpace(_booking.Pickup)
-                    && !string.IsNullOrWhiteSpace(incoming)
-                    && StreetNameChanged(_booking.Pickup, incoming))
-                {
-                    _logger.LogWarning("[{SessionId}] 🛡️ CLARIFY LOCK: Rejected pickup update '{Incoming}' — clarify_address locked pickup to '{Locked}'",
-                        SessionId, incoming, _booking.Pickup);
-                    sttCorrections.Add($"CLARIFY LOCK: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}' (locked by clarify_address). Use '{_booking.Pickup}' in all future tool calls.");
-                    // Do NOT update _booking.Pickup
-                }
-                // ── CONFIRMED ADDRESS IMMUNITY ──
-                // If pickup is already geocoded (has lat/lon), reject phonetic mishearings.
-                else if (_booking.PickupLat.HasValue && _booking.PickupLon.HasValue
-                    && !string.IsNullOrWhiteSpace(_booking.Pickup)
-                    && !string.IsNullOrWhiteSpace(incoming)
-                    && StreetNameChanged(_booking.Pickup, incoming)
-                    && IsPhoneticMishearing(_booking.Pickup, incoming))
-                {
-                    _logger.LogWarning("[{SessionId}] 🛡️ CONFIRMED ADDRESS IMMUNITY: Rejected pickup update '{Incoming}' — verified pickup '{Verified}' is locked",
-                        SessionId, incoming, _booking.Pickup);
-                    sttCorrections.Add($"STT IMMUNITY: You sent pickup '{incoming}' but the verified pickup is '{_booking.Pickup}'. The pickup is LOCKED — use '{_booking.Pickup}' in all future tool calls.");
-                }
-                else
-                {
-                    // If normalisation changed the value, record the correction for AI context injection
-                    if (incoming != raw && raw != null)
-                        sttCorrections.Add($"STT CORRECTION (pickup): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: pickup = '{incoming}'.");
-
-                    // Safeguard: store previous interpretation before overwriting
-                    if (!string.IsNullOrWhiteSpace(_booking.Pickup) && _booking.Pickup != incoming)
-                    {
-                        if (!_booking.PreviousPickups.Contains(_booking.Pickup))
-                            _booking.PreviousPickups.Insert(0, _booking.Pickup);
-                        _logger.LogInformation("[{SessionId}] 📝 Pickup history: [{History}] → new: '{New}'",
-                            SessionId, string.Join(" | ", _booking.PreviousPickups), incoming);
-                    }
-                    if (StreetNameChanged(_booking.Pickup, incoming))
-                    {
-                        _booking.PickupLat = _booking.PickupLon = null;
-                        _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
-                        _booking.Fare = null;
-                        _booking.Eta = null;
-                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                        Interlocked.Exchange(ref _bookTaxiCompleted, 0);
-                        Interlocked.Exchange(ref _fareRejected, 0);
-                        _suffixRetryAttempted = false;
-                    }
-                    _booking.Pickup = incoming;
-                }
-            }
+            _booking.Pickup = incoming;
         }
-        // lastTranscript already declared above (before stage lock check)
-        // Always combine transcript + interpretation so the guard passes if EITHER
-        // mentions the address. The transcript can be stale when the tool call fires
-        // before the transcript event arrives (common with compound utterances).
-        var guardInterpretation = args.TryGetValue("interpretation", out var guardInterp) ? guardInterp?.ToString() ?? "" : "";
-        var contextForGuard = (lastTranscript + " " + guardInterpretation).Trim();
         if (args.TryGetValue("destination", out var d))
         {
-            var raw = d?.ToString();
-            var incoming = NormalizeHouseNumber(raw, "destination");
-            incoming = ApplyTranscriptStreetGuard(incoming, contextForGuard, "destination");
-
-            // ── CLARIFY LOCK GUARD (destination) ──
-            if (_destLockedByClarify
-                && !string.IsNullOrWhiteSpace(_booking.Destination)
-                && !string.IsNullOrWhiteSpace(incoming)
-                && StreetNameChanged(_booking.Destination, incoming))
+            var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
+            if (StreetNameChanged(_booking.Destination, incoming))
             {
-                _logger.LogWarning("[{SessionId}] 🛡️ CLARIFY LOCK: Rejected dest update '{Incoming}' — clarify_address locked dest to '{Locked}'",
-                    SessionId, incoming, _booking.Destination);
-                sttCorrections.Add($"CLARIFY LOCK: You sent destination '{incoming}' but the verified destination is '{_booking.Destination}' (locked by clarify_address). Use '{_booking.Destination}' in all future tool calls.");
+                _booking.DestLat = _booking.DestLon = null;
+                _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
+                // Reset fare/booking state so stale data can't bypass guards
+                _booking.Fare = null;
+                _booking.Eta = null;
+                Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                Interlocked.Exchange(ref _bookTaxiCompleted, 0);
+                _suffixRetryAttempted = false;
             }
-            // ── HISTORY AUTO-FILL GUARD (destination) ──
-            // When destination is currently null (fresh start or post-cancel), verify the
-            // incoming value actually resembles what the user said. This prevents the model
-            // from auto-filling destinations from [CALLER HISTORY].
-            // TRUST ADA: When Ada explicitly sends a destination= argument (not redirected
-            // from pickup by the stage guard), her transcription is definitive. The raw STT
-            // transcript is often stale or garbled, so we skip the guard entirely.
-            // The guard only fires for stage-guard-redirected values where we lack confidence.
-            // BYPASS 1: If this destination was blocked on a previous turn (resemblance match).
-            // BYPASS 2: If the user said the destination earlier in this same call (conversation history).
-            else if (redirectedToDestination // Only guard values redirected by stage guard — Ada's explicit dest is trusted
-                && string.IsNullOrWhiteSpace(_booking.Destination)
-                && !string.IsNullOrWhiteSpace(incoming)
-                && !string.IsNullOrWhiteSpace(contextForGuard)
-                && !TranscriptResemblesAddress(contextForGuard, incoming)
-                && !(_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming))
-                && !ConversationHistoryContainsAddress(incoming))
-            {
-                _lastGuardBlockedDest = incoming;
-                _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — context '{Context}' doesn't resemble it (likely auto-filled from history)",
-                    SessionId, incoming, contextForGuard);
-                sttCorrections.Add($"AUTO-FILL BLOCKED (THIS TURN ONLY): You sent destination '{incoming}' but the caller's utterance was '{lastTranscript}' which doesn't mention that destination. " +
-                    $"This was likely auto-filled from [CALLER HISTORY]. Ask the caller for their destination. " +
-                    $"IMPORTANT: If the caller then EXPLICITLY says a destination (even '{incoming}'), you MUST call sync_booking_data with it — this block only applied to the auto-fill attempt, not to future explicit mentions.");
-            }
-            else
-            {
-                // Log if we bypassed the guard due to repeat/confirm
-                if (_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming))
-                {
-                    _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS (prev-blocked): Allowing '{Incoming}' — previously blocked, user confirmed/repeated",
-                        SessionId, incoming);
-                }
-                else if (ConversationHistoryContainsAddress(incoming))
-                {
-                    _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS (conv-history): Allowing '{Incoming}' — user said it earlier in this call",
-                        SessionId, incoming);
-                }
-                _lastGuardBlockedDest = null; // Clear on successful accept
-
-                // If normalisation changed the value, record the correction for AI context injection
-                if (incoming != raw && raw != null)
-                    sttCorrections.Add($"STT CORRECTION (destination): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: destination = '{incoming}'.");
-                // Safeguard: store previous interpretation before overwriting
-                if (!string.IsNullOrWhiteSpace(_booking.Destination) && _booking.Destination != incoming)
-                {
-                    if (!_booking.PreviousDestinations.Contains(_booking.Destination))
-                        _booking.PreviousDestinations.Insert(0, _booking.Destination);
-                    _logger.LogInformation("[{SessionId}] 📝 Dest history: [{History}] → new: '{New}'",
-                        SessionId, string.Join(" | ", _booking.PreviousDestinations), incoming);
-                }
-                if (StreetNameChanged(_booking.Destination, incoming))
-                {
-                    _booking.DestLat = _booking.DestLon = null;
-                    _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
-                    _booking.Fare = null;
-                    _booking.Eta = null;
-                    Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                    Interlocked.Exchange(ref _bookTaxiCompleted, 0);
-                    _suffixRetryAttempted = false;
-                }
-                _booking.Destination = incoming;
-            }
+            _booking.Destination = incoming;
         }
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
         {
-            // ── PASSENGER HALLUCINATION GUARD ──
-            // The AI model sometimes hallucinates passenger counts from non-numeric utterances
-            // (e.g., "That's it" → Pax=3, "Thank you bye" → Pax=3).
-            // Only accept passenger values if the user's last transcript actually contains a digit
-            // or a spelled-out number word. Otherwise, silently reject.
-            // lastTranscript already defined above
-            bool transcriptHasNumber = System.Text.RegularExpressions.Regex.IsMatch(
-                lastTranscript,
-                @"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-            if (transcriptHasNumber || !_booking.Passengers.HasValue)
-            {
-                // Accept: either transcript confirms a number, or we have no passengers yet (first collection)
-                if (transcriptHasNumber)
-                {
-                    _booking.Passengers = pn;
-                    if (!args.ContainsKey("vehicle_type"))
-                        _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
-                }
-                else if (!_booking.Passengers.HasValue && pn > 0)
-                {
-                    // First time — trust the AI even without transcript confirmation
-                    _booking.Passengers = pn;
-                    if (!args.ContainsKey("vehicle_type"))
-                        _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
-                }
-                else
-                {
-                    _logger.LogWarning("[{SessionId}] 🛡️ PAX GUARD: Rejected passengers={Pax} — transcript '{Transcript}' has no number and passengers already set to {Current}",
-                        SessionId, pn, lastTranscript, _booking.Passengers);
-                }
-            }
-            else
-            {
-                _logger.LogWarning("[{SessionId}] 🛡️ PAX GUARD: Rejected passengers={Pax} — transcript '{Transcript}' has no number",
-                    SessionId, pn, lastTranscript);
-            }
+            _booking.Passengers = pn;
+            // Auto-recommend vehicle type based on passenger count (unless explicitly set)
+            if (!args.ContainsKey("vehicle_type"))
+                _booking.VehicleType = BookingState.RecommendVehicle(pn, _booking.Luggage);
         }
         if (args.TryGetValue("luggage", out var lug) && !string.IsNullOrWhiteSpace(lug?.ToString()))
         {
@@ -1133,8 +893,7 @@ public sealed class CallSession : ICallSession
 
         // ── BOOKING STATE INJECTION ──
         // Inject current booking state into conversation so Ada always has ground truth.
-        // Also pass any STT corrections so Ada updates its internal memory.
-        _ = InjectBookingStateAsync(interpretation, sttCorrections.Count > 0 ? sttCorrections : null);
+        _ = InjectBookingStateAsync(interpretation);
 
         // If transcript mismatch was detected, return warning to Ada
         if (mismatchWarning != null)
