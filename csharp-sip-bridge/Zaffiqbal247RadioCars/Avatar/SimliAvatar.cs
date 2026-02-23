@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace AdaMain.Avatar;
+namespace AdaSdkModel.Avatar;
 
 /// <summary>
 /// Simli avatar integration using WebView2 and the Simli JavaScript SDK.
