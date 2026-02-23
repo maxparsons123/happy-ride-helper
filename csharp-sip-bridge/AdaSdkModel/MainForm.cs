@@ -31,11 +31,9 @@ public partial class MainForm : Form
     private System.Threading.Timer? _edgeWarmupTimer;
     private readonly HttpClient _warmupHttpClient = new() { Timeout = TimeSpan.FromSeconds(8) };
 
-    // Audio monitor (hear raw SIP audio locally) — separate buffers to avoid interleave corruption
+    // Audio monitor (hear raw SIP audio locally) — single PCM16 buffer, no float mixing
     private WaveOutEvent? _monitorOut;
-    private BufferedWaveProvider? _monitorBufferAda;
-    private BufferedWaveProvider? _monitorBufferCaller;
-    private MixingWaveProvider32? _monitorMixer;
+    private BufferedWaveProvider? _monitorBuffer;
 
     // Operator microphone
     private WaveInEvent? _micInput;
@@ -328,7 +326,7 @@ public partial class MainForm : Form
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
                 if (chkMonitorCaller.Checked)
-                    MonitorAddAlaw(_monitorBufferCaller, alawFrame);
+                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             };
 
             _sipServer.OnCallEnded += (sessionId, reason) => SafeInvoke(() =>
@@ -458,7 +456,7 @@ public partial class MainForm : Form
             {
                 // No avatar – fall back to local monitor speakers
                 if (chkMonitorAda.Checked)
-                    MonitorAddAlaw(_monitorBufferAda, alawFrame);
+                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
             }
         };
 
@@ -759,67 +757,24 @@ public partial class MainForm : Form
     //  AUDIO MONITOR
     // ══════════════════════════════════════
 
-    // A-law decode table for monitor
-    private static readonly short[] _alawDecode = BuildAlawDecodeTable();
-    private static short[] BuildAlawDecodeTable()
-    {
-        var t = new short[256];
-        for (int i = 0; i < 256; i++)
-        {
-            int v = i ^ 0x55, sign = v & 0x80, exp = (v >> 4) & 7, man = v & 0xF;
-            int s = exp == 0 ? (man << 4) + 8 : ((man << 4) + 0x108) << (exp - 1);
-            t[i] = (short)(sign != 0 ? s : -s);
-        }
-        return t;
-    }
 
-    private readonly object _monitorLock = new();
-
-    private void MonitorAddAlaw(BufferedWaveProvider? buf, byte[] alaw)
-    {
-        if (buf == null || alaw == null || alaw.Length == 0) return;
-
-        // Decode A-law → PCM16 with a local copy for thread safety
-        var localCopy = new byte[alaw.Length];
-        Buffer.BlockCopy(alaw, 0, localCopy, 0, alaw.Length);
-
-        var pcm = new byte[localCopy.Length * 2];
-        for (int i = 0; i < localCopy.Length; i++)
-        {
-            short s = _alawDecode[localCopy[i]];
-            pcm[i * 2] = (byte)(s & 0xFF);
-            pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
-        }
-
-        lock (_monitorLock)
-        {
-            buf.AddSamples(pcm, 0, pcm.Length);
-        }
-    }
 
     private void StartAudioMonitor()
     {
         StopAudioMonitor();
         try
         {
-            var pcm16Format = new WaveFormat(8000, 16, 1);
-
-            _monitorBufferAda = new BufferedWaveProvider(pcm16Format)
-            { BufferDuration = TimeSpan.FromSeconds(5), DiscardOnBufferOverflow = true };
-
-            _monitorBufferCaller = new BufferedWaveProvider(pcm16Format)
-            { BufferDuration = TimeSpan.FromSeconds(5), DiscardOnBufferOverflow = true };
-
-            // Convert PCM16 → float for proper mixing
-            var adaFloat = new Wave16ToFloatProvider(_monitorBufferAda);
-            var callerFloat = new Wave16ToFloatProvider(_monitorBufferCaller);
-
-            _monitorMixer = new MixingWaveProvider32(new IWaveProvider[] { adaFloat, callerFloat });
+            // Single A-law buffer — NAudio handles G.711 decode internally (no manual float chain)
+            _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
+            {
+                BufferDuration = TimeSpan.FromSeconds(5),
+                DiscardOnBufferOverflow = true
+            };
 
             _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
-            _monitorOut.Init(_monitorMixer);
+            _monitorOut.Init(_monitorBuffer);
             if (!_muted) _monitorOut.Play();
-            Log("🔊 Audio monitor started (dual-buffer PCM mix)");
+            Log("🔊 Audio monitor started");
         }
         catch (Exception ex) { Log($"⚠ Audio monitor failed: {ex.Message}"); }
     }
@@ -828,9 +783,7 @@ public partial class MainForm : Form
     {
         try { _monitorOut?.Stop(); _monitorOut?.Dispose(); } catch { }
         _monitorOut = null;
-        _monitorMixer = null;
-        _monitorBufferAda = null;
-        _monitorBufferCaller = null;
+        _monitorBuffer = null;
     }
 
     // ══════════════════════════════════════
