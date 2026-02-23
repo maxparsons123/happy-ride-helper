@@ -98,7 +98,7 @@ public sealed class AudioSettings
     /// High-pass thinning filter alpha (0.80 = very thin, 0.88 = crisp, 0.95 = natural).
     /// Set to 0 to disable the filter entirely.
     /// </summary>
-    public float ThinningAlpha { get; set; } = 0.88f;
+    public float ThinningAlpha { get; set; } = 0.0f;
 }
 
 public sealed class DispatchSettings
