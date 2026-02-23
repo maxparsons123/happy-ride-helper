@@ -30,6 +30,10 @@ public sealed class CallSession : ICallSession
     private int _bookTaxiCompleted;
     private long _lastAdaFinishedAt;
 
+    // Audio diagnostics
+    private long _inboundFrames;
+    private long _outboundFrames;
+
     // Fare sanity guard
     private int _fareSanityAlertCount;
     private string? _lastSanityAlertDestination;
@@ -205,7 +209,8 @@ public sealed class CallSession : ICallSession
         if (Interlocked.Exchange(ref _active, 0) == 0)
             return;
 
-        _logger.LogInformation("[{SessionId}] Ending session: {Reason}", SessionId, reason);
+        _logger.LogInformation("[{SessionId}] Ending session: {Reason} | Audio stats: inbound={In} frames, outbound={Out} frames",
+            SessionId, reason, Interlocked.Read(ref _inboundFrames), Interlocked.Read(ref _outboundFrames));
         await _aiClient.DisconnectAsync();
         OnEnded?.Invoke(this, reason);
     }
@@ -213,6 +218,7 @@ public sealed class CallSession : ICallSession
     public void ProcessInboundAudio(byte[] alawRtp)
     {
         if (!IsActive || alawRtp.Length == 0) return;
+        Interlocked.Increment(ref _inboundFrames);
         _aiClient.SendAudio(alawRtp);
     }
 
@@ -227,6 +233,7 @@ public sealed class CallSession : ICallSession
 
     private void HandleAiAudio(byte[] alawFrame)
     {
+        Interlocked.Increment(ref _outboundFrames);
         // 1. Volume boost
         var gain = (float)_settings.Audio.VolumeBoost;
         if (gain > 1.01f || gain < 0.99f)

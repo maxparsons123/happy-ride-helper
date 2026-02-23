@@ -72,6 +72,7 @@ export type Database = {
           silence_timeout_ms: number | null
           slug: string
           system_prompt: string
+          thinning_alpha: number | null
           updated_at: string
           use_simple_mode: boolean
           vad_prefix_padding_ms: number | null
@@ -97,6 +98,7 @@ export type Database = {
           silence_timeout_ms?: number | null
           slug: string
           system_prompt: string
+          thinning_alpha?: number | null
           updated_at?: string
           use_simple_mode?: boolean
           vad_prefix_padding_ms?: number | null
@@ -122,6 +124,7 @@ export type Database = {
           silence_timeout_ms?: number | null
           slug?: string
           system_prompt?: string
+          thinning_alpha?: number | null
           updated_at?: string
           use_simple_mode?: boolean
           vad_prefix_padding_ms?: number | null

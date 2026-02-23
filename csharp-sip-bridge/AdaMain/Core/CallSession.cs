@@ -28,6 +28,10 @@ public sealed class CallSession : ICallSession
     private int _active;
     private int _bookTaxiCompleted;   // Guard: prevent duplicate book_taxi confirmed calls
     private long _lastAdaFinishedAt;
+
+    // Audio diagnostics
+    private long _inboundFrames;
+    private long _outboundFrames;
     
     public string SessionId { get; }
     public string CallerId { get; }
@@ -95,7 +99,8 @@ public sealed class CallSession : ICallSession
         if (Interlocked.Exchange(ref _active, 0) == 0)
             return;
         
-        _logger.LogInformation("[{SessionId}] Ending session: {Reason}", SessionId, reason);
+        _logger.LogInformation("[{SessionId}] Ending session: {Reason} | Audio stats: inbound={In} frames, outbound={Out} frames",
+            SessionId, reason, Interlocked.Read(ref _inboundFrames), Interlocked.Read(ref _outboundFrames));
         
         await _aiClient.DisconnectAsync();
         OnEnded?.Invoke(this, reason);
@@ -106,7 +111,7 @@ public sealed class CallSession : ICallSession
     {
         if (!IsActive || alawRtp.Length == 0)
             return;
-        
+        Interlocked.Increment(ref _inboundFrames);
         _aiClient.SendAudio(alawRtp);
     }
     
@@ -128,6 +133,7 @@ public sealed class CallSession : ICallSession
     /// <summary>Direct A-law frames from OpenAI → playout via event (with volume boost).</summary>
     private void HandleAiAudio(byte[] alawFrame)
     {
+        Interlocked.Increment(ref _outboundFrames);
         // Apply configurable volume boost in A-law domain (decode→amplify→re-encode)
         var gain = (float)_settings.Audio.VolumeBoost;
         if (gain > 1.01f || gain < 0.99f)
