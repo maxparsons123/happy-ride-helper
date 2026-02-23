@@ -53,7 +53,7 @@ serve(async (req) => {
       };
       if (pickup?.trim()) updateData.last_pickup = pickup.trim();
       if (destination?.trim()) updateData.last_destination = destination.trim();
-      if (name?.trim() && !existing.name) updateData.name = name.trim();
+      if (name?.trim()) updateData.name = name.trim();
 
       const { error } = await supabase.from("callers").update(updateData).eq("id", existing.id);
       if (error) throw error;
