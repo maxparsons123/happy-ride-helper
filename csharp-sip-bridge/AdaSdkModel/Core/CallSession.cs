@@ -3544,8 +3544,15 @@ public sealed class CallSession : ICallSession
     {
         if (string.IsNullOrWhiteSpace(oldAddress) || string.IsNullOrWhiteSpace(newAddress))
             return false;
-        string Normalize(string s) =>
-            System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"\d|[^a-z ]", "").Trim();
+        // Strip leading house number (digits + optional letter suffix like "52A", "528", "14B")
+        // then normalize to lowercase alpha + spaces only.
+        string Normalize(string s)
+        {
+            var stripped = System.Text.RegularExpressions.Regex.Replace(
+                s.Trim(), @"^\d+[A-Za-z]?\s*", ""); // remove leading house number
+            return System.Text.RegularExpressions.Regex.Replace(
+                stripped.ToLowerInvariant(), @"[^a-z ]", "").Trim();
+        }
         return Normalize(oldAddress) != Normalize(newAddress);
     }
 
