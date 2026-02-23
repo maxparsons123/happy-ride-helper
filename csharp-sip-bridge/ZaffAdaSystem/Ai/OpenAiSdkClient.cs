@@ -231,8 +231,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 OutputAudioFormat = ConversationAudioFormat.G711Alaw,
                 InputTranscriptionOptions = new ConversationInputTranscriptionOptions
                 {
-                    Model = "whisper-1",
-                    Prompt = "UK address. House numbers may include letter suffixes: 52A, 14B, 7C, 22D. Street names include David Road, Dovey Road, Warwick Road, High Street."
+                    Model = "whisper-1"
                 },
                 // SDK 2.1.0-beta.4 doesn't support semantic_vad natively.
                 // Simulate patient vs responsive modes using server_vad with different parameters.

@@ -153,8 +153,8 @@ public sealed class CallSession : ICallSession
             {
                 sb.AppendLine($"  Known name: {nameEl.GetString()}");
                 // Pre-fill booking name
-                if (string.IsNullOrEmpty(_booking.CallerName))
-                    _booking.CallerName = nameEl.GetString();
+                if (string.IsNullOrEmpty(_booking.Name))
+                    _booking.Name = nameEl.GetString();
             }
 
             if (caller.TryGetProperty("total_bookings", out var tb))
