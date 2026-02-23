@@ -704,12 +704,12 @@ public sealed class CallSession : ICallSession
         var issues = new List<string>();
         if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
         {
-            if (!AddressContainsStreet(_booking.Pickup, result.PickupStreet))
+            if (!IsKnownLandmarkType(_booking.Pickup) && !AddressContainsStreet(_booking.Pickup, result.PickupStreet))
                 issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different location.");
         }
         if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
         {
-            if (!AddressContainsStreet(_booking.Destination, result.DestStreet))
+            if (!IsKnownLandmarkType(_booking.Destination) && !AddressContainsStreet(_booking.Destination, result.DestStreet))
                 issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different location.");
         }
         return issues.Count > 0 ? string.Join(" ", issues) : null;
@@ -727,6 +727,40 @@ public sealed class CallSession : ICallSession
         if (streetWords.Length == 0) return true;
         var matchCount = streetWords.Count(w => rawWords.Contains(w));
         return matchCount >= Math.Ceiling(streetWords.Length / 2.0);
+    }
+
+    private static bool IsKnownLandmarkType(string address)
+    {
+        var lower = address.ToLowerInvariant();
+        string[] landmarks = {
+            "station", "airport", "hospital", "university", "college",
+            "school", "church", "mosque", "temple", "cathedral",
+            "museum", "library", "theatre", "theater", "cinema",
+            "stadium", "arena", "centre", "center", "mall",
+            "shopping", "supermarket", "tesco", "asda", "sainsbury",
+            "morrisons", "aldi", "lidl", "waitrose", "primark",
+            "hotel", "inn", "pub", "bar", "restaurant",
+            "park", "garden", "zoo", "castle", "palace",
+            "court", "hall", "tower", "square", "market",
+            "bus stop", "coach station", "ferry", "terminal",
+            "retail park", "industrial estate", "business park",
+            "nightclub", "club", "gym", "leisure", "pool",
+            "office", "surgery", "clinic", "dental", "pharmacy",
+            "prison", "police", "fire station", "council",
+            "cafe", "café", "bakery", "takeaway", "pizza",
+            "chicken", "kebab", "chippy", "sweet", "shop", "store"
+        };
+        if (landmarks.Any(kw => lower.Contains(kw)))
+            return true;
+
+        string[] streetTypes = {
+            "road", "street", "lane", "avenue", "drive", "close", "way",
+            "crescent", "terrace", "place", "grove", "rise", "hill",
+            "walk", "row", "mews", "parade", "gardens", "yard",
+            "boulevard", "passage", "alley", "circus", "gate"
+        };
+        var addressPart = lower.Contains(',') ? lower.Substring(0, lower.IndexOf(',')) : lower;
+        return !streetTypes.Any(st => addressPart.Contains(st));
     }
 
     public async ValueTask DisposeAsync()
