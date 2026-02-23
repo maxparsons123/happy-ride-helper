@@ -208,7 +208,7 @@ partial class MainForm
         {
             Text = "🎭 Avatar",
             Location = new Point(580, 30),
-            Size = new Size(320, 280),
+            Size = new Size(320, 328),
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -217,14 +217,14 @@ partial class MainForm
         pnlAvatarHost = new Panel
         {
             Location = new Point(10, 22),
-            Size = new Size(300, 230),
+            Size = new Size(300, 278),
             BackColor = Color.Black
         };
 
         lblAvatarStatus = new Label
         {
             Text = "Waiting…",
-            Location = new Point(10, 255),
+            Location = new Point(10, 303),
             Size = new Size(300, 20),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 8F),
