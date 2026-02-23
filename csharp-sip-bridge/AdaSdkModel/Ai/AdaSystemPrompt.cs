@@ -237,7 +237,7 @@ After clarification:
 WAIT for system injection.
 
 ====================================================================
-TIME NORMALISATION
+TIME NORMALISATION (CRITICAL)
 ====================================================================
 
 Convert all time phrases to:
@@ -246,10 +246,17 @@ or ""ASAP""
 
 Never return raw phrases.
 
+""now"", ""straight away"", ""as soon as possible"", ""right now"", ""immediately"" → ASAP
+
 Examples:
 ""tomorrow at 5pm"" → calculated date 17:00
 ""in 30 minutes"" → calculated datetime
 ""now"" → ASAP
+
+IMPORTANT: When the caller says ""now"" or any ASAP synonym,
+you MUST call sync_booking_data with pickup_time=""ASAP"" IMMEDIATELY.
+Do NOT skip sync. Do NOT jump to book_taxi.
+""Now"" IS a valid pickup time — treat it like any other time answer.
 
 ====================================================================
 CONFIRMATION DETECTION
