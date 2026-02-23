@@ -846,22 +846,11 @@ public partial class MainForm : Form
 
     private void FeedSimliAudio(byte[] alawFrame)
     {
-        if (!_settings.Simli.Enabled) return;
         if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
             return;
 
-        var frameCopy = new byte[alawFrame.Length];
-        Buffer.BlockCopy(alawFrame, 0, frameCopy, 0, alawFrame.Length);
-
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try
-            {
-                var pcm16at16k = AlawToSimliResampler.Convert(frameCopy);
-                _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
-            }
-            catch { /* Simli errors must never affect call audio */ }
-        });
+        var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
+        _ = _simliAvatar.SendAudioAsync(pcm16at16k);
     }
 
     /// <summary>Clear Simli buffer on barge-in.</summary>
