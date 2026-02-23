@@ -1,4 +1,5 @@
 // Last updated: 2026-02-21 (v2.8)
+using System;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
