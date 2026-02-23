@@ -3570,97 +3570,15 @@ public sealed class CallSession : ICallSession
     /// </summary>
     private string? ApplyTranscriptStreetGuard(string? aiAddress, string transcript, string fieldName)
     {
+        // Ada's transcription is the source of truth — the raw STT transcript is unreliable
+        // and was previously causing incorrect substitutions (e.g. "Dovey" → "Dove").
+        // We no longer override Ada's interpretation with the raw transcript.
+        // The guard is retained as a no-op for logging/diagnostics only.
         if (string.IsNullOrWhiteSpace(aiAddress) || string.IsNullOrWhiteSpace(transcript) || transcript.Length < 5)
             return aiAddress;
 
-        // ── HOUSE NUMBER + AREA COMPARISON ──
-        // Parse both the AI address and the transcript to extract structured components.
-        // If house number or area/town differs, these are genuinely different addresses — skip the guard.
-        var aiParsed = AddressParser.ParseAddress(aiAddress);
-        var transcriptParsed = AddressParser.ParseAddress(transcript);
-
-        // Compare house numbers: if both have one and they differ → different address, skip guard
-        if (aiParsed.HasHouseNumber && transcriptParsed.HasHouseNumber
-            && !string.Equals(aiParsed.HouseNumber, transcriptParsed.HouseNumber, StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogInformation(
-                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different house numbers — AI='{AiNum}' vs transcript='{TNum}' — treating as different address",
-                SessionId, fieldName, aiParsed.HouseNumber, transcriptParsed.HouseNumber);
-            return aiAddress;
-        }
-
-        // Compare area/town: if both have one and they differ → different address, skip guard
-        if (!string.IsNullOrWhiteSpace(aiParsed.TownOrArea) && !string.IsNullOrWhiteSpace(transcriptParsed.TownOrArea)
-            && !string.Equals(aiParsed.TownOrArea, transcriptParsed.TownOrArea, StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogInformation(
-                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different area — AI='{AiArea}' vs transcript='{TArea}' — treating as different address",
-                SessionId, fieldName, aiParsed.TownOrArea, transcriptParsed.TownOrArea);
-            return aiAddress;
-        }
-
-        // Compare street suffix: if both are street-type but suffixes differ (Road vs Street) → different address
-        if (aiParsed.IsStreetTypeAddress && transcriptParsed.IsStreetTypeAddress
-            && !string.IsNullOrWhiteSpace(aiParsed.StreetName) && !string.IsNullOrWhiteSpace(transcriptParsed.StreetName))
-        {
-            var aiSuffix = aiParsed.StreetName.Split(' ').LastOrDefault() ?? "";
-            var tSuffix = transcriptParsed.StreetName.Split(' ').LastOrDefault() ?? "";
-            if (!string.Equals(aiSuffix, tSuffix, StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogInformation(
-                    "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different street suffix — AI='{AiSuffix}' vs transcript='{TSuffix}' — treating as different address",
-                    SessionId, fieldName, aiSuffix, tSuffix);
-                return aiAddress;
-            }
-        }
-
-        var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "road", "street", "lane", "drive", "avenue", "close", "way", "crescent",
-            "place", "court", "grove", "terrace", "gardens", "hill", "park", "row",
-            "the", "and", "from", "to", "for", "birmingham", "coventry", "london",
-            "wolverhampton", "solihull", "walsall", "dudley", "sandwell", "warwick"
-        };
-
-        var transcriptWords = transcript.Split(new[] { ' ', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Length >= 3 && w.All(c => char.IsLetter(c)))
-            .Select(w => w.Trim())
-            .Where(w => !skipWords.Contains(w))
-            .ToList();
-
-        if (transcriptWords.Count == 0) return aiAddress;
-
-        var aiWords = aiAddress.Split(new[] { ' ', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Length >= 3 && w.All(c => char.IsLetter(c)))
-            .Where(w => !skipWords.Contains(w))
-            .ToList();
-
-        var transcriptLookup = new HashSet<string>(transcriptWords.Select(w => w.ToLowerInvariant()));
-
-        foreach (var aiWord in aiWords)
-        {
-            if (transcriptLookup.Contains(aiWord.ToLowerInvariant()))
-                continue;
-
-            foreach (var tWord in transcriptWords)
-            {
-                int dist = LevenshteinDistance(aiWord.ToLowerInvariant(), tWord.ToLowerInvariant());
-                if (dist >= 1 && dist <= 2)
-                {
-                    _logger.LogWarning(
-                        "[{SessionId}] 🛡️ STREET GUARD ({Field}): AI sent '{AiWord}' but transcript has '{TranscriptWord}' — using transcript version",
-                        SessionId, fieldName, aiWord, tWord);
-
-                    var result = System.Text.RegularExpressions.Regex.Replace(
-                        aiAddress,
-                        @"\b" + System.Text.RegularExpressions.Regex.Escape(aiWord) + @"\b",
-                        tWord,
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    return result;
-                }
-            }
-        }
-
+        _logger.LogDebug("[{SessionId}] 🛡️ STREET GUARD ({Field}): Trusting Ada transcription '{AiAddress}' (raw STT: '{Transcript}')",
+            SessionId, fieldName, aiAddress, transcript);
         return aiAddress;
     }
 
