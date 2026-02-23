@@ -1,9 +1,8 @@
-// Last updated: 2026-02-23 (v3.1 - removed ThreadStatic, stateless resampling)
 namespace AdaSdkModel.Audio;
 
 /// <summary>
 /// Converts G.711 A-law (8kHz) frames to PCM16 (16kHz) for Simli avatar lip-sync.
-/// Fully stateless — safe to call from any thread (ThreadPool).
+/// Uses linear interpolation for the 2× upsample — simple, low-latency, no dependencies.
 /// </summary>
 public static class AlawToSimliResampler
 {
@@ -21,31 +20,21 @@ public static class AlawToSimliResampler
         for (int i = 0; i < alawFrame.Length; i++)
             samples8k[i] = ALawDecode(alawFrame[i]);
 
-        // Step 2: Upsample 8kHz → 16kHz (stateless — no cross-frame state)
-        var samples16k = Upsample2x(samples8k);
+        // Step 2: Upsample 8kHz → 16kHz (2× linear interpolation)
+        var samples16k = new short[samples8k.Length * 2];
+        for (int i = 0; i < samples8k.Length - 1; i++)
+        {
+            samples16k[i * 2] = samples8k[i];
+            samples16k[i * 2 + 1] = (short)((samples8k[i] + samples8k[i + 1]) / 2);
+        }
+        // Last sample: duplicate
+        samples16k[(samples8k.Length - 1) * 2] = samples8k[^1];
+        samples16k[(samples8k.Length - 1) * 2 + 1] = samples8k[^1];
 
         // Step 3: Convert to byte[]
         var result = new byte[samples16k.Length * 2];
         Buffer.BlockCopy(samples16k, 0, result, 0, result.Length);
         return result;
-    }
-
-    /// <summary>2× upsample with linear interpolation (stateless).</summary>
-    private static short[] Upsample2x(short[] input)
-    {
-        var output = new short[input.Length * 2];
-
-        // First sample: duplicate (no previous frame context available)
-        output[0] = input[0];
-        output[1] = input[0];
-
-        for (int i = 1; i < input.Length; i++)
-        {
-            output[i * 2] = (short)((input[i - 1] + input[i]) / 2);
-            output[i * 2 + 1] = input[i];
-        }
-
-        return output;
     }
 
     /// <summary>ITU-T G.711 A-law decode.</summary>
