@@ -522,11 +522,12 @@ public sealed class SipServer : IAsyncDisposable
             sdk.GetQueuedFrames = () => playout.QueuedFrames;
 
         WireAudioPipeline(activeCall, negotiatedCodec);
-        playout.Start();
 
         callAgent.OnCallHungup += async (_) => await RemoveAndCleanupAsync(session.SessionId, "remote_hangup");
         session.OnEnded += async (s, r) => await RemoveAndCleanupAsync(s.SessionId, r);
         session.OnEscalate += async (s, reason) => await HandleEscalationTransferAsync(s.SessionId, reason);
+
+        playout.Start();
 
         OnCallStarted?.Invoke(session.SessionId, caller);
         Log($"📞 Call {session.SessionId} active for {caller} (total: {_activeCalls.Count})");
@@ -628,7 +629,11 @@ public sealed class SipServer : IAsyncDisposable
             var payload = rtpPacket.Payload;
             if (payload == null || payload.Length == 0) return;
 
-            // Flush initial garbage packets before codec is fully negotiated
+            // Flush initial garbage packets before codec is fully negotiated.
+            // NOTE: negotiatedCodec is captured by value at lambda-creation time.
+            // Negotiation happens during SDP exchange (before RTP flows), so this flush
+            // window naturally covers the tiny race where first packets could arrive
+            // before OnAudioFormatsNegotiated fires.
             if (!inboundFlushComplete)
             {
                 if (++inboundPacketCount < 20) return;
@@ -643,7 +648,8 @@ public sealed class SipServer : IAsyncDisposable
             byte[] g711ToSend = negotiatedCodec == AudioCodecsEnum.PCMU
                 ? G711Transcode.MuLawToALaw(payload) : payload;
 
-            // Forward caller audio to local speaker monitor (both AI and operator calls)
+            // NOTE: fires pre-gate — monitor receives raw caller audio including during bot speech.
+            // This is intentional: operator listen-in needs full context, not gated audio.
             try { OnOperatorCallerAudio?.Invoke(g711ToSend); } catch { }
 
             // ── Soft gate: suppress echo while bot is speaking / just stopped ──
@@ -731,8 +737,25 @@ public sealed class SipServer : IAsyncDisposable
 
             Log($"🔀 [{sessionId}] Transferring to operator ext {transferExt} (reason: {reason})...");
 
-            // Wait for Ada's "transferring you now" speech to play out
-            await Task.Delay(2500);
+            // Wait for Ada's "transferring you now" speech to drain from playout queue
+            // (drain-wait with 5s timeout cap, same pattern as NotifyPlayoutComplete coordinator)
+            if (_activeCalls.TryGetValue(sessionId, out var drainCall) && drainCall.Playout != null)
+            {
+                var drainStart = Stopwatch.GetTimestamp();
+                while (drainCall.Playout.QueuedFrames > 0)
+                {
+                    long elapsedMs = (long)((Stopwatch.GetTimestamp() - drainStart) * NsPerTick / 1_000_000.0);
+                    if (elapsedMs > 5000) break; // 5s timeout cap
+                    await Task.Delay(50);
+                }
+                // Small tail pause after drain for natural feel
+                await Task.Delay(300);
+            }
+            else
+            {
+                // Fallback if playout not available
+                await Task.Delay(2500);
+            }
 
             bool transferred = await call.CallAgent.BlindTransfer(targetUri, TimeSpan.FromSeconds(15), default);
 
