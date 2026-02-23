@@ -856,15 +856,41 @@ public sealed class CallSession : ICallSession
                     _currentStage = BookingStage.CollectingDestination;
                     Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 }
-                else if (!args.ContainsKey("destination") && string.IsNullOrWhiteSpace(_booking.Destination))
+                else if (string.IsNullOrWhiteSpace(_booking.Destination))
                 {
-                    // Case (b): No destination yet — redirect this value to destination
-                    _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION",
-                        SessionId, incoming, _currentStage);
-                    _booking.Destination = incoming;
-                    sttCorrections.Add($"STAGE CORRECTION: You sent '{incoming}' as pickup, but the pickup is already '{_booking.Pickup}' and no destination was set. " +
-                        $"The system has assigned '{incoming}' as the DESTINATION. Use destination='{incoming}' in future tool calls.");
-                    redirectedToDestination = true;
+                    // Case (b): No destination yet — redirect this value to destination.
+                    // Also redirect if the AI sent a destination that doesn't appear in the transcript
+                    // (i.e. auto-filled from caller history while misrouting the spoken address to pickup).
+                    var aiDest = args.ContainsKey("destination") ? args["destination"]?.ToString() : null;
+                    bool aiDestFromHistory = !string.IsNullOrWhiteSpace(aiDest)
+                        && !string.IsNullOrWhiteSpace(lastTranscript)
+                        && !TranscriptContainsAddress(lastTranscript, aiDest);
+
+                    if (!args.ContainsKey("destination") || aiDestFromHistory)
+                    {
+                        _logger.LogWarning("[{SessionId}] 🔀 STAGE GUARD: AI sent pickup='{Incoming}' but stage={Stage} and destination is empty — redirecting to DESTINATION (aiDestFromHistory={HistFlag})",
+                            SessionId, incoming, _currentStage, aiDestFromHistory);
+                        _booking.Destination = incoming;
+                        // If AI also sent a hallucinated destination from history, discard it
+                        if (aiDestFromHistory)
+                        {
+                            _logger.LogWarning("[{SessionId}] 🛡️ HISTORY DISCARD: Discarding AI destination '{AiDest}' — not in transcript, replacing with redirected '{Incoming}'",
+                                SessionId, aiDest, incoming);
+                            args.Remove("destination"); // prevent it from being processed later
+                        }
+                        sttCorrections.Add($"STAGE CORRECTION: You sent '{incoming}' as pickup, but the pickup is already '{_booking.Pickup}' and no destination was set. " +
+                            $"The system has assigned '{incoming}' as the DESTINATION. Use destination='{incoming}' in future tool calls.");
+                        redirectedToDestination = true;
+                    }
+                    else
+                    {
+                        // Destination was explicitly provided and IS in the transcript — block the pickup change
+                        _logger.LogWarning("[{SessionId}] 🛡️ STAGE LOCK: Rejected pickup update '{Incoming}' — stage={Stage}, pickup is locked to '{Locked}'",
+                            SessionId, incoming, _currentStage, _booking.Pickup);
+                        sttCorrections.Add($"STAGE LOCK: You sent pickup '{incoming}' but the pickup is already confirmed as '{_booking.Pickup}' and cannot be changed at this stage. " +
+                            $"Use pickup='{_booking.Pickup}' in all future tool calls.");
+                        pickupBlockedByStage = true;
+                    }
                 }
                 else
                 {
@@ -3525,6 +3551,31 @@ public sealed class CallSession : ICallSession
         }
 
         return aiAddress;
+    }
+
+    /// <summary>
+    /// Checks if the transcript contains at least one significant word from the given address.
+    /// Used to detect if an AI-provided address was actually spoken by the caller vs auto-filled from history.
+    /// </summary>
+    private static bool TranscriptContainsAddress(string transcript, string address)
+    {
+        if (string.IsNullOrWhiteSpace(transcript) || string.IsNullOrWhiteSpace(address))
+            return false;
+
+        static string Norm(string s) => System.Text.RegularExpressions.Regex
+            .Replace(s.ToLowerInvariant(), @"[^a-z ]", " ").Trim();
+
+        var transcriptNorm = Norm(transcript);
+        var addressWords = Norm(address).Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length > 2)
+            .Where(w => w is not "road" and not "street" and not "lane" and not "drive" and not "avenue"
+                and not "close" and not "way" and not "the" and not "and")
+            .ToArray();
+
+        if (addressWords.Length == 0) return true; // No significant words to check
+
+        // At least one significant word from the address must appear in the transcript
+        return addressWords.Any(w => transcriptNorm.Contains(w));
     }
 
 
