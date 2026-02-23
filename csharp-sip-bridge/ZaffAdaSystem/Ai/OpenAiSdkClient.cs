@@ -1097,7 +1097,13 @@ Example pattern (addresses here are FAKE — do NOT reuse them):
   User gives name → call sync_booking_data(caller_name=WHAT_THEY_SAID) → THEN ask pickup
   User gives pickup → call sync_booking_data(..., pickup=WHAT_THEY_SAID) → wait for [BOOKING STATE] → THEN ask destination
   User gives destination → call sync_booking_data(..., destination=WHAT_THEY_SAID) → THEN ask passengers
-NEVER collect multiple fields without calling sync_booking_data between each.
+
+⚠️ COMPOUND UTTERANCE OVERRIDE (CRITICAL):
+If the caller gives MULTIPLE fields in ONE sentence (e.g. ""from 8 David Road to 7 Russell Street, 3 passengers""),
+you MUST extract ALL fields and call sync_booking_data ONCE with ALL of them populated.
+Do NOT split into separate calls. Do NOT ignore fields. Do NOT re-ask for fields already stated.
+Keywords to detect: ""from X to Y"", ""going to"", ""X and then Y"", ""X destination Y"", ""X with N passengers"".
+After the single sync call, ask ONLY for the next MISSING field.
 
 ⚠️ DESTINATION QUESTION — CRITICAL READBACK RULE:
 When asking ""Where would you like to go?"" after collecting pickup, you may include the pickup for context.
