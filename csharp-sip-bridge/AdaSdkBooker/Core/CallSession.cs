@@ -1626,6 +1626,21 @@ public sealed class CallSession : ICallSession
             return aiAddress;
         }
 
+        // Compare street suffix: if both are street-type but suffixes differ → different address
+        if (aiParsed.IsStreetTypeAddress && transcriptParsed.IsStreetTypeAddress
+            && !string.IsNullOrWhiteSpace(aiParsed.StreetName) && !string.IsNullOrWhiteSpace(transcriptParsed.StreetName))
+        {
+            var aiSuffix = aiParsed.StreetName.Split(' ').LastOrDefault() ?? "";
+            var tSuffix = transcriptParsed.StreetName.Split(' ').LastOrDefault() ?? "";
+            if (!string.Equals(aiSuffix, tSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different street suffix — AI='{AiSuffix}' vs transcript='{TSuffix}'",
+                    SessionId, fieldName, aiSuffix, tSuffix);
+                return aiAddress;
+            }
+        }
+
         // Common words to skip (not street names)
         var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
