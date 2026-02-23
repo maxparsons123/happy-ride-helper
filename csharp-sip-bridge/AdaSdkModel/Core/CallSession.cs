@@ -42,6 +42,11 @@ public sealed class CallSession : ICallSession
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private int _intentGuardFiring; // prevents re-entrant guard execution
 
+    // ── DUAL-TRANSCRIPT AUDIT TRAIL ──
+    // In-memory list of transcript entries pushed to Supabase live_calls.transcripts
+    private readonly List<object> _transcriptLog = new();
+    private int _transcriptPushPending; // debounce guard
+
     public string SessionId { get; }
     public string CallerId { get; }
     public DateTime StartedAt { get; } = DateTime.UtcNow;
@@ -96,6 +101,34 @@ public sealed class CallSession : ICallSession
             {
                 _lastUserTranscript = text;
                 lock (_userTranscriptHistory) { _userTranscriptHistory.Add(text); }
+            }
+
+            // ── DUAL-TRANSCRIPT AUDIT: Log Ada's hearing (OnTranscript) vs raw STT (LastUserTranscript) ──
+            if (role.Equals("user", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(text))
+            {
+                var sttRaw = _aiClient.LastUserTranscript;
+                var entry = new Dictionary<string, object?>
+                {
+                    ["role"] = "user",
+                    ["text"] = text, // Ada's interpretation (what she heard)
+                    ["timestamp"] = DateTime.UtcNow.ToString("o"),
+                };
+                if (!string.IsNullOrWhiteSpace(sttRaw) && sttRaw != text)
+                    entry["stt"] = sttRaw; // Whisper backup (raw STT)
+
+                lock (_transcriptLog) { _transcriptLog.Add(entry); }
+                _ = DebouncedPushTranscriptsAsync();
+            }
+            else if (role.Equals("Ada", StringComparison.OrdinalIgnoreCase) || role.Equals("assistant", StringComparison.OrdinalIgnoreCase))
+            {
+                var entry = new Dictionary<string, object?>
+                {
+                    ["role"] = "assistant",
+                    ["text"] = text,
+                    ["timestamp"] = DateTime.UtcNow.ToString("o"),
+                };
+                lock (_transcriptLog) { _transcriptLog.Add(entry); }
+                _ = DebouncedPushTranscriptsAsync();
             }
         };
 
@@ -888,6 +921,24 @@ public sealed class CallSession : ICallSession
             SessionId, _booking.Name ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?", _booking.Passengers, _booking.VehicleType);
         if (!string.IsNullOrWhiteSpace(interpretation))
             _logger.LogInformation("[{SessionId}] 💭 Interpretation: {Interpretation}", SessionId, interpretation);
+
+        // ── DUAL-TRANSCRIPT AUDIT LOG ──
+        // Log Ada's interpretation vs raw STT side-by-side for cross-referencing
+        var sttRaw = _aiClient.LastUserTranscript;
+        if (!string.IsNullOrWhiteSpace(sttRaw))
+        {
+            var adaPickup = args.TryGetValue("pickup", out var ap) ? ap?.ToString() : null;
+            var adaDest = args.TryGetValue("destination", out var ad) ? ad?.ToString() : null;
+            var adaName = args.TryGetValue("caller_name", out var an) ? an?.ToString() : null;
+            var adaPax = args.TryGetValue("passengers", out var apx) ? apx?.ToString() : null;
+            var adaTime = args.TryGetValue("pickup_time", out var at) ? at?.ToString() : null;
+
+            _logger.LogInformation(
+                "[{SessionId}] 🔍 DUAL TRANSCRIPT — STT heard: \"{SttRaw}\" | Ada extracted: name={Name}, pickup={Pickup}, dest={Dest}, pax={Pax}, time={Time}",
+                SessionId, sttRaw,
+                adaName ?? "(none)", adaPickup ?? "(none)", adaDest ?? "(none)",
+                adaPax ?? "(none)", adaTime ?? "(none)");
+        }
 
         OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -4043,7 +4094,48 @@ public sealed class CallSession : ICallSession
                 var respBody = await resp.Content.ReadAsStringAsync();
                 _logger.LogWarning("[{SessionId}] ⚠️ Failed to save booking to Supabase: HTTP {Status} — {Body}",
                     sessionId, (int)resp.StatusCode, respBody);
-            }
+
+    // =========================
+    // TRANSCRIPT PUSH TO SUPABASE
+    // =========================
+    /// <summary>
+    /// Debounced push of transcript log to live_calls.transcripts in Supabase.
+    /// Batches rapid transcript updates (e.g. user+assistant in quick succession)
+    /// into a single HTTP PATCH with 500ms debounce.
+    /// </summary>
+    private async Task DebouncedPushTranscriptsAsync()
+    {
+        if (Interlocked.CompareExchange(ref _transcriptPushPending, 1, 0) == 1)
+            return; // Already scheduled
+
+        await Task.Delay(500); // Debounce
+        Interlocked.Exchange(ref _transcriptPushPending, 0);
+
+        List<object> snapshot;
+        lock (_transcriptLog) { snapshot = new List<object>(_transcriptLog); }
+
+        if (snapshot.Count == 0 || string.IsNullOrWhiteSpace(_settings.Supabase.ServiceRoleKey))
+            return;
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var url = $"{_settings.Supabase.Url}/rest/v1/live_calls?call_id=eq.{Uri.EscapeDataString(SessionId)}";
+            var patch = new StringContent(
+                System.Text.Json.JsonSerializer.Serialize(new { transcripts = snapshot }),
+                System.Text.Encoding.UTF8, "application/json");
+            patch.Headers.Add("Prefer", "return=minimal");
+            var req = new HttpRequestMessage(HttpMethod.Patch, url) { Content = patch };
+            req.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            req.Headers.Add("Authorization", $"Bearer {_settings.Supabase.ServiceRoleKey}");
+            await http.SendAsync(req);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[{SessionId}] Transcript push failed (non-fatal)", SessionId);
+        }
+    }
+}
         }
         catch (Exception ex)
         {
