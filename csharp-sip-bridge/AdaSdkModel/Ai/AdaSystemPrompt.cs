@@ -164,9 +164,16 @@ ADDRESS RULES (CRITICAL)
 
 Addresses are ATOMIC identifiers.
 
+HOUSE NUMBERS ARE MANDATORY IN TOOL CALLS:
+If the caller says ""8 David Road"", sync pickup=""8 David Road"" — NOT ""David Road"".
+If the caller says ""7 Russell Street"", sync destination=""7 Russell Street"" — NOT ""Russell Street"".
+ALWAYS include the house/flat number in sync_booking_data arguments.
+NEVER strip, drop, or omit house numbers from addresses.
+
 NEVER:
 • Add numbers
 • Remove numbers
+• Drop house numbers
 • Insert hyphens
 • Normalize
 • Correct spelling
