@@ -579,7 +579,7 @@ public sealed class CallSession : ICallSession
                     if (discrepancy != null)
                     {
                         // ── CONFIRMATION LOOP BREAKER ──
-                        var discrepancyKey = $"{_booking.Destination}|{result.DestStreet}";
+                        var discrepancyKey = $"{_booking.Pickup}|{result.PickupStreet}|{result.PickupCity}|{_booking.Destination}|{result.DestStreet}|{result.DestCity}";
                         if (discrepancyKey == _lastDiscrepancyKey && ++_discrepancyConfirmCount >= 1)
                         {
                             _logger.LogInformation("[{SessionId}] ✅ Discrepancy loop breaker: accepting geocoded result for '{Dest}'",
@@ -1860,17 +1860,83 @@ public sealed class CallSession : ICallSession
     private string? DetectAddressDiscrepancy(FareResult result)
     {
         var issues = new List<string>();
+
+        // --- PICKUP: street check ---
         if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
         {
             if (!IsKnownLandmarkType(_booking.Pickup) && !AddressContainsStreet(_booking.Pickup, result.PickupStreet))
-                issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different location.");
+                issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different street.");
         }
+
+        // --- PICKUP: city/area check ---
+        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupCity))
+        {
+            if (AddressContainsCity(_booking.Pickup) && !AddressCityMatches(_booking.Pickup, result.PickupCity))
+                issues.Add($"The pickup city/area was specified as part of '{_booking.Pickup}' but the system resolved it to '{result.PickupCity}'. Please confirm the correct area.");
+        }
+
+        // --- DESTINATION: street check ---
         if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
         {
             if (!IsKnownLandmarkType(_booking.Destination) && !AddressContainsStreet(_booking.Destination, result.DestStreet))
-                issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different location.");
+                issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different street.");
         }
+
+        // --- DESTINATION: city/area check ---
+        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestCity))
+        {
+            if (AddressContainsCity(_booking.Destination) && !AddressCityMatches(_booking.Destination, result.DestCity))
+                issues.Add($"The destination city/area was specified as part of '{_booking.Destination}' but the system resolved it to '{result.DestCity}'. Please confirm the correct area.");
+        }
+
         return issues.Count > 0 ? string.Join(" ", issues) : null;
+    }
+
+    /// <summary>
+    /// Checks whether the raw user input contains a city/area component (after a comma or as a trailing word).
+    /// </summary>
+    private static bool AddressContainsCity(string rawInput)
+    {
+        // If the address has a comma, there's likely a city/area after it
+        if (rawInput.Contains(',')) return true;
+
+        // Check for well-known UK city names as trailing words
+        var lower = rawInput.ToLowerInvariant();
+        string[] commonCities = {
+            "birmingham", "coventry", "london", "manchester", "leeds", "liverpool",
+            "sheffield", "bristol", "nottingham", "leicester", "wolverhampton",
+            "derby", "stoke", "bradford", "cardiff", "edinburgh", "glasgow",
+            "newcastle", "sunderland", "brighton", "oxford", "cambridge",
+            "bath", "york", "exeter", "plymouth", "southampton", "portsmouth",
+            "reading", "luton", "bolton", "wigan", "blackburn", "preston",
+            "warwick", "solihull", "dudley", "walsall", "sutton coldfield",
+            "acocks green", "moseley", "kings heath", "erdington", "handsworth",
+            "small heath", "sparkbrook", "sparkhill", "bordesley green",
+            "hall green", "yardley", "stechford", "castle bromwich"
+        };
+        return commonCities.Any(c => lower.Contains(c));
+    }
+
+    /// <summary>
+    /// Checks whether the geocoded city matches the city/area mentioned in the user's raw input.
+    /// </summary>
+    private static bool AddressCityMatches(string rawInput, string geocodedCity)
+    {
+        static string Norm(string s) => System.Text.RegularExpressions.Regex
+            .Replace(s.ToLowerInvariant(), @"[^a-z ]", " ").Trim();
+
+        var rawNorm = Norm(rawInput);
+        var cityNorm = Norm(geocodedCity);
+
+        // Direct containment check
+        if (rawNorm.Contains(cityNorm) || cityNorm.Contains(rawNorm)) return true;
+
+        // Word-level match: if the geocoded city words appear in the raw input
+        var cityWords = cityNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(w => w.Length > 2).ToArray();
+        if (cityWords.Length == 0) return true;
+        var rawWords = new HashSet<string>(rawNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        var matchCount = cityWords.Count(w => rawWords.Contains(w));
+        return matchCount >= Math.Ceiling(cityWords.Length / 2.0);
     }
 
     private static bool AddressContainsStreet(string rawInput, string geocodedStreet)
