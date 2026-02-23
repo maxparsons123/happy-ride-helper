@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AdaAudioPipe</RootNamespace>
+    <AssemblyName>AdaAudioPipe</AssemblyName>
+    <Description>OpenAI Realtime → G.711 A-law audio pipe for SIP telephony</Description>
+  </PropertyGroup>
+
+</Project>
