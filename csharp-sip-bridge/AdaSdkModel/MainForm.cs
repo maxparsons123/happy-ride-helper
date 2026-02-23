@@ -43,8 +43,6 @@ public partial class MainForm : Form
 
     // Simli avatar
     private SimliAvatar? _simliAvatar;
-    private readonly System.Collections.Concurrent.BlockingCollection<byte[]> _simliQueue = new(200);
-    private Thread? _simliThread;
     public MainForm()
     {
         InitializeComponent();
@@ -751,32 +749,19 @@ public partial class MainForm : Form
         var frameCopy = new byte[alawFrame.Length];
         Buffer.BlockCopy(alawFrame, 0, frameCopy, 0, alawFrame.Length);
 
-        _simliQueue.TryAdd(frameCopy);
-
-        if (_simliThread == null || !_simliThread.IsAlive)
-        {
-            _simliThread = new Thread(SimliConsumerLoop) { IsBackground = true, Name = "SimliAudio" };
-            _simliThread.Start();
-        }
-    }
-
-    private void SimliConsumerLoop()
-    {
-        foreach (var frame in _simliQueue.GetConsumingEnumerable())
+        ThreadPool.QueueUserWorkItem(_ =>
         {
             try
             {
-                var pcm16at16k = AlawToSimliResampler.Convert(frame);
+                var pcm16at16k = AlawToSimliResampler.Convert(frameCopy);
                 _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
             }
-            catch { }
-            Thread.Sleep(18);
-        }
+            catch { /* Simli errors must never affect call audio */ }
+        });
     }
 
     private void ClearSimliBuffer()
     {
-        while (_simliQueue.TryTake(out _)) { }
         if (_simliAvatar == null || !_simliAvatar.IsConnected) return;
         _ = _simliAvatar.ClearBufferAsync();
     }
