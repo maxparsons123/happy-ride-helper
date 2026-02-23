@@ -445,20 +445,15 @@ public partial class MainForm : Form
         // Wire session events → UI
         session.OnTranscript += (role, text) => SafeInvoke(() => Log($"💬 {role}: {text}"));
 
-        // Wire audio → Simli avatar OR monitor speakers (never both to avoid double audio)
+        // Wire audio → Simli avatar AND local monitor (Simli drives lip-sync, monitor gives local speaker output)
         session.OnAudioOut += alawFrame =>
         {
             if (_simliAvatar?.IsConnected == true)
-            {
-                // Avatar is active – route audio to avatar only (it has its own speaker)
                 FeedSimliAudio(alawFrame);
-            }
-            else
-            {
-                // No avatar – fall back to local monitor speakers
-                if (chkMonitorAda.Checked)
-                    MonitorAddAlaw(alawFrame);
-            }
+
+            // Always feed local monitor so operator can hear Ada's audio
+            if (chkMonitorAda.Checked)
+                MonitorAddAlaw(alawFrame);
         };
 
         // Wire barge-in → clear Simli buffer
