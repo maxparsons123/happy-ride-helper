@@ -1,4 +1,4 @@
-// Last updated: 2026-02-22 (v3.11 - Simplified, streamlined prompt)
+// Last updated: 2026-02-23 (v3.12 - Transcript grounding hardened against caller history bias)
 // Extracted from OpenAiSdkClient to reduce file length.
 
 using System;
