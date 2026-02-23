@@ -840,11 +840,15 @@ public sealed class CallSession : ICallSession
                 && !string.IsNullOrWhiteSpace(incoming)
                 && StreetNameChanged(_booking.Pickup, incoming))
             {
-                // If address discrepancy correction is pending, allow the pickup update through
-                if (_pendingAddressCorrection)
+                // Detect explicit user correction intent from transcript or AI interpretation
+                var earlyInterpretation = args.TryGetValue("interpretation", out var earlyInterp) ? earlyInterp?.ToString() : null;
+                var correctionDetected = _pendingAddressCorrection || UserRequestedAddressCorrection(lastTranscript, earlyInterpretation);
+
+                // If address discrepancy correction is pending OR user explicitly asked to change, allow through
+                if (correctionDetected)
                 {
-                    _logger.LogInformation("[{SessionId}] ✅ ADDRESS CORRECTION: Allowing pickup update '{Incoming}' (discrepancy correction pending)",
-                        SessionId, incoming);
+                    _logger.LogInformation("[{SessionId}] ✅ ADDRESS CORRECTION: Allowing pickup update '{Incoming}' → replacing '{Old}' (correction detected, pendingFlag={Pending}, userRequested={UserReq})",
+                        SessionId, incoming, _booking.Pickup, _pendingAddressCorrection, !_pendingAddressCorrection && correctionDetected);
                     _pendingAddressCorrection = false;
                     // Reset stage to re-trigger fare calculation with corrected address
                     _currentStage = BookingStage.CollectingDestination;
@@ -3527,6 +3531,26 @@ public sealed class CallSession : ICallSession
     }
 
     /// <summary>
+    /// Regex to detect explicit address correction intent in transcript or AI interpretation.
+    /// Matches phrases like "change the pickup", "wrong address", "correct the address", "it's not Hanbury".
+    /// </summary>
+    private static readonly Regex AddressCorrectionPattern = new(
+        @"\b(change|correct|update|fix|wrong|not right|not correct|it'?s not|that'?s not|should be|meant to say|i said|i meant)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Returns true if the user's transcript or the AI's interpretation indicates the user
+    /// is explicitly requesting an address correction (not just STT noise).
+    /// </summary>
+    private static bool UserRequestedAddressCorrection(string? transcript, string? interpretation)
+    {
+        if (!string.IsNullOrWhiteSpace(transcript) && AddressCorrectionPattern.IsMatch(transcript))
+            return true;
+        if (!string.IsNullOrWhiteSpace(interpretation) && AddressCorrectionPattern.IsMatch(interpretation))
+            return true;
+        return false;
+    }
+
     /// Returns true if the incoming address is a phonetic mishearing of the existing address.
     /// Compares street-name portions using Levenshtein distance (≤2 chars difference = phonetic mishearing).
     /// E.g., "David Rose" is a mishearing of "David Road" (distance=2).
