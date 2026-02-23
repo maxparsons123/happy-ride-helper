@@ -1621,6 +1621,7 @@ public sealed class CallSession : ICallSession
 
                     _aiClient.SetAwaitingConfirmation(true);
                     _currentStage = BookingStage.FarePresented;
+                    _lastUserTranscript = null; // Clear stale transcript so IntentGuard doesn't evaluate old speech against FarePresented
                     await _aiClient.SetVadModeAsync(useSemantic: true, eagerness: 0.20f);
                     _logger.LogInformation("[{SessionId}] 🔄 Auto-VAD → SEMANTIC (fare presented, awaiting payment choice) (stage→FarePresented)", sessionId);
 
@@ -2071,6 +2072,7 @@ public sealed class CallSession : ICallSession
 
             _aiClient.SetAwaitingConfirmation(true);
             _currentStage = BookingStage.FarePresented;
+            _lastUserTranscript = null; // Clear stale transcript so IntentGuard doesn't evaluate old speech against FarePresented
             await _aiClient.SetVadModeAsync(useSemantic: false);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
@@ -2315,6 +2317,7 @@ public sealed class CallSession : ICallSession
 
                     _aiClient.SetAwaitingConfirmation(true);
                     _currentStage = BookingStage.FarePresented;
+                    _lastUserTranscript = null; // Clear stale transcript so IntentGuard doesn't evaluate old speech against FarePresented
                     await _aiClient.SetVadModeAsync(useSemantic: false);
 
                     OnBookingUpdated?.Invoke(_booking.Clone());

@@ -62,6 +62,11 @@ public sealed class IntentGuard
         @"\b(yes|yeah|actually|one more|another|also|i need|can you|could you)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // ── Current-booking action patterns (NOT a new booking — let AI handle) ──
+    private static readonly Regex CurrentBookingActionPattern = new(
+        @"\b(payment\s*link|pay\s*(by|with)|send\s*(me|the)|tracking|track\s*(my|the)|where.*(driver|taxi)|special\s*instructions?|notes?\s*for|child\s*seat|wheelchair)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     /// <summary>
     /// Resolve user intent based on current booking stage and what they said.
     /// Returns None if no deterministic action can be taken (let AI handle it).
@@ -100,6 +105,11 @@ public sealed class IntentGuard
         // Check "nothing else" first
         if (NothingElsePattern.IsMatch(text))
             return ResolvedIntent.EndCall;
+
+        // If the user is asking about the CURRENT booking (payment link, tracking, etc.),
+        // let the AI handle it — do NOT treat as a new booking request
+        if (CurrentBookingActionPattern.IsMatch(text))
+            return ResolvedIntent.None;
 
         if (SomethingElsePattern.IsMatch(text))
             return ResolvedIntent.NewBooking;
