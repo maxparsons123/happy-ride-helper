@@ -64,7 +64,7 @@ public sealed class IntentGuard
 
     // ── Current-booking action patterns (NOT a new booking — let AI handle) ──
     private static readonly Regex CurrentBookingActionPattern = new(
-        @"\b(payment\s*link|pay\s*(by|with)|send\s*(me|the)|tracking|track\s*(my|the)|where.*(driver|taxi)|special\s*instructions?|notes?\s*for|child\s*seat|wheelchair)\b",
+        @"\b(payment|pay\s*(by|with|now|for)|send\s*(me|the)|tracking|track\s*(my|the)|where.*(driver|taxi)|special\s*instructions?|notes?\s*for|child\s*seat|wheelchair|link|card|meter|confirmation|receipt)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
