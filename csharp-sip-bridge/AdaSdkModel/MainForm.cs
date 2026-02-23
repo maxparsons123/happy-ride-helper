@@ -294,6 +294,9 @@ public partial class MainForm : Form
                 lblSipStatus.Text = "● Registered";
                 lblSipStatus.ForeColor = Color.LimeGreen;
                 statusLabel.Text = "SIP Registered";
+                // Pre-connect Simli so avatar is warm when first call arrives
+                if (!_operatorMode)
+                    _ = ConnectSimliAsync();
             });
 
             _sipServer.OnRegistrationFailed += msg => SafeInvoke(() =>
@@ -310,7 +313,8 @@ public partial class MainForm : Form
                 SetInCall(true);
                 statusCallId.Text = $"{callerId} [{sessionId}]";
                 StartAudioMonitor();
-                if (!_operatorMode)
+                // Simli already pre-connected on SIP registration; reconnect if it dropped
+                if (!_operatorMode && _simliAvatar?.IsConnected != true && _simliAvatar?.IsConnecting != true)
                     _ = ConnectSimliAsync();
             });
 
@@ -342,7 +346,9 @@ public partial class MainForm : Form
                     lblCallInfo.Text = "No active call";
                     lblCallInfo.ForeColor = Color.Gray;
                     StopAudioMonitor();
-                    _ = DisconnectSimliAsync();
+                    // Reconnect Simli for the next call instead of disconnecting
+                    if (!_operatorMode)
+                        _ = ReconnectSimliAsync();
                 }
             });
 
@@ -732,6 +738,19 @@ public partial class MainForm : Form
         if (_simliAvatar == null) return;
         try { await _simliAvatar.DisconnectAsync(); }
         catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
+    }
+
+    /// <summary>Disconnect and immediately reconnect Simli so it's warm for the next call.</summary>
+    private async Task ReconnectSimliAsync()
+    {
+        try
+        {
+            await DisconnectSimliAsync();
+            await Task.Delay(500); // brief cooldown before re-establishing WebRTC
+            await ConnectSimliAsync();
+            Log("🎭 Simli reconnected — ready for next call");
+        }
+        catch (Exception ex) { Log($"🎭 Simli reconnect error: {ex.Message}"); }
     }
 
     private void FeedSimliAudio(byte[] alawFrame)
