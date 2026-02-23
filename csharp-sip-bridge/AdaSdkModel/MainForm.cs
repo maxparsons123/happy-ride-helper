@@ -327,11 +327,7 @@ public partial class MainForm : Form
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
                 if (chkMonitorCaller.Checked)
-                {
-                    var buf = _monitorBuffer;
-                    if (buf != null)
-                        lock (_monitorLock) { buf.AddSamples(alawFrame, 0, alawFrame.Length); }
-                }
+                    MonitorAddAlaw(alawFrame);
             };
 
             _sipServer.OnCallEnded += (sessionId, reason) => SafeInvoke(() =>
@@ -461,11 +457,7 @@ public partial class MainForm : Form
             {
                 // No avatar – fall back to local monitor speakers
                 if (chkMonitorAda.Checked)
-                {
-                    var buf = _monitorBuffer;
-                    if (buf != null)
-                        lock (_monitorLock) { buf.AddSamples(alawFrame, 0, alawFrame.Length); }
-                }
+                    MonitorAddAlaw(alawFrame);
             }
         };
 
@@ -766,15 +758,43 @@ public partial class MainForm : Form
     //  AUDIO MONITOR
     // ══════════════════════════════════════
 
+    // A-law decode table for monitor (PCM16 where 0x00 = silence on underrun)
+    private static readonly short[] _alawDecode = BuildAlawDecodeTable();
+    private static short[] BuildAlawDecodeTable()
+    {
+        var t = new short[256];
+        for (int i = 0; i < 256; i++)
+        {
+            int v = i ^ 0x55, sign = v & 0x80, exp = (v >> 4) & 7, man = v & 0xF;
+            int s = exp == 0 ? (man << 4) + 8 : ((man << 4) + 0x108) << (exp - 1);
+            t[i] = (short)(sign != 0 ? s : -s);
+        }
+        return t;
+    }
 
+    private void MonitorAddAlaw(byte[] alaw)
+    {
+        var buf = _monitorBuffer;
+        if (buf == null || alaw == null || alaw.Length == 0) return;
+
+        var pcm = new byte[alaw.Length * 2];
+        for (int i = 0; i < alaw.Length; i++)
+        {
+            short s = _alawDecode[alaw[i]];
+            pcm[i * 2] = (byte)(s & 0xFF);
+            pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+        }
+
+        lock (_monitorLock) { buf.AddSamples(pcm, 0, pcm.Length); }
+    }
 
     private void StartAudioMonitor()
     {
         StopAudioMonitor();
         try
         {
-            // Single A-law buffer — NAudio handles G.711 decode internally (no manual float chain)
-            _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
+            // PCM16 buffer — zeros = true silence on underrun (A-law 0x00 ≠ silence, causes garble)
+            _monitorBuffer = new BufferedWaveProvider(new WaveFormat(8000, 16, 1))
             {
                 BufferDuration = TimeSpan.FromSeconds(5),
                 DiscardOnBufferOverflow = true
