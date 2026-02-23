@@ -1,10 +1,9 @@
-// Last updated: 2026-02-21 (v2.8)
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace AdaSdkModel.Avatar;
+namespace AdaMain.Avatar;
 
 /// <summary>
 /// Simli avatar integration using WebView2 and the Simli JavaScript SDK.
@@ -17,7 +16,6 @@ public sealed class SimliAvatar : UserControl
     private readonly Label _statusLabel;
     private readonly ILogger<SimliAvatar> _logger;
     private bool _isInitialized;
-    private readonly TaskCompletionSource<bool> _initTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private string? _apiKey;
     private string? _faceId;
     private long _audioBytesSent;
@@ -68,7 +66,6 @@ public sealed class SimliAvatar : UserControl
             _webView.CoreWebView2.Settings.AreDevToolsEnabled = true;
             _webView.CoreWebView2.NavigateToString(GetSimliHtml());
             _isInitialized = true;
-            _initTcs.TrySetResult(true);
             SetStatus("Ready", System.Drawing.Color.Orange);
             _logger.LogInformation("🎭 Simli avatar initialized");
         }
@@ -76,7 +73,6 @@ public sealed class SimliAvatar : UserControl
         {
             SetStatus("WebView2 failed", System.Drawing.Color.Red);
             _logger.LogError("🎭 WebView2 init failed: {Msg}", ex.Message);
-            _initTcs.TrySetResult(false);
         }
     }
 
@@ -94,13 +90,9 @@ public sealed class SimliAvatar : UserControl
     /// <summary>Establish WebRTC session with Simli.</summary>
     public async Task ConnectAsync()
     {
-        // Wait up to 10s for WebView2 to finish initializing
-        var initOk = await Task.WhenAny(_initTcs.Task, Task.Delay(10_000)) == _initTcs.Task && _initTcs.Task.Result;
-        
-        if (!initOk || string.IsNullOrEmpty(_apiKey) || string.IsNullOrEmpty(_faceId))
+        if (!_isInitialized || string.IsNullOrEmpty(_apiKey) || string.IsNullOrEmpty(_faceId))
         {
-            _logger.LogWarning("🎭 Cannot connect: init={Init}, apiKey={HasKey}, faceId={HasFace}",
-                initOk, !string.IsNullOrEmpty(_apiKey), !string.IsNullOrEmpty(_faceId));
+            _logger.LogWarning("🎭 Cannot connect: not configured or not initialized");
             return;
         }
 
@@ -219,7 +211,7 @@ public sealed class SimliAvatar : UserControl
 
     private async Task ExecAsync(string script)
     {
-        if (IsDisposed || !IsHandleCreated) return;
+        if (IsDisposed) return;
 
         if (InvokeRequired)
         {
@@ -253,16 +245,15 @@ public sealed class SimliAvatar : UserControl
 
     private void SetStatus(string text, System.Drawing.Color color)
     {
-        if (IsDisposed || !IsHandleCreated) return;
-        if (InvokeRequired) { try { BeginInvoke(() => SetStatus(text, color)); } catch { } return; }
+        if (InvokeRequired) { try { Invoke(() => SetStatus(text, color)); } catch { } return; }
         _statusLabel.Text = text;
         _statusLabel.ForeColor = color;
     }
 
     private void SafeInvoke(Action action)
     {
-        if (IsDisposed || !IsHandleCreated) return;
-        if (InvokeRequired) { try { BeginInvoke(action); } catch { } }
+        if (IsDisposed) return;
+        if (InvokeRequired) { try { Invoke(action); } catch { } }
         else action();
     }
 
@@ -290,18 +281,15 @@ public sealed class SimliAvatar : UserControl
     </div>
     <script>
         let pc=null, ws=null, audioQueue=[], isSending=false, audioBytesSent=0;
-        let drainTimer=null;
         function log(msg){ chrome.webview.postMessage({type:'log',message:msg}); }
-
         function handleCommand(cmd){
             switch(cmd.command){
                 case 'connect': connect(cmd.apiKey,cmd.faceId); break;
                 case 'audio': queueAudio(cmd.data); break;
                 case 'disconnect': disconnect(); break;
-                case 'clear': audioQueue=[]; if(drainTimer){clearTimeout(drainTimer);drainTimer=null;} break;
+                case 'clear': audioQueue=[]; break;
             }
         }
-
         async function connect(apiKey,faceId){
             document.getElementById('loading').textContent='Creating WebRTC...';
             try{
@@ -341,25 +329,18 @@ public sealed class SimliAvatar : UserControl
                 chrome.webview.postMessage({type:'error',message:err.message});
             }
         }
-
         function waitForIce(){return new Promise(r=>{let c=0,l=-1;const chk=()=>{if(pc.iceGatheringState==='complete'||c===l)r();else{l=c;setTimeout(chk,250);}};pc.onicecandidate=e=>{if(e.candidate)c++;};setTimeout(()=>r(),3000);setTimeout(chk,250);});}
-
         function queueAudio(b64){
             if(!ws||ws.readyState!==WebSocket.OPEN) return;
-            try{
-                const bin=atob(b64);
-                const bytes=new Uint8Array(bin.length);
-                for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-                audioBytesSent+=bytes.length;
-                // Send immediately — pacing is handled C#-side
-                ws.send(bytes);
-                chrome.webview.postMessage({type:'speaking'});
-                if(drainTimer) clearTimeout(drainTimer);
-                drainTimer=setTimeout(()=>{chrome.webview.postMessage({type:'silent'});drainTimer=null;},200);
-            }catch(e){}
+            try{const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);audioBytesSent+=bytes.length;audioQueue.push(bytes);processQueue();}catch(e){}
         }
-
-        function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];if(drainTimer){clearTimeout(drainTimer);drainTimer=null;}document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
+        function processQueue(){
+            if(isSending||!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0) return;
+            isSending=true;const chunk=audioQueue.shift();
+            try{ws.send(chunk);chrome.webview.postMessage({type:'speaking'});}catch(e){}
+            setTimeout(()=>{isSending=false;if(audioQueue.length>0)processQueue();else chrome.webview.postMessage({type:'silent'});},20);
+        }
+        function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
     </script>
 </body>
 </html>
