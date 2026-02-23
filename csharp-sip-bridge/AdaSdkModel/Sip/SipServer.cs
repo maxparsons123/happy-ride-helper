@@ -550,47 +550,40 @@ public sealed class SipServer : IAsyncDisposable
 
         int responseCompletedLatch = 0;
 
-        // ── PIPE: OpenAI raw A-law → bounded channel → playout (single consumer) ──
+        // ── DIRECT WIRING: OpenAI A-law → playout (no intermediate pipe = lowest latency) ──
         var gain = (float)_audioSettings.VolumeBoost;
-        var pipe = new Audio.OpenAiToSipPipe(
-            sink: new Audio.PlayoutSink(playout),
-            plugin: null,       // null = native A-law mode (no PCM→A-law conversion needed)
-            maxFrames: 240,     // 4.8s buffer
-            dropBatch: 20,      // drop 0.4s when overloaded
-            alawGain: gain
-        );
-        pipe.OnLog += msg => Log($"[{sid}] {msg}");
+        bool applyGain = Math.Abs(gain - 1.0f) > 0.001f;
 
-        // Track speaking state from pipe frames (Simli/monitor still driven by CallSession.OnAudio → OnAudioOut)
-        pipe.OnFrameOut += frame =>
+        // Inline handler: apply gain, fork to listeners, then feed playout
+        Action<byte[]> feedPlayout = (byte[] alawBytes) =>
         {
+            if (alawBytes == null || alawBytes.Length == 0) return;
+            if (applyGain) Audio.Processing.ALawGain.ApplyInPlace(alawBytes, gain);
+
             Interlocked.Exchange(ref isBotSpeaking, 1);
             Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
+
+            playout.BufferALaw(alawBytes);
         };
 
-        pipe.Start();
-        call.Pipe = pipe;
-
-        // ── Wire raw A-law from OpenAI into pipe (single subscription = no double speaking) ──
+        // Wire the appropriate AI client
         if (session.AiClient is OpenAiSdkClient sdkClient)
         {
-            sdkClient.OnAudioRaw += pipe.PushAlaw;
+            sdkClient.OnAudioRaw += feedPlayout;
             sdkClient.GetQueuedFrames = () => playout.QueuedFrames;
         }
         else if (session.AiClient is OpenAiSdkClientHighSample highSample)
         {
-            // HighSample client already converts PCM24k → A-law internally;
-            // OnAudio emits A-law bytes — feed them directly into the pipe.
-            highSample.OnAudio += pipe.PushAlaw;
+            highSample.OnAudio += feedPlayout;
             highSample.GetQueuedFrames = () => playout.QueuedFrames;
         }
 
-        // ── Barge-in: clear pipe + playout, then reset latches ──
+        // ── Barge-in: clear playout, then reset latches ──
         session.OnBargeIn += () =>
         {
             if (Volatile.Read(ref isBotSpeaking) == 0 && playout.QueuedFrames == 0) return;
 
-            pipe.Clear();
+            playout.Clear();
 
             Interlocked.Exchange(ref watchdogPending, 0);
             Interlocked.Exchange(ref responseCompletedLatch, 0);
@@ -600,7 +593,7 @@ public sealed class SipServer : IAsyncDisposable
         // ── Response completed: flush tail, set latches ──
         session.AiClient.OnResponseCompleted += () =>
         {
-            pipe.Flush();
+            // Direct wiring — no pipe to flush
             Interlocked.Exchange(ref responseCompletedLatch, 1);
             Interlocked.Exchange(ref isBotSpeaking, 0);
             Interlocked.Exchange(ref botStoppedSpeakingTick, Stopwatch.GetTimestamp());
@@ -702,14 +695,15 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
-        // ── Cleanup: stop pipe when session ends ──
+        // ── Cleanup: unhook audio + dispose playout when session ends ──
         session.OnEnded += (_, _) =>
         {
             // Unhook raw audio first to prevent double-speaking on next call
             if (session.AiClient is OpenAiSdkClient sdk)
-                sdk.OnAudioRaw -= pipe.PushAlaw;
+                sdk.OnAudioRaw -= feedPlayout;
+            else if (session.AiClient is OpenAiSdkClientHighSample hs)
+                hs.OnAudio -= feedPlayout;
 
-            try { pipe.Dispose(); } catch { }
             try { playout.Dispose(); } catch { }
         };
     }
@@ -796,8 +790,7 @@ public sealed class SipServer : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref call.CleanupDone, 1) == 1) return;
 
-        // Stop pipe first — unhooks events and stops pump
-        try { call.Pipe?.Dispose(); } catch { }
+        // Stop playout first — ensures no more RTP frames are sent during teardown
 
         // Stop playout — ensures no more RTP frames are sent during teardown
         try { call.Playout?.Dispose(); } catch { }
@@ -870,7 +863,6 @@ public sealed class SipServer : IAsyncDisposable
         public required VoIPMediaSession RtpSession { get; init; }
         public required SIPUserAgent CallAgent { get; init; }
         public ALawRtpPlayout? Playout { get; set; }
-        public Audio.OpenAiToSipPipe? Pipe { get; set; }
         public int CleanupDone;
     }
 
