@@ -1001,7 +1001,7 @@ public sealed class CallSession : ICallSession
                 && !string.IsNullOrWhiteSpace(incoming)
                 && !string.IsNullOrWhiteSpace(contextForGuard)
                 && !TranscriptResemblesAddress(contextForGuard, incoming)
-                && !string.Equals(_lastGuardBlockedDest, incoming, StringComparison.OrdinalIgnoreCase))
+                && !(_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming)))
             {
                 _lastGuardBlockedDest = incoming;
                 _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — context '{Context}' doesn't resemble it (likely auto-filled from history)",
@@ -1013,7 +1013,7 @@ public sealed class CallSession : ICallSession
             else
             {
                 // Log if we bypassed the guard due to repeat/confirm
-                if (_lastGuardBlockedDest != null && string.Equals(_lastGuardBlockedDest, incoming, StringComparison.OrdinalIgnoreCase))
+                if (_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming))
                 {
                     _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS: Allowing '{Incoming}' — previously blocked, user confirmed/repeated",
                         SessionId, incoming);
