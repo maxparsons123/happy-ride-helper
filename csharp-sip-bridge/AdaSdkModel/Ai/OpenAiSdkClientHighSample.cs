@@ -11,6 +11,7 @@ using AdaSdkModel.Config;
 using Microsoft.Extensions.Logging;
 using OpenAI.RealtimeConversation;
 using System.ClientModel;
+using System.Text.RegularExpressions;
 
 #pragma warning disable OPENAI002 // Experimental Realtime API
 
@@ -133,6 +134,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     /// (already resampled + encoded) so the existing ALawRtpPlayout works unchanged.
     /// </summary>
     public event Action<byte[]>? OnAudio;
+    public event Action<byte[]>? OnAudioRaw;
     public event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     public event Action<string>? OnEnded;
     public event Action? OnPlayoutComplete;
