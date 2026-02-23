@@ -1,4 +1,4 @@
-using AdaAudioPipe.Interfaces;
+using AdaSdkModel.Audio.Interfaces;
 
 namespace AdaSdkModel.Audio;
 

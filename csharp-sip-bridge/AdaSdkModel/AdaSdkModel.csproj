@@ -37,9 +37,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\AdaAudioPipe\AdaAudioPipe.csproj" />
-  </ItemGroup>
+  <!-- AdaAudioPipe classes are now inlined in Audio/ for testing -->
 
   <ItemGroup>
     <None Update="appsettings.json">
