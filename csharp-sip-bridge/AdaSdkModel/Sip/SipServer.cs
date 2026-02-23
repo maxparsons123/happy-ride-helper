@@ -554,7 +554,7 @@ public sealed class SipServer : IAsyncDisposable
 
         // ── PIPE: OpenAI raw A-law → bounded channel → playout (single consumer) ──
         var gain = (float)_audioSettings.VolumeBoost;
-        var pipe = new AdaAudioPipe.OpenAiToSipPipe(
+        var pipe = new Audio.OpenAiToSipPipe(
             sink: new Audio.PlayoutSink(playout),
             plugin: null,       // null = native A-law mode (no PCM→A-law conversion needed)
             maxFrames: 240,     // 4.8s buffer
@@ -864,7 +864,7 @@ public sealed class SipServer : IAsyncDisposable
         public required VoIPMediaSession RtpSession { get; init; }
         public required SIPUserAgent CallAgent { get; init; }
         public ALawRtpPlayout? Playout { get; set; }
-        public AdaAudioPipe.OpenAiToSipPipe? Pipe { get; set; }
+        public Audio.OpenAiToSipPipe? Pipe { get; set; }
         public int CleanupDone;
     }
 
