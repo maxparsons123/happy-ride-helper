@@ -995,9 +995,14 @@ public sealed class CallSession : ICallSession
             // When destination is currently null (fresh start or post-cancel), verify the
             // incoming value actually resembles what the user said. This prevents the model
             // from auto-filling destinations from [CALLER HISTORY].
+            // TRUST ADA: When Ada explicitly sends a destination= argument (not redirected
+            // from pickup by the stage guard), her transcription is definitive. The raw STT
+            // transcript is often stale or garbled, so we skip the guard entirely.
+            // The guard only fires for stage-guard-redirected values where we lack confidence.
             // BYPASS 1: If this destination was blocked on a previous turn (resemblance match).
             // BYPASS 2: If the user said the destination earlier in this same call (conversation history).
-            else if (string.IsNullOrWhiteSpace(_booking.Destination)
+            else if (redirectedToDestination // Only guard values redirected by stage guard — Ada's explicit dest is trusted
+                && string.IsNullOrWhiteSpace(_booking.Destination)
                 && !string.IsNullOrWhiteSpace(incoming)
                 && !string.IsNullOrWhiteSpace(contextForGuard)
                 && !TranscriptResemblesAddress(contextForGuard, incoming)
