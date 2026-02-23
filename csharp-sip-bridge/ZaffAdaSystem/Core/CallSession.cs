@@ -266,6 +266,8 @@ public sealed class CallSession : ICallSession
     private int _discrepancyConfirmCount;    // How many times the same discrepancy has fired — after 1 we bypass (user confirmed)
     private bool _pickupDisambiguated = true;  // true = no disambiguation needed (set to false when triggered)
     private bool _destDisambiguated = true;    // true = no disambiguation needed (set to false when triggered)
+    private bool _userConfirmedPickup;       // Set when user confirms pickup after a discrepancy — skips future checks
+    private bool _userConfirmedDest;         // Set when user confirms destination after a discrepancy — skips future checks
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
 
@@ -344,6 +346,7 @@ public sealed class CallSession : ICallSession
                 _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
                 _booking.Fare = null;
                 _booking.Eta = null;
+                _userConfirmedPickup = false; // Reset — new address needs fresh validation
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             }
@@ -359,6 +362,7 @@ public sealed class CallSession : ICallSession
                 _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
                 _booking.Fare = null;
                 _booking.Eta = null;
+                _userConfirmedDest = false; // Reset — new address needs fresh validation
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 Interlocked.Exchange(ref _bookTaxiCompleted, 0);
             }
@@ -582,10 +586,13 @@ public sealed class CallSession : ICallSession
                         var discrepancyKey = $"{_booking.Pickup}|{result.PickupStreet}|{result.PickupCity}|{_booking.Destination}|{result.DestStreet}|{result.DestCity}";
                         if (discrepancyKey == _lastDiscrepancyKey && ++_discrepancyConfirmCount >= 1)
                         {
-                            _logger.LogInformation("[{SessionId}] ✅ Discrepancy loop breaker: accepting geocoded result for '{Dest}'",
-                                sessionId, _booking.Destination);
+                            _logger.LogInformation("[{SessionId}] ✅ Discrepancy loop breaker: accepting geocoded result (user confirmed)",
+                                sessionId);
                             _lastDiscrepancyKey = null;
                             _discrepancyConfirmCount = 0;
+                            // Mark confirmed so future re-calculations don't re-trigger
+                            _userConfirmedPickup = true;
+                            _userConfirmedDest = true;
                             goto discrepancyAccepted;
                         }
                         _lastDiscrepancyKey = discrepancyKey;
@@ -1861,32 +1868,40 @@ public sealed class CallSession : ICallSession
     {
         var issues = new List<string>();
 
-        // --- PICKUP: street check ---
-        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
+        // --- PICKUP checks (skip if user already confirmed after a previous discrepancy) ---
+        if (!_userConfirmedPickup)
         {
-            if (!IsKnownLandmarkType(_booking.Pickup) && !AddressContainsStreet(_booking.Pickup, result.PickupStreet))
-                issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different street.");
+            // Street check
+            if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupStreet))
+            {
+                if (!IsKnownLandmarkType(_booking.Pickup) && !AddressContainsStreet(_booking.Pickup, result.PickupStreet))
+                    issues.Add($"The pickup was '{_booking.Pickup}' but the system resolved it to '{result.PickupStreet}' which appears to be a different street.");
+            }
+
+            // City/area check
+            if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupCity))
+            {
+                if (AddressContainsCity(_booking.Pickup) && !AddressCityMatches(_booking.Pickup, result.PickupCity))
+                    issues.Add($"The pickup city/area was specified as part of '{_booking.Pickup}' but the system resolved it to '{result.PickupCity}'. Please confirm the correct area.");
+            }
         }
 
-        // --- PICKUP: city/area check ---
-        if (!string.IsNullOrWhiteSpace(_booking.Pickup) && !string.IsNullOrWhiteSpace(result.PickupCity))
+        // --- DESTINATION checks (skip if user already confirmed after a previous discrepancy) ---
+        if (!_userConfirmedDest)
         {
-            if (AddressContainsCity(_booking.Pickup) && !AddressCityMatches(_booking.Pickup, result.PickupCity))
-                issues.Add($"The pickup city/area was specified as part of '{_booking.Pickup}' but the system resolved it to '{result.PickupCity}'. Please confirm the correct area.");
-        }
+            // Street check
+            if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
+            {
+                if (!IsKnownLandmarkType(_booking.Destination) && !AddressContainsStreet(_booking.Destination, result.DestStreet))
+                    issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different street.");
+            }
 
-        // --- DESTINATION: street check ---
-        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestStreet))
-        {
-            if (!IsKnownLandmarkType(_booking.Destination) && !AddressContainsStreet(_booking.Destination, result.DestStreet))
-                issues.Add($"The destination was '{_booking.Destination}' but the system resolved it to '{result.DestStreet}' which appears to be a different street.");
-        }
-
-        // --- DESTINATION: city/area check ---
-        if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestCity))
-        {
-            if (AddressContainsCity(_booking.Destination) && !AddressCityMatches(_booking.Destination, result.DestCity))
-                issues.Add($"The destination city/area was specified as part of '{_booking.Destination}' but the system resolved it to '{result.DestCity}'. Please confirm the correct area.");
+            // City/area check
+            if (!string.IsNullOrWhiteSpace(_booking.Destination) && !string.IsNullOrWhiteSpace(result.DestCity))
+            {
+                if (AddressContainsCity(_booking.Destination) && !AddressCityMatches(_booking.Destination, result.DestCity))
+                    issues.Add($"The destination city/area was specified as part of '{_booking.Destination}' but the system resolved it to '{result.DestCity}'. Please confirm the correct area.");
+            }
         }
 
         return issues.Count > 0 ? string.Join(" ", issues) : null;
