@@ -446,8 +446,7 @@ public sealed class SipServer : IAsyncDisposable
         playout.OnLog += msg => Log($"[{sessionId}] {msg}");
         activeCall.Playout = playout;
 
-        if (session.AiClient is OpenAiSdkClient sdk)
-            sdk.GetQueuedFrames = () => playout.QueuedFrames;
+        // GetQueuedFrames is now wired inside WireAudioPipeline
 
         WireAudioPipeline(activeCall, negotiatedCodec);
 
@@ -518,8 +517,7 @@ public sealed class SipServer : IAsyncDisposable
         playout.OnLog += msg => Log($"[{session.SessionId}] {msg}");
         activeCall.Playout = playout;
 
-        if (session.AiClient is OpenAiSdkClient sdk)
-            sdk.GetQueuedFrames = () => playout.QueuedFrames;
+        // GetQueuedFrames is now wired inside WireAudioPipeline
 
         WireAudioPipeline(activeCall, negotiatedCodec);
 
@@ -577,6 +575,14 @@ public sealed class SipServer : IAsyncDisposable
         if (session.AiClient is OpenAiSdkClient sdkClient)
         {
             sdkClient.OnAudioRaw += pipe.PushAlaw;
+            sdkClient.GetQueuedFrames = () => playout.QueuedFrames;
+        }
+        else if (session.AiClient is OpenAiSdkClientHighSample highSample)
+        {
+            // HighSample client already converts PCM24k → A-law internally;
+            // OnAudio emits A-law bytes — feed them directly into the pipe.
+            highSample.OnAudio += pipe.PushAlaw;
+            highSample.GetQueuedFrames = () => playout.QueuedFrames;
         }
 
         // ── Barge-in: clear pipe + playout, then reset latches ──
