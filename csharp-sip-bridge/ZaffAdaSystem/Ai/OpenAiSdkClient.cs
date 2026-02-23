@@ -1007,9 +1007,26 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     };
 
     // =========================
+    // PUBLIC STATIC ACCESSORS (used by OpenAiSdkClientHighSample)
+    // =========================
+    public static string DetectLanguageStatic(string? phone) => DetectLanguage(phone);
+    public static string GetLanguageNameStatic(string lang) => GetLanguageName(lang);
+    public static string GetLocalizedGreetingStatic(string lang) => GetLocalizedGreeting(lang);
+    public static string GetDefaultSystemPromptStatic() => DefaultSystemPrompt;
+
+    public static ConversationFunctionTool BuildSyncBookingDataToolStatic() => BuildSyncBookingDataTool();
+    public static ConversationFunctionTool BuildClarifyAddressToolStatic() => BuildClarifyAddressTool();
+    public static ConversationFunctionTool BuildBookTaxiToolStatic() => BuildBookTaxiTool();
+    public static ConversationFunctionTool BuildCreateBookingToolStatic() => BuildCreateBookingTool();
+    public static ConversationFunctionTool BuildFindLocalEventsToolStatic() => BuildFindLocalEventsTool();
+    public static ConversationFunctionTool BuildEndCallToolStatic() => BuildEndCallTool();
+
+    // =========================
     // SYSTEM PROMPT
     // =========================
-    private string GetDefaultSystemPrompt() =>
+    private string GetDefaultSystemPrompt() => DefaultSystemPrompt;
+
+    private static readonly string DefaultSystemPrompt =
 @"You are Ada, a taxi booking assistant for Voice Taxibot. Version 3.9.
 
 ==============================

@@ -925,13 +925,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private static ConversationVoice MapVoice(string voice) => voice?.ToLowerInvariant() switch
     {
         "alloy" => ConversationVoice.Alloy,
-        "ash" => ConversationVoice.Ash,
-        "ballad" => ConversationVoice.Ballad,
-        "coral" => ConversationVoice.Coral,
         "echo" => ConversationVoice.Echo,
-        "sage" => ConversationVoice.Sage,
         "shimmer" => ConversationVoice.Shimmer,
-        "verse" => ConversationVoice.Verse,
         _ => ConversationVoice.Shimmer
     };
 
