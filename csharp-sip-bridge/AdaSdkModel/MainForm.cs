@@ -40,8 +40,11 @@ public partial class MainForm : Form
     private WaveInEvent? _micInput;
     private readonly object _micLock = new();
 
-    // Simli avatar
+    // Simli avatar + dedicated background feeder
     private SimliAvatar? _simliAvatar;
+    private System.Threading.Channels.Channel<byte[]>? _simliChannel;
+    private CancellationTokenSource? _simliCts;
+    private Task? _simliFeederTask;
     public MainForm()
     {
         InitializeComponent();
@@ -451,24 +454,27 @@ public partial class MainForm : Form
         // Wire session events → UI
         session.OnTranscript += (role, text) => SafeInvoke(() => Log($"💬 {role}: {text}"));
 
-        // Wire audio → Simli avatar AND local monitor (Simli drives lip-sync, monitor gives local speaker output)
+        // Wire audio → Simli avatar (via background queue) AND local monitor
         // CRITICAL: Simli operations are fully isolated — failures must NEVER propagate to SIP
         session.OnAudioOut += alawFrame =>
         {
-            try
-            {
-                if (_simliAvatar?.IsConnected == true)
-                    FeedSimliAudio(alawFrame);
-            }
-            catch { /* Simli failure must never affect SIP audio path */ }
-
             // Always feed local monitor so operator can hear Ada's audio
             if (chkMonitorAda.Checked)
                 MonitorAddAlaw(alawFrame);
+
+            // Enqueue for Simli on dedicated background thread (non-blocking)
+            if (_simliAvatar?.IsConnected == true)
+                _simliChannel?.Writer.TryWrite(alawFrame);
         };
 
         // Wire barge-in → clear Simli buffer
-        session.OnBargeIn += () => { try { ClearSimliBuffer(); } catch { } };
+        session.OnBargeIn += () =>
+        {
+            try { ClearSimliBuffer(); } catch { }
+            // Drain queued Simli frames on barge-in
+            if (_simliChannel != null)
+                while (_simliChannel.Reader.TryRead(out _)) { }
+        };
 
         session.OnBookingUpdated += booking => SafeInvoke(() =>
         {
@@ -736,10 +742,14 @@ public partial class MainForm : Form
 
         try { await _simliAvatar.ConnectAsync(); }
         catch (Exception ex) { Log($"🎭 Simli connect error: {ex.Message}"); }
+
+        // Start dedicated background feeder thread (BelowNormal priority)
+        StartSimliFeeder();
     }
 
     private async Task DisconnectSimliAsync()
     {
+        StopSimliFeeder();
         if (_simliAvatar == null) return;
         try { await _simliAvatar.DisconnectAsync(); }
         catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
@@ -758,18 +768,59 @@ public partial class MainForm : Form
         catch (Exception ex) { Log($"🎭 Simli reconnect error: {ex.Message}"); }
     }
 
-    private void FeedSimliAudio(byte[] alawFrame)
+    private void StartSimliFeeder()
     {
-        if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
-            return;
+        StopSimliFeeder();
+        _simliChannel = System.Threading.Channels.Channel.CreateBounded<byte[]>(
+            new System.Threading.Channels.BoundedChannelOptions(120) // ~2.4s max buffer
+            {
+                SingleWriter = false,
+                SingleReader = true,
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest
+            });
+        _simliCts = new CancellationTokenSource();
+        var ct = _simliCts.Token;
 
-        var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
-        _simliAvatar.SendAudio(pcm16at16k);
+        _simliFeederTask = Task.Factory.StartNew(async () =>
+        {
+            try
+            {
+                // Lower thread priority so SIP audio is never starved
+                Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                Log("🎭 Simli feeder thread started (BelowNormal priority)");
+
+                while (!ct.IsCancellationRequested)
+                {
+                    var alawFrame = await _simliChannel.Reader.ReadAsync(ct);
+                    if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
+                        continue;
+
+                    var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
+                    _simliAvatar.SendAudio(pcm16at16k);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log($"🎭 Simli feeder error: {ex.Message}"); }
+            finally { Log("🎭 Simli feeder thread stopped"); }
+        }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+    }
+
+    private void StopSimliFeeder()
+    {
+        try { _simliCts?.Cancel(); } catch { }
+        try { _simliFeederTask?.Wait(500); } catch { }
+        _simliCts?.Dispose();
+        _simliCts = null;
+        _simliFeederTask = null;
+        _simliChannel = null;
     }
 
     private void ClearSimliBuffer()
     {
         if (_simliAvatar == null || !_simliAvatar.IsConnected) return;
+        // Drain the feeder queue
+        if (_simliChannel != null)
+            while (_simliChannel.Reader.TryRead(out _)) { }
         _ = _simliAvatar.ClearBufferAsync();
     }
 
@@ -936,7 +987,8 @@ public partial class MainForm : Form
         StopMicrophone();
         StopAudioMonitor();
 
-        // Disconnect and dispose Simli avatar safely
+        // Stop Simli feeder thread and dispose avatar
+        StopSimliFeeder();
         try
         {
             var avatar = _simliAvatar;
