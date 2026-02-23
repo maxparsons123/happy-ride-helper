@@ -1,17 +1,17 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Zaffiqbal247RadioCars.Ai;
-using Zaffiqbal247RadioCars.Audio;
-using Zaffiqbal247RadioCars.Avatar;
-using Zaffiqbal247RadioCars.Config;
-using Zaffiqbal247RadioCars.Core;
-using Zaffiqbal247RadioCars.Services;
-using Zaffiqbal247RadioCars.Sip;
+using ZaffAdaSystem.Ai;
+using ZaffAdaSystem.Audio;
+using ZaffAdaSystem.Avatar;
+using ZaffAdaSystem.Config;
+using ZaffAdaSystem.Core;
+using ZaffAdaSystem.Services;
+using ZaffAdaSystem.Sip;
 using Microsoft.Extensions.Logging;
 using NAudio.Codecs;
 using NAudio.Wave;
 
-namespace Zaffiqbal247RadioCars;
+namespace ZaffAdaSystem;
 
 public partial class MainForm : Form
 {
@@ -42,7 +42,7 @@ public partial class MainForm : Form
         _settings = LoadSettings();
         ApplySettingsToUi();
         InitSimliAvatar();
-        Log($"Zaffiqbal247RadioCars v{OpenAiSdkClient.VERSION} started. Configure SIP and click Connect.");
+        Log($"ZaffAdaSystem v{OpenAiSdkClientHighSample.VERSION} started. Configure SIP and click Connect.");
     }
 
     // ── Logger factory ──
@@ -62,7 +62,7 @@ public partial class MainForm : Form
 
     private static string SettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Zaffiqbal247RadioCars", "appsettings.json");
+        "ZaffAdaSystem", "appsettings.json");
 
     private static AppSettings LoadSettings()
     {
@@ -365,7 +365,7 @@ public partial class MainForm : Form
     {
         var factory = GetLoggerFactory();
 
-        var aiClient = new OpenAiSdkClient(factory.CreateLogger<OpenAiSdkClient>(), _settings.OpenAi);
+        var aiClient = new OpenAiSdkClientHighSample(factory.CreateLogger<OpenAiSdkClientHighSample>(), _settings.OpenAi);
         var fareCalculator = new FareCalculator(factory.CreateLogger<FareCalculator>(), _settings.GoogleMaps, _settings.Supabase);
         var dispatcher = new BsqdDispatcher(factory.CreateLogger<BsqdDispatcher>(), _settings.Dispatch);
 

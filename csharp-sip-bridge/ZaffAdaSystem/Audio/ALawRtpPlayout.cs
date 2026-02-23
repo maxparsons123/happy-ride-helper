@@ -7,7 +7,7 @@ using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
-namespace Zaffiqbal247RadioCars.Audio;
+namespace ZaffAdaSystem.Audio;
 
 /// <summary>
 /// Pure A-law RTP playout engine v10.4 — exact-size frames (reverted ArrayPool).

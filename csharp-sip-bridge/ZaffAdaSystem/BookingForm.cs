@@ -1,11 +1,11 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
-using Zaffiqbal247RadioCars.Config;
-using Zaffiqbal247RadioCars.Core;
-using Zaffiqbal247RadioCars.Services;
+using ZaffAdaSystem.Config;
+using ZaffAdaSystem.Core;
+using ZaffAdaSystem.Services;
 using Microsoft.Extensions.Logging;
 
-namespace Zaffiqbal247RadioCars;
+namespace ZaffAdaSystem;
 
 /// <summary>
 /// Manual booking dialog — allows operators to take bookings over the phone.

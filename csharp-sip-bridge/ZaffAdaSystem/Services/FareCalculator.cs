@@ -1,8 +1,8 @@
 using System.Text.Json;
-using Zaffiqbal247RadioCars.Config;
+using ZaffAdaSystem.Config;
 using Microsoft.Extensions.Logging;
 
-namespace Zaffiqbal247RadioCars.Services;
+namespace ZaffAdaSystem.Services;
 
 /// <summary>
 /// Fare calculator with Google Maps geocoding + address-dispatch edge function.

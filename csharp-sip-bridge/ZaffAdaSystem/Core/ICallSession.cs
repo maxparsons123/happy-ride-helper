@@ -1,6 +1,6 @@
-using Zaffiqbal247RadioCars.Ai;
+using ZaffAdaSystem.Ai;
 
-namespace Zaffiqbal247RadioCars.Core;
+namespace ZaffAdaSystem.Core;
 
 /// <summary>
 /// Represents a single call session lifecycle.

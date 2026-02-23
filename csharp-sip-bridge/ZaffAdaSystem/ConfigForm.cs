@@ -1,6 +1,6 @@
-using Zaffiqbal247RadioCars.Config;
+using ZaffAdaSystem.Config;
 
-namespace Zaffiqbal247RadioCars;
+namespace ZaffAdaSystem;
 
 /// <summary>
 /// Settings dialog for API keys, dispatch config, and audio options.

@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace Zaffiqbal247RadioCars.Core;
+namespace ZaffAdaSystem.Core;
 
 /// <summary>
 /// Centralized booking state for a call session.

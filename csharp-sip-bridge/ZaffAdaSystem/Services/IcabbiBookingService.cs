@@ -2,9 +2,9 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Zaffiqbal247RadioCars.Core;
+using ZaffAdaSystem.Core;
 
-namespace Zaffiqbal247RadioCars.Services;
+namespace ZaffAdaSystem.Services;
 
 /// <summary>
 /// Sends bookings to the iCabbi API from AdaSdkModel.
