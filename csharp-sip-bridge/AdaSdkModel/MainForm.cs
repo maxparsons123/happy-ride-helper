@@ -796,7 +796,7 @@ public partial class MainForm : Form
                         continue;
 
                     var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
-                    _simliAvatar.SendAudio(pcm16at16k);
+                    await _simliAvatar.SendAudioAsync(pcm16at16k);
                 }
             }
             catch (OperationCanceledException) { }
