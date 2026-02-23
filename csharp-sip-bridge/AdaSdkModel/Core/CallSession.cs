@@ -4094,6 +4094,13 @@ public sealed class CallSession : ICallSession
                 var respBody = await resp.Content.ReadAsStringAsync();
                 _logger.LogWarning("[{SessionId}] ⚠️ Failed to save booking to Supabase: HTTP {Status} — {Body}",
                     sessionId, (int)resp.StatusCode, respBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{SessionId}] ⚠️ SaveBookingToSupabase error (non-fatal)", sessionId);
+        }
+    }
 
     // =========================
     // TRANSCRIPT PUSH TO SUPABASE
@@ -4133,13 +4140,6 @@ public sealed class CallSession : ICallSession
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "[{SessionId}] Transcript push failed (non-fatal)", SessionId);
-        }
-    }
-}
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[{SessionId}] ⚠️ SaveBookingToSupabase error (non-fatal)", sessionId);
         }
     }
 }
