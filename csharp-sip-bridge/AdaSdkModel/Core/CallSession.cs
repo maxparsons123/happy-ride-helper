@@ -751,6 +751,8 @@ public sealed class CallSession : ICallSession
     private string? _pendingDestClarificationMessage;
     private bool _pendingAddressCorrection;  // true = address discrepancy detected, allow pickup/dest correction through stage lock
     private string? _lastGuardBlockedDest;   // Remembers the last destination blocked by the auto-fill guard so a repeat/confirm bypasses it
+    private string? _lastDiscrepancyKey;     // Tracks the discrepancy text from the last attempt so we can detect confirmation loops
+    private int _discrepancyConfirmCount;    // How many times the same discrepancy has fired — after 1 we bypass (user confirmed)
 
     /// <summary>
     /// Known addresses from the caller's Supabase history (pickup + dropoff combined).
@@ -1554,6 +1556,29 @@ public sealed class CallSession : ICallSession
                     var discrepancy = DetectAddressDiscrepancy(result);
                     if (discrepancy != null)
                     {
+                        // ── CONFIRMATION LOOP BREAKER ──
+                        // If the same discrepancy fires again with the same destination, the user
+                        // has already been asked and confirmed — accept the geocoded result.
+                        var discrepancyKey = $"{_booking.Destination}|{result.DestStreet}";
+                        if (discrepancyKey == _lastDiscrepancyKey)
+                        {
+                            _discrepancyConfirmCount++;
+                            if (_discrepancyConfirmCount >= 1)
+                            {
+                                _logger.LogInformation("[{SessionId}] ✅ Discrepancy loop breaker: user confirmed '{Dest}' resolves to '{Street}' — accepting geocoded result",
+                                    sessionId, _booking.Destination, result.DestStreet);
+                                _lastDiscrepancyKey = null;
+                                _discrepancyConfirmCount = 0;
+                                // Fall through to fare presentation below
+                                goto discrepancyAccepted;
+                            }
+                        }
+                        else
+                        {
+                            _lastDiscrepancyKey = discrepancyKey;
+                            _discrepancyConfirmCount = 0;
+                        }
+
                         _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
                         _pendingAddressCorrection = true;  // Allow pickup/dest correction through stage lock
@@ -1565,6 +1590,7 @@ public sealed class CallSession : ICallSession
                             "When they respond, call sync_booking_data with the corrected address.");
                         return;
                     }
+                    discrepancyAccepted:
 
                     // Enrich structured fields if edge function failed internally and returned Nominatim-only result
                     if (string.IsNullOrWhiteSpace(result.PickupStreet) || string.IsNullOrWhiteSpace(result.DestStreet))
@@ -2019,6 +2045,18 @@ public sealed class CallSession : ICallSession
             var discrepancy2 = DetectAddressDiscrepancy(result);
             if (discrepancy2 != null)
             {
+                // ── CONFIRMATION LOOP BREAKER (post-clarification) ──
+                var discKey2 = $"{_booking.Destination}|{result.DestStreet}";
+                if (discKey2 == _lastDiscrepancyKey && ++_discrepancyConfirmCount >= 1)
+                {
+                    _logger.LogInformation("[{SessionId}] ✅ Discrepancy loop breaker (post-clarify): accepting geocoded result for '{Dest}'",
+                        sessionId, _booking.Destination);
+                    _lastDiscrepancyKey = null;
+                    _discrepancyConfirmCount = 0;
+                    goto postClarifyAccepted;
+                }
+                _lastDiscrepancyKey = discKey2;
+
                 _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy after clarification: {Msg}", sessionId, discrepancy2);
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
                 await _aiClient.InjectMessageAndRespondAsync(
@@ -2027,6 +2065,7 @@ public sealed class CallSession : ICallSession
                     "When they respond, call sync_booking_data with the corrected address.");
                 return;
             }
+            postClarifyAccepted:
 
             ApplyFareResult(result);
 
@@ -4108,9 +4147,24 @@ public sealed class CallSession : ICallSession
             "retail park", "industrial estate", "business park",
             "nightclub", "club", "gym", "leisure", "pool",
             "office", "surgery", "clinic", "dental", "pharmacy",
-            "prison", "police", "fire station", "council"
+            "prison", "police", "fire station", "council",
+            "cafe", "café", "bakery", "takeaway", "pizza",
+            "chicken", "kebab", "chippy", "sweet", "shop", "store"
         };
-        return landmarks.Any(kw => lower.Contains(kw));
+        if (landmarks.Any(kw => lower.Contains(kw)))
+            return true;
+
+        // Heuristic: if the address contains NO standard street-type suffix,
+        // it's likely a venue/POI name (e.g. "Sweet Spot, Coventry")
+        string[] streetTypes = {
+            "road", "street", "lane", "avenue", "drive", "close", "way",
+            "crescent", "terrace", "place", "grove", "rise", "hill",
+            "walk", "row", "mews", "parade", "gardens", "yard",
+            "boulevard", "passage", "alley", "circus", "gate"
+        };
+        // Strip city suffix (after comma) before checking
+        var addressPart = lower.Contains(',') ? lower.Substring(0, lower.IndexOf(',')) : lower;
+        return !streetTypes.Any(st => addressPart.Contains(st));
     }
 
 
