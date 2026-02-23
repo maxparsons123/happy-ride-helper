@@ -11,6 +11,10 @@ namespace AdaSdkModel.Avatar;
 /// Simli avatar integration using WebView2 and the Simli JavaScript SDK.
 /// Embeds a web page that handles WebRTC communication with Simli's
 /// audio-to-video pipeline. Expects PCM16 audio at 16kHz.
+///
+/// Audio is batched in C# (200ms window) to reduce ExecuteScriptAsync
+/// cross-boundary calls from ~50/s to ~5/s, preventing UI-thread starvation
+/// that causes lip-sync lag and video freezes.
 /// </summary>
 public sealed class SimliAvatar : UserControl
 {
@@ -31,6 +35,15 @@ public sealed class SimliAvatar : UserControl
     // Buffer audio while WebRTC connection is being established
     private readonly List<byte[]> _pendingAudio = new();
     private const int MAX_PENDING_CHUNKS = 100; // ~2s
+
+    // ── Audio batching ──
+    // Accumulate small PCM chunks and flush as one base64 blob every BATCH_INTERVAL_MS
+    private readonly List<byte[]> _audioBatch = new();
+    private int _audioBatchBytes;
+    private System.Threading.Timer? _batchTimer;
+    private readonly object _batchLock = new();
+    private const int BATCH_INTERVAL_MS = 200;   // flush every 200ms
+    private const int BATCH_MAX_BYTES = 32_000;   // or when 1s of audio accumulated (16kHz×16bit = 32KB/s)
 
     public SimliAvatar(ILogger<SimliAvatar> logger)
     {
@@ -107,29 +120,48 @@ public sealed class SimliAvatar : UserControl
         await ExecAsync($"handleCommand({cmd})");
     }
 
-    /// <summary>Send PCM16 audio at 16kHz to drive lip-sync.</summary>
-    public async Task SendAudioAsync(byte[] pcm16Audio)
+    /// <summary>Send PCM16 audio at 16kHz to drive lip-sync (batched).</summary>
+    public Task SendAudioAsync(byte[] pcm16Audio)
     {
         if (IsConnecting && !IsConnected)
         {
             if (_pendingAudio.Count < MAX_PENDING_CHUNKS)
                 _pendingAudio.Add(pcm16Audio);
-            return;
+            return Task.CompletedTask;
         }
 
-        if (!IsConnected) return;
+        if (!IsConnected) return Task.CompletedTask;
 
         _audioBytesSent += pcm16Audio.Length;
 
-        var b64 = Convert.ToBase64String(pcm16Audio);
-        var cmd = JsonSerializer.Serialize(new { command = "audio", data = b64 });
-        await ExecAsync($"handleCommand({cmd})");
+        lock (_batchLock)
+        {
+            _audioBatch.Add(pcm16Audio);
+            _audioBatchBytes += pcm16Audio.Length;
+
+            // Start timer on first chunk
+            _batchTimer ??= new System.Threading.Timer(
+                _ => _ = FlushBatchAsync(), null, BATCH_INTERVAL_MS, BATCH_INTERVAL_MS);
+
+            // Flush immediately if we've accumulated enough
+            if (_audioBatchBytes >= BATCH_MAX_BYTES)
+            {
+                _ = FlushBatchAsync();
+            }
+        }
+
+        return Task.CompletedTask;
     }
 
     /// <summary>Clear the audio queue (barge-in).</summary>
     public async Task ClearBufferAsync()
     {
         _pendingAudio.Clear();
+        lock (_batchLock)
+        {
+            _audioBatch.Clear();
+            _audioBatchBytes = 0;
+        }
         var cmd = JsonSerializer.Serialize(new { command = "clear" });
         await ExecAsync($"handleCommand({cmd})");
     }
@@ -137,12 +169,50 @@ public sealed class SimliAvatar : UserControl
     /// <summary>Tear down WebRTC session.</summary>
     public async Task DisconnectAsync()
     {
+        StopBatchTimer();
         var cmd = JsonSerializer.Serialize(new { command = "disconnect" });
         await ExecAsync($"handleCommand({cmd})");
         IsConnected = false;
         IsConnecting = false;
         _pendingAudio.Clear();
         SetStatus("Disconnected", System.Drawing.Color.Gray);
+    }
+
+    // ── Batching ──
+
+    private async Task FlushBatchAsync()
+    {
+        byte[] combined;
+        lock (_batchLock)
+        {
+            if (_audioBatch.Count == 0) return;
+
+            // Concatenate all chunks into one blob
+            combined = new byte[_audioBatchBytes];
+            int offset = 0;
+            foreach (var chunk in _audioBatch)
+            {
+                Buffer.BlockCopy(chunk, 0, combined, offset, chunk.Length);
+                offset += chunk.Length;
+            }
+            _audioBatch.Clear();
+            _audioBatchBytes = 0;
+        }
+
+        var b64 = Convert.ToBase64String(combined);
+        var cmd = JsonSerializer.Serialize(new { command = "audio", data = b64 });
+        await ExecAsync($"handleCommand({cmd})");
+    }
+
+    private void StopBatchTimer()
+    {
+        lock (_batchLock)
+        {
+            _batchTimer?.Dispose();
+            _batchTimer = null;
+            _audioBatch.Clear();
+            _audioBatchBytes = 0;
+        }
     }
 
     // ── Internals ──
@@ -167,6 +237,7 @@ public sealed class SimliAvatar : UserControl
                 case "disconnected":
                     IsConnected = false;
                     IsConnecting = false;
+                    StopBatchTimer();
                     _pendingAudio.Clear();
                     SafeInvoke(() => SetStatus("Disconnected", System.Drawing.Color.Gray));
                     _logger.LogInformation("🎭 Avatar disconnected");
@@ -202,13 +273,22 @@ public sealed class SimliAvatar : UserControl
     {
         if (_pendingAudio.Count == 0) return;
         _logger.LogInformation("🎭 Flushing {Count} buffered chunks", _pendingAudio.Count);
-        var buf = _pendingAudio.ToList();
-        _pendingAudio.Clear();
-        foreach (var chunk in buf)
+
+        // Concatenate all pending into one batch send
+        int total = 0;
+        foreach (var c in _pendingAudio) total += c.Length;
+        var combined = new byte[total];
+        int off = 0;
+        foreach (var c in _pendingAudio)
         {
-            await SendAudioAsync(chunk);
-            await Task.Delay(10);
+            Buffer.BlockCopy(c, 0, combined, off, c.Length);
+            off += c.Length;
         }
+        _pendingAudio.Clear();
+
+        var b64 = Convert.ToBase64String(combined);
+        var cmd = JsonSerializer.Serialize(new { command = "audio", data = b64 });
+        await ExecAsync($"handleCommand({cmd})");
     }
 
     private async Task ExecAsync(string script)
