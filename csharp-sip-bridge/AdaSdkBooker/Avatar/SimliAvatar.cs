@@ -282,14 +282,16 @@ public sealed class SimliAvatar : UserControl
         <div id="loading">Waiting for connection...</div>
     </div>
     <script>
-        let pc=null, ws=null, audioQueue=[], isSending=false, audioBytesSent=0;
+        let pc=null, ws=null, audioBytesSent=0;
+        const BP_HIGH=64000, BP_LOW=16000;
+        let bpQueue=[], bpTimer=null;
         function log(msg){ chrome.webview.postMessage({type:'log',message:msg}); }
         function handleCommand(cmd){
             switch(cmd.command){
                 case 'connect': connect(cmd.apiKey,cmd.faceId); break;
-                case 'audio': queueAudio(cmd.data); break;
+                case 'audio': sendAudio(cmd.data); break;
                 case 'disconnect': disconnect(); break;
-                case 'clear': audioQueue=[]; break;
+                case 'clear': bpQueue=[]; break;
             }
         }
         async function connect(apiKey,faceId){
@@ -307,7 +309,7 @@ public sealed class SimliAvatar : UserControl
                 dc.addEventListener('open',async()=>{
                     log('DataChannel open');
                     try{
-                        const resp=await fetch('https://api.simli.ai/startAudioToVideoSession',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({faceId,apiKey,isJPG:false,syncAudio:true,handleSilence:true,maxSessionLength:3600,maxIdleTime:600})});
+                        const resp=await fetch('https://api.simli.ai/startAudioToVideoSession',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({faceId,apiKey,isJPG:false,syncAudio:true,handleSilence:true,maxSessionLength:3600,maxIdleTime:600,model:'fasttalk'})});
                         if(!resp.ok) throw new Error('API '+resp.status);
                         const json=await resp.json();
                         if(ws&&ws.readyState===WebSocket.OPEN){ws.send(json.session_token);log('Token sent');}
@@ -319,7 +321,7 @@ public sealed class SimliAvatar : UserControl
                 ws=new WebSocket('wss://api.simli.ai/startWebRTCSession');
                 ws.addEventListener('open',()=>{ws.send(JSON.stringify({sdp:pc.localDescription.sdp,type:pc.localDescription.type}));});
                 ws.addEventListener('message',async evt=>{
-                    if(evt.data==='START'){chrome.webview.postMessage({type:'connected'});ws.send(new Uint8Array(16000));return;}
+                    if(evt.data==='START'){chrome.webview.postMessage({type:'connected'});ws.send(new Uint8Array(6400));return;}
                     if(evt.data==='STOP'){disconnect();return;}
                     try{const m=JSON.parse(evt.data);if(m.type==='answer') await pc.setRemoteDescription(m);}catch(e){}
                 });
@@ -332,17 +334,26 @@ public sealed class SimliAvatar : UserControl
             }
         }
         function waitForIce(){return new Promise(r=>{let c=0,l=-1;const chk=()=>{if(pc.iceGatheringState==='complete'||c===l)r();else{l=c;setTimeout(chk,250);}};pc.onicecandidate=e=>{if(e.candidate)c++;};setTimeout(()=>r(),3000);setTimeout(chk,250);});}
-        function queueAudio(b64){
+        function sendAudio(b64){
             if(!ws||ws.readyState!==WebSocket.OPEN) return;
-            try{const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);audioBytesSent+=bytes.length;audioQueue.push(bytes);processQueue();}catch(e){}
+            try{
+                const bin=atob(b64);const bytes=new Uint8Array(bin.length);
+                for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                audioBytesSent+=bytes.length;
+                if(ws.bufferedAmount>BP_HIGH){
+                    bpQueue.push(bytes);
+                    if(!bpTimer) bpTimer=setInterval(drainBp,5);
+                    return;
+                }
+                ws.send(bytes);
+            }catch(e){log('send error: '+e.message);}
         }
-        function processQueue(){
-            if(isSending||!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0) return;
-            isSending=true;const chunk=audioQueue.shift();
-            try{ws.send(chunk);chrome.webview.postMessage({type:'speaking'});}catch(e){}
-            setTimeout(()=>{isSending=false;if(audioQueue.length>0)processQueue();else chrome.webview.postMessage({type:'silent'});},20);
+        function drainBp(){
+            if(!ws||ws.readyState!==WebSocket.OPEN||bpQueue.length===0){clearInterval(bpTimer);bpTimer=null;return;}
+            while(bpQueue.length>0&&ws.bufferedAmount<BP_LOW) ws.send(bpQueue.shift());
+            if(bpQueue.length===0){clearInterval(bpTimer);bpTimer=null;}
         }
-        function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
+        function disconnect(){if(bpTimer){clearInterval(bpTimer);bpTimer=null;}bpQueue=[];if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
     </script>
 </body>
 </html>

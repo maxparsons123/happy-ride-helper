@@ -436,8 +436,11 @@ public class SimliWebView : UserControl
     <script>
         let pc = null;
         let ws = null;
-        let audioQueue = [];
-        let isSending = false;
+        let audioBytesSent = 0;
+        const BACKPRESSURE_HIGH = 64000; // pause sending if WS buffer > 64KB
+        const BACKPRESSURE_LOW  = 16000; // resume when buffer drains below 16KB
+        let backpressureQueue = [];
+        let drainTimer = null;
 
         function log(msg) {
             chrome.webview.postMessage({ type: 'log', message: msg });
@@ -450,13 +453,13 @@ public class SimliWebView : UserControl
                     connect(cmd.apiKey, cmd.faceId);
                     break;
                 case 'audio':
-                    queueAudio(cmd.data);
+                    sendAudio(cmd.data);
                     break;
                 case 'disconnect':
                     disconnect();
                     break;
                 case 'clear':
-                    audioQueue = [];
+                    backpressureQueue = [];
                     break;
             }
         }
@@ -465,7 +468,6 @@ public class SimliWebView : UserControl
             document.getElementById('loading').textContent = 'Creating WebRTC connection...';
             
             try {
-                // Step 1: Create peer connection with STUN servers
                 const config = {
                     sdpSemantics: 'unified-plan',
                     iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
@@ -486,20 +488,17 @@ public class SimliWebView : UserControl
 
                 pc.addEventListener('iceconnectionstatechange', () => {
                     log('ICE state: ' + pc.iceConnectionState);
-                    // Don't mark connected on ICE state - wait for START message from Simli
                     if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
                         chrome.webview.postMessage({ type: 'disconnected' });
                     }
                 });
 
-                // Step 2: Create data channel (for receiving Simli messages, not audio)
                 const dc = pc.createDataChannel('datachannel', { ordered: true });
                 log('DataChannel created');
                 
                 dc.addEventListener('open', async () => {
                     log('DataChannel open - getting session token...');
                     
-                    // Get session token from Simli API
                     const metadata = {
                         faceId: faceId,
                         apiKey: apiKey,
@@ -507,7 +506,8 @@ public class SimliWebView : UserControl
                         syncAudio: true,
                         handleSilence: true,
                         maxSessionLength: 3600,
-                        maxIdleTime: 600
+                        maxIdleTime: 600,
+                        model: 'fasttalk'
                     };
                     
                     try {
@@ -525,11 +525,9 @@ public class SimliWebView : UserControl
                         const resJSON = await response.json();
                         log('Session token received: ' + (resJSON.session_token ? 'yes' : 'no'));
                         
-                        // Send session token over WebSocket
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             ws.send(resJSON.session_token);
                             log('Session token sent to WebSocket - waiting for START...');
-                            // DON'T mark connected yet - wait for START message
                         }
                     } catch (err) {
                         log('Session token error: ' + err.message);
@@ -545,7 +543,6 @@ public class SimliWebView : UserControl
                     log('DataChannel closed');
                 });
 
-                // Step 3: Create offer
                 const offer = await pc.createOffer({
                     offerToReceiveAudio: true,
                     offerToReceiveVideo: true
@@ -553,11 +550,9 @@ public class SimliWebView : UserControl
                 await pc.setLocalDescription(offer);
                 log('Local description set');
 
-                // Wait for ICE candidates
                 await waitForIceCandidates();
                 log('ICE gathering done');
 
-                // Step 4: Connect via WebSocket to Simli
                 document.getElementById('loading').textContent = 'Connecting to Simli...';
                 
                 ws = new WebSocket('wss://api.simli.ai/startWebRTCSession');
@@ -576,12 +571,10 @@ public class SimliWebView : UserControl
                     
                     if (data === 'START') {
                         log('Received START - Simli ready for audio!');
-                        // NOW we're connected and ready for audio
                         chrome.webview.postMessage({ type: 'connected' });
-                        // Send initial silence to start the session
-                        const silence = new Uint8Array(16000);
+                        const silence = new Uint8Array(6400); // 200ms of PCM16 silence at 16kHz
                         ws.send(silence);
-                        log('Initial silence sent');
+                        log('Initial silence sent (6400 bytes)');
                         return;
                     }
                     
@@ -591,7 +584,6 @@ public class SimliWebView : UserControl
                         return;
                     }
                     
-                    // Try to parse as SDP answer
                     try {
                         const message = JSON.parse(data);
                         if (message.type === 'answer') {
@@ -599,9 +591,7 @@ public class SimliWebView : UserControl
                             await pc.setRemoteDescription(message);
                             log('Remote description set');
                         }
-                    } catch (e) {
-                        // Not JSON, might be pong or other message
-                    }
+                    } catch (e) {}
                 });
                 
                 ws.addEventListener('close', () => {
@@ -642,27 +632,13 @@ public class SimliWebView : UserControl
                     }
                 };
                 
-                // Also resolve after timeout
                 setTimeout(() => resolve(), 3000);
                 setTimeout(checkCandidates, 250);
             });
         }
 
-        let audioBytesSent = 0;
-        
-        function queueAudio(base64Data) {
-            if (!ws) {
-                log('Audio dropped: WebSocket is null');
-                return;
-            }
-            
-            if (ws.readyState !== WebSocket.OPEN) {
-                // Log WebSocket state issues
-                if (audioBytesSent % 10000 < 2000 || audioBytesSent < 5000) {
-                    log('Audio dropped: WebSocket state=' + ws.readyState + ' (0=CONNECTING,1=OPEN,2=CLOSING,3=CLOSED)');
-                }
-                return;
-            }
+        function sendAudio(base64Data) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
             
             try {
                 const binary = atob(base64Data);
@@ -671,54 +647,51 @@ public class SimliWebView : UserControl
                     bytes[i] = binary.charCodeAt(i);
                 }
                 audioBytesSent += bytes.length;
-                
-                // Log periodically
-                if (audioBytesSent % 32000 < bytes.length) {
-                    log('Audio queued: ' + Math.round(audioBytesSent / 1000) + 'KB total, queue: ' + audioQueue.length);
+
+                // Backpressure: if WS buffer is full, queue and drain later
+                if (ws.bufferedAmount > BACKPRESSURE_HIGH) {
+                    backpressureQueue.push(bytes);
+                    if (!drainTimer) {
+                        drainTimer = setInterval(drainBackpressure, 5);
+                    }
+                    if (backpressureQueue.length % 50 === 0) {
+                        log('Backpressure: queued ' + backpressureQueue.length + ' chunks, buffered=' + ws.bufferedAmount);
+                    }
+                    return;
                 }
+
+                ws.send(bytes);
                 
-                audioQueue.push(bytes);
-                processAudioQueue();
-            } catch (err) {
-                log('Audio queue error: ' + err.message);
+                if (audioBytesSent % 32000 < bytes.length) {
+                    log('Audio sent: ' + Math.round(audioBytesSent / 1000) + 'KB total, buffered=' + ws.bufferedAmount);
+                }
+            } catch (e) {
+                log('Send error: ' + e.message);
             }
         }
-        
-        function processAudioQueue() {
-            if (isSending || !ws || ws.readyState !== WebSocket.OPEN) return;
-            if (audioQueue.length === 0) return;
-            
-            isSending = true;
-            const chunk = audioQueue.shift();
-            
-            try {
-                ws.send(chunk);
-                chrome.webview.postMessage({ type: 'speaking' });
-            } catch (err) {
-                log('Send error: ' + err.message);
+
+        function drainBackpressure() {
+            if (!ws || ws.readyState !== WebSocket.OPEN || backpressureQueue.length === 0) {
+                clearInterval(drainTimer);
+                drainTimer = null;
+                return;
             }
-            
-            // Throttle to prevent overwhelming
-            setTimeout(() => {
-                isSending = false;
-                if (audioQueue.length > 0) {
-                    processAudioQueue();
-                } else {
-                    chrome.webview.postMessage({ type: 'silent' });
-                }
-            }, 20);
+            // Drain as long as buffer is below low watermark
+            while (backpressureQueue.length > 0 && ws.bufferedAmount < BACKPRESSURE_LOW) {
+                ws.send(backpressureQueue.shift());
+            }
+            if (backpressureQueue.length === 0) {
+                clearInterval(drainTimer);
+                drainTimer = null;
+                log('Backpressure drained');
+            }
         }
 
         function disconnect() {
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            if (pc) {
-                pc.close();
-                pc = null;
-            }
-            audioQueue = [];
+            if (drainTimer) { clearInterval(drainTimer); drainTimer = null; }
+            backpressureQueue = [];
+            if (ws) { ws.close(); ws = null; }
+            if (pc) { pc.close(); pc = null; }
             document.getElementById('loading').style.display = 'block';
             document.getElementById('loading').textContent = 'Disconnected';
         }
