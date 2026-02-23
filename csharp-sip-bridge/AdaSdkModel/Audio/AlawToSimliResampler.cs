@@ -2,7 +2,8 @@ namespace AdaSdkModel.Audio;
 
 /// <summary>
 /// Converts G.711 A-law (8kHz) frames to PCM16 (16kHz) for Simli avatar lip-sync.
-/// Uses linear interpolation for the 2× upsample — simple, low-latency, no dependencies.
+/// Uses cubic interpolation for the 2× upsample with a simple low-pass filter
+/// to reduce aliasing artifacts (crackling).
 /// </summary>
 public static class AlawToSimliResampler
 {
@@ -20,18 +21,47 @@ public static class AlawToSimliResampler
         for (int i = 0; i < alawFrame.Length; i++)
             samples8k[i] = ALawDecode(alawFrame[i]);
 
-        // Step 2: Upsample 8kHz → 16kHz (2× linear interpolation)
+        // Step 2: Upsample 8kHz → 16kHz (2× with cubic interpolation)
         var samples16k = new short[samples8k.Length * 2];
-        for (int i = 0; i < samples8k.Length - 1; i++)
+        for (int i = 0; i < samples8k.Length; i++)
         {
+            // Original sample stays
             samples16k[i * 2] = samples8k[i];
-            samples16k[i * 2 + 1] = (short)((samples8k[i] + samples8k[i + 1]) / 2);
-        }
-        // Last sample: duplicate
-        samples16k[(samples8k.Length - 1) * 2] = samples8k[^1];
-        samples16k[(samples8k.Length - 1) * 2 + 1] = samples8k[^1];
 
-        // Step 3: Convert to byte[]
+            // Interpolated midpoint using cubic (Catmull-Rom) for smoother result
+            int im1 = Math.Max(i - 1, 0);
+            int ip1 = Math.Min(i + 1, samples8k.Length - 1);
+            int ip2 = Math.Min(i + 2, samples8k.Length - 1);
+
+            float p0 = samples8k[im1];
+            float p1 = samples8k[i];
+            float p2 = samples8k[ip1];
+            float p3 = samples8k[ip2];
+
+            // Catmull-Rom at t=0.5
+            float mid = 0.5f * (
+                2f * p1 +
+                (-p0 + p2) * 0.5f +
+                (2f * p0 - 5f * p1 + 4f * p2 - p3) * 0.25f +
+                (-p0 + 3f * p1 - 3f * p2 + p3) * 0.125f
+            );
+
+            samples16k[i * 2 + 1] = (short)Math.Clamp((int)mid, short.MinValue, short.MaxValue);
+        }
+
+        // Step 3: Simple 3-tap low-pass to smooth any remaining artifacts
+        // [0.25, 0.5, 0.25] kernel - very light, preserves timing
+        for (int i = 1; i < samples16k.Length - 1; i++)
+        {
+            // Only filter the interpolated (odd) samples to avoid smearing originals
+            if ((i & 1) == 1)
+            {
+                int smoothed = (samples16k[i - 1] + 2 * samples16k[i] + samples16k[i + 1]) / 4;
+                samples16k[i] = (short)smoothed;
+            }
+        }
+
+        // Step 4: Convert to byte[]
         var result = new byte[samples16k.Length * 2];
         Buffer.BlockCopy(samples16k, 0, result, 0, result.Length);
         return result;
