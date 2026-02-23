@@ -1,4 +1,4 @@
-// Last updated: 2026-02-21 (v2.8)
+// Last updated: 2026-02-23 (v3.1 — improved: cached JSON, VAD helper, voice map, goodbye regex, keepalive diag)
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -113,6 +113,12 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private const string TYPE_RESPONSE_CREATED = "ResponseCreated";
     private const string TYPE_RESPONSE_DONE = "ResponseDone";
     private const string TYPE_RESPONSE_FINISHED = "ResponseFinished";
+
+    // Cached JSON options — avoid allocating per tool call
+    private static readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     // =========================
     // NON-BLOCKING LOGGER
@@ -266,15 +272,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                 {
                     Model = "whisper-1"
                 },
-                TurnDetectionOptions = _useSemanticVad
-                    ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.25f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
-                        silenceDuration: TimeSpan.FromMilliseconds(1400))
-                    : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.2f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
-                        silenceDuration: TimeSpan.FromMilliseconds(600))
+                TurnDetectionOptions = BuildVadOptions(_useSemanticVad)
             };
 
             options.Tools.Add(OpenAiSdkClient.BuildSyncBookingDataToolStatic());
@@ -334,13 +332,16 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         _sessionCts = null;
 
         OnAudio = null;
+        OnAudioRaw = null;
         OnToolCall = null;
         OnEnded = null;
         OnPlayoutComplete = null;
         OnTranscript = null;
         OnBargeIn = null;
         OnResponseCompleted = null;
+        OnGoodbyeWithoutBooking = null;
         GetQueuedFrames = null;
+        NoReplyContextProvider = null;
 
         ResetCallState(null);
         _logger.LogInformation("OpenAiSdkClientHighSample fully disposed — all state cleared");
@@ -478,15 +479,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         {
             var options = new ConversationSessionOptions
             {
-                TurnDetectionOptions = useSemantic
-                    ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.25f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
-                        silenceDuration: TimeSpan.FromMilliseconds(1400))
-                    : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
-                        detectionThreshold: 0.2f,
-                        prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
-                        silenceDuration: TimeSpan.FromMilliseconds(600))
+                TurnDetectionOptions = BuildVadOptions(useSemantic)
             };
 
             await _session.ConfigureSessionAsync(options);
@@ -698,8 +691,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         {
             var toolName = itemFinished.FunctionName ?? "unknown";
             var argsJson = itemFinished.FunctionCallArguments ?? "{}";
-            var args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsJson,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
+            var args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsJson, _jsonOptions) ?? new();
 
             Log($"🔧 Tool call: {toolName} ({args.Count} args)");
 
@@ -924,7 +916,12 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                 var active = Volatile.Read(ref _responseActive) == 1;
                 var ended = Volatile.Read(ref _callEnded) == 1;
                 var tool = Volatile.Read(ref _toolInFlight) == 1;
-                Log($"💓 Keepalive: connected={IsConnected}, response_active={active}, tool={tool}, ended={ended}, codec=PCM16-24k");
+                var noReply = Volatile.Read(ref _noReplyCount);
+                var syncs = Volatile.Read(ref _syncCallCount);
+                var queueDepth = -1;
+                try { queueDepth = GetQueuedFrames?.Invoke() ?? -1; } catch { }
+                Log($"💓 Keepalive: connected={IsConnected}, resp={active}, tool={tool}, ended={ended}, " +
+                    $"noReply={noReply}/{MAX_NO_REPLY_PROMPTS}, syncs={syncs}, queue={queueDepth}, codec=PCM16-24k");
             }
         }
         catch (OperationCanceledException) { }
@@ -945,14 +942,16 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     // =========================
     // GOODBYE DETECTION
     // =========================
+    private static readonly Regex _adaGoodbyePattern = new(
+        @"\b(goodbye|good\s*bye|bye\s*bye)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private void CheckGoodbye(string text)
     {
-        if (text.Contains("Goodbye", StringComparison.OrdinalIgnoreCase) &&
-            (text.Contains("Taxibot", StringComparison.OrdinalIgnoreCase) ||
-             text.Contains("TaxiBot", StringComparison.OrdinalIgnoreCase) ||
-             text.Contains("taxi", StringComparison.OrdinalIgnoreCase)))
+        // Only fire if Ada is saying goodbye AND no booking was confirmed this call
+        if (_adaGoodbyePattern.IsMatch(text) && Volatile.Read(ref _bookingConfirmed) == 0)
         {
-            Log("👋 Goodbye detected in Ada's speech");
+            Log("👋 Goodbye detected in Ada's speech (no booking confirmed)");
             Interlocked.Exchange(ref _ignoreUserAudio, 1);
             OnGoodbyeWithoutBooking?.Invoke();
         }
@@ -976,10 +975,30 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private static ConversationVoice MapVoice(string voice) => voice?.ToLowerInvariant() switch
     {
         "alloy" => ConversationVoice.Alloy,
+        "ash" => ConversationVoice.Ash,
+        "ballad" => ConversationVoice.Ballad,
+        "coral" => ConversationVoice.Coral,
         "echo" => ConversationVoice.Echo,
+        "sage" => ConversationVoice.Sage,
         "shimmer" => ConversationVoice.Shimmer,
+        "verse" => ConversationVoice.Verse,
         _ => ConversationVoice.Shimmer
     };
+
+    /// <summary>
+    /// Build VAD turn detection options — centralised to avoid duplication between
+    /// ConnectAsync and SetVadModeAsync.
+    /// </summary>
+    private static ConversationTurnDetectionOptions BuildVadOptions(bool useSemantic) =>
+        useSemantic
+            ? ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                detectionThreshold: 0.25f,
+                prefixPaddingDuration: TimeSpan.FromMilliseconds(500),
+                silenceDuration: TimeSpan.FromMilliseconds(1400))
+            : ConversationTurnDetectionOptions.CreateServerVoiceActivityTurnDetectionOptions(
+                detectionThreshold: 0.2f,
+                prefixPaddingDuration: TimeSpan.FromMilliseconds(400),
+                silenceDuration: TimeSpan.FromMilliseconds(600));
 
     // =========================
     // DISPOSE
