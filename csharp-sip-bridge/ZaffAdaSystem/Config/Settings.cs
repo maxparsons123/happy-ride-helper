@@ -20,6 +20,9 @@ public sealed class AppSettings
     public SupabaseSettings Supabase { get; set; } = new();
     public SimliSettings Simli { get; set; } = new();
     public IcabbiSettings Icabbi { get; set; } = new();
+    public GeminiSettings Gemini { get; set; } = new();
+    public ZoneGuardSettings ZoneGuard { get; set; } = new();
+    public SumUpSettings SumUp { get; set; } = new();
 }
 
 public sealed class SimliSettings
@@ -66,6 +69,9 @@ public sealed class SipSettings
     public bool EnableStun { get; set; } = true;
     public string StunServer { get; set; } = "stun.l.google.com";
     public int StunPort { get; set; } = 19302;
+
+    /// <summary>Extension to blind-transfer to when caller requests a human operator.</summary>
+    public string? OperatorTransferExtension { get; set; }
 
     public bool IsGammaTrunk => Transport.Equals("TCP_GAMMA", StringComparison.OrdinalIgnoreCase);
     public string EffectiveAuthUser => string.IsNullOrWhiteSpace(AuthId) ? Username : AuthId;
@@ -142,13 +148,15 @@ public sealed class SipAccount
     public bool EnableStun { get; set; } = true;
     public string StunServer { get; set; } = "stun.l.google.com";
     public int StunPort { get; set; } = 19302;
+    public string? OperatorTransferExtension { get; set; }
 
     public SipSettings ToSipSettings() => new()
     {
         Server = Server, Port = Port, Transport = Transport,
         Username = Username, Password = Password, AuthId = AuthId,
         Domain = Domain, DisplayName = DisplayName, Ddi = Ddi, AutoAnswer = AutoAnswer,
-        EnableStun = EnableStun, StunServer = StunServer, StunPort = StunPort
+        EnableStun = EnableStun, StunServer = StunServer, StunPort = StunPort,
+        OperatorTransferExtension = OperatorTransferExtension
     };
 
     public void FromSipSettings(SipSettings s, string label)
@@ -157,7 +165,34 @@ public sealed class SipAccount
         Username = s.Username; Password = s.Password; AuthId = s.AuthId;
         Domain = s.Domain; DisplayName = s.DisplayName; Ddi = s.Ddi; AutoAnswer = s.AutoAnswer;
         EnableStun = s.EnableStun; StunServer = s.StunServer; StunPort = s.StunPort;
+        OperatorTransferExtension = s.OperatorTransferExtension;
     }
 
     public override string ToString() => $"{Label} ({Username}@{Server})";
+}
+
+public sealed class GeminiSettings
+{
+    public string ApiKey { get; set; } = "";
+    public string Model { get; set; } = "gemini-2.0-flash";
+    public bool Enabled { get; set; } = false;
+}
+
+public sealed class ZoneGuardSettings
+{
+    public bool Enabled { get; set; } = false;
+    public double MinSimilarity { get; set; } = 0.25;
+    public bool BlockOnNoMatch { get; set; } = false;
+    public int MaxCandidates { get; set; } = 10;
+    public string CompanyId { get; set; } = "";
+}
+
+public sealed class SumUpSettings
+{
+    public bool Enabled { get; set; } = false;
+    public string MerchantCode { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public string Currency { get; set; } = "GBP";
+    public string PayToEmail { get; set; } = "";
+    public string PaymentPageBaseUrl { get; set; } = "";
 }
