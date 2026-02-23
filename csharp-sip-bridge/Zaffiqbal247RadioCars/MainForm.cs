@@ -36,6 +36,9 @@ public partial class MainForm : Form
 
     // Simli avatar
     private SimliAvatar? _simliAvatar;
+    private readonly List<byte[]> _simliBatch = new();
+    private System.Threading.Timer? _simliBatchTimer;
+    private readonly object _simliBatchLock = new();
     public MainForm()
     {
         InitializeComponent();
@@ -683,19 +686,56 @@ public partial class MainForm : Form
         var frameCopy = new byte[alawFrame.Length];
         Buffer.BlockCopy(alawFrame, 0, frameCopy, 0, alawFrame.Length);
 
-        ThreadPool.QueueUserWorkItem(_ =>
+        lock (_simliBatchLock)
         {
-            try
+            _simliBatch.Add(frameCopy);
+
+            // Start/reset the batch timer — flushes after 100ms (5 frames) of no new audio
+            _simliBatchTimer?.Dispose();
+            _simliBatchTimer = new System.Threading.Timer(_ => FlushSimliBatch(), null, 100, Timeout.Infinite);
+
+            // Force flush if we've accumulated 5+ frames (100ms) to cap latency
+            if (_simliBatch.Count >= 5)
             {
-                var pcm16at16k = AlawToSimliResampler.Convert(frameCopy);
-                _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
+                _simliBatchTimer?.Dispose();
+                _simliBatchTimer = null;
+                FlushSimliBatchLocked();
             }
-            catch { /* Simli errors must never affect call audio */ }
-        });
+        }
+    }
+
+    private void FlushSimliBatch()
+    {
+        lock (_simliBatchLock)
+        {
+            FlushSimliBatchLocked();
+        }
+    }
+
+    private void FlushSimliBatchLocked()
+    {
+        if (_simliBatch.Count == 0) return;
+        var batch = new List<byte[]>(_simliBatch);
+        _simliBatch.Clear();
+
+        // Convert entire batch as one contiguous stream (no frame-boundary clicks)
+        try
+        {
+            var pcm16at16k = AlawToSimliResampler.ConvertBatch(batch);
+            _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
+        }
+        catch { /* Simli errors must never affect call audio */ }
     }
 
     private void ClearSimliBuffer()
     {
+        lock (_simliBatchLock)
+        {
+            _simliBatch.Clear();
+            _simliBatchTimer?.Dispose();
+            _simliBatchTimer = null;
+        }
+        AlawToSimliResampler.Reset();
         if (_simliAvatar == null || !_simliAvatar.IsConnected) return;
         _ = _simliAvatar.ClearBufferAsync();
     }
