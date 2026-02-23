@@ -703,9 +703,10 @@ public partial class MainForm : Form
             try
             {
                 var pcm16at16k = AlawToSimliResampler.Convert(frame);
-                _simliAvatar?.SendAudioAsync(pcm16at16k).GetAwaiter().GetResult();
+                _ = _simliAvatar?.SendAudioAsync(pcm16at16k);
             }
-            catch { /* Simli errors must never affect call audio */ }
+            catch { }
+            Thread.Sleep(18); // Pace at ~20ms per frame to match real-time audio rate
         }
     }
 
