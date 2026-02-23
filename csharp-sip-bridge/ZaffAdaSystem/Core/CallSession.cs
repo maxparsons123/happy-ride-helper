@@ -90,21 +90,26 @@ public sealed class CallSession : ICallSession
 
         _logger.LogInformation("[{SessionId}] Starting G.711 session for {CallerId}", SessionId, CallerId);
 
-        // Step 1: Load caller history BEFORE connecting so Ada knows the caller's name
+        // Step 1+2: Load caller history AND connect to OpenAI IN PARALLEL for fastest startup
         string? callerHistory = null;
-        try
+        var historyTask = Task.Run(async () =>
         {
-            callerHistory = await LoadCallerHistoryAsync(CallerId);
-            if (callerHistory != null)
-                _logger.LogInformation("[{SessionId}] 📋 Caller history loaded for {CallerId}", SessionId, CallerId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed (non-fatal)", SessionId);
-        }
+            try
+            {
+                callerHistory = await LoadCallerHistoryAsync(CallerId);
+                if (callerHistory != null)
+                    _logger.LogInformation("[{SessionId}] 📋 Caller history loaded for {CallerId}", SessionId, CallerId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[{SessionId}] Caller history lookup failed (non-fatal)", SessionId);
+            }
+        });
 
-        // Step 2: Connect to OpenAI (session configured, event loops started, but NO greeting yet)
-        await _aiClient.ConnectAsync(CallerId, ct);
+        var connectTask = _aiClient.ConnectAsync(CallerId, ct);
+
+        // Wait for both to complete
+        await Task.WhenAll(historyTask, connectTask);
 
         // Step 3: Inject caller history BEFORE greeting so Ada knows the caller's name
         if (!string.IsNullOrEmpty(callerHistory))
