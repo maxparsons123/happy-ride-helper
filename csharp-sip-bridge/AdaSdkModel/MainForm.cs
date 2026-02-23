@@ -31,9 +31,10 @@ public partial class MainForm : Form
     private System.Threading.Timer? _edgeWarmupTimer;
     private readonly HttpClient _warmupHttpClient = new() { Timeout = TimeSpan.FromSeconds(8) };
 
-    // Audio monitor (hear raw SIP audio locally) — single PCM16 buffer, no float mixing
+    // Audio monitor (hear raw SIP audio locally)
     private WaveOutEvent? _monitorOut;
     private BufferedWaveProvider? _monitorBuffer;
+    private readonly object _monitorLock = new();
 
     // Operator microphone
     private WaveInEvent? _micInput;
@@ -326,7 +327,11 @@ public partial class MainForm : Form
             _sipServer.OnOperatorCallerAudio += alawFrame =>
             {
                 if (chkMonitorCaller.Checked)
-                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
+                {
+                    var buf = _monitorBuffer;
+                    if (buf != null)
+                        lock (_monitorLock) { buf.AddSamples(alawFrame, 0, alawFrame.Length); }
+                }
             };
 
             _sipServer.OnCallEnded += (sessionId, reason) => SafeInvoke(() =>
@@ -456,8 +461,11 @@ public partial class MainForm : Form
             {
                 // No avatar – fall back to local monitor speakers
                 if (chkMonitorAda.Checked)
-                    _monitorBuffer?.AddSamples(alawFrame, 0, alawFrame.Length);
-            }
+                {
+                    var buf = _monitorBuffer;
+                    if (buf != null)
+                        lock (_monitorLock) { buf.AddSamples(alawFrame, 0, alawFrame.Length); }
+                }
         };
 
         // Wire barge-in → clear Simli buffer
