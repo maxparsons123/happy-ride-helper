@@ -850,7 +850,7 @@ public partial class MainForm : Form
             return;
 
         var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
-        _simliAvatar.SendAudio(pcm16at16k);
+        _ = _simliAvatar.SendAudioAsync(pcm16at16k);
     }
 
     /// <summary>Clear Simli buffer on barge-in.</summary>
