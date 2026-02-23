@@ -821,6 +821,7 @@ public sealed class CallSession : ICallSession
 
         // Track STT house-number corrections so we can notify the AI to update its internal memory
         var sttCorrections = new List<string>();
+        var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
 
         if (args.TryGetValue("pickup", out var p))
         {
@@ -931,7 +932,7 @@ public sealed class CallSession : ICallSession
                 }
             }
         }
-        var lastTranscript = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
+        // lastTranscript already declared above (before stage lock check)
         // Always combine transcript + interpretation so the guard passes if EITHER
         // mentions the address. The transcript can be stale when the tool call fires
         // before the transcript event arrives (common with compound utterances).
