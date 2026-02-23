@@ -773,17 +773,28 @@ public partial class MainForm : Form
         return t;
     }
 
+    private readonly object _monitorLock = new();
+
     private void MonitorAddAlaw(BufferedWaveProvider? buf, byte[] alaw)
     {
-        if (buf == null) return;
-        var pcm = new byte[alaw.Length * 2];
-        for (int i = 0; i < alaw.Length; i++)
+        if (buf == null || alaw == null || alaw.Length == 0) return;
+
+        // Decode A-law → PCM16 with a local copy for thread safety
+        var localCopy = new byte[alaw.Length];
+        Buffer.BlockCopy(alaw, 0, localCopy, 0, alaw.Length);
+
+        var pcm = new byte[localCopy.Length * 2];
+        for (int i = 0; i < localCopy.Length; i++)
         {
-            short s = _alawDecode[alaw[i]];
+            short s = _alawDecode[localCopy[i]];
             pcm[i * 2] = (byte)(s & 0xFF);
             pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
         }
-        buf.AddSamples(pcm, 0, pcm.Length);
+
+        lock (_monitorLock)
+        {
+            buf.AddSamples(pcm, 0, pcm.Length);
+        }
     }
 
     private void StartAudioMonitor()
@@ -805,7 +816,7 @@ public partial class MainForm : Form
 
             _monitorMixer = new MixingWaveProvider32(new IWaveProvider[] { adaFloat, callerFloat });
 
-            _monitorOut = new WaveOutEvent { DesiredLatency = 150 };
+            _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
             _monitorOut.Init(_monitorMixer);
             if (!_muted) _monitorOut.Play();
             Log("🔊 Audio monitor started (dual-buffer PCM mix)");
