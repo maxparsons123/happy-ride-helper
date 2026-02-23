@@ -20,6 +20,7 @@ interface Transcript {
   role: string;
   text: string;
   timestamp: string;
+  stt?: string; // Raw STT backup (Whisper) — shown alongside Ada's interpretation for user messages
 }
 
 interface GeocodeResult {
@@ -1453,6 +1454,14 @@ export default function LiveCalls() {
                               }`}
                             >
                               <p className="text-sm">{t.text}</p>
+                              {/* Dual-transcript: show raw STT backup for user messages */}
+                              {t.role === "user" && t.stt && t.stt !== t.text && (
+                                <div className="mt-1.5 pt-1.5 border-t border-primary-foreground/20">
+                                  <p className="text-xs opacity-70 flex items-center gap-1">
+                                    <span className="font-medium">🎤 STT:</span> {t.stt}
+                                  </p>
+                                </div>
+                              )}
                               <p className="text-xs opacity-60 mt-1">
                                 {t.role === "user" ? "Customer" : "Ada"} • {formatTime(t.timestamp, { ms: true })}
                               </p>
