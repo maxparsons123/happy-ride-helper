@@ -873,12 +873,9 @@ public partial class MainForm : Form
         StopAudioMonitor();
         try
         {
-        _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
-            {
-                BufferDuration = TimeSpan.FromSeconds(1),
-                DiscardOnBufferOverflow = true
-            };
-            _monitorOut = new WaveOutEvent { DesiredLatency = 50 };
+            _monitorBuffer = new BufferedWaveProvider(WaveFormat.CreateALawFormat(8000, 1))
+            { BufferDuration = TimeSpan.FromSeconds(5), DiscardOnBufferOverflow = true };
+            _monitorOut = new WaveOutEvent { DesiredLatency = 100 };
             _monitorOut.Init(_monitorBuffer);
             if (!_muted) _monitorOut.Play();
             Log("🔊 Audio monitor started — hearing raw SIP audio");
