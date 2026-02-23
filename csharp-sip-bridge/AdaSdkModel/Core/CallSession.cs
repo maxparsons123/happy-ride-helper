@@ -335,6 +335,7 @@ public sealed class CallSession : ICallSession
                     _destDisambiguated = true;
                     _pickupLockedByClarify = false;
                     _destLockedByClarify = false;
+                    _lastGuardBlockedDest = null;
                     // Inject clean state so the AI knows ALL booking fields are now empty
                     _ = InjectBookingStateAsync("[BOOKING RESET] New booking started. ALL fields are now empty except caller name. " +
                         "Do NOT reuse any addresses from previous bookings. Ask for pickup address from scratch.");
@@ -741,6 +742,7 @@ public sealed class CallSession : ICallSession
     private string[]? _pendingDestAlternatives;
     private string? _pendingDestClarificationMessage;
     private bool _pendingAddressCorrection;  // true = address discrepancy detected, allow pickup/dest correction through stage lock
+    private string? _lastGuardBlockedDest;   // Remembers the last destination blocked by the auto-fill guard so a repeat/confirm bypasses it
 
     /// <summary>
     /// Known addresses from the caller's Supabase history (pickup + dropoff combined).
@@ -950,11 +952,15 @@ public sealed class CallSession : ICallSession
             // When destination is currently null (fresh start or post-cancel), verify the
             // incoming value actually resembles what the user said. This prevents the model
             // from auto-filling destinations from [CALLER HISTORY].
+            // BYPASS: If this exact destination was blocked on a previous turn, the AI has
+            // already asked the user about it and they're confirming/repeating — let it through.
             else if (string.IsNullOrWhiteSpace(_booking.Destination)
                 && !string.IsNullOrWhiteSpace(incoming)
                 && !string.IsNullOrWhiteSpace(contextForGuard)
-                && !TranscriptResemblesAddress(contextForGuard, incoming))
+                && !TranscriptResemblesAddress(contextForGuard, incoming)
+                && !string.Equals(_lastGuardBlockedDest, incoming, StringComparison.OrdinalIgnoreCase))
             {
+                _lastGuardBlockedDest = incoming;
                 _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — context '{Context}' doesn't resemble it (likely auto-filled from history)",
                     SessionId, incoming, contextForGuard);
                 sttCorrections.Add($"AUTO-FILL BLOCKED (THIS TURN ONLY): You sent destination '{incoming}' but the caller's utterance was '{lastTranscript}' which doesn't mention that destination. " +
@@ -963,6 +969,14 @@ public sealed class CallSession : ICallSession
             }
             else
             {
+                // Log if we bypassed the guard due to repeat/confirm
+                if (_lastGuardBlockedDest != null && string.Equals(_lastGuardBlockedDest, incoming, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS: Allowing '{Incoming}' — previously blocked, user confirmed/repeated",
+                        SessionId, incoming);
+                }
+                _lastGuardBlockedDest = null; // Clear on successful accept
+
                 // If normalisation changed the value, record the correction for AI context injection
                 if (incoming != raw && raw != null)
                     sttCorrections.Add($"STT CORRECTION (destination): you sent '{raw}' but the correct value is '{incoming}'. Update your memory: destination = '{incoming}'.");
