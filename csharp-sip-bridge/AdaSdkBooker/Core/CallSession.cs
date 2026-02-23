@@ -1597,11 +1597,34 @@ public sealed class CallSession : ICallSession
     /// e.g. AI sends "43 Dove Road, Birmingham" but transcript says "43 Dovey Road, Birmingham"
     /// → correct to "43 Dovey Road, Birmingham".
     /// Only triggers when a word in the AI address is NOT in the transcript but a similar word IS.
+    /// If the house number or area/town differs, they are treated as genuinely different addresses.
     /// </summary>
     private string? ApplyTranscriptStreetGuard(string? aiAddress, string transcript, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(aiAddress) || string.IsNullOrWhiteSpace(transcript) || transcript.Length < 5)
             return aiAddress;
+
+        // ── HOUSE NUMBER + AREA COMPARISON ──
+        var aiParsed = AddressParser.ParseAddress(aiAddress);
+        var transcriptParsed = AddressParser.ParseAddress(transcript);
+
+        if (aiParsed.HasHouseNumber && transcriptParsed.HasHouseNumber
+            && !string.Equals(aiParsed.HouseNumber, transcriptParsed.HouseNumber, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different house numbers — AI='{AiNum}' vs transcript='{TNum}'",
+                SessionId, fieldName, aiParsed.HouseNumber, transcriptParsed.HouseNumber);
+            return aiAddress;
+        }
+
+        if (!string.IsNullOrWhiteSpace(aiParsed.TownOrArea) && !string.IsNullOrWhiteSpace(transcriptParsed.TownOrArea)
+            && !string.Equals(aiParsed.TownOrArea, transcriptParsed.TownOrArea, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different area — AI='{AiArea}' vs transcript='{TArea}'",
+                SessionId, fieldName, aiParsed.TownOrArea, transcriptParsed.TownOrArea);
+            return aiAddress;
+        }
 
         // Common words to skip (not street names)
         var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -1629,22 +1652,18 @@ public sealed class CallSession : ICallSession
 
         foreach (var aiWord in aiWords)
         {
-            // Skip if this word appears exactly in the transcript
             if (transcriptLookup.Contains(aiWord.ToLowerInvariant()))
                 continue;
 
-            // Look for a close match in the transcript (edit distance 1-2)
             foreach (var tWord in transcriptWords)
             {
                 int dist = LevenshteinDistance(aiWord.ToLowerInvariant(), tWord.ToLowerInvariant());
                 if (dist >= 1 && dist <= 2)
                 {
-                    // The AI substituted a similar word! Replace with transcript version.
                     _logger.LogWarning(
                         "[{SessionId}] 🛡️ STREET GUARD ({Field}): AI sent '{AiWord}' but transcript has '{TranscriptWord}' — using transcript version",
                         SessionId, fieldName, aiWord, tWord);
 
-                    // Do case-insensitive replacement in the original address
                     var result = System.Text.RegularExpressions.Regex.Replace(
                         aiAddress,
                         @"\b" + System.Text.RegularExpressions.Regex.Escape(aiWord) + @"\b",
