@@ -1609,11 +1609,34 @@ public sealed class CallSession : ICallSession
     /// <summary>
     /// HARD GUARD: If the AI substituted a street name that differs from the transcript,
     /// replace the AI's version with the transcript version.
+    /// If the house number or area/town differs, they are treated as genuinely different addresses.
     /// </summary>
     private string? ApplyTranscriptStreetGuard(string? aiAddress, string transcript, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(aiAddress) || string.IsNullOrWhiteSpace(transcript) || transcript.Length < 5)
             return aiAddress;
+
+        // ── HOUSE NUMBER + AREA COMPARISON ──
+        var aiParsed = AddressParser.ParseAddress(aiAddress);
+        var transcriptParsed = AddressParser.ParseAddress(transcript);
+
+        if (aiParsed.HasHouseNumber && transcriptParsed.HasHouseNumber
+            && !string.Equals(aiParsed.HouseNumber, transcriptParsed.HouseNumber, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different house numbers — AI='{AiNum}' vs transcript='{TNum}'",
+                SessionId, fieldName, aiParsed.HouseNumber, transcriptParsed.HouseNumber);
+            return aiAddress;
+        }
+
+        if (!string.IsNullOrWhiteSpace(aiParsed.TownOrArea) && !string.IsNullOrWhiteSpace(transcriptParsed.TownOrArea)
+            && !string.Equals(aiParsed.TownOrArea, transcriptParsed.TownOrArea, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different area — AI='{AiArea}' vs transcript='{TArea}'",
+                SessionId, fieldName, aiParsed.TownOrArea, transcriptParsed.TownOrArea);
+            return aiAddress;
+        }
 
         var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {

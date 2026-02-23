@@ -3497,11 +3497,39 @@ public sealed class CallSession : ICallSession
     /// HARD GUARD: If the AI substituted a street name that differs from the transcript,
     /// replace the AI's version with the transcript version.
     /// e.g. AI sends "43 Dove Road" but transcript says "43 Dovey Road" → correct to "43 Dovey Road".
+    /// If the house number or area/town differs between the AI address and the transcript,
+    /// they are treated as genuinely different addresses and the guard is skipped.
     /// </summary>
     private string? ApplyTranscriptStreetGuard(string? aiAddress, string transcript, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(aiAddress) || string.IsNullOrWhiteSpace(transcript) || transcript.Length < 5)
             return aiAddress;
+
+        // ── HOUSE NUMBER + AREA COMPARISON ──
+        // Parse both the AI address and the transcript to extract structured components.
+        // If house number or area/town differs, these are genuinely different addresses — skip the guard.
+        var aiParsed = AddressParser.ParseAddress(aiAddress);
+        var transcriptParsed = AddressParser.ParseAddress(transcript);
+
+        // Compare house numbers: if both have one and they differ → different address, skip guard
+        if (aiParsed.HasHouseNumber && transcriptParsed.HasHouseNumber
+            && !string.Equals(aiParsed.HouseNumber, transcriptParsed.HouseNumber, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation(
+                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different house numbers — AI='{AiNum}' vs transcript='{TNum}' — treating as different address",
+                SessionId, fieldName, aiParsed.HouseNumber, transcriptParsed.HouseNumber);
+            return aiAddress;
+        }
+
+        // Compare area/town: if both have one and they differ → different address, skip guard
+        if (!string.IsNullOrWhiteSpace(aiParsed.TownOrArea) && !string.IsNullOrWhiteSpace(transcriptParsed.TownOrArea)
+            && !string.Equals(aiParsed.TownOrArea, transcriptParsed.TownOrArea, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation(
+                "[{SessionId}] 🛡️ STREET GUARD SKIP ({Field}): Different area — AI='{AiArea}' vs transcript='{TArea}' — treating as different address",
+                SessionId, fieldName, aiParsed.TownOrArea, transcriptParsed.TownOrArea);
+            return aiAddress;
+        }
 
         var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
