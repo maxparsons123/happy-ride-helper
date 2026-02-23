@@ -172,7 +172,7 @@ public sealed class BsqdDispatcher : IDispatcher
 
                 // Passenger & bidding
                 passengers = booking.Passengers?.ToString() ?? "1",
-                biddingWindowSec = booking.BiddingWindowSec ?? 45,
+                biddingWindowSec = booking.BiddingWindowSec,
 
                 // Customer info (both formats)
                 customerName = booking.Name ?? "Customer",
