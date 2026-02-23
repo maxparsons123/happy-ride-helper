@@ -466,6 +466,7 @@ public partial class MainForm : Form
                     if (buf != null)
                         lock (_monitorLock) { buf.AddSamples(alawFrame, 0, alawFrame.Length); }
                 }
+            }
         };
 
         // Wire barge-in → clear Simli buffer
