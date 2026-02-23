@@ -724,7 +724,9 @@ public sealed class CallSession : ICallSession
 
     private void HandleAiAudio(byte[] alawFrame)
     {
-        Interlocked.Increment(ref _outboundFrames);
+        // Count actual 160-byte equivalent frames (HighSample sends variable-size chunks)
+        int frameEquiv = Math.Max(1, alawFrame.Length / 160);
+        Interlocked.Add(ref _outboundFrames, frameEquiv);
         // Pure A-law passthrough — no filters, no gain manipulation on compressed bytes.
         // OpenAI sends native G.711 A-law; any DSP on logarithmic bytes degrades quality.
         _thinningFilter?.ApplyInPlace(alawFrame);

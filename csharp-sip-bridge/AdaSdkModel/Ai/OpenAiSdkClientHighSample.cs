@@ -678,7 +678,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         else
         {
             if (!typeName.Contains("InputAudio") && !typeName.Contains("RateLimit"))
-                Log($"📎 Unknown update type: {typeName}");
+                _logger.LogDebug("📎 Unhandled update type: {Type}", typeName);
         }
     }
 
