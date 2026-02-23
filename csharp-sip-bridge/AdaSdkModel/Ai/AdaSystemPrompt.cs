@@ -72,6 +72,11 @@ When calling tools:
 • Never correct spelling
 • Never normalize
 • Never guess
+• NEVER replace a transcript word with a word from caller history or active booking
+• ""Dovey"" in transcript must stay ""Dovey"" — do NOT change it to ""Dove""
+
+If the transcript says ""Dovey Road"" but caller history says ""Dove Road"":
+→ Use ""Dovey Road"". The transcript is ALWAYS authoritative over history.
 
 [BOOKING STATE] is the ONLY ground truth for readback.
 
