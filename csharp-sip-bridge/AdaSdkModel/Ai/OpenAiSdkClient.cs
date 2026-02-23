@@ -744,6 +744,20 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
             Log($"🔧 Tool call: {toolName} ({args.Count} args)");
 
+            // ── TRANSCRIPT WAIT ──
+            // OpenAI Realtime delivers tool_call BEFORE the user transcript event.
+            // The Street Guard needs the transcript to prevent history-based substitution
+            // (e.g. AI sends "Dove Road" from history when user said "Dovey Road").
+            // Wait up to 300ms for the transcript to arrive before processing.
+            if (toolName == "sync_booking_data")
+            {
+                var preTranscript = _lastUserTranscript;
+                for (int i = 0; i < 6 && _lastUserTranscript == preTranscript; i++)
+                    await Task.Delay(50);
+                if (_lastUserTranscript != preTranscript)
+                    Log($"📋 Transcript arrived during wait: \"{_lastUserTranscript}\"");
+            }
+
             if (OnToolCall != null)
             {
                 var result = await OnToolCall(toolName, args);
