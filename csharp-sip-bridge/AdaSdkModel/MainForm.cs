@@ -452,10 +452,15 @@ public partial class MainForm : Form
         session.OnTranscript += (role, text) => SafeInvoke(() => Log($"💬 {role}: {text}"));
 
         // Wire audio → Simli avatar AND local monitor (Simli drives lip-sync, monitor gives local speaker output)
+        // CRITICAL: Simli operations are fully isolated — failures must NEVER propagate to SIP
         session.OnAudioOut += alawFrame =>
         {
-            if (_simliAvatar?.IsConnected == true)
-                FeedSimliAudio(alawFrame);
+            try
+            {
+                if (_simliAvatar?.IsConnected == true)
+                    FeedSimliAudio(alawFrame);
+            }
+            catch { /* Simli failure must never affect SIP audio path */ }
 
             // Always feed local monitor so operator can hear Ada's audio
             if (chkMonitorAda.Checked)
@@ -463,7 +468,7 @@ public partial class MainForm : Form
         };
 
         // Wire barge-in → clear Simli buffer
-        session.OnBargeIn += () => ClearSimliBuffer();
+        session.OnBargeIn += () => { try { ClearSimliBuffer(); } catch { } };
 
         session.OnBookingUpdated += booking => SafeInvoke(() =>
         {
@@ -759,7 +764,7 @@ public partial class MainForm : Form
             return;
 
         var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
-        _ = _simliAvatar.SendAudioAsync(pcm16at16k);
+        _simliAvatar.SendAudio(pcm16at16k);
     }
 
     private void ClearSimliBuffer()

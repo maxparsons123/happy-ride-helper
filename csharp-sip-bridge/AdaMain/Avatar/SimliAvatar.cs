@@ -32,6 +32,14 @@ public sealed class SimliAvatar : UserControl
     private readonly List<byte[]> _pendingAudio = new();
     private const int MAX_PENDING_CHUNKS = 100; // ~2s
 
+    // ── C#-side batching: accumulate audio and flush every 200ms ──
+    private readonly object _batchLock = new();
+    private readonly List<byte[]> _batchBuffer = new();
+    private int _batchBytes;
+    private System.Threading.Timer? _batchTimer;
+    private const int BATCH_INTERVAL_MS = 200;
+    private const int BATCH_MAX_BYTES = 32_000; // flush early if large
+
     public SimliAvatar(ILogger<SimliAvatar> logger)
     {
         _logger = logger;
@@ -107,28 +115,76 @@ public sealed class SimliAvatar : UserControl
         await ExecAsync($"handleCommand({cmd})");
     }
 
-    /// <summary>Send PCM16 audio at 16kHz to drive lip-sync.</summary>
-    public async Task SendAudioAsync(byte[] pcm16Audio)
+    /// <summary>Send PCM16 audio at 16kHz to drive lip-sync. Batched to reduce UI thread pressure.</summary>
+    public void SendAudio(byte[] pcm16Audio)
     {
         if (IsConnecting && !IsConnected)
         {
-            if (_pendingAudio.Count < MAX_PENDING_CHUNKS)
-                _pendingAudio.Add(pcm16Audio);
+            lock (_batchLock)
+            {
+                if (_pendingAudio.Count < MAX_PENDING_CHUNKS)
+                    _pendingAudio.Add(pcm16Audio);
+            }
             return;
         }
 
         if (!IsConnected) return;
 
-        _audioBytesSent += pcm16Audio.Length;
+        lock (_batchLock)
+        {
+            _batchBuffer.Add(pcm16Audio);
+            _batchBytes += pcm16Audio.Length;
 
-        var b64 = Convert.ToBase64String(pcm16Audio);
+            // Start timer on first chunk
+            _batchTimer ??= new System.Threading.Timer(
+                _ => FlushBatch(), null, BATCH_INTERVAL_MS, BATCH_INTERVAL_MS);
+
+            // Flush early if batch is large enough
+            if (_batchBytes >= BATCH_MAX_BYTES)
+                FlushBatch();
+        }
+    }
+
+    private void FlushBatch()
+    {
+        byte[] merged;
+        lock (_batchLock)
+        {
+            if (_batchBuffer.Count == 0) return;
+
+            // Merge all chunks into one blob
+            merged = new byte[_batchBytes];
+            int offset = 0;
+            foreach (var chunk in _batchBuffer)
+            {
+                Buffer.BlockCopy(chunk, 0, merged, offset, chunk.Length);
+                offset += chunk.Length;
+            }
+            _batchBuffer.Clear();
+            _batchBytes = 0;
+        }
+
+        if (!IsConnected || IsDisposed) return;
+
+        _audioBytesSent += merged.Length;
+        var b64 = Convert.ToBase64String(merged);
         var cmd = JsonSerializer.Serialize(new { command = "audio", data = b64 });
-        await ExecAsync($"handleCommand({cmd})");
+        // Fire-and-forget on UI thread — errors are swallowed
+        SafeInvoke(async () =>
+        {
+            try
+            {
+                if (!IsDisposed && _webView.CoreWebView2 != null)
+                    await _webView.CoreWebView2.ExecuteScriptAsync($"handleCommand({cmd})");
+            }
+            catch { /* Simli send failure must never affect SIP */ }
+        });
     }
 
     /// <summary>Clear the audio queue (barge-in).</summary>
     public async Task ClearBufferAsync()
     {
+        lock (_batchLock) { _batchBuffer.Clear(); _batchBytes = 0; }
         _pendingAudio.Clear();
         var cmd = JsonSerializer.Serialize(new { command = "clear" });
         await ExecAsync($"handleCommand({cmd})");
@@ -137,6 +193,11 @@ public sealed class SimliAvatar : UserControl
     /// <summary>Tear down WebRTC session.</summary>
     public async Task DisconnectAsync()
     {
+        // Stop batch timer first to prevent further sends
+        _batchTimer?.Dispose();
+        _batchTimer = null;
+        lock (_batchLock) { _batchBuffer.Clear(); _batchBytes = 0; }
+
         var cmd = JsonSerializer.Serialize(new { command = "disconnect" });
         await ExecAsync($"handleCommand({cmd})");
         IsConnected = false;
@@ -161,7 +222,7 @@ public sealed class SimliAvatar : UserControl
                     IsConnecting = false;
                     SafeInvoke(() => SetStatus("🟢 Connected", System.Drawing.Color.LightGreen));
                     _logger.LogInformation("🎭 Avatar connected");
-                    _ = FlushPendingAsync();
+                    FlushPendingAsync();
                     break;
 
                 case "disconnected":
@@ -198,17 +259,18 @@ public sealed class SimliAvatar : UserControl
         }
     }
 
-    private async Task FlushPendingAsync()
+    private void FlushPendingAsync()
     {
-        if (_pendingAudio.Count == 0) return;
-        _logger.LogInformation("🎭 Flushing {Count} buffered chunks", _pendingAudio.Count);
-        var buf = _pendingAudio.ToList();
-        _pendingAudio.Clear();
-        foreach (var chunk in buf)
+        List<byte[]> buf;
+        lock (_batchLock)
         {
-            await SendAudioAsync(chunk);
-            await Task.Delay(10);
+            if (_pendingAudio.Count == 0) return;
+            _logger.LogInformation("🎭 Flushing {Count} buffered chunks", _pendingAudio.Count);
+            buf = _pendingAudio.ToList();
+            _pendingAudio.Clear();
         }
+        foreach (var chunk in buf)
+            SendAudio(chunk);
     }
 
     private async Task ExecAsync(string script)
