@@ -72,7 +72,7 @@ public sealed class SipSettings
 public sealed class OpenAiSettings
 {
     public string ApiKey { get; set; } = "";
-    public string Model { get; set; } = "gpt-4o-mini-realtime-preview-2024-12-17";
+    public string Model { get; set; } = "gpt-4o-realtime-preview";
     public string Voice { get; set; } = "alloy";
 
     /// <summary>Use PCM16 24kHz (HighSample) instead of G.711 A-law passthrough.</summary>
