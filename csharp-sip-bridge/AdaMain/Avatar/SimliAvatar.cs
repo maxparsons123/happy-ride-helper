@@ -1,6 +1,7 @@
-using System.IO;
 using System.Text.Json;
+
 using Microsoft.Extensions.Logging;
+
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -20,10 +21,6 @@ public sealed class SimliAvatar : UserControl
     private string? _apiKey;
     private string? _faceId;
     private long _audioBytesSent;
-
-    // Batch small frames into ~6000-byte chunks for optimal Simli lip-sync
-    private readonly MemoryStream _batchBuffer = new();
-    private const int BATCH_TARGET_BYTES = 6000; // ~187ms at 16kHz PCM16
 
     /// <summary>Whether the avatar is connected and accepting audio.</summary>
     public bool IsConnected { get; private set; }
@@ -110,7 +107,7 @@ public sealed class SimliAvatar : UserControl
         await ExecAsync($"handleCommand({cmd})");
     }
 
-    /// <summary>Send PCM16 audio at 16kHz to drive lip-sync. Batches small frames for optimal delivery.</summary>
+    /// <summary>Send PCM16 audio at 16kHz to drive lip-sync.</summary>
     public async Task SendAudioAsync(byte[] pcm16Audio)
     {
         if (IsConnecting && !IsConnected)
@@ -124,25 +121,7 @@ public sealed class SimliAvatar : UserControl
 
         _audioBytesSent += pcm16Audio.Length;
 
-        // Accumulate into batch buffer
-        _batchBuffer.Write(pcm16Audio, 0, pcm16Audio.Length);
-
-        // Only send when we have enough data for good lip-sync (~6000 bytes)
-        if (_batchBuffer.Length < BATCH_TARGET_BYTES)
-            return;
-
-        await FlushBatchAsync();
-    }
-
-    /// <summary>Send accumulated batch to Simli.</summary>
-    private async Task FlushBatchAsync()
-    {
-        if (_batchBuffer.Length == 0) return;
-
-        var data = _batchBuffer.ToArray();
-        _batchBuffer.SetLength(0);
-
-        var b64 = Convert.ToBase64String(data);
+        var b64 = Convert.ToBase64String(pcm16Audio);
         var cmd = JsonSerializer.Serialize(new { command = "audio", data = b64 });
         await ExecAsync($"handleCommand({cmd})");
     }
@@ -151,7 +130,6 @@ public sealed class SimliAvatar : UserControl
     public async Task ClearBufferAsync()
     {
         _pendingAudio.Clear();
-        _batchBuffer.SetLength(0);
         var cmd = JsonSerializer.Serialize(new { command = "clear" });
         await ExecAsync($"handleCommand({cmd})");
     }
@@ -159,14 +137,11 @@ public sealed class SimliAvatar : UserControl
     /// <summary>Tear down WebRTC session.</summary>
     public async Task DisconnectAsync()
     {
-        // Flush any remaining batched audio before disconnecting
-        await FlushBatchAsync();
         var cmd = JsonSerializer.Serialize(new { command = "disconnect" });
         await ExecAsync($"handleCommand({cmd})");
         IsConnected = false;
         IsConnecting = false;
         _pendingAudio.Clear();
-        _batchBuffer.SetLength(0);
         SetStatus("Disconnected", System.Drawing.Color.Gray);
     }
 
