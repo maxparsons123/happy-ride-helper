@@ -552,23 +552,39 @@ public sealed class SipServer : IAsyncDisposable
 
         int responseCompletedLatch = 0;
 
-        // ── Audio out: pass raw frame to playout (v11 handles accumulator + framing internally) ──
-        session.OnAudioOut += frame =>
+        // ── PIPE: OpenAI raw A-law → bounded channel → playout (single consumer) ──
+        var gain = (float)_audioSettings.VolumeBoost;
+        var pipe = new AdaAudioPipe.OpenAiToSipPipe(
+            sink: new Audio.PlayoutSink(playout),
+            plugin: null,       // null = native A-law mode (no PCM→A-law conversion needed)
+            maxFrames: 240,     // 4.8s buffer
+            dropBatch: 20,      // drop 0.4s when overloaded
+            alawGain: gain
+        );
+        pipe.OnLog += msg => Log($"[{sid}] {msg}");
+
+        // Track speaking state from pipe frames (Simli/monitor still driven by CallSession.OnAudio → OnAudioOut)
+        pipe.OnFrameOut += frame =>
         {
             Interlocked.Exchange(ref isBotSpeaking, 1);
             Interlocked.Exchange(ref adaHasStartedSpeaking, 1);
-            playout.BufferALaw(frame);
         };
 
-        // ── Barge-in: clear playout first, then reset latches ──
+        pipe.Start();
+        call.Pipe = pipe;
+
+        // ── Wire raw A-law from OpenAI into pipe (single subscription = no double speaking) ──
+        if (session.AiClient is OpenAiSdkClient sdkClient)
+        {
+            sdkClient.OnAudioRaw += pipe.PushAlaw;
+        }
+
+        // ── Barge-in: clear pipe + playout, then reset latches ──
         session.OnBargeIn += () =>
         {
             if (Volatile.Read(ref isBotSpeaking) == 0 && playout.QueuedFrames == 0) return;
 
-            // Clear playout before resetting latches so OnQueueEmpty
-            // fires (if it does) while watchdogPending is still 1, then
-            // we immediately zero it — preventing a stale NotifyPlayoutComplete.
-            playout.Clear();
+            pipe.Clear();
 
             Interlocked.Exchange(ref watchdogPending, 0);
             Interlocked.Exchange(ref responseCompletedLatch, 0);
@@ -578,7 +594,7 @@ public sealed class SipServer : IAsyncDisposable
         // ── Response completed: flush tail, set latches ──
         session.AiClient.OnResponseCompleted += () =>
         {
-            playout.Flush();
+            pipe.Flush();
             Interlocked.Exchange(ref responseCompletedLatch, 1);
             Interlocked.Exchange(ref isBotSpeaking, 0);
             Interlocked.Exchange(ref botStoppedSpeakingTick, Stopwatch.GetTimestamp());
@@ -590,7 +606,6 @@ public sealed class SipServer : IAsyncDisposable
                 {
                     Interlocked.Exchange(ref lastNotifyPlayoutCompleteTick, nowTick);
                     Interlocked.Exchange(ref responseCompletedLatch, 0);
-                    // Dispatch off calling thread — never block the AI client callback
                     Task.Run(() => session.NotifyPlayoutComplete());
                 }
             }
@@ -601,9 +616,6 @@ public sealed class SipServer : IAsyncDisposable
         };
 
         // ── Queue empty: notify completion once both latches are set ──
-        // IMPORTANT: this fires from the playout thread (50Hz hot loop).
-        // All non-trivial work MUST be dispatched via Task.Run to avoid
-        // blocking the 20ms tick and causing a late frame.
         playout.OnQueueEmpty += () =>
         {
             if (Volatile.Read(ref watchdogPending) != 1 ||
@@ -618,7 +630,6 @@ public sealed class SipServer : IAsyncDisposable
             Interlocked.Exchange(ref watchdogPending, 0);
             Interlocked.Exchange(ref responseCompletedLatch, 0);
 
-            // Dispatch off playout thread — avoids blocking the 20ms RTP tick
             Task.Run(() => session.NotifyPlayoutComplete());
         };
 
@@ -629,27 +640,18 @@ public sealed class SipServer : IAsyncDisposable
             var payload = rtpPacket.Payload;
             if (payload == null || payload.Length == 0) return;
 
-            // Flush initial garbage packets before codec is fully negotiated.
-            // NOTE: negotiatedCodec is captured by value at lambda-creation time.
-            // Negotiation happens during SDP exchange (before RTP flows), so this flush
-            // window naturally covers the tiny race where first packets could arrive
-            // before OnAudioFormatsNegotiated fires.
             if (!inboundFlushComplete)
             {
                 if (++inboundPacketCount < 20) return;
                 inboundFlushComplete = true;
             }
 
-            // Ignore very early packets (first 500ms) to avoid start-of-call noise
             long elapsedNs = (long)((Stopwatch.GetTimestamp() - callStartTick) * NsPerTick);
             if (elapsedNs < 500_000_000L) return;
 
-            // Codec conversion
             byte[] g711ToSend = negotiatedCodec == AudioCodecsEnum.PCMU
                 ? G711Transcode.MuLawToALaw(payload) : payload;
 
-            // NOTE: fires pre-gate — monitor receives raw caller audio including during bot speech.
-            // This is intentional: operator listen-in needs full context, not gated audio.
             try { OnOperatorCallerAudio?.Invoke(g711ToSend); } catch { }
 
             // ── Soft gate: suppress echo while bot is speaking / just stopped ──
@@ -660,14 +662,13 @@ public sealed class SipServer : IAsyncDisposable
                 if (stoppedTick != 0)
                 {
                     long sinceStopNs = (long)((Stopwatch.GetTimestamp() - stoppedTick) * NsPerTick);
-                    if (sinceStopNs < 300_000_000L) // 300ms tail suppression
+                    if (sinceStopNs < 300_000_000L)
                         applySoftGate = true;
                 }
             }
 
             if (applySoftGate)
             {
-                // Sample every 4th byte — statistically equivalent for RMS, 4x cheaper
                 double sumSq = 0;
                 for (int i = 0; i < g711ToSend.Length; i += 4)
                 {
@@ -678,11 +679,9 @@ public sealed class SipServer : IAsyncDisposable
                 float thresh = _audioSettings.BargeInRmsThreshold > 0
                     ? _audioSettings.BargeInRmsThreshold : 1200f;
 
-                // Quiet enough to be echo — drop it (no allocations)
                 if (rms < thresh) return;
             }
 
-            // Apply ingress gain before passing to AI
             float ingressGain = (float)_audioSettings.IngressVolumeBoost;
             if (ingressGain > 1.01f)
             {
@@ -697,8 +696,14 @@ public sealed class SipServer : IAsyncDisposable
             }
         };
 
+        // ── Cleanup: stop pipe when session ends ──
         session.OnEnded += (_, _) =>
         {
+            // Unhook raw audio first to prevent double-speaking on next call
+            if (session.AiClient is OpenAiSdkClient sdk)
+                sdk.OnAudioRaw -= pipe.PushAlaw;
+
+            try { pipe.Dispose(); } catch { }
             try { playout.Dispose(); } catch { }
         };
     }
@@ -785,7 +790,10 @@ public sealed class SipServer : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref call.CleanupDone, 1) == 1) return;
 
-        // Stop playout first — ensures no more RTP frames are sent during teardown
+        // Stop pipe first — unhooks events and stops pump
+        try { call.Pipe?.Dispose(); } catch { }
+
+        // Stop playout — ensures no more RTP frames are sent during teardown
         try { call.Playout?.Dispose(); } catch { }
 
         if (call.Session != null)
@@ -856,6 +864,7 @@ public sealed class SipServer : IAsyncDisposable
         public required VoIPMediaSession RtpSession { get; init; }
         public required SIPUserAgent CallAgent { get; init; }
         public ALawRtpPlayout? Playout { get; set; }
+        public AdaAudioPipe.OpenAiToSipPipe? Pipe { get; set; }
         public int CleanupDone;
     }
 
