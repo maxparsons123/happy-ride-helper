@@ -37,7 +37,13 @@ public interface IOpenAiClient
     /// <summary>Stage-aware context provider for no-reply watchdog re-prompts.</summary>
     Func<string?>? NoReplyContextProvider { get; set; }
 
+    /// <summary>Fired with aligned 160-byte A-law frames (legacy — used by CallSession).</summary>
     event Action<byte[]>? OnAudio;
+
+    /// <summary>Fired with raw unaligned A-law bytes from OpenAI delta (before frame alignment).
+    /// Use this for the pipe — it handles accumulation internally.</summary>
+    event Action<byte[]>? OnAudioRaw;
+
     event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     event Action<string>? OnEnded;
     event Action? OnPlayoutComplete;

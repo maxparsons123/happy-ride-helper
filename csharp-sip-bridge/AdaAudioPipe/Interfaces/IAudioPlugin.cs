@@ -16,3 +16,18 @@ public interface IAudioPlugin
     /// <summary>Reset all DSP state (call boundary).</summary>
     void Reset();
 }
+
+/// <summary>
+/// Accumulates raw A-law bytes (from native G.711 sources like OpenAI) 
+/// into exact 160-byte frames.
+/// </summary>
+public interface IAlawAccumulator
+{
+    /// <summary>
+    /// Accept raw A-law bytes (any size) and emit exact 160-byte frames.
+    /// </summary>
+    void Accumulate(byte[] alawBytes, ConcurrentQueue<byte[]> framesOut);
+
+    /// <summary>Clear the accumulator buffer.</summary>
+    void Clear();
+}

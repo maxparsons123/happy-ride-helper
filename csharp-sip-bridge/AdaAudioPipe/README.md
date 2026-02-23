@@ -6,27 +6,32 @@ Standalone audio pipeline library for OpenAI Realtime → G.711 A-law SIP teleph
 
 ```
 OpenAI Realtime API
-  │  response.audio.delta (PCM16 24kHz)
+  │  response.audio.delta
+  │  (G.711 A-law native OR PCM16 24kHz)
   ▼
-┌─────────────────────────┐
-│   OpenAiToSipPipe       │
-│                         │
-│  ┌───────────────────┐  │
-│  │  IAudioPlugin     │  │ ← Your DSP (de-ess, warm, soft-clip, resample)
-│  │  PCM → A-law      │  │
-│  └────────┬──────────┘  │
-│           ▼             │
-│  Channel<byte[]>        │ ← Bounded, DropOldest, SingleReader
-│  (max 240 frames/4.8s)  │
-│           ▼             │
-│  PumpLoop (single)      │ ← Optional ALawGain
-│           ▼             │
-│  IAlawFrameSink         │ → ALawRtpPlayout.BufferALaw()
-│                         │
-│  ┌───────────────────┐  │
-│  │ ISimliPcmSink     │  │ ← Optional fork: PCM16 16kHz for avatar
-│  └───────────────────┘  │
-└─────────────────────────┘
+┌─────────────────────────────┐
+│   OpenAiToSipPipe           │
+│                             │
+│  A-law mode (native):       │
+│  ┌───────────────────────┐  │
+│  │  AlawFrameAccumulator │  │ ← Aligns raw bytes to 160-byte frames
+│  └────────┬──────────────┘  │
+│           │                 │
+│  PCM mode (optional):       │
+│  ┌───────────────────────┐  │
+│  │  IAudioPlugin         │  │ ← DSP: de-ess, warm, soft-clip, resample
+│  │  PCM → A-law          │  │
+│  └────────┬──────────────┘  │
+│           ▼                 │
+│  Channel<byte[]>            │ ← Bounded, DropOldest, SingleReader
+│  (max 240 frames/4.8s)      │
+│           ▼                 │
+│  PumpLoop (single consumer) │ ← Optional ALawGain
+│           │                 │
+│  OnFrameOut ──→ Simli/monitor fork
+│           ▼                 │
+│  IAlawFrameSink             │ → ALawRtpPlayout.BufferALaw()
+└─────────────────────────────┘
 ```
 
 ## Key Guarantees
@@ -36,31 +41,29 @@ OpenAI Realtime API
 - **Latency clamp**: Drops oldest frames when overloaded (newest speech wins)
 - **Clean lifecycle**: `Start()` / `Stop()` per call, with plugin state reset
 - **Event guard**: `Interlocked.Exchange` prevents duplicate subscriptions
+- **Dual mode**: Supports both native A-law (OpenAI G.711) and PCM (with plugin)
 
-## Usage
+## Wiring (AdaSdkModel)
 
 ```csharp
-// Create pipe (once per call)
+// In SipServer.WireAudioPipeline:
 var pipe = new OpenAiToSipPipe(
-    plugin: audioPlugin,        // your IAudioPlugin (AudioProcessorPlugin)
-    sink: playoutSink,          // IAlawFrameSink wrapper around ALawRtpPlayout
-    maxFrames: 240,             // 4.8s buffer
-    dropBatch: 20,              // drop 0.4s when overloaded
-    alawGain: 1.2f              // optional volume boost
+    sink: new PlayoutSink(playout),  // IAlawFrameSink → ALawRtpPlayout
+    plugin: null,                    // null = A-law mode (OpenAI G.711 native)
+    maxFrames: 240,
+    dropBatch: 20,
+    alawGain: 1.2f
 );
-
-pipe.OnLog += msg => logger.LogInformation(msg);
 pipe.Start();
 
-// Wire to OpenAI client
-aiClient.OnAudioPcm += pipe.PushPcm;
+// Wire raw A-law from OpenAI (single subscription = no double speaking)
+sdkClient.OnAudioRaw += pipe.PushAlaw;
 
 // On barge-in
 pipe.Clear();
 
 // On call end
-aiClient.OnAudioPcm -= pipe.PushPcm;
-pipe.Stop();
+sdkClient.OnAudioRaw -= pipe.PushAlaw;
 pipe.Dispose();
 ```
 

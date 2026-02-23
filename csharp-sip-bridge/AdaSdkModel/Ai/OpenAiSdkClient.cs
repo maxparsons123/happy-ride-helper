@@ -123,6 +123,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     public bool IsResponseActive => Volatile.Read(ref _responseActive) == 1;
 
     public event Action<byte[]>? OnAudio;
+    public event Action<byte[]>? OnAudioRaw;
     public event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
     public event Action<string>? OnEnded;
     public event Action? OnPlayoutComplete;
@@ -323,6 +324,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
 
         _audioAlignBuffer.Clear();
         OnAudio = null;
+        OnAudioRaw = null;
         OnToolCall = null;
         OnEnded = null;
         OnPlayoutComplete = null;
@@ -567,8 +569,10 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             case ConversationItemStreamingPartDeltaUpdate delta:
                 if (delta.AudioBytes != null)
                 {
+                    var raw = delta.AudioBytes.ToArray();
                     Interlocked.Exchange(ref _hasEnqueuedAudio, 1);
-                    EnqueueAligned(delta.AudioBytes.ToArray());
+                    OnAudioRaw?.Invoke(raw);   // Raw bytes for pipe (handles alignment)
+                    EnqueueAligned(raw);        // Legacy aligned frames for CallSession
                 }
                 break;
 
