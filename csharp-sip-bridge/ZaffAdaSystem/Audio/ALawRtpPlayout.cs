@@ -36,9 +36,9 @@ public sealed class ALawRtpPlayout : IDisposable
     private const int PayloadTypePcma = 8;
     private const byte AlawSilence = 0xD5;
 
-    // Fix #4: split thresholds — cold start needs shallow buffer for fast first-word, resume is immediate
+    // Fix #4: split thresholds — cold start shallow for fast greeting, resume keeps jitter buffer
     private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start (was 200ms)
-    private const int ResumeThresholdFrames = 3;       // 60ms for mid-stream resume
+    private const int ResumeThresholdFrames = 5;       // 100ms for mid-stream resume (jitter safety)
 
     // Fix #1: pool cap to prevent unbounded memory growth after bursts
     private const int MaxPoolSize = 200;
