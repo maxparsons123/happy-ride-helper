@@ -1,6 +1,6 @@
-using Zaffiqbal247RadioCars.Core;
+using ZaffAdaSystem.Core;
 
-namespace Zaffiqbal247RadioCars.Services;
+namespace ZaffAdaSystem.Services;
 
 /// <summary>
 /// Interface for dispatch and notification services.

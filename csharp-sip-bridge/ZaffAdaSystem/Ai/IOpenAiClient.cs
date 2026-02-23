@@ -1,4 +1,4 @@
-namespace Zaffiqbal247RadioCars.Ai;
+namespace ZaffAdaSystem.Ai;
 
 /// <summary>
 /// Interface for OpenAI Realtime API client.

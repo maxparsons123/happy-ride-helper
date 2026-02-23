@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 
-namespace Zaffiqbal247RadioCars.Services;
+namespace ZaffAdaSystem.Services;
 
 /// <summary>
 /// Parsed components of a UK address string.

@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Logging;
 
-namespace Zaffiqbal247RadioCars.Core;
+namespace ZaffAdaSystem.Core;
 
 /// <summary>
 /// Logger provider that forwards all log messages to a callback (e.g. UI log panel).

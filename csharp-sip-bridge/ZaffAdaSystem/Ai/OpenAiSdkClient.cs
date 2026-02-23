@@ -5,14 +5,14 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
-using Zaffiqbal247RadioCars.Config;
+using ZaffAdaSystem.Config;
 using Microsoft.Extensions.Logging;
 using OpenAI.RealtimeConversation;
 using System.ClientModel;
 
 #pragma warning disable OPENAI002 // Experimental Realtime API
 
-namespace Zaffiqbal247RadioCars.Ai;
+namespace ZaffAdaSystem.Ai;
 
 /// <summary>
 /// OpenAI Realtime API client using official .NET SDK (2.1.0-beta.4) — G.711 A-law passthrough (8kHz).

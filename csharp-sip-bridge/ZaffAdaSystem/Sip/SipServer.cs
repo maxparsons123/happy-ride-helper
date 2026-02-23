@@ -1,10 +1,10 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using Zaffiqbal247RadioCars.Ai;
-using Zaffiqbal247RadioCars.Audio;
-using Zaffiqbal247RadioCars.Config;
-using Zaffiqbal247RadioCars.Core;
+using ZaffAdaSystem.Ai;
+using ZaffAdaSystem.Audio;
+using ZaffAdaSystem.Config;
+using ZaffAdaSystem.Core;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
@@ -12,7 +12,7 @@ using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorceryMedia.Abstractions;
 
-namespace Zaffiqbal247RadioCars.Sip;
+namespace ZaffAdaSystem.Sip;
 
 /// <summary>
 /// Multi-call SIP server with G.711 A-law passthrough + OpenAI SDK.
@@ -73,7 +73,7 @@ public sealed class SipServer : IAsyncDisposable
     {
         if (_isRunning) return;
 
-        Log("🚀 SipServer starting (Zaffiqbal247RadioCars)...");
+        Log("🚀 SipServer starting (ZaffAdaSystem)...");
         Log($"➡ SIP: {_settings.Server}:{_settings.Port} ({_settings.Transport})");
 
         _localIp = GetLocalIp();
@@ -474,7 +474,7 @@ public sealed class SipServer : IAsyncDisposable
         playout.OnLog += msg => Log($"[{sessionId}] {msg}");
         activeCall.Playout = playout;
 
-        if (session.AiClient is OpenAiSdkClient sdk)
+        if (session.AiClient is OpenAiSdkClientHighSample sdk)
             sdk.GetQueuedFrames = () => playout.QueuedFrames;
 
         // Wire RTP receive — apply ingress gain
@@ -583,7 +583,7 @@ public sealed class SipServer : IAsyncDisposable
         playout.OnLog += msg => Log($"[{session.SessionId}] {msg}");
         activeCall.Playout = playout;
 
-        if (session.AiClient is OpenAiSdkClient sdk)
+        if (session.AiClient is OpenAiSdkClientHighSample sdk)
             sdk.GetQueuedFrames = () => playout.QueuedFrames;
 
         WireAudioPipeline(activeCall, negotiatedCodec, isOperator);
@@ -647,7 +647,7 @@ public sealed class SipServer : IAsyncDisposable
             Interlocked.Exchange(ref isBotSpeaking, 0);
         };
 
-        if (session.AiClient is OpenAiSdkClient sdkClient)
+        if (session.AiClient is OpenAiSdkClientHighSample sdkClient)
         {
             sdkClient.OnResponseCompleted += () =>
             {

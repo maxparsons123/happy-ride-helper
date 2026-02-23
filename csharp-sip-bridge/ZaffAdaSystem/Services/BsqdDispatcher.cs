@@ -3,14 +3,14 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
-using Zaffiqbal247RadioCars.Config;
-using Zaffiqbal247RadioCars.Core;
+using ZaffAdaSystem.Config;
+using ZaffAdaSystem.Core;
 using Microsoft.Extensions.Logging;
 using MQTTnet;
 using MQTTnet.Client;
 using MQTTnet.Protocol;
 
-namespace Zaffiqbal247RadioCars.Services;
+namespace ZaffAdaSystem.Services;
 
 public sealed class BsqdDispatcher : IDispatcher
 {

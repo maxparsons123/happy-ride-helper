@@ -1,4 +1,4 @@
-namespace Zaffiqbal247RadioCars.Services;
+namespace ZaffAdaSystem.Services;
 
 /// <summary>
 /// Fare calculation result with geocoded addresses.
