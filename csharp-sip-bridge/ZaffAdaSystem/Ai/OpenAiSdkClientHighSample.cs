@@ -17,23 +17,20 @@ using System.Text.RegularExpressions;
 namespace ZaffAdaSystem.Ai;
 
 /// <summary>
-/// OpenAI Realtime API client using PCM16 24kHz for higher audio fidelity.
+/// OpenAI Realtime API client — HYBRID MODE:
+///   Input:  G.711 A-law natively (best STT accuracy, no upsampling artifacts)
+///   Output: PCM16 24kHz (best TTS fidelity with proper anti-aliasing)
 /// 
-/// Key differences from OpenAiSdkClient (G.711 A-law passthrough):
-/// - Sends/receives PCM16 24kHz to/from OpenAI (3× higher sample rate)
-/// - All DSP (gain, filtering) happens in clean linear PCM domain
-/// - Proper anti-aliasing Butterworth LPF before decimation to 8kHz
-/// - A-law encoding only at the final output step
-/// - Inbound: A-law 8kHz → decode + gain in PCM → upsample to 24kHz → OpenAI
-/// - Outbound: OpenAI PCM16 24kHz → LPF → decimate → A-law encode → SIP RTP
+/// Egress path: OpenAI PCM16 24kHz → Butterworth LPF → decimate → A-law encode → SIP RTP
+/// Ingress path: Raw A-law → OpenAI (no DSP, no resampling)
 /// 
 /// All other features (tools, watchdog, greeting, barge-in, etc.) are identical.
 /// 
-/// Version 3.1 — HighSampleAda (PCM16 24kHz)
+/// Version 3.2 — HybridAda (A-law in / PCM16 24kHz out)
 /// </summary>
 public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
 {
-    public const string VERSION = "3.1-sdk-pcm24k";
+    public const string VERSION = "3.2-hybrid-alaw-in-pcm24k-out";
 
     // =========================
     // CONFIG
@@ -236,7 +233,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         ResetCallState(callerId);
         InitializeLogger();
 
-        Log($"📞 Connecting v{VERSION} (caller: {callerId}, codec: PCM16 24kHz, model: {_settings.Model})");
+        Log($"📞 Connecting v{VERSION} (caller: {callerId}, codec: A-law→PCM16 hybrid, model: {_settings.Model})");
 
         _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
@@ -264,8 +261,8 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
             {
                 Instructions = langPreamble + _systemPrompt,
                 Voice = MapVoice(_settings.Voice),
-                InputAudioFormat = ConversationAudioFormat.Pcm16,
-                OutputAudioFormat = ConversationAudioFormat.Pcm16,
+                InputAudioFormat = ConversationAudioFormat.G711Alaw,   // Native A-law in = best STT
+                OutputAudioFormat = ConversationAudioFormat.Pcm16,      // PCM16 24kHz out = best TTS fidelity
                 InputTranscriptionOptions = new ConversationInputTranscriptionOptions
                 {
                     Model = "whisper-1"
@@ -282,7 +279,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
 
             await _session.ConfigureSessionAsync(options);
 
-            _logger.LogInformation("✅ Session configured (PCM16 24kHz, model={Model})", _settings.Model);
+            _logger.LogInformation("✅ Session configured (A-law in / PCM16 24kHz out, model={Model})", _settings.Model);
 
             _eventLoopTask = Task.Run(() => ReceiveEventsLoopAsync(_sessionCts.Token));
             _keepaliveTask = Task.Run(() => KeepaliveLoopAsync(_sessionCts.Token));
@@ -341,7 +338,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     }
 
     // =========================
-    // AUDIO INPUT (SIP A-law → PCM16 24kHz → OpenAI)
+    // AUDIO INPUT (SIP A-law → OpenAI natively — no upsampling)
     // =========================
     public void SendAudio(byte[] alawData)
     {
@@ -355,11 +352,10 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
         try
         {
             // ══════════════════════════════════════════════
-            // KEY DIFFERENCE: Convert A-law 8kHz → PCM16 24kHz
-            // Gain is applied in PCM domain by the upsampler
+            // HYBRID MODE: Send raw G.711 A-law directly to OpenAI
+            // No upsampling — native A-law gives cleanest STT
             // ══════════════════════════════════════════════
-            var pcm24k = _ingressResampler.Convert(alawData);
-            _session!.SendInputAudio(new BinaryData(pcm24k));
+            _session!.SendInputAudio(new BinaryData(alawData));
             Volatile.Write(ref _lastUserSpeechAt, NowMs());
         }
         catch (Exception ex)
@@ -612,7 +608,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
 
         if (typeName.Contains(TYPE_SESSION_STARTED) || typeName.Contains(TYPE_SESSION_CREATED))
         {
-            Log("✅ Realtime Session Started (PCM16 24kHz)");
+            Log("✅ Realtime Session Started (A-law in / PCM16 24kHz out)");
         }
         else if (typeName.Contains(TYPE_RESPONSE_STARTED) || typeName.Contains(TYPE_RESPONSE_CREATED))
         {
@@ -874,7 +870,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                 var queueDepth = -1;
                 try { queueDepth = GetQueuedFrames?.Invoke() ?? -1; } catch { }
                 Log($"💓 Keepalive: connected={IsConnected}, resp={active}, tool={tool}, ended={ended}, " +
-                    $"noReply={noReply}/{MAX_NO_REPLY_PROMPTS}, syncs={syncs}, queue={queueDepth}, codec=PCM16-24k");
+                    $"noReply={noReply}/{MAX_NO_REPLY_PROMPTS}, syncs={syncs}, queue={queueDepth}, codec=hybrid-alaw-pcm24k");
             }
         }
         catch (OperationCanceledException) { }
