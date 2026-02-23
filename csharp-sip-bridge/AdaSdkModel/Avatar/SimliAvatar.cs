@@ -334,14 +334,17 @@ public sealed class SimliAvatar : UserControl
         function waitForIce(){return new Promise(r=>{let c=0,l=-1;const chk=()=>{if(pc.iceGatheringState==='complete'||c===l)r();else{l=c;setTimeout(chk,250);}};pc.onicecandidate=e=>{if(e.candidate)c++;};setTimeout(()=>r(),3000);setTimeout(chk,250);});}
         function queueAudio(b64){
             if(!ws||ws.readyState!==WebSocket.OPEN) return;
-            try{const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);audioBytesSent+=bytes.length;audioQueue.push(bytes);processQueue();}catch(e){}
+            try{
+                const bin=atob(b64);const bytes=new Uint8Array(bin.length);
+                for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+                audioBytesSent+=bytes.length;
+                // Send immediately — Simli server handles its own jitter buffer
+                ws.send(bytes);
+                if(audioQueue.length===0) chrome.webview.postMessage({type:'speaking'});
+            }catch(e){log('send error: '+e.message);}
         }
-        function processQueue(){
-            if(isSending||!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0) return;
-            isSending=true;const chunk=audioQueue.shift();
-            try{ws.send(chunk);chrome.webview.postMessage({type:'speaking'});}catch(e){}
-            setTimeout(()=>{isSending=false;if(audioQueue.length>0)processQueue();else chrome.webview.postMessage({type:'silent'});},20);
-        }
+        // Clear stale state on barge-in
+        function clearQueue(){ audioQueue=[]; }
         function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
     </script>
 </body>
