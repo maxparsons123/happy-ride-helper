@@ -995,13 +995,14 @@ public sealed class CallSession : ICallSession
             // When destination is currently null (fresh start or post-cancel), verify the
             // incoming value actually resembles what the user said. This prevents the model
             // from auto-filling destinations from [CALLER HISTORY].
-            // BYPASS: If this exact destination was blocked on a previous turn, the AI has
-            // already asked the user about it and they're confirming/repeating — let it through.
+            // BYPASS 1: If this destination was blocked on a previous turn (resemblance match).
+            // BYPASS 2: If the user said the destination earlier in this same call (conversation history).
             else if (string.IsNullOrWhiteSpace(_booking.Destination)
                 && !string.IsNullOrWhiteSpace(incoming)
                 && !string.IsNullOrWhiteSpace(contextForGuard)
                 && !TranscriptResemblesAddress(contextForGuard, incoming)
-                && !(_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming)))
+                && !(_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming))
+                && !ConversationHistoryContainsAddress(incoming))
             {
                 _lastGuardBlockedDest = incoming;
                 _logger.LogWarning("[{SessionId}] 🛡️ DEST AUTO-FILL GUARD: Rejected destination '{Incoming}' — context '{Context}' doesn't resemble it (likely auto-filled from history)",
@@ -1015,7 +1016,12 @@ public sealed class CallSession : ICallSession
                 // Log if we bypassed the guard due to repeat/confirm
                 if (_lastGuardBlockedDest != null && TranscriptResemblesAddress(_lastGuardBlockedDest, incoming))
                 {
-                    _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS: Allowing '{Incoming}' — previously blocked, user confirmed/repeated",
+                    _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS (prev-blocked): Allowing '{Incoming}' — previously blocked, user confirmed/repeated",
+                        SessionId, incoming);
+                }
+                else if (ConversationHistoryContainsAddress(incoming))
+                {
+                    _logger.LogInformation("[{SessionId}] ✅ DEST GUARD BYPASS (conv-history): Allowing '{Incoming}' — user said it earlier in this call",
                         SessionId, incoming);
                 }
                 _lastGuardBlockedDest = null; // Clear on successful accept
@@ -3700,6 +3706,21 @@ public sealed class CallSession : ICallSession
 
         // Check if any significant address word appears in the transcript
         return addressWords.Any(w => transcriptLower.Contains(w));
+    }
+
+    /// <summary>
+    /// Checks if any user transcript in the current call's conversation history
+    /// resembles the given address. This allows the dest guard to bypass when
+    /// the user said the destination earlier in the same call (e.g. before a cancellation).
+    /// </summary>
+    private bool ConversationHistoryContainsAddress(string address)
+    {
+        List<string> history;
+        lock (_userTranscriptHistory)
+        {
+            history = _userTranscriptHistory.ToList();
+        }
+        return history.Any(t => TranscriptResemblesAddress(t, address));
     }
 
     // When Whisper hears a letter suffix it sometimes inserts a hyphen+digit:
