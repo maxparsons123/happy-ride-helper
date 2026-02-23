@@ -322,9 +322,13 @@ public sealed class CallSession : ICallSession
             }
         }
 
+        // Get last transcript for street name guard
+        var lastTranscriptForGuard = (_aiClient is OpenAiSdkClient sdkGuard ? sdkGuard.LastUserTranscript : null) ?? "";
+
         if (args.TryGetValue("pickup", out var p))
         {
             var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
+            incoming = ApplyTranscriptStreetGuard(incoming, lastTranscriptForGuard, "pickup");
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
                 _booking.PickupLat = _booking.PickupLon = null;
@@ -339,6 +343,7 @@ public sealed class CallSession : ICallSession
         if (args.TryGetValue("destination", out var d))
         {
             var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
+            incoming = ApplyTranscriptStreetGuard(incoming, lastTranscriptForGuard, "destination");
             if (StreetNameChanged(_booking.Destination, incoming))
             {
                 _booking.DestLat = _booking.DestLon = null;
@@ -1599,6 +1604,84 @@ public sealed class CallSession : ICallSession
         string Normalize(string s) =>
             System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), @"\d|[^a-z ]", "").Trim();
         return Normalize(oldAddress) != Normalize(newAddress);
+    }
+
+    /// <summary>
+    /// HARD GUARD: If the AI substituted a street name that differs from the transcript,
+    /// replace the AI's version with the transcript version.
+    /// </summary>
+    private string? ApplyTranscriptStreetGuard(string? aiAddress, string transcript, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(aiAddress) || string.IsNullOrWhiteSpace(transcript) || transcript.Length < 5)
+            return aiAddress;
+
+        var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "road", "street", "lane", "drive", "avenue", "close", "way", "crescent",
+            "place", "court", "grove", "terrace", "gardens", "hill", "park", "row",
+            "the", "and", "from", "to", "for", "birmingham", "coventry", "london",
+            "wolverhampton", "solihull", "walsall", "dudley", "sandwell", "warwick"
+        };
+
+        var transcriptWords = transcript.Split(new[] { ' ', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length >= 3 && w.All(c => char.IsLetter(c)))
+            .Select(w => w.Trim())
+            .Where(w => !skipWords.Contains(w))
+            .ToList();
+
+        if (transcriptWords.Count == 0) return aiAddress;
+
+        var aiWords = aiAddress.Split(new[] { ' ', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length >= 3 && w.All(c => char.IsLetter(c)))
+            .Where(w => !skipWords.Contains(w))
+            .ToList();
+
+        var transcriptLookup = new HashSet<string>(transcriptWords.Select(w => w.ToLowerInvariant()));
+
+        foreach (var aiWord in aiWords)
+        {
+            if (transcriptLookup.Contains(aiWord.ToLowerInvariant()))
+                continue;
+
+            foreach (var tWord in transcriptWords)
+            {
+                int dist = LevenshteinDistance(aiWord.ToLowerInvariant(), tWord.ToLowerInvariant());
+                if (dist >= 1 && dist <= 2)
+                {
+                    _logger.LogWarning(
+                        "[{SessionId}] 🛡️ STREET GUARD ({Field}): AI sent '{AiWord}' but transcript has '{TranscriptWord}' — using transcript version",
+                        SessionId, fieldName, aiWord, tWord);
+
+                    var result = System.Text.RegularExpressions.Regex.Replace(
+                        aiAddress,
+                        @"\b" + System.Text.RegularExpressions.Regex.Escape(aiWord) + @"\b",
+                        tWord,
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    return result;
+                }
+            }
+        }
+
+        return aiAddress;
+    }
+
+    private static int LevenshteinDistance(string a, string b)
+    {
+        if (a.Length == 0) return b.Length;
+        if (b.Length == 0) return a.Length;
+
+        var d = new int[a.Length + 1, b.Length + 1];
+        for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+
+        for (int i = 1; i <= a.Length; i++)
+            for (int j = 1; j <= b.Length; j++)
+            {
+                int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+            }
+
+        return d[a.Length, b.Length];
     }
 
     /// <summary>
