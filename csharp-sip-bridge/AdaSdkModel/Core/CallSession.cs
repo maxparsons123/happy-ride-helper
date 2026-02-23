@@ -32,6 +32,10 @@ public sealed class CallSession : ICallSession
     private int _fareRejected; // Set to 1 when user explicitly rejects fare — allows end_call without booking
     private long _lastAdaFinishedAt;
 
+    // Audio diagnostics
+    private long _inboundFrames;
+    private long _outboundFrames;
+
     // ── STAGE-AWARE INTENT GUARD ──
     private volatile BookingStage _currentStage = BookingStage.Greeting;
     private string? _lastUserTranscript;
@@ -604,7 +608,8 @@ public sealed class CallSession : ICallSession
         if (Interlocked.Exchange(ref _active, 0) == 0)
             return;
 
-        _logger.LogInformation("[{SessionId}] Ending session: {Reason}", SessionId, reason);
+        _logger.LogInformation("[{SessionId}] Ending session: {Reason} | Audio stats: inbound={In} frames, outbound={Out} frames",
+            SessionId, reason, Interlocked.Read(ref _inboundFrames), Interlocked.Read(ref _outboundFrames));
 
         // Reset booking state so session is clean for next caller
         _booking.Reset();
@@ -618,6 +623,7 @@ public sealed class CallSession : ICallSession
     public void ProcessInboundAudio(byte[] alawRtp)
     {
         if (!IsActive || alawRtp.Length == 0) return;
+        Interlocked.Increment(ref _inboundFrames);
         _aiClient.SendAudio(alawRtp);
     }
 
@@ -701,8 +707,10 @@ public sealed class CallSession : ICallSession
 
     private void HandleAiAudio(byte[] alawFrame)
     {
+        Interlocked.Increment(ref _outboundFrames);
         // Pure A-law passthrough — no filters, no gain manipulation on compressed bytes.
         // OpenAI sends native G.711 A-law; any DSP on logarithmic bytes degrades quality.
+        _thinningFilter?.ApplyInPlace(alawFrame);
         OnAudioOut?.Invoke(alawFrame);
     }
 

@@ -41,6 +41,7 @@ interface Agent {
   max_no_reply_reprompts: number;
   echo_guard_ms: number;
   goodbye_grace_ms: number;
+  thinning_alpha: number;
 }
 
 const VOICE_OPTIONS = [
@@ -286,6 +287,7 @@ export default function Agents() {
           max_no_reply_reprompts: selectedAgent.max_no_reply_reprompts,
           echo_guard_ms: selectedAgent.echo_guard_ms,
           goodbye_grace_ms: selectedAgent.goodbye_grace_ms,
+          thinning_alpha: selectedAgent.thinning_alpha,
           updated_at: new Date().toISOString(),
         })
         .eq("id", selectedAgent.id);
@@ -827,6 +829,22 @@ export default function Agents() {
                           className="w-full"
                         />
                         <p className="text-xs text-muted-foreground">Wait for goodbye audio to finish before ending. Default: 4500ms</p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Voice Thinning (Alpha)</Label>
+                          <span className="text-sm font-mono text-muted-foreground">{selectedAgent.thinning_alpha?.toFixed(2) ?? '0.88'}</span>
+                        </div>
+                        <Slider
+                          value={[selectedAgent.thinning_alpha ?? 0.88]}
+                          onValueChange={([value]) => updateSelectedAgent({ thinning_alpha: parseFloat(value.toFixed(2)) })}
+                          min={0.80}
+                          max={0.95}
+                          step={0.01}
+                          className="w-full"
+                        />
+                        <p className="text-xs text-muted-foreground">HPF alpha: 0.80=tinny, 0.88=crisp telephony (default), 0.95=natural</p>
                       </div>
                     </CardContent>
                   </Card>
