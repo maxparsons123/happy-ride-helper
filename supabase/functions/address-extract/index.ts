@@ -166,11 +166,22 @@ If a street exists in multiple UK locations AND the phone is mobile (+44 7) with
 - If no house number provided, leave house_number as empty string ""
 
 **Address Formatting:**
-- Format: "[HouseNumber] [Street], [City], [PostalCode]"
+- Format: "[HouseNumber] [Street], [City], [FULL PostalCode]"
+- You MUST always include the FULL postcode (e.g., "CV1 2AB", not just "CV1") for every resolved address
+- If you cannot determine the exact postcode, provide the most likely full postcode for that street+city combination
 - Examples: 
-  - "52A David Road, Coventry, CV1 2AB"
+  - "52A David Road, Coventry, CV1 4QN"
   - "7 Russell Street, Coventry, CV1 4GE"  
-  - "Russell Street, Coventry" (if no house number provided)
+  - "Russell Street, Coventry, CV1 4GE" (if no house number provided)
+- NEVER omit the postcode — always include the best-match full postcode
+
+**Address Verification Protocol:**
+- After resolving, compare your resolved address against the user's ORIGINAL spoken input
+- If the street name you resolved DIFFERS from what the user said (e.g., user said "Dovey Road" but you resolved "Dove Road"), flag this:
+  - Set "address_modified": true in the pickup/destination object
+  - Set "original_input": the exact text the user spoke
+  - Set "modification_reason": why you changed it (e.g., "No 'Dovey Road' found in Coventry, closest match is 'Dove Road'")
+- This allows the caller system to re-verify with the user
 
 **Output as JSON (STRICT FORMAT):**
 {
@@ -178,25 +189,31 @@ If a street exists in multiple UK locations AND the phone is mobile (+44 7) with
   "region_source": "landline_area_code | destination_landmark | text_mention | neighborhood | ambiguous",
   "pickup": {
     "resolved": true,
-    "address": "Full formatted address with city",
+    "address": "Full formatted address with city and FULL postcode",
     "house_number": "Exact house number or empty string",
     "street": "Street name only (no house number)",
     "city": "City name",
-    "postal_code": "Postal code if inferrable, else empty",
+    "postal_code": "FULL postal code (e.g. CV1 4QN) - NEVER empty, always best match",
     "confidence": 0.95,
+    "address_modified": false,
+    "original_input": "exact user spoken text if modified",
+    "modification_reason": "why address was changed, or null",
     "alternatives": []
   },
   "destination": {
     "resolved": true,
-    "address": "Full formatted address with city",
+    "address": "Full formatted address with city and FULL postcode",
     "house_number": "Exact house number or empty string", 
     "street": "Street name only",
     "city": "City name",
-    "postal_code": "Postal code if inferrable, else empty",
+    "postal_code": "FULL postal code (e.g. CV5 6GD) - NEVER empty, always best match",
     "confidence": 0.95,
+    "address_modified": false,
+    "original_input": "exact user spoken text if modified",
+    "modification_reason": "why address was changed, or null",
     "alternatives": []
   },
-  "status": "ready_to_book | clarification_required",
+  "status": "ready_to_book | clarification_required | address_mismatch",
   "clarification_message": null
 }`;
 
