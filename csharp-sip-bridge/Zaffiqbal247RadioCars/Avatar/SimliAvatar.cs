@@ -352,22 +352,17 @@ public sealed class SimliAvatar : UserControl
                 for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
                 audioBytesSent+=bytes.length;
                 audioQueue.push(bytes);
-                // Drain immediately — batching is done C#-side now
-                drainQueue();
+                if(!isSending) drainQueue();
             }catch(e){}
         }
 
         function drainQueue(){
-            if(!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0) return;
-            // Send all queued chunks in order without artificial delays
-            while(audioQueue.length>0){
-                const chunk=audioQueue.shift();
-                try{ws.send(chunk);}catch(e){break;}
-            }
+            if(!ws||ws.readyState!==WebSocket.OPEN||audioQueue.length===0){isSending=false;chrome.webview.postMessage({type:'silent'});return;}
+            isSending=true;
+            const chunk=audioQueue.shift();
+            try{ws.send(chunk);}catch(e){isSending=false;return;}
             chrome.webview.postMessage({type:'speaking'});
-            // Set a timer to signal silent when no new audio arrives for 100ms
-            if(drainTimer) clearTimeout(drainTimer);
-            drainTimer=setTimeout(()=>{chrome.webview.postMessage({type:'silent'});drainTimer=null;},100);
+            drainTimer=setTimeout(drainQueue,20);
         }
 
         function disconnect(){if(ws){ws.close();ws=null;}if(pc){pc.close();pc=null;}audioQueue=[];if(drainTimer){clearTimeout(drainTimer);drainTimer=null;}document.getElementById('loading').style.display='block';document.getElementById('loading').textContent='Disconnected';}
