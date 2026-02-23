@@ -114,6 +114,11 @@ const Pay = () => {
                 {amount}
               </p>
             )}
+            <div className="flex items-center justify-center gap-2 mt-3 text-xs">
+              <span className="bg-black rounded-md px-3 py-1.5 font-semibold tracking-wide"> Pay</span>
+              <span className="bg-white text-gray-900 rounded-md px-3 py-1.5 font-semibold tracking-wide">G Pay</span>
+              <span className="bg-white/20 rounded-md px-3 py-1.5 font-semibold">💳 Card</span>
+            </div>
           </div>
 
           {/* Widget container */}
