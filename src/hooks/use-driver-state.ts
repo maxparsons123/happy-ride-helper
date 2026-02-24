@@ -14,7 +14,7 @@ export interface JobData {
   dropoffLat: number;
   dropoffLng: number;
   biddingWindowSec: number;
-  status: 'queued' | 'allocated' | 'completed' | 'rejected' | 'lost';
+  status: 'queued' | 'allocated' | 'arrived' | 'completed' | 'rejected' | 'lost';
   timestamp: number;
   raw?: any;
 }
@@ -115,14 +115,32 @@ export function useDriverState() {
     setJobsState(prev => {
       const next = prev.map(j => j.jobId === jobId ? { ...j, status } : j);
       localStorage.setItem(getStorageKey(driverId, 'jobs'), JSON.stringify(next));
+      // Persist active booking snapshot when driver arrives
+      if (status === 'arrived') {
+        const arrivedJob = next.find(j => j.jobId === jobId);
+        if (arrivedJob) {
+          localStorage.setItem(getStorageKey(driverId, 'active_booking'), JSON.stringify(arrivedJob));
+        }
+      }
+      // Clear active booking when job completes or is rejected
+      if (status === 'completed' || status === 'rejected') {
+        localStorage.removeItem(getStorageKey(driverId, 'active_booking'));
+      }
       return next;
     });
   }, [driverId]);
 
-  const allocatedJob = jobs.find(j => j.status === 'allocated');
+  const getActiveBooking = useCallback((): JobData | null => {
+    try {
+      const saved = localStorage.getItem(getStorageKey(driverId, 'active_booking'));
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  }, [driverId]);
+
+  const allocatedJob = jobs.find(j => j.status === 'allocated' || j.status === 'arrived');
 
   return {
     driverId, presence, setPresence, coords, setCoords,
-    jobs, addJob, updateJobStatus, allocatedJob, seenJobIds,
+    jobs, addJob, updateJobStatus, allocatedJob, getActiveBooking, seenJobIds,
   };
 }
