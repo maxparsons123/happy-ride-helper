@@ -136,7 +136,7 @@ export function useMqttDispatch() {
             dropoffLat: parseFloat(data.dropoffLat) || parseFloat(data.dropoffLng) || 0,
             dropoffLng: parseFloat(data.dropoffLng) || 0,
             passengers: data.passengers || '1',
-            fare: data.fare || '0.00',
+            fare: data.fare || data.estimatedFare || data.estimatedPrice || data.price || data.amount || data.cost || '0.00',
             customerName: data.customerName || 'Customer',
             customerPhone: data.customerPhone || '',
             notes: data.notes || '',
