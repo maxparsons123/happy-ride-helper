@@ -232,7 +232,7 @@
 // Ultra-resilient debug logger
 document.title = 'BOOT...';
 var _dbg = document.getElementById('debugLog');
-if(_dbg) _dbg.style.display = 'block';
+// Debug panel hidden by default, shown on errors only
 function dbg(msg){
   try {
     var d = document.getElementById('debugLog');
@@ -242,6 +242,7 @@ function dbg(msg){
   console.log(msg);
 }
 window.onerror = function(msg, url, line, col, err) {
+  if(_dbg) _dbg.style.display = 'block'; // show debug panel on error
   dbg('❌ ERROR L' + line + ': ' + msg);
   var pill = document.getElementById('mqttText');
   if(pill) pill.textContent = 'JS Error L' + line;
@@ -815,8 +816,8 @@ function publishDriverStatus() {
 
 // ── REAL MQTT CONNECTION ──
 const MQTT_BROKERS = [
-  'wss://test.mosquitto.org:8081',
-  'wss://broker.hivemq.com:8884/mqtt'
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081'
 ];
 let currentBrokerIdx = 0;
 let MQTT_BROKER = MQTT_BROKERS[0];
@@ -1073,12 +1074,23 @@ bidOnJob = function(id){
   },2000);
 };
 
+// Seed initial mock jobs for demo
+function addMockJobs(){
+  for(let i=0;i<4;i++){
+    const j=generateJob();
+    availableJobs.push(j);
+    const m=L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
+    jobMarkers['avail_'+j.jobId]=m;
+  }
+  renderAvailableJobs();
+}
+
 // Test WebSocket connectivity then connect MQTT
 dbg('🚀 Starting MQTT connection sequence...');
 testWsConnectivity();
 connectMqtt();
 
-// Still seed some mock jobs for demo + drip if no real MQTT jobs
+// Seed mock jobs
 addMockJobs();
 setInterval(()=>{
   if(availableJobs.length<3 && !mqttConnected){
