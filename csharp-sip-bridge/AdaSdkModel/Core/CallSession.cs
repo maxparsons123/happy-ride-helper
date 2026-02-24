@@ -44,6 +44,7 @@ public sealed class CallSession : ICallSession
     private string? _lastUserTranscript;
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private string? _lastToolIntent; // Tracks the last tool the AI called (e.g. "check_booking_status", "cancel_booking")
+    private string? _previousToolIntent; // The tool intent before _lastToolIntent (for confirmation-after-block flows)
     private int _intentGuardFiring; // prevents re-entrant guard execution
 
     // ── DUAL-TRANSCRIPT AUDIT TRAIL ──
@@ -742,6 +743,7 @@ public sealed class CallSession : ICallSession
         _logger.LogDebug("[{SessionId}] Tool call: {Name} (args: {ArgCount})", SessionId, name, args.Count);
 
         var previousIntent = _lastToolIntent;
+        _previousToolIntent = previousIntent;
         _lastToolIntent = name; // Track for intent-gating (e.g. block cancel after status check)
         if (name != "sync_booking_data") // skip noisy sync logs
             _logger.LogInformation("[{SessionId}] 🎯 Tool intent: {Tool} (previous: {Previous})", SessionId, name, previousIntent ?? "none");
@@ -2825,10 +2827,18 @@ public sealed class CallSession : ICallSession
 
         var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
 
-        // CRITICAL: Confirmation keywords alone (e.g. "yeah", "ok") are NOT sufficient.
-        // The caller must have explicitly mentioned cancellation in a recent message.
-        // This prevents garbled transcripts containing "yeah" from enabling accidental cancellations.
-        if (!hasCancelIntent)
+        // If the PREVIOUS tool call was also cancel_booking (i.e. Ada already asked for
+        // confirmation after a blocked attempt), allow confirmation keywords through.
+        // This handles the flow: user says garbled "cancel" → blocked → Ada asks "are you sure?" → user says "yes"
+        var isConfirmationAfterPreviousAttempt = _previousToolIntent == "cancel_booking" &&
+            recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
+
+        if (isConfirmationAfterPreviousAttempt)
+        {
+            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — confirmation after previous blocked attempt. Transcripts: [{Transcripts}]",
+                SessionId, string.Join(" | ", recentUserMessages));
+        }
+        else if (!hasCancelIntent)
         {
             _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — no cancellation keywords found in recent transcripts: [{Transcripts}]",
                 SessionId, string.Join(" | ", recentUserMessages));
