@@ -69,6 +69,9 @@ export function useMqttDispatch() {
       client.subscribe('radio/channel');
       client.subscribe('dispatch/bids/incoming');
       client.subscribe('jobs/+/bids');
+      // WebRTC radio signaling
+      client.subscribe('radio/webrtc/signal/DISPATCH');
+      client.subscribe('radio/webrtc/presence');
     });
 
     client.on('message', (topic: string, message: Buffer) => {

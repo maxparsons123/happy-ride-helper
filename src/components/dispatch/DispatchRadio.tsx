@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Radio, Mic, MicOff, Volume2, Users, User, Check } from 'lucide-react';
 import type { OnlineDriver } from '@/hooks/use-mqtt-dispatch';
+import { useWebRTCRadio } from '@/hooks/use-webrtc-radio';
 
 interface DispatchRadioProps {
   publish: (topic: string, payload: any) => void;
@@ -16,15 +17,18 @@ interface RadioLogEntry {
 
 export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: DispatchRadioProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [pttActive, setPttActive] = useState(false);
   const [volume, setVolume] = useState(80);
   const [radioLog, setRadioLog] = useState<RadioLogEntry[]>([]);
-  const [selectedDrivers, setSelectedDrivers] = useState<Set<string>>(new Set()); // empty = all
+  const [selectedDrivers, setSelectedDrivers] = useState<Set<string>>(new Set());
   const [showDriverList, setShowDriverList] = useState(false);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
-  const pttActiveRef = useRef(false);
+
+  const radio = useWebRTCRadio({
+    peerId: 'DISPATCH',
+    peerName: 'Dispatch',
+    publish,
+    mqttConnected,
+  });
 
   const isAllMode = selectedDrivers.size === 0;
 
@@ -37,6 +41,13 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [radioLog]);
 
+  // Auto-join radio channel when panel opens
+  useEffect(() => {
+    if (isOpen && mqttConnected) {
+      radio.joinChannel();
+    }
+  }, [isOpen, mqttConnected]);
+
   const toggleDriver = useCallback((id: string) => {
     setSelectedDrivers(prev => {
       const next = new Set(prev);
@@ -48,87 +59,25 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
 
   const selectAll = useCallback(() => setSelectedDrivers(new Set()), []);
 
-  const publishAudioChunk = useCallback((base64: string, mimeType: string) => {
-    const payload = {
-      driver: 'DISPATCH',
-      name: 'Dispatch',
-      audio: base64,
-      mime: mimeType,
-      ts: Date.now(),
-    };
-
-    if (selectedDrivers.size === 0) {
-      // Broadcast to all
-      publish('radio/broadcast', payload);
-    } else {
-      // Send to each selected driver's private radio topic
-      selectedDrivers.forEach(dId => {
-        publish(`radio/driver/${dId}`, payload);
-      });
-      // Also send on broadcast with a target list so drivers can filter
-      publish('radio/broadcast', { ...payload, targets: Array.from(selectedDrivers) });
-    }
-  }, [publish, selectedDrivers]);
-
-  const startPtt = useCallback(async () => {
-    if (pttActiveRef.current || !mqttConnected) return;
-    pttActiveRef.current = true;
-    setPttActive(true);
-
-    try {
-      if (!mediaStreamRef.current) {
-        mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
-          video: false,
-        });
-      }
-
-      let mimeType = 'audio/webm;codecs=opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'audio/webm';
-        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
-      }
-
-      const recorder = new MediaRecorder(mediaStreamRef.current, {
-        mimeType,
-        audioBitsPerSecond: 16000,
-      });
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0 && pttActiveRef.current) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64 = (reader.result as string)?.split(',')[1];
-            if (base64) publishAudioChunk(base64, mimeType);
-          };
-          reader.readAsDataURL(e.data);
-        }
-      };
-
-      recorder.start(500);
-      recorderRef.current = recorder;
-
-      const targetLabel = isAllMode
-        ? 'All Drivers'
-        : selectedDrivers.size === 1
-          ? onlineDrivers.find(d => selectedDrivers.has(d.id))?.name || 'Driver'
-          : `${selectedDrivers.size} drivers`;
-      addLog('outgoing', targetLabel);
-    } catch {
-      pttActiveRef.current = false;
-      setPttActive(false);
-    }
-  }, [mqttConnected, publishAudioChunk, addLog, isAllMode, selectedDrivers, onlineDrivers]);
+  const startPtt = useCallback(() => {
+    if (!mqttConnected) return;
+    radio.startTransmitting();
+    const targetLabel = isAllMode
+      ? 'All Drivers'
+      : selectedDrivers.size === 1
+        ? onlineDrivers.find(d => selectedDrivers.has(d.id))?.name || 'Driver'
+        : `${selectedDrivers.size} drivers`;
+    addLog('outgoing', targetLabel);
+  }, [mqttConnected, radio, isAllMode, selectedDrivers, onlineDrivers, addLog]);
 
   const stopPtt = useCallback(() => {
-    if (!pttActiveRef.current) return;
-    pttActiveRef.current = false;
-    setPttActive(false);
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
-    }
-    recorderRef.current = null;
-  }, []);
+    radio.stopTransmitting();
+  }, [radio]);
+
+  const handleVolumeChange = useCallback((val: number) => {
+    setVolume(val);
+    radio.setVolume(val / 100);
+  }, [radio]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => e.preventDefault(), []);
 
@@ -150,6 +99,11 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 text-cyan-400 text-sm font-bold">
           <Radio className="w-4 h-4" /> Radio
+          {radio.connectedPeers.length > 0 && (
+            <span className="text-[10px] text-green-400 font-mono">
+              ({radio.connectedPeers.length} peer{radio.connectedPeers.length > 1 ? 's' : ''})
+            </span>
+          )}
         </div>
         <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white text-sm px-1">✕</button>
       </div>
@@ -177,7 +131,6 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
 
         {showDriverList && (
           <div className="mt-1 border border-[#333] rounded-lg bg-[#111] max-h-40 overflow-y-auto">
-            {/* All drivers option */}
             <button
               onClick={selectAll}
               className={`w-full px-3 py-2 text-left text-xs flex items-center gap-2 hover:bg-white/5 transition-colors ${
@@ -194,9 +147,7 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
             </button>
 
             {onlineDrivers.length === 0 && (
-              <div className="px-3 py-3 text-center text-[11px] text-gray-600">
-                No drivers online
-              </div>
+              <div className="px-3 py-3 text-center text-[11px] text-gray-600">No drivers online</div>
             )}
 
             {onlineDrivers.map(d => {
@@ -227,9 +178,9 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
 
       {/* Status */}
       <div className={`text-center text-xs mb-3 font-semibold ${
-        pttActive ? 'text-red-400' : mqttConnected ? 'text-gray-500' : 'text-yellow-500'
+        radio.isTransmitting ? 'text-red-400' : mqttConnected ? 'text-gray-500' : 'text-yellow-500'
       }`}>
-        {pttActive
+        {radio.isTransmitting
           ? isAllMode
             ? '🔴 BROADCASTING TO ALL...'
             : `🔴 TO ${selectedDrivers.size} DRIVER${selectedDrivers.size > 1 ? 'S' : ''}...`
@@ -241,7 +192,7 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
       {/* PTT Button */}
       <button
         className={`mx-auto block w-20 h-20 rounded-full border-[3px] transition-all select-none touch-none flex flex-col items-center justify-center gap-1 ${
-          pttActive
+          radio.isTransmitting
             ? 'border-red-500 bg-red-950/60 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.3)]'
             : 'border-[#444] bg-gradient-to-b from-[#222] to-[#1a1a1a] text-gray-500 hover:border-[#666]'
         }`}
@@ -254,7 +205,7 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
         onContextMenu={handleContextMenu}
         disabled={!mqttConnected}
       >
-        {pttActive ? <Mic className="w-6 h-6 animate-pulse" /> : <MicOff className="w-6 h-6" />}
+        {radio.isTransmitting ? <Mic className="w-6 h-6 animate-pulse" /> : <MicOff className="w-6 h-6" />}
         <span className="text-[10px] font-extrabold">PTT</span>
       </button>
 
@@ -266,7 +217,7 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
           min={0}
           max={100}
           value={volume}
-          onChange={(e) => setVolume(Number(e.target.value))}
+          onChange={(e) => handleVolumeChange(Number(e.target.value))}
           className="flex-1 h-1 bg-[#333] rounded appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-cyan-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer"
         />
       </div>

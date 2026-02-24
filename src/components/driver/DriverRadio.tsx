@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { Radio, Mic, MicOff, Volume2 } from 'lucide-react';
-import type { RadioMessage } from '@/hooks/use-mqtt-driver';
+import { useWebRTCRadio } from '@/hooks/use-webrtc-radio';
 
 export interface DriverRadioHandle {
   startPtt: () => void;
@@ -12,7 +12,7 @@ interface DriverRadioProps {
   driverName: string;
   publish: (topic: string, payload: any) => void;
   mqttConnected: boolean;
-  lastRadioMessage: RadioMessage | null;
+  lastRadioMessage?: any; // kept for interface compat, no longer used
 }
 
 interface RadioLogEntry {
@@ -21,19 +21,21 @@ interface RadioLogEntry {
   time: string;
 }
 
-export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(function DriverRadio({ driverId, driverName, publish, mqttConnected, lastRadioMessage }, ref) {
+export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(function DriverRadio(
+  { driverId, driverName, publish, mqttConnected },
+  ref
+) {
   const [isOpen, setIsOpen] = useState(false);
-  const [pttActive, setPttActive] = useState(false);
-  const [receiving, setReceiving] = useState(false);
   const [volume, setVolume] = useState(80);
   const [radioLog, setRadioLog] = useState<RadioLogEntry[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
-  const pttActiveRef = useRef(false);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const gainRef = useRef<GainNode | null>(null);
-  const processedTsRef = useRef<Set<number>>(new Set());
+
+  const radio = useWebRTCRadio({
+    peerId: driverId,
+    peerName: driverName,
+    publish,
+    mqttConnected,
+  });
 
   const addLog = useCallback((type: RadioLogEntry['type'], name: string) => {
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -44,115 +46,27 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [radioLog]);
 
-  // Update gain when volume changes
+  // Auto-join radio channel when panel opens
   useEffect(() => {
-    if (gainRef.current) gainRef.current.gain.value = volume / 100;
-  }, [volume]);
-
-  // Play incoming radio audio
-  useEffect(() => {
-    if (!lastRadioMessage || !lastRadioMessage.audio) return;
-    if (processedTsRef.current.has(lastRadioMessage.ts)) return;
-    processedTsRef.current.add(lastRadioMessage.ts);
-    // Keep set small
-    if (processedTsRef.current.size > 50) {
-      const arr = Array.from(processedTsRef.current);
-      processedTsRef.current = new Set(arr.slice(-30));
+    if (isOpen && mqttConnected) {
+      radio.joinChannel();
     }
+  }, [isOpen, mqttConnected]);
 
-    const playAudio = async () => {
-      try {
-        if (!audioCtxRef.current) {
-          audioCtxRef.current = new AudioContext();
-          gainRef.current = audioCtxRef.current.createGain();
-          gainRef.current.gain.value = volume / 100;
-          gainRef.current.connect(audioCtxRef.current.destination);
-        }
-        const ctx = audioCtxRef.current;
-        if (ctx.state === 'suspended') await ctx.resume();
-
-        const binary = atob(lastRadioMessage.audio);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-        const blob = new Blob([bytes], { type: lastRadioMessage.mime || 'audio/webm;codecs=opus' });
-        const arrayBuf = await blob.arrayBuffer();
-        const audioBuf = await ctx.decodeAudioData(arrayBuf);
-
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuf;
-        source.connect(gainRef.current!);
-        setReceiving(true);
-        source.onended = () => setReceiving(false);
-        source.start();
-
-        addLog('incoming', lastRadioMessage.name || 'Dispatch');
-      } catch {
-        setReceiving(false);
-      }
-    };
-    playAudio();
-  }, [lastRadioMessage, volume, addLog]);
-
-  const publishAudioChunk = useCallback((base64: string, mimeType: string) => {
-    publish('radio/channel', {
-      driver: driverId,
-      name: driverName,
-      audio: base64,
-      mime: mimeType,
-      ts: Date.now(),
-    });
-  }, [publish, driverId, driverName]);
-
-  const startPtt = useCallback(async () => {
-    if (pttActiveRef.current || !mqttConnected) return;
-    pttActiveRef.current = true;
-    setPttActive(true);
-
-    try {
-      if (!mediaStreamRef.current) {
-        mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
-          video: false,
-        });
-      }
-
-      let mimeType = 'audio/webm;codecs=opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'audio/webm';
-        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
-      }
-
-      const recorder = new MediaRecorder(mediaStreamRef.current, { mimeType, audioBitsPerSecond: 16000 });
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0 && pttActiveRef.current) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const base64 = (reader.result as string)?.split(',')[1];
-            if (base64) publishAudioChunk(base64, mimeType);
-          };
-          reader.readAsDataURL(e.data);
-        }
-      };
-
-      recorder.start(500);
-      recorderRef.current = recorder;
-      addLog('outgoing', 'Dispatch');
-    } catch {
-      pttActiveRef.current = false;
-      setPttActive(false);
-    }
-  }, [mqttConnected, publishAudioChunk, addLog]);
+  const startPtt = useCallback(() => {
+    if (!mqttConnected) return;
+    radio.startTransmitting();
+    addLog('outgoing', 'Dispatch');
+  }, [mqttConnected, radio, addLog]);
 
   const stopPtt = useCallback(() => {
-    if (!pttActiveRef.current) return;
-    pttActiveRef.current = false;
-    setPttActive(false);
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
-    }
-    recorderRef.current = null;
-  }, []);
+    radio.stopTransmitting();
+  }, [radio]);
+
+  const handleVolumeChange = useCallback((val: number) => {
+    setVolume(val);
+    radio.setVolume(val / 100);
+  }, [radio]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => e.preventDefault(), []);
 
@@ -166,8 +80,8 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
       <button
         onClick={() => setIsOpen(true)}
         className={`fixed bottom-20 right-3 z-[900] w-11 h-11 rounded-full border-2 flex items-center justify-center transition-colors shadow-lg ${
-          receiving
-            ? 'bg-green-600/30 border-green-500 text-green-400 animate-pulse'
+          radio.connectedPeers.length > 0
+            ? 'bg-green-600/20 border-green-500 text-green-400'
             : 'bg-cyan-600/20 border-cyan-500 text-cyan-400 hover:bg-cyan-600/30'
         }`}
         title="Open Radio"
@@ -183,31 +97,34 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-1.5 text-cyan-400 text-xs font-bold">
           <Radio className="w-3.5 h-3.5" /> Radio
+          {radio.connectedPeers.length > 0 && (
+            <span className="text-[9px] text-green-400 font-mono">
+              ({radio.connectedPeers.length} peer{radio.connectedPeers.length > 1 ? 's' : ''})
+            </span>
+          )}
         </div>
         <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white text-xs px-1">✕</button>
       </div>
 
       {/* Status */}
       <div className={`text-center text-[11px] mb-2 font-semibold ${
-        pttActive ? 'text-red-400' : receiving ? 'text-green-400' : mqttConnected ? 'text-gray-500' : 'text-yellow-500'
+        radio.isTransmitting ? 'text-red-400' : mqttConnected ? 'text-gray-500' : 'text-yellow-500'
       }`}>
-        {pttActive
+        {radio.isTransmitting
           ? '🔴 TRANSMITTING...'
-          : receiving
-            ? '🟢 RECEIVING...'
-            : mqttConnected
-              ? 'Hold to talk'
-              : 'Disconnected'}
+          : mqttConnected
+            ? radio.connectedPeers.length > 0
+              ? `${radio.connectedPeers.length} peer(s) — Hold to talk`
+              : 'Hold to talk'
+            : 'Disconnected'}
       </div>
 
       {/* PTT Button */}
       <button
         className={`mx-auto block w-16 h-16 rounded-full border-[3px] transition-all select-none touch-none flex flex-col items-center justify-center gap-0.5 ${
-          pttActive
+          radio.isTransmitting
             ? 'border-red-500 bg-red-950/60 text-red-400 shadow-[0_0_20px_rgba(239,68,68,0.3)]'
-            : receiving
-              ? 'border-green-500 bg-green-950/40 text-green-400'
-              : 'border-[#444] bg-gradient-to-b from-[#222] to-[#1a1a1a] text-gray-500 hover:border-[#666]'
+            : 'border-[#444] bg-gradient-to-b from-[#222] to-[#1a1a1a] text-gray-500 hover:border-[#666]'
         }`}
         onMouseDown={startPtt}
         onMouseUp={stopPtt}
@@ -218,7 +135,7 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
         onContextMenu={handleContextMenu}
         disabled={!mqttConnected}
       >
-        {pttActive ? <Mic className="w-5 h-5 animate-pulse" /> : <MicOff className="w-5 h-5" />}
+        {radio.isTransmitting ? <Mic className="w-5 h-5 animate-pulse" /> : <MicOff className="w-5 h-5" />}
         <span className="text-[9px] font-extrabold">PTT</span>
       </button>
 
@@ -230,7 +147,7 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
           min={0}
           max={100}
           value={volume}
-          onChange={(e) => setVolume(Number(e.target.value))}
+          onChange={(e) => handleVolumeChange(Number(e.target.value))}
           className="flex-1 h-1 bg-[#333] rounded appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-cyan-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer"
         />
       </div>

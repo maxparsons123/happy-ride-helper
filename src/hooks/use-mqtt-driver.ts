@@ -41,10 +41,12 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
       client.subscribe(`jobs/+/result/${driverId}`);
       client.subscribe(`drivers/${driverId}/bid-request`);
       client.subscribe(`drivers/${driverId}/jobs`);
-      // Radio topics
+      // Radio topics (legacy + WebRTC signaling)
       client.subscribe('radio/broadcast');
       client.subscribe('radio/channel');
       client.subscribe(`radio/driver/${driverId}`);
+      client.subscribe(`radio/webrtc/signal/${driverId}`);
+      client.subscribe('radio/webrtc/presence');
     });
 
     client.on('message', (topic: string, message: Buffer) => {
