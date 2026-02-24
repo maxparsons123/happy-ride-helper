@@ -146,14 +146,19 @@ public sealed class MqttDispatchClient : IDisposable
                     var dLat = booking.dropoffLat != 0 ? booking.dropoffLat : booking.destinationLat;
                     var dLng = booking.dropoffLng != 0 ? booking.dropoffLng : booking.destinationLng;
 
-                    // Pub app sends fare as string "£12.50", dispatch uses decimal
+                    // Parse fare from multiple possible field names
                     decimal? fare = booking.estimatedPrice;
-                    if (fare == null && !string.IsNullOrEmpty(booking.fare))
+                    if (fare == null)
                     {
-                        var cleaned = booking.fare.Replace("£", "").Replace("$", "").Trim();
-                        if (decimal.TryParse(cleaned, NumberStyles.Any,
-                            CultureInfo.InvariantCulture, out var parsed))
-                            fare = parsed;
+                        // Check all possible string fare fields
+                        var fareStr = booking.fare ?? booking.estimatedFare ?? booking.price ?? booking.amount ?? booking.cost;
+                        if (!string.IsNullOrEmpty(fareStr))
+                        {
+                            var cleaned = fareStr.Replace("£", "").Replace("$", "").Replace("€", "").Trim();
+                            if (decimal.TryParse(cleaned, NumberStyles.Any,
+                                CultureInfo.InvariantCulture, out var parsed))
+                                fare = parsed;
+                        }
                     }
 
                     // Parse passengers: can be int OR descriptive string like "2 adults, 1 child with wheelchair"
@@ -711,6 +716,10 @@ public sealed class MqttDispatchClient : IDisposable
         public double lat { get; set; }              // pickup lat
         public double lng { get; set; }              // pickup lng
         public string? fare { get; set; }            // string like "£12.50"
+        public string? estimatedFare { get; set; }   // alternative fare field name
+        public string? price { get; set; }           // alternative fare field name
+        public string? amount { get; set; }          // alternative fare field name
+        public string? cost { get; set; }            // alternative fare field name
         public string? notes { get; set; }           // special requirements / notes
         public long timestamp { get; set; }          // epoch ms
 
