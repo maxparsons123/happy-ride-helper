@@ -178,6 +178,7 @@
   <div class="status-group">
     <div class="status-pill status-online" id="driverStatus"><span class="dot"></span> <span id="statusText">Online</span></div>
     <div class="status-pill mqtt-pill"><span class="dot"></span> MQTT Connected</div>
+    <div class="status-pill" style="cursor:pointer" onclick="toggleTTS()" id="ttsPill">🔊 TTS On</div>
     <div class="earnings">Today: £<span id="earningsTotal">0.00</span></div>
   </div>
 </div>
@@ -370,6 +371,45 @@ function selectJob(id){
 }
 
 
+// ── TTS ANNOUNCEMENTS ──
+let ttsEnabled = true;
+function announceNewJob(j){
+  if(!ttsEnabled || !('speechSynthesis' in window)) return;
+  const km = (j.distanceFromDriver/1000).toFixed(1);
+  const text = `New job available. ${j.pickup.address} to ${j.dropoff.address}. ${km} kilometres away. £${j.pricing.estimate.toFixed(0)}.`;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.1;
+  utterance.pitch = 1.0;
+  utterance.volume = 0.8;
+  // Prefer a British English voice if available
+  const voices = speechSynthesis.getVoices();
+  const britishVoice = voices.find(v=>v.lang==='en-GB') || voices.find(v=>v.lang.startsWith('en'));
+  if(britishVoice) utterance.voice = britishVoice;
+  speechSynthesis.speak(utterance);
+}
+
+function announceBidResult(won, j){
+  if(!ttsEnabled || !('speechSynthesis' in window)) return;
+  const text = won ? `Bid won! ${j.pickup.address} to ${j.dropoff.address}.` : `Bid lost for ${j.pickup.address}.`;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.1;
+  utterance.volume = 0.8;
+  const voices = speechSynthesis.getVoices();
+  const britishVoice = voices.find(v=>v.lang==='en-GB') || voices.find(v=>v.lang.startsWith('en'));
+  if(britishVoice) utterance.voice = britishVoice;
+  speechSynthesis.speak(utterance);
+}
+
+// Pre-load voices
+if('speechSynthesis' in window){ speechSynthesis.getVoices(); window.speechSynthesis.onvoiceschanged=()=>speechSynthesis.getVoices(); }
+
+function toggleTTS(){
+  ttsEnabled=!ttsEnabled;
+  document.getElementById('ttsPill').textContent=ttsEnabled?'🔊 TTS On':'🔇 TTS Off';
+  document.getElementById('ttsPill').style.borderColor=ttsEnabled?'var(--green)':'#555';
+  if(!ttsEnabled) speechSynthesis.cancel();
+}
+
 
 async function fetchRoute(coords){
   try {
@@ -493,6 +533,7 @@ function bidOnJob(id){
       inboxJobs.push(j);
       document.getElementById('inboxCount').textContent = inboxJobs.length;
       toast('🎉 You won the job!','success');
+      announceBidResult(true, j);
       renderAvailableJobs();
       switchTab('inbox');
       showInboxJob(j);
@@ -500,6 +541,7 @@ function bidOnJob(id){
       j.bidStatus = 'none';
       availableJobs = availableJobs.filter(x=>x.jobId!==id);
       toast('❌ Another driver selected','error');
+      announceBidResult(false, j);
       renderAvailableJobs();
     }
   }, 1500+Math.random()*2000);
@@ -686,6 +728,7 @@ setInterval(()=>{
     const m=L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
     jobMarkers['avail_'+j.jobId]=m;
     toast(`📍 New job: ${j.pickup.address}`,'info');
+    announceNewJob(j);
   }
 },8000+Math.random()*7000);
 
