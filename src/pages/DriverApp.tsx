@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
+import type { DriverRadioHandle } from '@/components/driver/DriverRadio';
 import { useDriverState, type JobData } from '@/hooks/use-driver-state';
 import { DriverRadio } from '@/components/driver/DriverRadio';
 import { useMqttDriver } from '@/hooks/use-mqtt-driver';
@@ -16,6 +17,7 @@ export default function DriverApp() {
   const driver = useDriverState();
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeJobRequest, setActiveJobRequest] = useState<JobData | null>(null);
+  const radioRef = useRef<DriverRadioHandle>(null);
 
   const gps = useGpsTracking(driver.setCoords);
   const geocoded = useGeocodeJob(driver.allocatedJob);
@@ -97,7 +99,7 @@ export default function DriverApp() {
   return (
     <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-background" style={{ touchAction: 'manipulation' }}>
       {/* Map Layer */}
-      <DriverMap coords={gps.coords} allocatedJob={driver.allocatedJob} geocodedCoords={geocoded} liveEtaMinutes={etaMinutes} liveDistanceKm={distanceKm} />
+      <DriverMap coords={gps.coords} allocatedJob={driver.allocatedJob} geocodedCoords={geocoded} liveEtaMinutes={etaMinutes} liveDistanceKm={distanceKm} onCabLongPress={() => radioRef.current?.startPtt()} onCabLongPressEnd={() => radioRef.current?.stopPtt()} />
 
       {/* Header */}
       <DriverHeader presence={driver.presence} onMenuToggle={() => setMenuOpen(prev => !prev)} />
@@ -121,6 +123,7 @@ export default function DriverApp() {
 
       {/* Radio PTT */}
       <DriverRadio
+        ref={radioRef}
         driverId={driver.driverId}
         driverName={`Driver ${driver.driverId}`}
         publish={mqtt.publish}

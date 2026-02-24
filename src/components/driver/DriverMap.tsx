@@ -40,15 +40,19 @@ interface DriverMapProps {
   geocodedCoords?: GeocodedCoords | null;
   liveEtaMinutes?: number | null;
   liveDistanceKm?: number | null;
+  onCabLongPress?: () => void;
+  onCabLongPressEnd?: () => void;
 }
 
-export function DriverMap({ coords, allocatedJob, geocodedCoords, liveEtaMinutes, liveDistanceKm }: DriverMapProps) {
+export function DriverMap({ coords, allocatedJob, geocodedCoords, liveEtaMinutes, liveDistanceKm, onCabLongPress, onCabLongPressEnd }: DriverMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
   const pickupMarkerRef = useRef<L.Marker | null>(null);
   const dropoffMarkerRef = useRef<L.Marker | null>(null);
   const routeLayerRef = useRef<L.GeoJSON | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressActiveRef = useRef(false);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -64,7 +68,36 @@ export function DriverMap({ coords, allocatedJob, geocodedCoords, liveEtaMinutes
       attribution: '© OpenStreetMap',
     }).addTo(map);
 
-    markerRef.current = L.marker([52.4068, -1.5197], { icon: createCabIcon(0) }).addTo(map);
+    const marker = L.marker([52.4068, -1.5197], { icon: createCabIcon(0) }).addTo(map);
+
+    // Long-press detection on cab icon
+    const el = marker.getElement();
+    const startLongPress = () => {
+      longPressTimerRef.current = setTimeout(() => {
+        longPressActiveRef.current = true;
+        onCabLongPress?.();
+      }, 2000);
+    };
+    const cancelLongPress = () => {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      if (longPressActiveRef.current) {
+        longPressActiveRef.current = false;
+        onCabLongPressEnd?.();
+      }
+    };
+    if (el) {
+      el.addEventListener('mousedown', startLongPress);
+      el.addEventListener('mouseup', cancelLongPress);
+      el.addEventListener('mouseleave', cancelLongPress);
+      el.addEventListener('touchstart', startLongPress, { passive: true });
+      el.addEventListener('touchend', cancelLongPress);
+      el.addEventListener('touchcancel', cancelLongPress);
+    }
+
+    markerRef.current = marker;
     mapRef.current = map;
 
     return () => { map.remove(); mapRef.current = null; };
