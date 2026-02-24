@@ -6,6 +6,7 @@
 <title>Black Cab Unite — Driver Tablet App</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/mqtt@5.5.0/dist/mqtt.min.js"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   :root{
@@ -177,7 +178,7 @@
   <div class="brand">🚕 Black Cab Unite</div>
   <div class="status-group">
     <div class="status-pill status-online" id="driverStatus"><span class="dot"></span> <span id="statusText">Online</span></div>
-    <div class="status-pill mqtt-pill"><span class="dot"></span> MQTT Connected</div>
+    <div class="status-pill mqtt-pill" id="mqttPill"><span class="dot"></span> <span id="mqttText">MQTT Connecting…</span></div>
     <div class="status-pill" style="cursor:pointer" onclick="toggleTTS()" id="ttsPill">🔊 TTS On</div>
     <div class="earnings">Today: £<span id="earningsTotal">0.00</span></div>
   </div>
@@ -725,22 +726,182 @@ function toast(msg,type='info'){
   setTimeout(()=>t.remove(),3000);
 }
 
-// ── SIMULATE MQTT FEED ──
-function addMockJobs(){
-  for(let i=0;i<4;i++) availableJobs.push(generateJob());
-  renderAvailableJobs();
-  // Add pickup markers to map
-  availableJobs.forEach(j=>{
-    const m = L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
-    jobMarkers['avail_'+j.jobId]=m;
-  });
+// ── REAL MQTT CONNECTION ──
+const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+const DRIVER_ID = 'driver_demo_' + Math.random().toString(36).substr(2,6);
+let mqttClient = null;
+let mqttConnected = false;
+
+function mqttJobFromPayload(data){
+  // Normalise payloads from C# bridge (pubs/requests, taxi/bookings, passengers/*/created)
+  const pickupLat = parseFloat(data.lat || data.pickupLat) || 0;
+  const pickupLng = parseFloat(data.lng || data.pickupLng) || 0;
+  const dropoffLat = parseFloat(data.dropoffLat || data.dropofflat) || 0;
+  const dropoffLng = parseFloat(data.dropoffLng || data.dropofflon) || 0;
+  const jobId = data.jobId || data.job || data.id || ('MQ'+Date.now().toString(36).toUpperCase());
+  // Skip if we already have this job
+  if(availableJobs.find(j=>j.jobId===jobId) || inboxJobs.find(j=>j.jobId===jobId)) return null;
+
+  const dist = haversine(driverLat, driverLng, pickupLat, pickupLng);
+  const fare = parseFloat(data.fare) || (5+Math.random()*20);
+  const notes = data.notes || data.special_instructions || '';
+  const tags = [];
+  if((data.temp1||'').toLowerCase().includes('asap') || (data.pickupTime||'').toLowerCase().includes('asap')) tags.push('asap');
+  if((data.notes||'').toLowerCase().includes('airport') || (data.temp2||'')==='airport') tags.push('airport');
+  if((data.notes||'').toLowerCase().includes('wheelchair')) tags.push('wheelchair');
+
+  return {
+    jobId,
+    createdAt: new Date().toISOString(),
+    pickup: { lat: pickupLat, lng: pickupLng, address: data.pickupAddress || data.pickup || 'Pickup' },
+    dropoff: { lat: dropoffLat, lng: dropoffLng, address: data.dropoff || data.dropAddress || data.destination || 'Dropoff' },
+    pickupTime: data.temp1 || data.pickupTime || data.customerbooktim || 'ASAP',
+    passenger: {
+      name: data.customerName || data.caller_name || 'Customer',
+      phoneMasked: (data.customerPhone || data.caller_phone || '').replace(/\d(?=\d{4})/g,'*') || '+44*******'
+    },
+    notes, tags,
+    pricing: { estimate: typeof fare==='number'? fare : parseFloat(fare)||10, currency: 'GBP' },
+    distanceFromDriver: Math.round(dist),
+    etaToPickup: Math.round(dist/500*60),
+    bidStatus: 'none',
+    source: 'mqtt'
+  };
 }
 
-addMockJobs();
+function handleMqttJob(data){
+  const j = mqttJobFromPayload(data);
+  if(!j) return;
+  availableJobs.push(j);
+  renderAvailableJobs();
+  const m = L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
+  jobMarkers['avail_'+j.jobId]=m;
+  toast(`📍 New job: ${j.pickup.address}`,'info');
+  announceNewJob(j);
+}
 
-// Drip new jobs every 8-15s
+function updateMqttStatus(status){
+  const pill = document.getElementById('mqttPill');
+  const text = document.getElementById('mqttText');
+  pill.classList.remove('mqtt-pill');
+  if(status==='connected'){ pill.classList.add('mqtt-pill'); text.textContent='MQTT Live'; mqttConnected=true; }
+  else if(status==='error'){ pill.style.background='rgba(239,68,68,.15)'; pill.style.color='var(--red)'; text.textContent='MQTT Error'; }
+  else { pill.style.background='rgba(245,158,11,.15)'; pill.style.color='var(--orange)'; text.textContent='MQTT Reconnecting…'; }
+}
+
+function connectMqtt(){
+  try {
+    mqttClient = mqtt.connect(MQTT_BROKER, {
+      clientId: DRIVER_ID,
+      reconnectPeriod: 3000,
+      connectTimeout: 10000,
+      keepalive: 60,
+      clean: true
+    });
+
+    mqttClient.on('connect', ()=>{
+      updateMqttStatus('connected');
+      // Subscribe to all job-related topics from C# bridge
+      mqttClient.subscribe('pubs/requests/+');            // SIP bridge job requests
+      mqttClient.subscribe('taxi/bookings');               // WhatsApp dispatcher
+      mqttClient.subscribe('passengers/+/created');        // Passenger created events
+      mqttClient.subscribe(`drivers/${DRIVER_ID}/bid-request`);
+      mqttClient.subscribe(`drivers/${DRIVER_ID}/jobs`);
+      mqttClient.subscribe(`jobs/+/result/${DRIVER_ID}`);
+      console.log('[MQTT] Connected & subscribed. Driver ID:', DRIVER_ID);
+    });
+
+    mqttClient.on('message', (topic, message)=>{
+      try {
+        const data = JSON.parse(message.toString());
+        console.log('[MQTT] Received on', topic, data);
+        if(topic.startsWith('pubs/requests/') || topic==='taxi/bookings' || topic.includes('/created') || topic.includes('/bid-request') || topic.includes('/jobs')){
+          handleMqttJob(data);
+        }
+        if(topic.includes(`/result/${DRIVER_ID}`)){
+          const jobId = data.jobId || data.job;
+          const j = availableJobs.find(x=>x.jobId===jobId);
+          if(data.result==='won' && j){
+            j.bidStatus='won';
+            availableJobs = availableJobs.filter(x=>x.jobId!==jobId);
+            j.state='ASSIGNED';
+            inboxJobs.push(j);
+            document.getElementById('inboxCount').textContent=inboxJobs.length;
+            toast('🎉 You won the job!','success');
+            announceBidResult(true,j);
+            renderAvailableJobs();
+            switchTab('inbox');
+            showInboxJob(j);
+          } else if(data.result==='lost'){
+            toast('❌ Another driver selected','error');
+            if(j) announceBidResult(false,j);
+          }
+        }
+      } catch(e){ console.error('[MQTT] Parse error:', e); }
+    });
+
+    mqttClient.on('error', ()=> updateMqttStatus('error'));
+    mqttClient.on('reconnect', ()=> updateMqttStatus('reconnecting'));
+    mqttClient.on('offline', ()=> updateMqttStatus('reconnecting'));
+  } catch(e){
+    console.error('[MQTT] Connection failed:', e);
+    updateMqttStatus('error');
+  }
+}
+
+// Override bidOnJob to publish real MQTT bids
+const _originalBid = bidOnJob;
+bidOnJob = function(id){
+  const j = availableJobs.find(x=>x.jobId===id);
+  if(!j) return;
+  j.bidStatus = 'pending';
+  renderAvailableJobs();
+  toast('⚡ Bid submitted — waiting…','info');
+
+  // Publish bid via MQTT
+  if(mqttClient && mqttConnected){
+    mqttClient.publish(`jobs/${id}/bids`, JSON.stringify({
+      driverId: DRIVER_ID, jobId: id,
+      lat: driverLat, lng: driverLng, timestamp: Date.now()
+    }));
+    mqttClient.publish(`jobs/${id}/response`, JSON.stringify({
+      driver: DRIVER_ID, driverId: DRIVER_ID, jobId: id, accepted: true
+    }));
+  }
+
+  // Fallback timeout for mock/demo if no MQTT result comes back
+  setTimeout(()=>{
+    if(!j || j.bidStatus!=='pending') return;
+    if(j.source==='mqtt') return; // wait for real MQTT result
+    // Mock result for demo jobs
+    if(Math.random()>.3){
+      j.bidStatus='won';
+      availableJobs=availableJobs.filter(x=>x.jobId!==id);
+      j.state='ASSIGNED';
+      inboxJobs.push(j);
+      document.getElementById('inboxCount').textContent=inboxJobs.length;
+      toast('🎉 You won the job!','success');
+      announceBidResult(true,j);
+      renderAvailableJobs();
+      switchTab('inbox');
+      showInboxJob(j);
+    } else {
+      j.bidStatus='none';
+      availableJobs=availableJobs.filter(x=>x.jobId!==id);
+      toast('❌ Another driver selected','error');
+      announceBidResult(false,j);
+      renderAvailableJobs();
+    }
+  },2000);
+};
+
+// Connect MQTT immediately
+connectMqtt();
+
+// Still seed some mock jobs for demo + drip if no real MQTT jobs
+addMockJobs();
 setInterval(()=>{
-  if(availableJobs.length<10){
+  if(availableJobs.length<3 && !mqttConnected){
     const j=generateJob();
     availableJobs.push(j);
     renderAvailableJobs();
@@ -749,7 +910,7 @@ setInterval(()=>{
     toast(`📍 New job: ${j.pickup.address}`,'info');
     announceNewJob(j);
   }
-},8000+Math.random()*7000);
+},12000);
 
 // Simulate driver GPS drift
 setInterval(()=>{
@@ -758,7 +919,8 @@ setInterval(()=>{
   driverMarker.setLatLng([driverLat,driverLng]);
   availableJobs.forEach(j=>{ j.distanceFromDriver=haversine(driverLat,driverLng,j.pickup.lat,j.pickup.lng); j.etaToPickup=Math.round(j.distanceFromDriver/500*60); });
   if(document.getElementById('tabAvail').classList.contains('active')&&!activeInboxJob) renderAvailableJobs();
+  // Publish driver location via MQTT
+  if(mqttClient && mqttConnected){
+    mqttClient.publish(`drivers/${DRIVER_ID}/location`, JSON.stringify({ lat:driverLat, lng:driverLng, ts:Date.now() }));
+  }
 },5000);
-</script>
-</body>
-</html>
