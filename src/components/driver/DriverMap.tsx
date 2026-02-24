@@ -38,9 +38,11 @@ interface DriverMapProps {
   coords: DriverCoords | null;
   allocatedJob?: JobData | null;
   geocodedCoords?: GeocodedCoords | null;
+  liveEtaMinutes?: number | null;
+  liveDistanceKm?: number | null;
 }
 
-export function DriverMap({ coords, allocatedJob, geocodedCoords }: DriverMapProps) {
+export function DriverMap({ coords, allocatedJob, geocodedCoords, liveEtaMinutes, liveDistanceKm }: DriverMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
@@ -130,5 +132,18 @@ export function DriverMap({ coords, allocatedJob, geocodedCoords }: DriverMapPro
     }
   }, [allocatedJob?.jobId, geocodedCoords, coords?.lat, coords?.lng]);
 
-  return <div ref={containerRef} className="absolute inset-0" />;
+  return (
+    <div className="absolute inset-0">
+      <div ref={containerRef} className="absolute inset-0" />
+      {allocatedJob && liveEtaMinutes != null && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1000] bg-black/80 text-white px-4 py-2 rounded-full flex items-center gap-3 shadow-lg backdrop-blur-sm">
+          <span className="text-lg font-bold">{liveEtaMinutes} min</span>
+          {liveDistanceKm != null && (
+            <span className="text-sm opacity-75">{liveDistanceKm} km</span>
+          )}
+          <span className="text-xs opacity-60">to pickup</span>
+        </div>
+      )}
+    </div>
+  );
 }
