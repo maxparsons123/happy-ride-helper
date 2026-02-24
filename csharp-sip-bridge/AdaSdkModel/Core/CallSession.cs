@@ -2717,16 +2717,19 @@ public sealed class CallSession : ICallSession
         }
 
         var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
-        var hasConfirmation = recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
 
-        if (!hasCancelIntent && !hasConfirmation)
+        // CRITICAL: Confirmation keywords alone (e.g. "yeah", "ok") are NOT sufficient.
+        // The caller must have explicitly mentioned cancellation in a recent message.
+        // This prevents garbled transcripts containing "yeah" from enabling accidental cancellations.
+        if (!hasCancelIntent)
         {
             _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — no cancellation keywords found in recent transcripts: [{Transcripts}]",
                 SessionId, string.Join(" | ", recentUserMessages));
             return new
             {
                 success = false,
-                error = "BLOCKED: The caller's recent messages do not contain any clear cancellation intent. " +
+                error = "BLOCKED: The caller's recent messages do not contain any clear cancellation intent (e.g. 'cancel', 'don't want', 'remove'). " +
+                        "A bare 'yes' or 'yeah' is NOT enough — the caller must have explicitly requested cancellation. " +
                         "You may have misinterpreted background noise or echoed audio. " +
                         "Ask the caller clearly: 'I'm sorry, I didn't quite catch that. Would you like to cancel your booking, make changes, or check on your driver?'"
             };
