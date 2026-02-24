@@ -6,7 +6,7 @@
 <title>Black Cab Unite — Driver Tablet App</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   :root{
@@ -809,8 +809,8 @@ function publishDriverStatus() {
 
 // ── REAL MQTT CONNECTION ──
 const MQTT_BROKERS = [
-  'wss://broker.hivemq.com:8884/mqtt',
-  'wss://test.mosquitto.org:8081/mqtt'
+  'wss://test.mosquitto.org:8081',
+  'wss://broker.hivemq.com:8884/mqtt'
 ];
 let currentBrokerIdx = 0;
 let MQTT_BROKER = MQTT_BROKERS[0];
@@ -896,7 +896,8 @@ function connectMqtt(){
       reconnectPeriod: 2000,
       connectTimeout: 10000,
       keepalive: 60,
-      clean: true
+      clean: true,
+      protocolVersion: 4  // MQTT 3.1.1 — required for public brokers
     });
     dbg('🔌 mqtt.connect() called, waiting for events...');
 
