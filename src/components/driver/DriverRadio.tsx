@@ -1,6 +1,11 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { Radio, Mic, MicOff, Volume2 } from 'lucide-react';
 import type { RadioMessage } from '@/hooks/use-mqtt-driver';
+
+export interface DriverRadioHandle {
+  startPtt: () => void;
+  stopPtt: () => void;
+}
 
 interface DriverRadioProps {
   driverId: string;
@@ -16,7 +21,7 @@ interface RadioLogEntry {
   time: string;
 }
 
-export function DriverRadio({ driverId, driverName, publish, mqttConnected, lastRadioMessage }: DriverRadioProps) {
+export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(function DriverRadio({ driverId, driverName, publish, mqttConnected, lastRadioMessage }, ref) {
   const [isOpen, setIsOpen] = useState(false);
   const [pttActive, setPttActive] = useState(false);
   const [receiving, setReceiving] = useState(false);
@@ -151,6 +156,11 @@ export function DriverRadio({ driverId, driverName, publish, mqttConnected, last
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => e.preventDefault(), []);
 
+  useImperativeHandle(ref, () => ({
+    startPtt: () => { setIsOpen(true); startPtt(); },
+    stopPtt,
+  }), [startPtt, stopPtt]);
+
   if (!isOpen) {
     return (
       <button
@@ -244,4 +254,4 @@ export function DriverRadio({ driverId, driverName, publish, mqttConnected, last
       )}
     </div>
   );
-}
+});
