@@ -79,6 +79,21 @@
   .btn-preview{background:#222;color:var(--text)}
   .btn-connect{background:#222;color:var(--cyan)}
 
+  /* CONNECTING JOBS */
+  .connectors-section{margin-top:12px;border:1px solid #333;border-radius:10px;padding:10px;background:rgba(6,182,212,.05)}
+  .connectors-title{font-size:13px;font-weight:700;color:var(--cyan);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+  .conn-card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;transition:.15s}
+  .conn-card:hover{border-color:var(--cyan)}
+  .conn-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+  .conn-pickup{font-size:12px;font-weight:600;color:var(--text)}
+  .conn-dist{font-size:11px;color:var(--cyan);font-weight:700}
+  .conn-dropoff{font-size:11px;color:var(--muted);margin-bottom:4px}
+  .conn-meta{display:flex;gap:6px;align-items:center;font-size:11px}
+  .conn-fare{color:var(--green);font-weight:700}
+  .conn-savings{color:var(--gold);font-weight:700;font-size:10px;background:rgba(255,215,0,.15);padding:1px 6px;border-radius:4px}
+  .conn-bid{padding:4px 12px;border:none;border-radius:6px;background:var(--gold);color:#000;font-weight:700;font-size:11px;cursor:pointer}
+  .conn-bid:disabled{opacity:.5;cursor:not-allowed}
+
   /* INBOX DETAIL */
   .inbox-detail{display:none;flex-direction:column;height:100%;padding:10px;overflow-y:auto}
   .inbox-detail.visible{display:flex}
@@ -316,7 +331,7 @@ function renderAvailableJobs(){
       <div class="jc-tags">${j.tags.map(t=>`<span class="tag tag-${t}">${t.toUpperCase()}</span>`).join('')}</div>
       <div class="jc-actions">
         <button class="btn btn-preview" onclick="event.stopPropagation();previewJob('${j.jobId}')">👁 Preview</button>
-        <button class="btn btn-connect" onclick="event.stopPropagation();showConnectors('${j.jobId}')">🔗</button>
+        <button class="btn btn-connect" onclick="event.stopPropagation();showConnectors('${j.jobId}')">🔗 ${getConnectingJobs(j).length}</button>
         <button class="btn btn-bid" ${j.bidStatus!=='none'?'disabled':''} onclick="event.stopPropagation();bidOnJob('${j.jobId}')">
           ${j.bidStatus==='pending'?'⏳ Pending…':'⚡ BID'}
         </button>
@@ -351,11 +366,60 @@ function previewJob(id){
   if(j) showJobOnMap(j);
 }
 
+function getConnectingJobs(j){
+  return availableJobs.filter(x=>x.jobId!==j.jobId).map(x=>{
+    const distFromDropoff = haversine(j.dropoff.lat,j.dropoff.lng,x.pickup.lat,x.pickup.lng);
+    const deadMiles = haversine(j.dropoff.lat,j.dropoff.lng,driverLat,driverLng);
+    const savedKm = Math.max(0,((deadMiles-distFromDropoff)/1000)).toFixed(1);
+    return {...x, distFromDropoff, savedKm:parseFloat(savedKm)};
+  }).filter(x=>x.distFromDropoff<5000).sort((a,b)=>a.distFromDropoff-b.distFromDropoff).slice(0,5);
+}
+
+function renderConnectorsHTML(j, context){
+  const conns = getConnectingJobs(j);
+  if(!conns.length) return '<div style="color:var(--muted);font-size:12px;margin-top:8px">No connecting jobs nearby</div>';
+  return `<div class="connectors-section">
+    <div class="connectors-title">🔗 Connecting Jobs (near dropoff)</div>
+    ${conns.map(c=>{
+      const km = (c.distFromDropoff/1000).toFixed(1);
+      return `<div class="conn-card" onclick="previewConnector('${c.jobId}','${j.jobId}')">
+        <div class="conn-top">
+          <span class="conn-pickup">📍 ${c.pickup.address}</span>
+          <span class="conn-dist">${km} km from dropoff</span>
+        </div>
+        <div class="conn-dropoff">🏁 ${c.dropoff.address}</div>
+        <div class="conn-meta">
+          <span class="conn-fare">£${c.pricing.estimate.toFixed(2)}</span>
+          <span>${c.pickupTime}</span>
+          ${c.savedKm>0?`<span class="conn-savings">Save ${c.savedKm} km dead miles</span>`:''}
+          <button class="conn-bid" onclick="event.stopPropagation();bidOnJob('${c.jobId}')" ${c.bidStatus!=='none'?'disabled':''}>${c.bidStatus==='pending'?'⏳':'⚡ BID'}</button>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function previewConnector(connId, parentId){
+  const parent = [...availableJobs,...inboxJobs].find(x=>x.jobId===parentId);
+  const conn = availableJobs.find(x=>x.jobId===connId);
+  if(!parent||!conn) return;
+  clearMapOverlays();
+  jobMarkers.pickup = L.marker([parent.pickup.lat,parent.pickup.lng],{icon:pickupIcon('#22c55e')}).addTo(map).bindPopup('Current Pickup');
+  jobMarkers.dropoff = L.marker([parent.dropoff.lat,parent.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup('Current Dropoff');
+  jobMarkers.connPickup = L.marker([conn.pickup.lat,conn.pickup.lng],{icon:pickupIcon('#06b6d4')}).addTo(map).bindPopup('Next Pickup');
+  jobMarkers.connDropoff = L.marker([conn.dropoff.lat,conn.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup('Next Dropoff');
+  routeLine = L.polyline([
+    [driverLat,driverLng],[parent.pickup.lat,parent.pickup.lng],[parent.dropoff.lat,parent.dropoff.lng],
+    [conn.pickup.lat,conn.pickup.lng],[conn.dropoff.lat,conn.dropoff.lng]
+  ],{color:'#06b6d4',weight:4,dashArray:'8,6'}).addTo(map);
+  map.fitBounds(routeLine.getBounds().pad(0.15));
+}
+
 function showConnectors(id){
   const j = availableJobs.find(x=>x.jobId===id);
   if(!j) return;
-  const nearby = availableJobs.filter(x=>x.jobId!==id).map(x=>({...x, distFromDropoff:haversine(j.dropoff.lat,j.dropoff.lng,x.pickup.lat,x.pickup.lng)})).sort((a,b)=>a.distFromDropoff-b.distFromDropoff).slice(0,3);
-  toast(`🔗 ${nearby.length} connecting jobs near ${j.dropoff.address}`,'info');
+  const conns = getConnectingJobs(j);
+  toast(`🔗 ${conns.length} connecting jobs near ${j.dropoff.address}`,'info');
 }
 
 // ── BIDDING ──
@@ -415,6 +479,7 @@ function renderInboxDetail(){
         return `<div class="tl-step ${cls}"><div class="tl-dot"></div><div class="tl-label">${STATE_LABELS[s]}</div></div>`;
       }).join('')}
     </div>
+    ${renderConnectorsHTML(j,'inbox')}
     ${j.state!=='COMPLETED'?`<button class="primary-action" onclick="advanceState()">${STATE_BUTTONS[j.state]||'Done'}</button>`:''}
     <div class="secondary-actions">
       <button class="btn-secondary btn-msg" onclick="toggleMsgPanel()">💬 Message</button>
