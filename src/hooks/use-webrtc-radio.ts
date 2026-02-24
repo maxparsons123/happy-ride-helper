@@ -120,6 +120,7 @@ export function useWebRTCRadio({ peerId, peerName, publish, mqttConnected }: Use
     };
 
     pc.ontrack = (event) => {
+      console.log(`[WebRTC Radio] ontrack from ${remotePeerId}`, event.track.kind, event.track.readyState);
       const stream = event.streams?.[0] ?? new MediaStream([event.track]);
       if (!peerData.audioEl) {
         const audio = document.createElement('audio');
@@ -130,14 +131,19 @@ export function useWebRTCRadio({ peerId, peerName, publish, mqttConnected }: Use
         peerData.audioEl = audio;
       }
       peerData.audioEl.srcObject = stream;
-      peerData.audioEl.play().catch(() => { });
+      peerData.audioEl.play().catch((e) => { console.error('[WebRTC Radio] play error:', e); });
     };
 
     pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Radio] ${remotePeerId} connection: ${pc.connectionState}`);
       updateConnectedPeers();
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         cleanupPeer(remotePeerId);
       }
+    };
+
+    pc.onicegatheringstatechange = () => {
+      console.log(`[WebRTC Radio] ${remotePeerId} ICE gathering: ${pc.iceGatheringState}`);
     };
 
     // Add local tracks
@@ -272,10 +278,12 @@ export function useWebRTCRadio({ peerId, peerName, publish, mqttConnected }: Use
   // Process incoming MQTT message — call from parent's MQTT handler
   const handleMqttMessage = useCallback((topic: string, data: any): boolean => {
     if (topic === `radio/webrtc/signal/${peerIdRef.current}`) {
+      console.log(`[WebRTC Radio] Signal received:`, data.type, 'from:', data.from);
       handleSignal(data as WebRTCSignal);
       return true;
     }
     if (topic === 'radio/webrtc/presence') {
+      console.log(`[WebRTC Radio] Presence:`, data.type, 'peerId:', data.peerId);
       handlePresence(data as PresenceMessage);
       return true;
     }
