@@ -171,19 +171,34 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
 
       {/* Log */}
       {radioLog.length > 0 && (
-        <div className="mt-2 max-h-20 overflow-y-auto text-[10px] space-y-0.5">
-          {radioLog.map((entry, i) => (
-            <div
-              key={i}
-              className={`px-1.5 py-0.5 rounded flex items-center justify-between ${
-                entry.type === 'outgoing' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-green-500/10 text-green-400'
-              }`}
+        <div className="mt-2">
+          <div className="flex items-center justify-between mb-0.5">
+            <span className="text-[9px] text-gray-500">Log</span>
+            <button
+              onClick={() => {
+                const text = radioLog.map(e => `[${e.time}] ${e.type === 'outgoing' ? '→' : '←'} ${e.name}`).join('\n');
+                navigator.clipboard.writeText(text);
+              }}
+              className="text-[8px] px-1 py-0.5 rounded bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+              title="Copy log to clipboard"
             >
-              <span className="font-bold">{entry.type === 'outgoing' ? '→' : '←'} {entry.name}</span>
-              <span className="text-gray-600 text-[8px]">{entry.time}</span>
-            </div>
-          ))}
-          <div ref={logEndRef} />
+              📋 Copy
+            </button>
+          </div>
+          <div className="max-h-20 overflow-y-auto text-[10px] space-y-0.5">
+            {radioLog.map((entry, i) => (
+              <div
+                key={i}
+                className={`px-1.5 py-0.5 rounded flex items-center justify-between ${
+                  entry.type === 'outgoing' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-green-500/10 text-green-400'
+                }`}
+              >
+                <span className="font-bold">{entry.type === 'outgoing' ? '→' : '←'} {entry.name}</span>
+                <span className="text-gray-600 text-[8px]">{entry.time}</span>
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
         </div>
       )}
     </div>
