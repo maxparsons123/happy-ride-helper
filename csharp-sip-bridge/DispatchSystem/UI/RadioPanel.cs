@@ -1,26 +1,21 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Windows.Forms;
-using NAudio.Wave;
+using DispatchSystem.Radio;
 
 namespace DispatchSystem.UI;
 
 /// <summary>
 /// Push-To-Talk radio panel for the desktop dispatcher.
-/// Audio format: WAV base64 chunks over MQTT.
+/// Uses WebRTC peer connections for audio streaming with MQTT signaling.
 /// 
-/// MQTT Topics:
-///   TX (dispatch → drivers):
-///     radio/broadcast       — broadcast to all (optionally with "targets" array)
-///     radio/driver/{id}     — targeted to a specific driver
-///   RX (drivers → dispatch):
-///     radio/channel          — driver-to-all transmission
+/// MQTT Signaling Topics:
+///   radio/webrtc/signal/{peerId}  — SDP offers/answers + ICE candidates
+///   radio/webrtc/presence         — peer discovery
 /// 
-/// Dependencies: NAudio (NuGet)
+/// Dependencies: SIPSorcery, NAudio (NuGet)
 /// </summary>
 public class RadioPanel : Panel
 {
@@ -32,14 +27,11 @@ public class RadioPanel : Panel
     private readonly TrackBar _volumeSlider;
     private readonly ListBox _radioLog;
     private readonly Label _lblVolume;
+    private readonly Label _lblPeers;
 
-    // ── Audio ──
-    private WaveInEvent? _waveIn;
-    private WaveOutEvent? _waveOut;
-    private BufferedWaveProvider? _playBuffer;
+    // ── WebRTC Engine ──
+    private readonly WebRtcRadioEngine _engine;
     private bool _pttActive;
-    private float _volume = 0.8f;
-    private readonly List<byte[]> _captureBuffer = new();
 
     // ── State ──
     private readonly HashSet<string> _selectedDriverIds = new();
@@ -48,7 +40,7 @@ public class RadioPanel : Panel
     private bool _isTargetedPtt;
 
     // ── Events ──
-    /// <summary>Fires when PTT audio should be published. Args: (topic, jsonPayload)</summary>
+    /// <summary>Fires when a signaling message should be published via MQTT. Args: (topic, jsonPayload)</summary>
     public event Action<string, string>? OnRadioTransmit;
 
     /// <summary>Fires log entries for the main log panel.</summary>
@@ -60,14 +52,40 @@ public class RadioPanel : Panel
         Dock = DockStyle.Fill;
         Padding = new Padding(8);
 
+        // ── WebRTC Engine ──
+        _engine = new WebRtcRadioEngine();
+        _engine.OnSignalingSend += (topic, json) => OnRadioTransmit?.Invoke(topic, json);
+        _engine.OnLog += (msg, isError) =>
+        {
+            var color = isError ? Color.Orange : Color.FromArgb(0, 188, 212);
+            AddLogEntry(msg, color);
+            OnLog?.Invoke($"📻 {msg}", color);
+        };
+        _engine.OnPeerCountChanged += count =>
+        {
+            if (InvokeRequired) { BeginInvoke(() => UpdatePeerCount(count)); return; }
+            UpdatePeerCount(count);
+        };
+
         // ── Title ──
         var title = new Label
         {
-            Text = "📻 Radio PTT",
+            Text = "📻 Radio PTT (WebRTC)",
             ForeColor = Color.FromArgb(0, 188, 212),
             Font = new Font("Segoe UI", 11F, FontStyle.Bold),
             Dock = DockStyle.Top,
             Height = 28,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        // ── Peer count ──
+        _lblPeers = new Label
+        {
+            Text = "🔗 0 peers connected",
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8F),
+            Dock = DockStyle.Top,
+            Height = 20,
             TextAlign = ContentAlignment.MiddleLeft
         };
 
@@ -166,7 +184,8 @@ public class RadioPanel : Panel
         };
         _volumeSlider.ValueChanged += (_, _) =>
         {
-            _volume = _volumeSlider.Value / 100f;
+            var vol = _volumeSlider.Value / 100f;
+            _engine.SetVolume(vol);
             _lblVolume.Text = $"🔊 Volume: {_volumeSlider.Value}%";
         };
 
@@ -188,9 +207,11 @@ public class RadioPanel : Panel
         Controls.Add(_lblStatus);
         Controls.Add(_driverSelector);
         Controls.Add(_btnSelectAll);
+        Controls.Add(_lblPeers);
         Controls.Add(title);
 
-        InitPlayback();
+        // Announce presence on load
+        _engine.AnnouncePresence();
     }
 
     // ═══════════════════════════════════════════
@@ -224,34 +245,11 @@ public class RadioPanel : Panel
         UpdatePttLabel();
     }
 
-    /// <summary>Handle incoming radio audio from a driver (topic: radio/channel).</summary>
-    public void HandleIncomingRadio(string jsonPayload)
-    {
-        if (InvokeRequired) { BeginInvoke(() => HandleIncomingRadio(jsonPayload)); return; }
+    /// <summary>Handle incoming WebRTC presence message.</summary>
+    public void HandlePresence(string jsonPayload) => _engine.HandlePresence(jsonPayload);
 
-        try
-        {
-            using var doc = JsonDocument.Parse(jsonPayload);
-            var root = doc.RootElement;
-
-            var driverName = root.TryGetProperty("name", out var n) ? n.GetString() ?? "Driver" : "Driver";
-            var driverId = root.TryGetProperty("driver", out var d) ? d.GetString() ?? "" : "";
-            var audioB64 = root.TryGetProperty("audio", out var a) ? a.GetString() : null;
-            var mime = root.TryGetProperty("mime", out var m) ? m.GetString() ?? "" : "";
-
-            if (string.IsNullOrEmpty(audioB64)) return;
-            if (driverId == "DISPATCH") return;
-
-            AddLogEntry($"← {driverName}", Color.LimeGreen);
-            OnLog?.Invoke($"📻 Radio RX from {driverName}", Color.LimeGreen);
-
-            PlayBase64Audio(audioB64, mime);
-        }
-        catch (Exception ex)
-        {
-            OnLog?.Invoke($"⚠ Radio parse error: {ex.Message}", Color.Orange);
-        }
-    }
+    /// <summary>Handle incoming WebRTC signaling message (SDP/ICE).</summary>
+    public void HandleSignaling(string jsonPayload) => _ = _engine.HandleSignaling(jsonPayload);
 
     /// <summary>Handle keyboard shortcut — call from MainForm.ProcessCmdKey.</summary>
     public void HandleKeyDown(Keys key)
@@ -265,7 +263,7 @@ public class RadioPanel : Panel
     }
 
     /// <summary>
-    /// Start PTT targeted at a single driver (publishes to radio/driver/{id}).
+    /// Start PTT targeted at a single driver (only enables that peer's track).
     /// Used by long-press on driver grid row or map marker.
     /// </summary>
     public void StartTargetedPtt(string driverId)
@@ -276,14 +274,13 @@ public class RadioPanel : Panel
     }
 
     // ═══════════════════════════════════════════
-    //  PTT CAPTURE
+    //  PTT CONTROL
     // ═══════════════════════════════════════════
 
     public void StartPtt()
     {
         if (_pttActive) return;
         _pttActive = true;
-        _captureBuffer.Clear();
 
         _btnPtt.BackColor = Color.FromArgb(180, 30, 30);
         _btnPtt.Text = _isTargetedPtt
@@ -299,26 +296,14 @@ public class RadioPanel : Panel
 
         try
         {
-            _waveIn = new WaveInEvent
-            {
-                WaveFormat = new WaveFormat(16000, 16, 1),
-                BufferMilliseconds = 500
-            };
+            // Determine targets
+            IEnumerable<string>? targets = null;
+            if (_isTargetedPtt && !string.IsNullOrEmpty(_targetDriverId))
+                targets = new[] { _targetDriverId };
+            else if (_selectedDriverIds.Count > 0)
+                targets = _selectedDriverIds;
 
-            _waveIn.DataAvailable += (_, args) =>
-            {
-                if (!_pttActive || args.BytesRecorded == 0) return;
-
-                var chunk = new byte[args.BytesRecorded];
-                Array.Copy(args.Buffer, chunk, args.BytesRecorded);
-                _captureBuffer.Add(chunk);
-
-                var wavBytes = WrapInWavHeader(chunk, 16000, 16, 1);
-                var base64 = Convert.ToBase64String(wavBytes);
-                TransmitAudio(base64, "audio/wav");
-            };
-
-            _waveIn.StartRecording();
+            _engine.StartPtt(targets);
 
             var targetLabel = _isTargetedPtt
                 ? $"Driver {_targetDriverId}"
@@ -327,7 +312,7 @@ public class RadioPanel : Panel
                     : _selectedDriverIds.Count == 1
                         ? _knownDrivers.FirstOrDefault(d => _selectedDriverIds.Contains(d.id)).name ?? "Driver"
                         : $"{_selectedDriverIds.Count} drivers";
-            AddLogEntry($"→ {targetLabel}", Color.FromArgb(0, 188, 212));
+            AddLogEntry($"→ {targetLabel} (WebRTC)", Color.FromArgb(0, 188, 212));
         }
         catch (Exception ex)
         {
@@ -346,16 +331,13 @@ public class RadioPanel : Panel
         _isTargetedPtt = false;
         _targetDriverId = null;
 
-        try
-        {
-            _waveIn?.StopRecording();
-            _waveIn?.Dispose();
-            _waveIn = null;
-        }
-        catch { /* ignore */ }
-
+        _engine.StopPtt();
         ResetPttButton();
     }
+
+    // ═══════════════════════════════════════════
+    //  HELPERS
+    // ═══════════════════════════════════════════
 
     private void ResetPttButton()
     {
@@ -366,110 +348,6 @@ public class RadioPanel : Panel
         UpdatePttLabel();
     }
 
-    private void TransmitAudio(string base64, string mimeType)
-    {
-        var payload = new Dictionary<string, object>
-        {
-            ["driver"] = "DISPATCH",
-            ["name"] = "Dispatch",
-            ["audio"] = base64,
-            ["mime"] = mimeType,
-            ["ts"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        };
-
-        if (_isTargetedPtt && !string.IsNullOrEmpty(_targetDriverId))
-        {
-            // Targeted to one driver
-            payload["targets"] = new[] { _targetDriverId };
-            var json = JsonSerializer.Serialize(payload);
-            OnRadioTransmit?.Invoke($"radio/driver/{_targetDriverId}", json);
-            OnRadioTransmit?.Invoke("radio/broadcast", json);
-        }
-        else if (_selectedDriverIds.Count == 0)
-        {
-            // Broadcast to all
-            var json = JsonSerializer.Serialize(payload);
-            OnRadioTransmit?.Invoke("radio/broadcast", json);
-        }
-        else
-        {
-            // Send to each selected driver's private topic
-            foreach (var dId in _selectedDriverIds)
-            {
-                var json = JsonSerializer.Serialize(payload);
-                OnRadioTransmit?.Invoke($"radio/driver/{dId}", json);
-            }
-
-            payload["targets"] = _selectedDriverIds.ToArray();
-            var broadcastJson = JsonSerializer.Serialize(payload);
-            OnRadioTransmit?.Invoke("radio/broadcast", broadcastJson);
-        }
-    }
-
-    // ═══════════════════════════════════════════
-    //  AUDIO PLAYBACK
-    // ═══════════════════════════════════════════
-
-    private void InitPlayback()
-    {
-        _playBuffer = new BufferedWaveProvider(new WaveFormat(16000, 16, 1))
-        {
-            BufferDuration = TimeSpan.FromSeconds(10),
-            DiscardOnBufferOverflow = true
-        };
-
-        _waveOut = new WaveOutEvent();
-        _waveOut.Init(_playBuffer);
-        _waveOut.Volume = _volume;
-        _waveOut.Play();
-    }
-
-    private void PlayBase64Audio(string base64, string mime)
-    {
-        try
-        {
-            var bytes = Convert.FromBase64String(base64);
-
-            if (_waveOut != null)
-                _waveOut.Volume = _volume;
-
-            if (mime.Contains("wav") && bytes.Length > 44)
-            {
-                var pcm = new byte[bytes.Length - 44];
-                Array.Copy(bytes, 44, pcm, 0, pcm.Length);
-                _playBuffer?.AddSamples(pcm, 0, pcm.Length);
-                return;
-            }
-
-            var tempFile = Path.Combine(Path.GetTempPath(), $"radio_{Guid.NewGuid():N}.webm");
-            File.WriteAllBytes(tempFile, bytes);
-
-            try
-            {
-                using var reader = new MediaFoundationReader(tempFile);
-                using var resampler = new MediaFoundationResampler(reader, new WaveFormat(16000, 16, 1));
-                var buffer = new byte[4096];
-                int read;
-                while ((read = resampler.Read(buffer, 0, buffer.Length)) > 0)
-                {
-                    _playBuffer?.AddSamples(buffer, 0, read);
-                }
-            }
-            finally
-            {
-                try { File.Delete(tempFile); } catch { }
-            }
-        }
-        catch (Exception ex)
-        {
-            OnLog?.Invoke($"⚠ Audio playback error: {ex.Message}", Color.Orange);
-        }
-    }
-
-    // ═══════════════════════════════════════════
-    //  HELPERS
-    // ═══════════════════════════════════════════
-
     private void UpdatePttLabel()
     {
         if (InvokeRequired) { BeginInvoke(UpdatePttLabel); return; }
@@ -477,6 +355,12 @@ public class RadioPanel : Panel
             ? "Hold SPACE or click — broadcast to all"
             : $"Hold SPACE or click — {_selectedDriverIds.Count} driver(s) selected";
         _lblStatus.ForeColor = Color.Gray;
+    }
+
+    private void UpdatePeerCount(int count)
+    {
+        _lblPeers.Text = $"🔗 {count} peer{(count != 1 ? "s" : "")} connected";
+        _lblPeers.ForeColor = count > 0 ? Color.LimeGreen : Color.Gray;
     }
 
     private void AddLogEntry(string text, Color color)
@@ -489,28 +373,9 @@ public class RadioPanel : Panel
         _radioLog.TopIndex = _radioLog.Items.Count - 1;
     }
 
-    private static byte[] WrapInWavHeader(byte[] pcm, int sampleRate, int bitsPerSample, int channels)
+    protected override void Dispose(bool disposing)
     {
-        using var ms = new MemoryStream();
-        using var bw = new BinaryWriter(ms);
-        int byteRate = sampleRate * channels * bitsPerSample / 8;
-        int blockAlign = channels * bitsPerSample / 8;
-
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
-        bw.Write(36 + pcm.Length);
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
-        bw.Write(16);
-        bw.Write((short)1);
-        bw.Write((short)channels);
-        bw.Write(sampleRate);
-        bw.Write(byteRate);
-        bw.Write((short)blockAlign);
-        bw.Write((short)bitsPerSample);
-        bw.Write(System.Text.Encoding.ASCII.GetBytes("data"));
-        bw.Write(pcm.Length);
-        bw.Write(pcm);
-
-        return ms.ToArray();
+        if (disposing) _engine.Dispose();
+        base.Dispose(disposing);
     }
 }
