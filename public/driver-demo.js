@@ -867,6 +867,7 @@ function connectMqtt(){
           }
         }
 
+        if(topic.startsWith('pubs/requests/') || topic.includes('/bid-request') || topic.includes('/jobs') || topic === 'taxi/bookings' || topic.startsWith('dispatch/jobs/offer/')){
           handleMqttJob(data);
         }
 
