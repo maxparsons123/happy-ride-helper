@@ -111,6 +111,7 @@ export default function DriverApp() {
         presence={driver.presence}
         onPresenceChange={driver.setPresence}
         driverId={driver.driverId}
+        onJobStatusChange={driver.updateJobStatus}
       />
     </div>
   );

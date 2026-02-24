@@ -10,11 +10,12 @@ interface DriverMenuProps {
   presence: DriverPresence;
   onPresenceChange: (p: DriverPresence) => void;
   driverId: string;
+  onJobStatusChange: (jobId: string, status: JobData['status']) => void;
 }
 
 type MenuView = 'currentJob' | 'jobHistory' | 'settings';
 
-export function DriverMenu({ isOpen, onClose, allocatedJob, jobs, presence, onPresenceChange, driverId }: DriverMenuProps) {
+export function DriverMenu({ isOpen, onClose, allocatedJob, jobs, presence, onPresenceChange, driverId, onJobStatusChange }: DriverMenuProps) {
   const [view, setView] = useState<MenuView>('currentJob');
 
   if (!isOpen) return null;
@@ -45,7 +46,7 @@ export function DriverMenu({ isOpen, onClose, allocatedJob, jobs, presence, onPr
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-5 bg-[#f9fbfd]">
-        {view === 'currentJob' && <CurrentJobView job={allocatedJob} />}
+        {view === 'currentJob' && <CurrentJobView job={allocatedJob} onStatusChange={onJobStatusChange} />}
         {view === 'jobHistory' && <JobHistoryView jobs={jobs} />}
         {view === 'settings' && <SettingsView presence={presence} onPresenceChange={onPresenceChange} driverId={driverId} />}
       </div>
@@ -53,7 +54,7 @@ export function DriverMenu({ isOpen, onClose, allocatedJob, jobs, presence, onPr
   );
 }
 
-function CurrentJobView({ job }: { job: JobData | undefined }) {
+function CurrentJobView({ job, onStatusChange }: { job: JobData | undefined; onStatusChange: (jobId: string, status: JobData['status']) => void }) {
   if (!job) {
     return (
       <div className="text-center py-12 text-gray-400">
@@ -80,8 +81,28 @@ function CurrentJobView({ job }: { job: JobData | undefined }) {
       {job.passengers && <JobDetail icon="👥" label="Passengers" value={job.passengers} />}
       <JobDetail icon="💷" label="Fare" value={fareDisplay} danger />
       <JobDetail icon="📝" label="Notes" value={job.notes} />
-      <div className="bg-green-200/50 text-green-800 font-extrabold text-center py-2 rounded-xl uppercase tracking-wider text-sm">
-        ALLOCATED
+      <div className={`font-extrabold text-center py-2 rounded-xl uppercase tracking-wider text-sm ${
+        job.status === 'arrived' ? 'bg-blue-200/50 text-blue-800' : 'bg-green-200/50 text-green-800'
+      }`}>
+        {job.status === 'arrived' ? 'ARRIVED AT PICKUP' : 'ALLOCATED'}
+      </div>
+      <div className="flex gap-3 pt-2">
+        {job.status === 'allocated' && (
+          <button
+            onClick={() => onStatusChange(job.jobId, 'arrived')}
+            className="flex-1 py-3 rounded-xl font-bold text-sm bg-blue-500 text-white shadow-md hover:bg-blue-600 transition-colors"
+          >
+            📍 Arrived at Pickup
+          </button>
+        )}
+        {(job.status === 'allocated' || job.status === 'arrived') && (
+          <button
+            onClick={() => onStatusChange(job.jobId, 'completed')}
+            className="flex-1 py-3 rounded-xl font-bold text-sm bg-green-500 text-white shadow-md hover:bg-green-600 transition-colors"
+          >
+            ✅ Complete Job
+          </button>
+        )}
       </div>
     </div>
   );
@@ -100,6 +121,7 @@ function JobHistoryView({ jobs }: { jobs: JobData[] }) {
 
   const statusStyles: Record<string, string> = {
     allocated: 'bg-green-100 text-green-800 border-l-green-500',
+    arrived: 'bg-blue-100 text-blue-800 border-l-blue-500',
     completed: 'bg-gray-100 text-gray-600 border-l-gray-400',
     queued: 'bg-blue-50 text-blue-700 border-l-blue-400',
     rejected: 'bg-red-50 text-red-700 border-l-red-400',
