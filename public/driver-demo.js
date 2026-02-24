@@ -501,6 +501,101 @@ function backToList(){
   renderAvailableJobs();
 }
 
+// ── SETTINGS PANEL ──
+var jobRangeMiles = parseFloat(localStorage.getItem('bcu_demo_job_range') || '10');
+
+function renderSettings(){
+  var el = document.getElementById('settingsPanel');
+  var selType = localStorage.getItem('bcu_demo_vehicle_type') || 'Saloon';
+  var vtypes = ['Saloon','Estate','MPV','Executive','Minibus'];
+  el.innerHTML = `
+    <div class="settings-section">
+      <h3>👤 Driver Profile</h3>
+      <div class="settings-field">
+        <label>Driver ID</label>
+        <input type="text" id="setDriverId" value="${DRIVER_ID}" maxlength="30" autocomplete="off"/>
+      </div>
+      <div class="settings-field">
+        <label>Full Name</label>
+        <input type="text" id="setDriverName" value="${DRIVER_NAME}" maxlength="60" autocomplete="name"/>
+      </div>
+      <div class="settings-field">
+        <label>Phone Number</label>
+        <input type="tel" id="setDriverPhone" value="${DRIVER_PHONE}" maxlength="20" autocomplete="tel"/>
+      </div>
+    </div>
+    <div class="settings-section">
+      <h3>🚗 Vehicle</h3>
+      <div class="settings-field">
+        <label>Registration Plate</label>
+        <input type="text" id="setVehicleReg" value="${VEHICLE_REG}" maxlength="10" style="text-transform:uppercase" autocomplete="off"/>
+      </div>
+      <div class="settings-field">
+        <label>Vehicle Type</label>
+        <div class="settings-vehicle-grid" id="setVehicleType">
+          ${vtypes.map(function(v){ return '<div class="settings-vtype'+(v===selType?' selected':'')+'" data-type="'+v+'" onclick="selectSettingsVehicle(this)"><div class="icon">'+(v==='Saloon'?'🚗':v==='Estate'?'🚙':v==='MPV'?'🚐':v==='Executive'?'🏎️':'🚌')+'</div>'+v+'</div>'; }).join('')}
+        </div>
+      </div>
+    </div>
+    <div class="settings-section">
+      <h3>📍 Job Range</h3>
+      <div class="settings-field">
+        <label>Show jobs within <span class="settings-range-value" id="rangeLabel">${jobRangeMiles}</span> miles</label>
+        <input type="range" id="setJobRange" min="1" max="50" step="1" value="${jobRangeMiles}" oninput="document.getElementById('rangeLabel').textContent=this.value"/>
+      </div>
+    </div>
+    <button class="settings-save" onclick="saveSettings()">💾 Save Settings</button>
+  `;
+}
+
+function selectSettingsVehicle(el){
+  document.querySelectorAll('.settings-vtype').forEach(function(o){ o.classList.remove('selected'); });
+  el.classList.add('selected');
+}
+
+function saveSettings(){
+  var newId = document.getElementById('setDriverId').value.trim();
+  var newName = document.getElementById('setDriverName').value.trim();
+  var newPhone = document.getElementById('setDriverPhone').value.trim();
+  var newReg = document.getElementById('setVehicleReg').value.trim().toUpperCase();
+  var newType = (document.querySelector('.settings-vtype.selected') || {}).dataset;
+  var newVehicle = newType ? newType.type : 'Saloon';
+  var newRange = parseInt(document.getElementById('setJobRange').value) || 10;
+
+  if(!newId || !/^[a-zA-Z0-9_-]+$/.test(newId)){ toast('❌ Valid Driver ID is required','error'); return; }
+  if(!newName || newName.length < 2){ toast('❌ Name is required','error'); return; }
+  if(!newReg || newReg.length < 2){ toast('❌ Registration is required','error'); return; }
+
+  // Check if driver ID changed — need to reconnect MQTT
+  var idChanged = newId !== DRIVER_ID;
+
+  DRIVER_ID = newId;
+  DRIVER_NAME = newName;
+  DRIVER_PHONE = newPhone;
+  VEHICLE_REG = newReg;
+  VEHICLE_TYPE = newVehicle;
+  jobRangeMiles = newRange;
+
+  localStorage.setItem('bcu_demo_driver_id', DRIVER_ID);
+  localStorage.setItem('bcu_demo_driver_name', DRIVER_NAME);
+  localStorage.setItem('bcu_demo_driver_phone', DRIVER_PHONE);
+  localStorage.setItem('bcu_demo_vehicle_reg', VEHICLE_REG);
+  localStorage.setItem('bcu_demo_vehicle_type', VEHICLE_TYPE);
+  localStorage.setItem('bcu_demo_job_range', jobRangeMiles.toString());
+
+  document.getElementById('driverIdLabel').textContent = DRIVER_NAME + ' (' + DRIVER_ID + ') • ' + VEHICLE_REG;
+  toast('✅ Settings saved!','success');
+
+  if(idChanged && mqttClient){
+    dbg('[SETTINGS] Driver ID changed, reconnecting MQTT...');
+    mqttClient.end(true);
+    mqttRetryCount = 0;
+    setTimeout(connectMqtt, 500);
+  } else {
+    publishDriverStatus();
+  }
+}
+
 // ── TABS ──
 function switchTab(tab){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -508,20 +603,30 @@ function switchTab(tab){
     document.getElementById('tabAvail').classList.add('active');
     document.getElementById('availableList').style.display='';
     document.getElementById('historyList').style.display='none';
+    document.getElementById('settingsPanel').style.display='none';
     document.getElementById('inboxDetail').classList.remove('visible');
     renderAvailableJobs();
   } else if(tab==='inbox'){
     document.getElementById('tabInbox').classList.add('active');
     document.getElementById('availableList').style.display='none';
     document.getElementById('historyList').style.display='none';
+    document.getElementById('settingsPanel').style.display='none';
     if(inboxJobs.length) showInboxJob(inboxJobs[0]);
     else { document.getElementById('inboxDetail').classList.add('visible');document.getElementById('inboxDetail').innerHTML='<div class="empty-state"><div class="icon">📥</div>No active jobs</div>'; }
-  } else {
+  } else if(tab==='history'){
     document.getElementById('tabHistory').classList.add('active');
     document.getElementById('availableList').style.display='none';
     document.getElementById('inboxDetail').classList.remove('visible');
     document.getElementById('historyList').style.display='';
+    document.getElementById('settingsPanel').style.display='none';
     renderHistory();
+  } else if(tab==='settings'){
+    document.getElementById('tabSettings').classList.add('active');
+    document.getElementById('availableList').style.display='none';
+    document.getElementById('inboxDetail').classList.remove('visible');
+    document.getElementById('historyList').style.display='none';
+    document.getElementById('settingsPanel').style.display='';
+    renderSettings();
   }
 }
 
@@ -553,7 +658,7 @@ var DRIVER_PHONE = localStorage.getItem('bcu_demo_driver_phone') || '';
 var VEHICLE_REG = localStorage.getItem('bcu_demo_vehicle_reg') || '';
 var VEHICLE_TYPE = localStorage.getItem('bcu_demo_vehicle_type') || 'Saloon';
 
-document.getElementById('driverIdLabel').textContent = `${DRIVER_NAME} (${DRIVER_ID}) • ${VEHICLE_REG}`;
+document.getElementById('driverIdLabel').textContent = DRIVER_NAME + ' (' + DRIVER_ID + ') • ' + VEHICLE_REG;
 
 let driverPresence = localStorage.getItem('bcu_demo_driver_presence') || 'available';
 
@@ -665,6 +770,13 @@ function mqttJobFromPayload(data){
 function handleMqttJob(data){
   const j = mqttJobFromPayload(data);
   if(!j) return;
+  // Filter by job range setting
+  var rangeMiles = parseFloat(localStorage.getItem('bcu_demo_job_range') || '10');
+  var rangeMeters = rangeMiles * 1609.34;
+  if(j.distanceFromDriver > rangeMeters){
+    dbg('[JOB] Skipped job ' + j.jobId + ' — ' + (j.distanceFromDriver/1000).toFixed(1) + 'km exceeds range ' + rangeMiles + 'mi');
+    return;
+  }
   availableJobs.push(j);
   renderAvailableJobs();
   const m = L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);

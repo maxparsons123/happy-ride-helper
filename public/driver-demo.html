@@ -175,6 +175,26 @@
   .gps-gps{background:var(--green);box-shadow:0 0 8px rgba(34,197,94,.7)}
   .gps-network{background:var(--orange);box-shadow:0 0 8px rgba(245,158,11,.7)}
   .gps-poor{background:var(--red);box-shadow:0 0 6px rgba(239,68,68,.5)}
+
+  /* SETTINGS PANEL */
+  .settings-section{background:var(--card);border:1px solid #2a2a2a;border-radius:12px;padding:16px;margin-bottom:12px}
+  .settings-section h3{font-size:14px;font-weight:700;color:var(--gold);margin-bottom:14px;display:flex;align-items:center;gap:6px}
+  .settings-field{margin-bottom:14px}
+  .settings-field:last-child{margin-bottom:0}
+  .settings-field label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
+  .settings-field input{width:100%;padding:10px 12px;background:#1e1e22;border:1px solid #333;border-radius:8px;color:var(--text);font-size:14px;outline:none;transition:border-color .2s}
+  .settings-field input:focus{border-color:var(--gold)}
+  .settings-vehicle-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .settings-vtype{padding:8px 6px;background:#1e1e22;border:2px solid #333;border-radius:8px;text-align:center;cursor:pointer;font-size:12px;font-weight:600;transition:.15s}
+  .settings-vtype:hover{border-color:#555}
+  .settings-vtype.selected{border-color:var(--gold);background:rgba(255,215,0,.08);color:var(--gold)}
+  .settings-vtype .icon{font-size:18px;margin-bottom:2px}
+  .settings-save{width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,var(--gold),#D4A800);color:#000;font-size:14px;font-weight:800;cursor:pointer;transition:transform .1s;margin-top:4px}
+  .settings-save:active{transform:scale(.97)}
+  .settings-range-value{color:var(--gold);font-weight:800;font-size:18px;margin-left:8px}
+  .settings-field input[type="range"]{-webkit-appearance:none;height:6px;background:#333;border:none;border-radius:3px;padding:0}
+  .settings-field input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;background:var(--gold);border-radius:50%;cursor:pointer}
+  .settings-field input[type="range"]::-moz-range-thumb{width:20px;height:20px;background:var(--gold);border-radius:50%;cursor:pointer;border:none}
 </style>
 </head>
 <body>
@@ -199,6 +219,7 @@
       <div class="tab active" id="tabAvail" onclick="switchTab('available')">Available <span class="badge" id="availCount">0</span></div>
       <div class="tab" id="tabInbox" onclick="switchTab('inbox')">Inbox <span class="badge" id="inboxCount">0</span></div>
       <div class="tab" id="tabHistory" onclick="switchTab('history')">History</div>
+      <div class="tab" id="tabSettings" onclick="switchTab('settings')">⚙️ Settings</div>
     </div>
 
     <!-- Available Jobs List -->
@@ -211,6 +232,9 @@
     <div class="job-list" id="historyList" style="display:none">
       <div class="empty-state"><div class="icon">📋</div>No completed jobs yet</div>
     </div>
+
+    <!-- Settings -->
+    <div class="job-list" id="settingsPanel" style="display:none"></div>
   </div>
 
   <!-- RIGHT PANEL (MAP) -->
