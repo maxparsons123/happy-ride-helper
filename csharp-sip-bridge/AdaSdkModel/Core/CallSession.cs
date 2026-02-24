@@ -30,6 +30,9 @@ public sealed class CallSession : ICallSession
     private int _active;
     private int _bookTaxiCompleted;
     private int _fareRejected; // Set to 1 when user explicitly rejects fare — allows end_call without booking
+    private string? _previousFare; // Stores the fare from the original booking for amendment comparison
+    private string? _previousBookingRef; // Stores the booking ref when an amendment resets _bookTaxiCompleted
+    private volatile bool _isAmendment; // True when a confirmed booking is being amended (pickup/dest changed)
     private long _lastAdaFinishedAt;
 
     // Audio diagnostics
@@ -861,6 +864,17 @@ public sealed class CallSession : ICallSession
             var incoming = NormalizeHouseNumber(p?.ToString(), "pickup");
             if (StreetNameChanged(_booking.Pickup, incoming))
             {
+                // ── AMENDMENT DETECTION ──
+                // If booking was already confirmed and address is changing, this is an amendment
+                if (Volatile.Read(ref _bookTaxiCompleted) == 1 && !string.IsNullOrWhiteSpace(_booking.Fare))
+                {
+                    _previousFare = _booking.Fare;
+                    _previousBookingRef = _booking.BookingRef;
+                    _isAmendment = true;
+                    _logger.LogInformation("[{SessionId}] ✏️ AMENDMENT: Pickup changed on confirmed booking {Ref} (previous fare: {Fare})",
+                        SessionId, _booking.BookingRef, _booking.Fare);
+                }
+
                 _booking.PickupLat = _booking.PickupLon = null;
                 _booking.PickupStreet = _booking.PickupNumber = _booking.PickupPostalCode = _booking.PickupCity = _booking.PickupFormatted = null;
                 // Reset fare/booking state so stale data can't bypass guards
@@ -878,6 +892,16 @@ public sealed class CallSession : ICallSession
             var incoming = NormalizeHouseNumber(d?.ToString(), "destination");
             if (StreetNameChanged(_booking.Destination, incoming))
             {
+                // ── AMENDMENT DETECTION ──
+                if (Volatile.Read(ref _bookTaxiCompleted) == 1 && !string.IsNullOrWhiteSpace(_booking.Fare))
+                {
+                    _previousFare = _booking.Fare;
+                    _previousBookingRef = _booking.BookingRef;
+                    _isAmendment = true;
+                    _logger.LogInformation("[{SessionId}] ✏️ AMENDMENT: Destination changed on confirmed booking {Ref} (previous fare: {Fare})",
+                        SessionId, _booking.BookingRef, _booking.Fare);
+                }
+
                 _booking.DestLat = _booking.DestLon = null;
                 _booking.DestStreet = _booking.DestNumber = _booking.DestPostalCode = _booking.DestCity = _booking.DestFormatted = null;
                 // Reset fare/booking state so stale data can't bypass guards
@@ -1479,14 +1503,43 @@ public sealed class CallSession : ICallSession
                     }
 
                     var timePart1 = FormatScheduledTimePart();
-                    await _aiClient.InjectMessageAndRespondAsync(
-                            $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}. " +
-                            $"Driver ETA: {_booking.Eta ?? "around 10 minutes"}. " +
-                            $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
-                            $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA (say the ETA text naturally, e.g. 'We''re not too busy at the moment, we should be able to get you a taxi quite quickly'), 4) payment choice. " +
-                            $"After the ETA, offer the payment choice using this EXACT script: " +
-                            $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
-                            $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
+
+                    // ── AMENDMENT FARE INJECTION ──
+                    // If this is an amendment, compare with previous fare and give Ada streamlined instructions
+                    if (_isAmendment && _previousFare != null)
+                    {
+                        var fareChanged = !string.Equals(_previousFare, _booking.Fare, StringComparison.OrdinalIgnoreCase);
+                        _logger.LogInformation("[{SessionId}] ✏️ Amendment fare comparison: previous={PrevFare}, new={NewFare}, changed={Changed}",
+                            sessionId, _previousFare, _booking.Fare, fareChanged);
+
+                        if (fareChanged)
+                        {
+                            await _aiClient.InjectMessageAndRespondAsync(
+                                $"[AMENDMENT FARE RESULT] Booking update complete. Verified pickup: {pickupAddr}. Verified destination: {destAddr}. " +
+                                $"The fare has CHANGED from {FormatFareForSpeech(_previousFare)} to {spokenFare}. " +
+                                $"Tell the caller: 'Your booking has been updated. The new fare is {spokenFare}. A new payment link will be sent to your phone.' " +
+                                $"Then call book_taxi(action='confirmed', payment_preference='{_booking.PaymentPreference ?? "card"}') to re-confirm with the updated fare.");
+                        }
+                        else
+                        {
+                            await _aiClient.InjectMessageAndRespondAsync(
+                                $"[AMENDMENT FARE RESULT] Booking update complete. Verified pickup: {pickupAddr}. Verified destination: {destAddr}. " +
+                                $"The fare remains {spokenFare} — no change. " +
+                                $"Tell the caller: 'Your booking has been updated. The fare remains {spokenFare}.' " +
+                                $"Then call book_taxi(action='confirmed', payment_preference='{_booking.PaymentPreference ?? "card"}') to re-confirm.");
+                        }
+                    }
+                    else
+                    {
+                        await _aiClient.InjectMessageAndRespondAsync(
+                                $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}. " +
+                                $"Driver ETA: {_booking.Eta ?? "around 10 minutes"}. " +
+                                $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
+                                $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA (say the ETA text naturally, e.g. 'We''re not too busy at the moment, we should be able to get you a taxi quite quickly'), 4) payment choice. " +
+                                $"After the ETA, offer the payment choice using this EXACT script: " +
+                                $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
+                                $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -2281,29 +2334,50 @@ public sealed class CallSession : ICallSession
             }
 
             _booking.Confirmed = true;
-            _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+            // ── AMENDMENT vs NEW BOOKING ──
+            bool isAmendment = _isAmendment && !string.IsNullOrWhiteSpace(_previousBookingRef);
+            bool fareChanged = isAmendment && !string.Equals(_previousFare, _booking.Fare, StringComparison.OrdinalIgnoreCase);
+
+            if (isAmendment)
+            {
+                // Reuse the original booking ref for amendments
+                _booking.BookingRef = _previousBookingRef;
+                _logger.LogInformation("[{SessionId}] ✏️ Amendment confirmed for {Ref} (fare changed: {FareChanged}, old: {OldFare}, new: {NewFare})",
+                    SessionId, _booking.BookingRef, fareChanged, _previousFare, _booking.Fare);
+                // Clear amendment state
+                _isAmendment = false;
+                _previousFare = null;
+                _previousBookingRef = null;
+            }
+            else
+            {
+                _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
+            }
 
             _aiClient.SetAwaitingConfirmation(false);
 
             OnBookingUpdated?.Invoke(_booking.Clone());
-            _logger.LogInformation("[{SessionId}] ✅ Booked: {Ref}", SessionId, _booking.BookingRef);
+            _logger.LogInformation("[{SessionId}] ✅ {Action}: {Ref}", SessionId, isAmendment ? "Amended" : "Booked", _booking.BookingRef);
 
             var bookingSnapshot = _booking.Clone();
             var callerId = CallerId;
             var sessionId = SessionId;
 
             var sumUpRef = _sumUp;  // capture for closure
+            var generateNewPaymentLink = !isAmendment || fareChanged; // Only regenerate SumUp if fare changed or new booking
             _ = Task.Run(async () =>
             {
                 // No wait — fire dispatch immediately while Ada speaks
 
-                // ── SumUp PAYMENT LINK — always generate if SumUp is configured ──────────
-                // Link is included in the BSQD eta field and sent via WhatsApp regardless of preference.
+                // ── SumUp PAYMENT LINK ──────────
+                // For amendments: only regenerate if fare changed
+                // For new bookings: always generate
                 if (sumUpRef == null)
                 {
                     _logger.LogWarning("[{SessionId}] ⚠️ SumUp not configured — no payment link generated.", sessionId);
                 }
-                if (sumUpRef != null)
+                if (sumUpRef != null && generateNewPaymentLink)
                 {
                     try
                     {
@@ -2320,7 +2394,8 @@ public sealed class CallSession : ICallSession
                             if (!string.IsNullOrWhiteSpace(paymentUrl))
                             {
                                 bookingSnapshot.PaymentLink = paymentUrl;
-                                _logger.LogInformation("[{SessionId}] 💳 SumUp payment link generated (pre-dispatch): {Url}", sessionId, paymentUrl);
+                                _logger.LogInformation("[{SessionId}] 💳 SumUp payment link generated ({Action}): {Url}",
+                                    sessionId, isAmendment ? "amendment" : "pre-dispatch", paymentUrl);
                             }
                             else
                             {
@@ -2336,6 +2411,10 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogWarning(ex, "[{SessionId}] SumUp payment link error", sessionId);
                     }
+                }
+                else if (sumUpRef != null && !generateNewPaymentLink)
+                {
+                    _logger.LogInformation("[{SessionId}] 💳 SumUp: fare unchanged on amendment — keeping existing payment link", sessionId);
                 }
 
                 // Fire all post-booking tasks in parallel for speed
@@ -2431,6 +2510,16 @@ public sealed class CallSession : ICallSession
             var paymentMsg = _booking.PaymentPreference == "card"
                 ? $" I've also sent a secure payment link to your phone — just tap it to pay the fixed price of {_booking.Fare} by card. It's quick and easy, and it guarantees your fare."
                 : "";
+
+            if (isAmendment)
+            {
+                var amendmentPaymentMsg = fareChanged && _booking.PaymentPreference == "card"
+                    ? $" A new payment link for {_booking.Fare} has been sent to your phone."
+                    : "";
+                return new { success = true, booking_ref = _booking.BookingRef, is_amendment = true, fare_changed = fareChanged,
+                    message = $"Booking amended successfully.{amendmentPaymentMsg} Tell the caller: 'Your booking {_booking.BookingRef} has been updated.{amendmentPaymentMsg}' Then ask: 'Is there anything else I can help with?' If they say no, say the FINAL CLOSING script and call end_call." };
+            }
+
             return new { success = true, booking_ref = _booking.BookingRef, message = $"Taxi booked successfully. Tell the caller: 'Your booking reference is {_booking.BookingRef}.{paymentMsg}' Then ask: 'Is there anything else you'd like to add to your booking? For example, a flight number, special requests, or any notes for the driver?' CRITICAL: If the caller says 'thank you', 'no', 'that's all', 'cheers', or anything that is NOT a concrete special request, treat it as 'nothing else' and proceed to the FINAL CLOSING script + end_call. NEVER fabricate or assume requests like child seats, wheelchairs, etc. Only if they EXPLICITLY state a special request, call sync_booking_data(special_instructions='[their exact words]') to save it, confirm, and ask again. When they say no, say the FINAL CLOSING script and call end_call." };
         }
 
