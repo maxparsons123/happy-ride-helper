@@ -856,15 +856,43 @@ setInterval(()=>{
   }
 },12000);
 
-// Simulate driver GPS drift
-setInterval(()=>{
-  driverLat += (Math.random()-.5)*0.001;
-  driverLng += (Math.random()-.5)*0.001;
-  driverMarker.setLatLng([driverLat,driverLng]);
-  availableJobs.forEach(j=>{ j.distanceFromDriver=haversine(driverLat,driverLng,j.pickup.lat,j.pickup.lng); j.etaToPickup=Math.round(j.distanceFromDriver/500*60); });
+// ── REAL GPS TRACKING ──
+let gpsActive = false;
+let gpsWatchId = null;
+
+if (navigator.geolocation) {
+  dbg('[GPS] Requesting device location...');
+  gpsWatchId = navigator.geolocation.watchPosition(
+    function(pos) {
+      gpsActive = true;
+      driverLat = pos.coords.latitude;
+      driverLng = pos.coords.longitude;
+      driverMarker.setLatLng([driverLat, driverLng]);
+      var acc = pos.coords.accuracy ? Math.round(pos.coords.accuracy) : '?';
+      document.getElementById('mapInfo').textContent = 'GPS: ' + driverLat.toFixed(5) + ', ' + driverLng.toFixed(5) + ' (±' + acc + 'm)';
+      dbg('[GPS] Position: ' + driverLat.toFixed(5) + ',' + driverLng.toFixed(5) + ' acc=' + acc + 'm');
+    },
+    function(err) {
+      dbg('[GPS] Error: ' + err.message + ' — using simulated drift');
+      document.getElementById('mapInfo').textContent = 'GPS unavailable — simulated location';
+    },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+} else {
+  dbg('[GPS] Geolocation API not available — using simulated drift');
+}
+
+// Fallback simulated drift + periodic updates
+setInterval(function(){
+  if (!gpsActive) {
+    driverLat += (Math.random()-.5)*0.001;
+    driverLng += (Math.random()-.5)*0.001;
+    driverMarker.setLatLng([driverLat, driverLng]);
+  }
+  availableJobs.forEach(function(j){ j.distanceFromDriver=haversine(driverLat,driverLng,j.pickup.lat,j.pickup.lng); j.etaToPickup=Math.round(j.distanceFromDriver/500*60); });
   if(document.getElementById('tabAvail').classList.contains('active')&&!activeInboxJob) renderAvailableJobs();
   if(mqttClient && mqttConnected){
-    mqttClient.publish(`drivers/${DRIVER_ID}/location`, JSON.stringify({
+    mqttClient.publish('drivers/'+DRIVER_ID+'/location', JSON.stringify({
       driver: DRIVER_ID, name: DRIVER_NAME, registration: VEHICLE_REG, vehicle: VEHICLE_TYPE,
       lat:driverLat, lng:driverLng, status:driverPresence, ts:Date.now(), heading:0
     }));
