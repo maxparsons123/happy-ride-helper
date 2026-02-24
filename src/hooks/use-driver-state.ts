@@ -101,10 +101,11 @@ export function useDriverState() {
 
   const addJob = useCallback((raw: any): JobData | null => {
     const job = normalizeJobPayload(raw);
-    if (seenJobIds.current.has(job.jobId)) return null;
+    // Always accept — overwrite if same ID exists
     seenJobIds.current.add(job.jobId);
     setJobsState(prev => {
-      const next = [job, ...prev].slice(0, 50);
+      const filtered = prev.filter(j => j.jobId !== job.jobId);
+      const next = [job, ...filtered].slice(0, 50);
       localStorage.setItem(getStorageKey(driverId, 'jobs'), JSON.stringify(next));
       return next;
     });

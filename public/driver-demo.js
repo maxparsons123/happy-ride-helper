@@ -625,7 +625,15 @@ function mqttJobFromPayload(data){
   const dropoffLat = parseFloat(data.dropoffLat || data.dropofflat) || 0;
   const dropoffLng = parseFloat(data.dropoffLng || data.dropofflon) || 0;
   const jobId = data.jobId || data.job || data.id || ('MQ'+Date.now().toString(36).toUpperCase());
-  if(availableJobs.find(j=>j.jobId===jobId) || inboxJobs.find(j=>j.jobId===jobId)) return null;
+  // Skip if already in inbox (being worked on)
+  if(inboxJobs.find(j=>j.jobId===jobId)) return null;
+  // Remove existing available job with same ID (will be overwritten)
+  var existingIdx = availableJobs.findIndex(j=>j.jobId===jobId);
+  if(existingIdx !== -1) {
+    availableJobs.splice(existingIdx, 1);
+    if(jobMarkers['avail_'+jobId]) { map.removeLayer(jobMarkers['avail_'+jobId]); delete jobMarkers['avail_'+jobId]; }
+    dbg('[JOB] Overwriting existing job ' + jobId);
+  }
 
   const dist = haversine(driverLat, driverLng, pickupLat, pickupLng);
   const fare = parseFloat(data.fare) || (5+Math.random()*20);
