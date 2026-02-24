@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Black Cab Unite — Driver Setup</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{--gold:#FFD700;--bg:#0a0a0a;--card:#141416;--input-bg:#1e1e22;--border:#2a2a2e;--text:#eee;--muted:#888;--green:#22c55e;--red:#ef4444}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .setup-container{width:100%;max-width:440px}
+  .logo{text-align:center;margin-bottom:32px}
+  .logo h1{font-size:28px;font-weight:900;color:var(--gold);margin-bottom:4px}
+  .logo p{color:var(--muted);font-size:14px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px 24px;margin-bottom:16px}
+  .card h2{font-size:18px;font-weight:700;margin-bottom:20px;display:flex;align-items:center;gap:8px}
+  .field{margin-bottom:18px}
+  .field:last-child{margin-bottom:0}
+  .field label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+  .field input{width:100%;padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:15px;outline:none;transition:border-color .2s}
+  .field input:focus{border-color:var(--gold)}
+  .field input::placeholder{color:#555}
+  .field .hint{font-size:12px;color:var(--muted);margin-top:4px}
+  .field .error{font-size:12px;color:var(--red);margin-top:4px;display:none}
+  .btn-start{width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--gold),#D4A800);color:#000;font-size:16px;font-weight:800;cursor:pointer;transition:transform .1s,opacity .1s;margin-top:8px}
+  .btn-start:hover{opacity:.9}
+  .btn-start:active{transform:scale(.97)}
+  .btn-start:disabled{opacity:.4;cursor:not-allowed}
+  .existing{text-align:center;margin-top:16px;font-size:13px;color:var(--muted)}
+  .existing a{color:var(--gold);text-decoration:none;font-weight:600}
+  .existing a:hover{text-decoration:underline}
+  .vehicle-select{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+  .vehicle-opt{padding:10px 8px;background:var(--input-bg);border:2px solid var(--border);border-radius:10px;text-align:center;cursor:pointer;font-size:13px;font-weight:600;transition:.15s}
+  .vehicle-opt:hover{border-color:#555}
+  .vehicle-opt.selected{border-color:var(--gold);background:rgba(255,215,0,.08);color:var(--gold)}
+  .vehicle-opt .icon{font-size:22px;margin-bottom:4px}
+</style>
+</head>
+<body>
+
+<div class="setup-container">
+  <div class="logo">
+    <h1>🚕 Black Cab Unite</h1>
+    <p>Driver Registration</p>
+  </div>
+
+  <div class="card">
+    <h2>👤 Your Details</h2>
+
+    <div class="field">
+      <label>Driver ID *</label>
+      <input type="text" id="driverId" placeholder="e.g. DRV001 or your badge number" maxlength="30" autocomplete="off"/>
+      <div class="hint">Your ID as registered with the dispatch office</div>
+      <div class="error" id="driverIdError">Driver ID is required</div>
+    </div>
+
+    <div class="field">
+      <label>Full Name *</label>
+      <input type="text" id="driverName" placeholder="e.g. John Smith" maxlength="60" autocomplete="name"/>
+      <div class="error" id="driverNameError">Name is required</div>
+    </div>
+
+    <div class="field">
+      <label>Phone Number</label>
+      <input type="tel" id="driverPhone" placeholder="e.g. 07700 900123" maxlength="20" autocomplete="tel"/>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>🚗 Vehicle</h2>
+
+    <div class="field">
+      <label>Registration Plate *</label>
+      <input type="text" id="vehicleReg" placeholder="e.g. AB12 CDE" maxlength="10" autocomplete="off" style="text-transform:uppercase"/>
+      <div class="error" id="vehicleRegError">Registration is required</div>
+    </div>
+
+    <div class="field">
+      <label>Vehicle Type</label>
+      <div class="vehicle-select" id="vehicleType">
+        <div class="vehicle-opt selected" data-type="Saloon"><div class="icon">🚗</div>Saloon</div>
+        <div class="vehicle-opt" data-type="Estate"><div class="icon">🚙</div>Estate</div>
+        <div class="vehicle-opt" data-type="MPV"><div class="icon">🚐</div>MPV</div>
+        <div class="vehicle-opt" data-type="Executive"><div class="icon">🏎️</div>Executive</div>
+        <div class="vehicle-opt" data-type="Minibus"><div class="icon">🚌</div>Minibus</div>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn-start" id="startBtn">🚕 Start Driving</button>
+
+  <div class="existing" id="existingDriver" style="display:none">
+    Already set up? <a href="driver-demo.html">Go to app →</a>
+  </div>
+</div>
+
+<script>
+  // Check if already registered
+  const existing = localStorage.getItem('bcu_demo_driver_id');
+  if (existing) {
+    document.getElementById('existingDriver').style.display = 'block';
+    // Pre-fill fields
+    document.getElementById('driverId').value = existing;
+    document.getElementById('driverName').value = localStorage.getItem('bcu_demo_driver_name') || '';
+    document.getElementById('driverPhone').value = localStorage.getItem('bcu_demo_driver_phone') || '';
+    document.getElementById('vehicleReg').value = localStorage.getItem('bcu_demo_vehicle_reg') || '';
+    const savedType = localStorage.getItem('bcu_demo_vehicle_type') || 'Saloon';
+    document.querySelectorAll('.vehicle-opt').forEach(el => {
+      el.classList.toggle('selected', el.dataset.type === savedType);
+    });
+  }
+
+  // Vehicle type selection
+  document.querySelectorAll('.vehicle-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      document.querySelectorAll('.vehicle-opt').forEach(o => o.classList.remove('selected'));
+      el.classList.add('selected');
+    });
+  });
+
+  // Validation & save
+  document.getElementById('startBtn').addEventListener('click', () => {
+    let valid = true;
+
+    const id = document.getElementById('driverId').value.trim();
+    const name = document.getElementById('driverName').value.trim();
+    const phone = document.getElementById('driverPhone').value.trim();
+    const reg = document.getElementById('vehicleReg').value.trim().toUpperCase();
+    const vehicleType = document.querySelector('.vehicle-opt.selected')?.dataset.type || 'Saloon';
+
+    // Validate Driver ID
+    if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+      document.getElementById('driverIdError').style.display = 'block';
+      document.getElementById('driverIdError').textContent = !id ? 'Driver ID is required' : 'Only letters, numbers, hyphens and underscores allowed';
+      valid = false;
+    } else {
+      document.getElementById('driverIdError').style.display = 'none';
+    }
+
+    // Validate Name
+    if (!name || name.length < 2) {
+      document.getElementById('driverNameError').style.display = 'block';
+      valid = false;
+    } else {
+      document.getElementById('driverNameError').style.display = 'none';
+    }
+
+    // Validate Reg
+    if (!reg || reg.length < 2) {
+      document.getElementById('vehicleRegError').style.display = 'block';
+      valid = false;
+    } else {
+      document.getElementById('vehicleRegError').style.display = 'none';
+    }
+
+    if (!valid) return;
+
+    // Save to localStorage
+    localStorage.setItem('bcu_demo_driver_id', id);
+    localStorage.setItem('bcu_demo_driver_name', name);
+    localStorage.setItem('bcu_demo_driver_phone', phone);
+    localStorage.setItem('bcu_demo_vehicle_reg', reg);
+    localStorage.setItem('bcu_demo_vehicle_type', vehicleType);
+    localStorage.setItem('bcu_demo_driver_presence', 'available');
+
+    // Redirect to driver app
+    window.location.href = 'driver-demo.html';
+  });
+</script>
+</body>
+</html>
