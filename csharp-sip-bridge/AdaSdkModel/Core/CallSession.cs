@@ -40,6 +40,7 @@ public sealed class CallSession : ICallSession
     private volatile BookingStage _currentStage = BookingStage.Greeting;
     private string? _lastUserTranscript;
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
+    private string? _lastToolIntent; // Tracks the last tool the AI called (e.g. "check_booking_status", "cancel_booking")
     private int _intentGuardFiring; // prevents re-entrant guard execution
 
     // ── DUAL-TRANSCRIPT AUDIT TRAIL ──
@@ -737,6 +738,7 @@ public sealed class CallSession : ICallSession
     {
         _logger.LogDebug("[{SessionId}] Tool call: {Name} (args: {ArgCount})", SessionId, name, args.Count);
 
+        _lastToolIntent = name; // Track for intent-gating (e.g. block cancel after status check)
         return name switch
         {
             "sync_booking_data" => HandleSyncBookingData(args),
@@ -2693,6 +2695,19 @@ public sealed class CallSession : ICallSession
                 success = false,
                 error = "STOP. You must verbally confirm with the caller first. Ask: 'Just to confirm, you'd like me to cancel your booking?' " +
                         "Only call cancel_booking(confirmed=true) after the caller explicitly says yes."
+            };
+        }
+
+        // ── Intent-tracking guard: block cancel if last tool was a non-cancel action (e.g. status check) ──
+        if (_lastToolIntent == "check_booking_status")
+        {
+            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — last tool was check_booking_status, caller likely didn't mean to cancel",
+                SessionId);
+            return new
+            {
+                success = false,
+                error = "BLOCKED: You just performed a status check. The caller has NOT requested cancellation. " +
+                        "Do NOT cancel the booking. Ask: 'Is there anything else you'd like help with regarding your booking?'"
             };
         }
 
