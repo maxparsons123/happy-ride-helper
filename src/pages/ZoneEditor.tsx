@@ -7,6 +7,7 @@ import { BookingDatagrid } from '@/components/zones/BookingDatagrid';
 import { useLiveBookings } from '@/hooks/use-live-bookings';
 import { useMqttDispatch, type MqttBooking } from '@/hooks/use-mqtt-dispatch';
 import type { LiveBookingMarker } from '@/hooks/use-live-bookings';
+import { DispatchRadio } from '@/components/dispatch/DispatchRadio';
 import { toast } from 'sonner';
 
 export default function ZoneEditor() {
@@ -199,6 +200,8 @@ export default function ZoneEditor() {
           liveBookings={allBookings}
         />
       </div>
+
+      <DispatchRadio publish={mqtt.publish} mqttConnected={mqtt.connectionStatus === 'connected'} />
     </div>
   );
 }

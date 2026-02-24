@@ -94,5 +94,11 @@ export function useMqttDispatch() {
     setBookings(prev => prev.filter(b => b.status === 'pending' || b.status === 'allocated'));
   }, []);
 
-  return { connectionStatus, bookings, updateBookingStatus, clearCompleted };
+  const publish = useCallback((topic: string, payload: any) => {
+    if (clientRef.current?.connected) {
+      clientRef.current.publish(topic, JSON.stringify(payload));
+    }
+  }, []);
+
+  return { connectionStatus, bookings, updateBookingStatus, clearCompleted, publish };
 }
