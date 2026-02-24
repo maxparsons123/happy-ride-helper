@@ -10,7 +10,8 @@ public sealed class DriverListPanel : Panel
     private readonly ListView _list;
 
     public event Action<string>? OnDriverSelected;
-
+    public event Action<string>? OnDriverLongPressStart;
+    public event Action? OnDriverLongPressEnd;
     public string? SelectedDriverId =>
         _list.SelectedItems.Count > 0 ? _list.SelectedItems[0].Tag as string : null;
 
@@ -52,6 +53,16 @@ public sealed class DriverListPanel : Panel
         {
             if (SelectedDriverId != null) OnDriverSelected?.Invoke(SelectedDriverId);
         };
+
+        // Long-press PTT on driver rows
+        _list.MouseDown += (_, e) =>
+        {
+            var hit = _list.HitTest(e.Location);
+            if (hit.Item?.Tag is string driverId)
+                OnDriverLongPressStart?.Invoke(driverId);
+        };
+        _list.MouseUp += (_, _) => OnDriverLongPressEnd?.Invoke();
+        _list.MouseLeave += (_, _) => OnDriverLongPressEnd?.Invoke();
 
         Controls.Add(_list);
         Controls.Add(lbl);
