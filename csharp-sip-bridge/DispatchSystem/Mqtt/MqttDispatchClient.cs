@@ -33,7 +33,7 @@ public sealed class MqttDispatchClient : IDisposable
     public event Action<Job>? OnBookingReceived;
     public event Action<string, string, string>? OnJobStatusUpdate;          // jobId, driverId, status
     public event Action<string, string, bool>? OnDriverJobResponse;          // jobId, driverId, accepted
-    public event Action<string, string, double, double>? OnDriverBidReceived; // jobId, driverId, lat, lng
+    public event Action<string, string, double, double, double, double, double, string?>? OnDriverBidReceived; // jobId, driverId, lat, lng, speedKmh, heading, gpsAccuracy, lastJobCompletedAt
     public event Action<string, string>? OnRadioReceived;                    // topic, jsonPayload
     public event Action<string>? OnWebRtcPresence;                          // jsonPayload
     public event Action<string>? OnWebRtcSignaling;                         // jsonPayload
@@ -276,7 +276,8 @@ public sealed class MqttDispatchClient : IDisposable
                 if (bid != null)
                 {
                     var bidDriverId = bid.driverId ?? bid.driver ?? "";
-                    OnDriverBidReceived?.Invoke(jobId, bidDriverId, bid.lat, bid.lng);
+                    OnDriverBidReceived?.Invoke(jobId, bidDriverId, bid.lat, bid.lng,
+                        bid.speedKmh, bid.heading, bid.gpsAccuracyMeters, bid.lastJobCompletedAt);
                 }
             }
             else if (topic == "radio/channel" || topic == "radio/broadcast")
@@ -770,5 +771,10 @@ public sealed class MqttDispatchClient : IDisposable
         public double lat { get; set; }
         public double lng { get; set; }
         public long timestamp { get; set; }
+        // Enhanced fields for dispatch scoring
+        public string? lastJobCompletedAt { get; set; }
+        public double speedKmh { get; set; }
+        public double heading { get; set; }
+        public double gpsAccuracyMeters { get; set; } = 999;
     }
 }
