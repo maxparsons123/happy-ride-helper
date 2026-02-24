@@ -853,7 +853,7 @@ function updateMqttStatus(status){
 function connectMqtt(){
   try {
     mqttClient = mqtt.connect(MQTT_BROKER, {
-      clientId: DRIVER_ID,
+      clientId: `${DRIVER_ID}_${Date.now().toString(36)}`,
       reconnectPeriod: 3000,
       connectTimeout: 10000,
       keepalive: 60,
