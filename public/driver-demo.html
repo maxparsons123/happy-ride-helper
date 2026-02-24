@@ -29,7 +29,7 @@
 
   /* MAIN SPLIT */
   .main{display:flex;height:calc(100vh - 52px)}
-  .left-panel{width:30%;min-width:280px;max-width:360px;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid #222;overflow:hidden}
+  .left-panel{width:35%;min-width:320px;max-width:420px;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid #222;overflow:hidden}
   .right-panel{flex:1;position:relative}
 
   /* TABS */
@@ -80,35 +80,35 @@
   .btn-connect{background:#222;color:var(--cyan)}
 
   /* INBOX DETAIL */
-  .inbox-detail{display:none;flex-direction:column;height:100%;padding:12px}
+  .inbox-detail{display:none;flex-direction:column;height:100%;padding:10px;overflow-y:auto}
   .inbox-detail.visible{display:flex}
-  .inbox-back{color:var(--gold);cursor:pointer;font-size:13px;margin-bottom:8px;font-weight:600}
+  .inbox-back{color:var(--gold);cursor:pointer;font-size:13px;margin-bottom:6px;font-weight:600}
 
-  .id-header{margin-bottom:12px}
-  .id-header h3{font-size:16px;margin-bottom:4px}
-  .id-passenger{font-size:13px;color:var(--muted)}
+  .id-header{margin-bottom:8px}
+  .id-header h3{font-size:14px;margin-bottom:2px}
+  .id-passenger{font-size:12px;color:var(--muted)}
 
-  .timeline{flex:1;padding:0 8px;overflow-y:auto}
-  .tl-step{display:flex;align-items:flex-start;gap:10px;padding:8px 0;position:relative}
-  .tl-dot{width:12px;height:12px;border-radius:50%;border:2px solid #444;flex-shrink:0;margin-top:2px;position:relative;z-index:1}
+  .timeline{display:flex;align-items:center;gap:0;padding:8px 0;flex-shrink:0;overflow-x:auto}
+  .tl-step{display:flex;align-items:center;gap:0;white-space:nowrap}
+  .tl-dot{width:10px;height:10px;border-radius:50%;border:2px solid #444;flex-shrink:0;position:relative;z-index:1}
   .tl-step.done .tl-dot{background:var(--green);border-color:var(--green)}
-  .tl-step.current .tl-dot{background:var(--gold);border-color:var(--gold);box-shadow:0 0 10px rgba(255,215,0,.5)}
-  .tl-step:not(:last-child)::after{content:'';position:absolute;left:5px;top:18px;bottom:-8px;width:2px;background:#333}
-  .tl-step.done::after{background:var(--green)}
-  .tl-label{font-size:13px;color:var(--muted)}
-  .tl-step.current .tl-label{color:var(--text);font-weight:700}
+  .tl-step.current .tl-dot{background:var(--gold);border-color:var(--gold);box-shadow:0 0 8px rgba(255,215,0,.5)}
+  .tl-label{font-size:10px;color:var(--muted);margin-left:3px;margin-right:2px}
+  .tl-step.current .tl-label{color:var(--text);font-weight:700;font-size:11px}
   .tl-step.done .tl-label{color:var(--green)}
+  .tl-connector{width:12px;height:2px;background:#333;flex-shrink:0}
+  .tl-step.done+.tl-connector{background:var(--green)}
 
-  .primary-action{padding:14px;border-radius:10px;background:var(--gold);color:#000;font-weight:800;font-size:16px;border:none;cursor:pointer;width:100%;margin-top:8px;transition:.15s}
+  .primary-action{padding:12px;border-radius:10px;background:var(--gold);color:#000;font-weight:800;font-size:15px;border:none;cursor:pointer;width:100%;margin-top:6px;transition:.15s;flex-shrink:0}
   .primary-action:active{transform:scale(.97)}
 
-  .secondary-actions{display:flex;gap:6px;margin-top:8px}
-  .btn-secondary{flex:1;padding:10px;border-radius:8px;border:1px solid #333;background:transparent;color:var(--text);font-weight:600;font-size:12px;cursor:pointer}
+  .secondary-actions{display:flex;gap:6px;margin-top:6px;flex-shrink:0}
+  .btn-secondary{flex:1;padding:8px;border-radius:8px;border:1px solid #333;background:transparent;color:var(--text);font-weight:600;font-size:12px;cursor:pointer}
   .btn-msg{border-color:var(--cyan);color:var(--cyan)}
   .btn-cancel{border-color:var(--red);color:var(--red)}
 
   /* MESSAGE PANEL */
-  .msg-panel{display:none;position:absolute;bottom:0;left:0;right:0;background:var(--card);border-top:2px solid var(--cyan);border-radius:12px 12px 0 0;padding:12px;z-index:20;max-height:50%}
+  .msg-panel{display:none;background:var(--card);border:1px solid var(--cyan);border-radius:10px;padding:10px;margin-top:8px;flex-shrink:0}
   .msg-panel.visible{display:block}
   .msg-presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .msg-preset{padding:8px 12px;border-radius:20px;border:1px solid #444;background:#222;color:var(--text);font-size:12px;cursor:pointer;transition:.15s}
@@ -408,7 +408,8 @@ function renderInboxDetail(){
     <div class="timeline">
       ${JOB_STATES.filter(s=>s!=='COMPLETED').map((s,i)=>{
         const cls = i<stateIdx?'done':i===stateIdx?'current':'';
-        return `<div class="tl-step ${cls}"><div class="tl-dot"></div><div class="tl-label">${STATE_LABELS[s]}</div></div>`;
+        const conn = i<JOB_STATES.length-2?`<div class="tl-connector"></div>`:'';
+        return `<div class="tl-step ${cls}"><div class="tl-dot"></div><div class="tl-label">${STATE_LABELS[s]}</div></div>${conn}`;
       }).join('')}
     </div>
     ${j.state!=='COMPLETED'?`<button class="primary-action" onclick="advanceState()">${STATE_BUTTONS[j.state]||'Done'}</button>`:''}
