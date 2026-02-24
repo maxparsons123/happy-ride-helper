@@ -195,6 +195,38 @@
   .settings-field input[type="range"]{-webkit-appearance:none;height:6px;background:#333;border:none;border-radius:3px;padding:0}
   .settings-field input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;background:var(--gold);border-radius:50%;cursor:pointer}
   .settings-field input[type="range"]::-moz-range-thumb{width:20px;height:20px;background:var(--gold);border-radius:50%;cursor:pointer;border:none}
+
+  /* WALKIE-TALKIE RADIO */
+  .radio-panel{position:fixed;bottom:16px;right:16px;z-index:9000;display:flex;flex-direction:column;align-items:center;gap:8px}
+  .radio-widget{background:rgba(10,10,10,.95);border:2px solid #333;border-radius:16px;padding:16px;backdrop-filter:blur(12px);width:220px;box-shadow:0 8px 32px rgba(0,0,0,.6)}
+  .radio-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+  .radio-title{font-size:13px;font-weight:700;color:var(--cyan);display:flex;align-items:center;gap:6px}
+  .radio-close{background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:2px 6px}
+  .radio-close:hover{color:var(--text)}
+  .radio-status{font-size:11px;color:var(--muted);text-align:center;margin-bottom:8px}
+  .radio-status.live{color:var(--red);font-weight:700}
+  .radio-status.receiving{color:var(--green);font-weight:700}
+  .ptt-btn{width:80px;height:80px;border-radius:50%;border:3px solid #444;background:linear-gradient(145deg,#222,#1a1a1a);color:var(--muted);font-size:11px;font-weight:800;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;transition:.15s;margin:0 auto;user-select:none;-webkit-user-select:none;touch-action:none}
+  .ptt-btn .ptt-icon{font-size:24px}
+  .ptt-btn:hover{border-color:#666}
+  .ptt-btn.active{border-color:var(--red);background:linear-gradient(145deg,#3a1111,#2a0a0a);color:var(--red);box-shadow:0 0 20px rgba(239,68,68,.3)}
+  .ptt-btn.active .ptt-icon{animation:pulse-mic .8s ease infinite}
+  @keyframes pulse-mic{0%,100%{transform:scale(1)}50%{transform:scale(1.15)}}
+  .radio-log{max-height:100px;overflow-y:auto;margin-top:8px;font-size:11px}
+  .radio-log::-webkit-scrollbar{width:3px}
+  .radio-log::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
+  .radio-msg{padding:4px 8px;border-radius:6px;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+  .radio-msg.incoming{background:rgba(34,197,94,.1);color:var(--green)}
+  .radio-msg.outgoing{background:rgba(6,182,212,.1);color:var(--cyan)}
+  .radio-msg .rm-name{font-weight:700;font-size:10px}
+  .radio-msg .rm-time{font-size:9px;color:var(--muted);margin-left:auto}
+  .radio-toggle{width:48px;height:48px;border-radius:50%;border:2px solid var(--cyan);background:rgba(6,182,212,.1);color:var(--cyan);font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;box-shadow:0 4px 16px rgba(0,0,0,.4)}
+  .radio-toggle:hover{background:rgba(6,182,212,.2)}
+  .radio-toggle.has-activity{border-color:var(--green);animation:radio-pulse 1.5s ease infinite}
+  @keyframes radio-pulse{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.4)}50%{box-shadow:0 0 0 8px rgba(34,197,94,0)}}
+  .radio-volume{width:100%;margin-top:4px}
+  .radio-volume input[type="range"]{-webkit-appearance:none;width:100%;height:4px;background:#333;border:none;border-radius:2px;outline:none}
+  .radio-volume input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;background:var(--cyan);border-radius:50%;cursor:pointer}
 </style>
 </head>
 <body>
@@ -254,6 +286,28 @@
     <div class="summary" id="completionSummary"></div>
     <button class="primary-action" onclick="closeCompletion()">Back to Available Jobs</button>
   </div>
+</div>
+
+<!-- WALKIE-TALKIE RADIO -->
+<div class="radio-panel" id="radioPanel">
+  <div class="radio-widget" id="radioWidget" style="display:none">
+    <div class="radio-header">
+      <div class="radio-title">📻 Radio Channel</div>
+      <button class="radio-close" onclick="toggleRadioPanel()">✕</button>
+    </div>
+    <div class="radio-status" id="radioStatus">Ready — Hold to talk</div>
+    <button class="ptt-btn" id="pttBtn"
+      onmousedown="pttStart()" onmouseup="pttStop()" onmouseleave="pttStop()"
+      ontouchstart="pttStart(event)" ontouchend="pttStop(event)" ontouchcancel="pttStop(event)">
+      <span class="ptt-icon">🎙️</span>
+      <span>PTT</span>
+    </button>
+    <div class="radio-volume">
+      <input type="range" min="0" max="100" value="80" id="radioVolume" oninput="setRadioVolume(this.value)"/>
+    </div>
+    <div class="radio-log" id="radioLog"></div>
+  </div>
+  <button class="radio-toggle" id="radioToggleBtn" onclick="toggleRadioPanel()" title="Walkie-Talkie">📻</button>
 </div>
 
 <!-- Debug log visible on screen -->

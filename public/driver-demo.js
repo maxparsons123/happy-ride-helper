@@ -828,6 +828,8 @@ function connectMqtt(){
       mqttClient.subscribe('drivers/+/location');
       mqttClient.subscribe('drivers/+/status');
       mqttClient.subscribe('chat/group');
+      mqttClient.subscribe('radio/broadcast');
+      mqttClient.subscribe('radio/channel');
       dbg('📡 Subscribed to all topics. Driver ID: ' + DRIVER_ID);
       publishDriverStatus();
     });
@@ -852,7 +854,13 @@ function connectMqtt(){
           localStorage.setItem(`chat_group_${DRIVER_ID}`, JSON.stringify(chatMessages.group));
         }
 
-        if(topic.startsWith('pubs/requests/') || topic==='taxi/bookings' || topic.includes('/created') || topic.includes('/bid-request') || topic.includes('/jobs')){
+        // Radio audio messages
+        if(topic === 'radio/broadcast' || topic === 'radio/channel'){
+          if(data.driver !== DRIVER_ID && data.audio){
+            handleRadioReceive(data, topic === 'radio/broadcast' ? 'dispatch' : 'driver');
+          }
+        }
+
           handleMqttJob(data);
         }
 
@@ -1147,3 +1155,169 @@ document.addEventListener('fullscreenchange',function(){
     releaseWakeLock();
   }
 });
+
+// ══════════════════════════════════════════════════════
+// ── WALKIE-TALKIE RADIO (Push-to-Talk over MQTT) ──
+// ══════════════════════════════════════════════════════
+
+var radioOpen = false;
+var pttActive = false;
+var radioVolume = 0.8;
+var radioMediaStream = null;
+var radioMediaRecorder = null;
+var radioAudioCtx = null;
+var radioLogMessages = [];
+
+function toggleRadioPanel(){
+  radioOpen = !radioOpen;
+  document.getElementById('radioWidget').style.display = radioOpen ? 'block' : 'none';
+  if(radioOpen) initRadioAudio();
+}
+
+function setRadioVolume(val){
+  radioVolume = parseInt(val) / 100;
+}
+
+async function initRadioAudio(){
+  if(radioAudioCtx) return;
+  try {
+    radioAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    dbg('[RADIO] AudioContext initialized, sampleRate=' + radioAudioCtx.sampleRate);
+  } catch(e){
+    dbg('[RADIO] AudioContext failed: ' + e.message);
+  }
+}
+
+async function pttStart(evt){
+  if(evt) evt.preventDefault();
+  if(pttActive) return;
+  if(!mqttClient || !mqttConnected){
+    toast('📻 Radio needs MQTT connection','error');
+    return;
+  }
+  pttActive = true;
+  document.getElementById('pttBtn').classList.add('active');
+  document.getElementById('radioStatus').textContent = '🔴 TRANSMITTING...';
+  document.getElementById('radioStatus').className = 'radio-status live';
+
+  try {
+    if(!radioMediaStream){
+      radioMediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 }, video: false });
+      dbg('[RADIO] Microphone access granted');
+    }
+
+    // Use MediaRecorder to capture audio in small chunks
+    var mimeType = 'audio/webm;codecs=opus';
+    if(!MediaRecorder.isTypeSupported(mimeType)){
+      mimeType = 'audio/webm';
+      if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
+    }
+
+    radioMediaRecorder = new MediaRecorder(radioMediaStream, { mimeType: mimeType, audioBitsPerSecond: 16000 });
+
+    radioMediaRecorder.ondataavailable = function(e){
+      if(e.data.size > 0 && pttActive){
+        var reader = new FileReader();
+        reader.onloadend = function(){
+          var base64 = reader.result.split(',')[1];
+          if(base64 && mqttClient && mqttConnected){
+            mqttClient.publish('radio/channel', JSON.stringify({
+              driver: DRIVER_ID,
+              name: DRIVER_NAME,
+              audio: base64,
+              mime: mimeType,
+              ts: Date.now(),
+              seq: Date.now()
+            }));
+          }
+        };
+        reader.readAsDataURL(e.data);
+      }
+    };
+
+    radioMediaRecorder.start(500); // 500ms chunks
+    dbg('[RADIO] Recording started, chunk interval=500ms');
+    addRadioLog('outgoing', DRIVER_NAME, 'Transmitting...');
+  } catch(e){
+    dbg('[RADIO] Mic error: ' + e.message);
+    toast('📻 Microphone access denied','error');
+    pttStop();
+  }
+}
+
+function pttStop(evt){
+  if(evt) evt.preventDefault();
+  if(!pttActive) return;
+  pttActive = false;
+  document.getElementById('pttBtn').classList.remove('active');
+  document.getElementById('radioStatus').textContent = 'Ready — Hold to talk';
+  document.getElementById('radioStatus').className = 'radio-status';
+
+  if(radioMediaRecorder && radioMediaRecorder.state !== 'inactive'){
+    radioMediaRecorder.stop();
+    dbg('[RADIO] Recording stopped');
+  }
+  radioMediaRecorder = null;
+}
+
+// Receive and play incoming radio audio
+var radioPlayQueue = [];
+var radioPlaying = false;
+
+function handleRadioReceive(data, source){
+  var label = source === 'dispatch' ? '📡 ' + (data.name || 'Dispatch') : '🚕 ' + (data.name || data.driver);
+  addRadioLog('incoming', label, 'Audio received');
+
+  // Flash the toggle button if panel is closed
+  if(!radioOpen){
+    var btn = document.getElementById('radioToggleBtn');
+    btn.classList.add('has-activity');
+    setTimeout(function(){ btn.classList.remove('has-activity'); }, 3000);
+  }
+
+  // Update status
+  document.getElementById('radioStatus').textContent = '🟢 ' + label + ' speaking...';
+  document.getElementById('radioStatus').className = 'radio-status receiving';
+  clearTimeout(window._radioStatusTimer);
+  window._radioStatusTimer = setTimeout(function(){
+    if(!pttActive){
+      document.getElementById('radioStatus').textContent = 'Ready — Hold to talk';
+      document.getElementById('radioStatus').className = 'radio-status';
+    }
+  }, 2000);
+
+  // Decode and play the audio
+  try {
+    var binaryStr = atob(data.audio);
+    var bytes = new Uint8Array(binaryStr.length);
+    for(var i=0; i<binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    var blob = new Blob([bytes], { type: data.mime || 'audio/webm;codecs=opus' });
+    var url = URL.createObjectURL(blob);
+    var audio = new Audio(url);
+    audio.volume = radioVolume;
+    audio.onended = function(){ URL.revokeObjectURL(url); };
+    audio.onerror = function(){ URL.revokeObjectURL(url); dbg('[RADIO] Playback error'); };
+    audio.play().catch(function(e){ dbg('[RADIO] Play blocked: ' + e.message); });
+  } catch(e){
+    dbg('[RADIO] Decode error: ' + e.message);
+  }
+}
+
+function addRadioLog(type, name, text){
+  var now = new Date();
+  var timeStr = now.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  radioLogMessages.push({ type: type, name: name, text: text, time: timeStr });
+  if(radioLogMessages.length > 20) radioLogMessages.shift();
+  renderRadioLog();
+}
+
+function renderRadioLog(){
+  var el = document.getElementById('radioLog');
+  if(!el) return;
+  el.innerHTML = radioLogMessages.map(function(m){
+    return '<div class="radio-msg ' + m.type + '"><span class="rm-name">' + m.name + '</span> ' + m.text + '<span class="rm-time">' + m.time + '</span></div>';
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+dbg('[RADIO] Walkie-talkie module loaded');
