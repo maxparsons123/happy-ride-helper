@@ -64,15 +64,20 @@ public sealed class DispatchDb : IDisposable
         """;
         cmd.ExecuteNonQuery();
 
-        // Add total_jobs_completed column if missing (migration for existing DBs)
+        // Add columns if missing (migration for existing DBs)
+        TryAddColumn("drivers", "total_jobs_completed", "INTEGER DEFAULT 0");
+        TryAddColumn("jobs", "bids_json", "TEXT DEFAULT '[]'");
+    }
+
+    private void TryAddColumn(string table, string column, string definition)
+    {
         try
         {
-            using var alter = _conn.CreateCommand();
-            alter.CommandText = "ALTER TABLE drivers ADD COLUMN total_jobs_completed INTEGER DEFAULT 0";
-            alter.ExecuteNonQuery();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+            cmd.ExecuteNonQuery();
         }
         catch { /* column already exists */ }
-        cmd.ExecuteNonQuery();
     }
 
     // ── Drivers ──
@@ -177,10 +182,10 @@ public sealed class DispatchDb : IDisposable
         cmd.CommandText = """
             INSERT INTO jobs (id, pickup, dropoff, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
                 passengers, vehicle_required, special_requirements, estimated_fare, caller_phone, caller_name, booking_ref,
-                status, allocated_driver_id, created_at, allocated_at, completed_at, driver_distance_km, driver_eta_minutes)
+                status, allocated_driver_id, created_at, allocated_at, completed_at, driver_distance_km, driver_eta_minutes, bids_json)
             VALUES ($id, $pu, $do, $plat, $plng, $dlat, $dlng,
                 $pax, $vr, $sr, $fare, $phone, $name, $ref,
-                $status, $did, $cat, $aat, $coat, $dkm, $eta)
+                $status, $did, $cat, $aat, $coat, $dkm, $eta, $bids)
             ON CONFLICT(id) DO UPDATE SET
                 pickup = excluded.pickup,
                 dropoff = excluded.dropoff,
@@ -219,6 +224,17 @@ public sealed class DispatchDb : IDisposable
         cmd.Parameters.AddWithValue("$coat", (object?)j.CompletedAt?.ToString("o") ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$dkm", (object?)j.DriverDistanceKm ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$eta", (object?)j.DriverEtaMinutes ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$bids", j.BidsJson ?? "[]");
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Update the bids JSON array for a job.</summary>
+    public void UpdateJobBids(string jobId, string bidsJson)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE jobs SET bids_json = $bids WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", jobId);
+        cmd.Parameters.AddWithValue("$bids", bidsJson);
         cmd.ExecuteNonQuery();
     }
 
@@ -338,7 +354,8 @@ public sealed class DispatchDb : IDisposable
                 AllocatedAt = !r.IsDBNull(17) && DateTime.TryParse(r.GetString(17), out var aa) ? aa : null,
                 CompletedAt = !r.IsDBNull(18) && DateTime.TryParse(r.GetString(18), out var co) ? co : null,
                 DriverDistanceKm = r.IsDBNull(19) ? null : r.GetDouble(19),
-                DriverEtaMinutes = r.IsDBNull(20) ? null : r.GetInt32(20)
+                DriverEtaMinutes = r.IsDBNull(20) ? null : r.GetInt32(20),
+                BidsJson = r.FieldCount > 21 && !r.IsDBNull(21) ? r.GetString(21) : "[]"
             });
         }
         return list;

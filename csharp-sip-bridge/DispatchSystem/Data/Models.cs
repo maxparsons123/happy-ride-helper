@@ -79,5 +79,8 @@ public class Job
     /// <summary>Payment method from temp3, e.g. "corporate", "cash", "card"</summary>
     public string? PaymentMethod { get; set; }
     /// <summary>Bidding window in seconds from payload; null = use system default (20s)</summary>
+    /// <summary>Bidding window in seconds from payload; null = use system default (30s)</summary>
     public int? BiddingWindowSec { get; set; }
+    /// <summary>JSON array of driver bids: [{driverId, driverName, lat, lng, distanceKm, completedJobs, bidTime, score}]</summary>
+    public string? BidsJson { get; set; }
 }
