@@ -104,7 +104,7 @@ public class WebRtcRadioEngine : IDisposable
         }
         catch (Exception ex)
         {
-            OnLog?.Invoke($"⚠ Presence parse error: {ex.Message}", true);
+            OnLog?.Invoke($"⚠ Presence parse error: {ex.Message} | Raw: {(json.Length > 200 ? json[..200] : json)}", true);
         }
     }
 
