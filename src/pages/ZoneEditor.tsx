@@ -201,7 +201,7 @@ export default function ZoneEditor() {
         />
       </div>
 
-      <DispatchRadio publish={mqtt.publish} mqttConnected={mqtt.connectionStatus === 'connected'} />
+      <DispatchRadio publish={mqtt.publish} mqttConnected={mqtt.connectionStatus === 'connected'} onlineDrivers={mqtt.onlineDrivers} />
     </div>
   );
 }

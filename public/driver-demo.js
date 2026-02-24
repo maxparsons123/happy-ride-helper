@@ -830,6 +830,7 @@ function connectMqtt(){
       mqttClient.subscribe('chat/group');
       mqttClient.subscribe('radio/broadcast');
       mqttClient.subscribe('radio/channel');
+      mqttClient.subscribe('radio/driver/' + DRIVER_ID);
       dbg('📡 Subscribed to all topics. Driver ID: ' + DRIVER_ID);
       publishDriverStatus();
     });
@@ -854,10 +855,15 @@ function connectMqtt(){
           localStorage.setItem(`chat_group_${DRIVER_ID}`, JSON.stringify(chatMessages.group));
         }
 
-        // Radio audio messages
-        if(topic === 'radio/broadcast' || topic === 'radio/channel'){
+        // Radio audio messages (broadcast, channel, or private)
+        if(topic === 'radio/broadcast' || topic === 'radio/channel' || topic === 'radio/driver/' + DRIVER_ID){
           if(data.driver !== DRIVER_ID && data.audio){
-            handleRadioReceive(data, topic === 'radio/broadcast' ? 'dispatch' : 'driver');
+            // If broadcast has a targets list, only play if we're in it
+            if(topic === 'radio/broadcast' && data.targets && Array.isArray(data.targets)){
+              if(!data.targets.includes(DRIVER_ID)) return;
+            }
+            var source = topic === 'radio/channel' ? 'driver' : 'dispatch';
+            handleRadioReceive(data, source);
           }
         }
 
