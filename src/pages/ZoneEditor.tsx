@@ -4,8 +4,6 @@ import type { DispatchZone, ZonePoint } from '@/hooks/use-dispatch-zones';
 import { ZoneEditorMap } from '@/components/zones/ZoneEditorMap';
 import { ZoneSidebar } from '@/components/zones/ZoneSidebar';
 import { useLiveBookings } from '@/hooks/use-live-bookings';
-import { useMqttDispatch } from '@/hooks/use-mqtt-dispatch';
-import { DispatchRadio } from '@/components/dispatch/DispatchRadio';
 import { toast } from 'sonner';
 
 export default function ZoneEditor() {
@@ -14,7 +12,6 @@ export default function ZoneEditor() {
   const saveZone = useSaveZone();
   const deleteZone = useDeleteZone();
   const dbBookings = useLiveBookings();
-  const mqtt = useMqttDispatch();
 
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [drawingMode, setDrawingMode] = useState(false);
@@ -163,7 +160,7 @@ export default function ZoneEditor() {
         />
       </div>
 
-      <DispatchRadio publish={mqtt.publish} mqttConnected={mqtt.connectionStatus === 'connected'} onlineDrivers={mqtt.onlineDrivers} />
+      
     </div>
   );
 }
