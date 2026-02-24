@@ -80,7 +80,7 @@ export default function DriverApp() {
   return (
     <div className="relative w-full h-screen overflow-hidden bg-gray-100" style={{ touchAction: 'manipulation' }}>
       {/* Map Layer */}
-      <DriverMap coords={gps.coords} />
+      <DriverMap coords={gps.coords} allocatedJob={driver.allocatedJob} />
 
       {/* Header */}
       <DriverHeader presence={driver.presence} onMenuToggle={() => setMenuOpen(prev => !prev)} />
