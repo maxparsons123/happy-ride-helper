@@ -55,14 +55,18 @@ export default function DriverApp() {
   });
 
   const handleAccept = useCallback((job: JobData) => {
-    // Send bid (for bidding mode)
-    mqtt.publish(`jobs/${job.jobId}/bids`, {
+    const bidPayload = {
       driverId: driver.driverId,
       jobId: job.jobId,
       lat: gps.coords?.lat || 52.4068,
       lng: gps.coords?.lng || -1.5197,
       timestamp: Date.now(),
-    });
+      pickupAddress: job.pickupAddress,
+      dropoff: job.dropoff,
+      fare: job.fare,
+    };
+    // Send bid (for bidding mode)
+    mqtt.publish(`jobs/${job.jobId}/bids`, bidPayload);
     // Send explicit accept response (for manual dispatch mode)
     mqtt.publish(`jobs/${job.jobId}/response`, {
       driver: driver.driverId,
@@ -70,6 +74,8 @@ export default function DriverApp() {
       jobId: job.jobId,
       accepted: true,
     });
+    // Notify dispatcher of bid
+    mqtt.publish('dispatch/bids/incoming', bidPayload);
     driver.updateJobStatus(job.jobId, 'allocated');
     driver.setPresence('busy');
     setActiveJobRequest(null);
