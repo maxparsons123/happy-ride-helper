@@ -1,5 +1,5 @@
+using System.Text.Json;
 using DispatchSystem.Data;
-
 namespace DispatchSystem.Dispatch;
 
 /// <summary>
@@ -123,9 +123,15 @@ public sealed class BiddingDispatcher : IDisposable
             var distKm = AutoDispatcher.HaversineKm(job.PickupLat, job.PickupLng, lat, lng);
             var completedJobs = _db.GetCompletedJobCountForDriver(driverId);
 
+            // Get driver name for the record
+            var allDrivers = _db.GetAllDrivers();
+            var driverRecord = allDrivers.FirstOrDefault(d => d.Id == driverId);
+            var driverName = driverRecord?.Name ?? driverId;
+
             bids.Add(new DriverBid
             {
                 DriverId = driverId,
+                DriverName = driverName,
                 JobId = jobId,
                 Lat = lat,
                 Lng = lng,
@@ -134,7 +140,36 @@ public sealed class BiddingDispatcher : IDisposable
                 BidTime = DateTime.UtcNow
             });
 
-            OnLog?.Invoke($"💬 Bid from {driverId} for {jobId} ({distKm:F1}km, {completedJobs} prior jobs)");
+            // Persist bids to job record in DB
+            PersistBidsToJob(jobId, bids);
+
+            OnLog?.Invoke($"💬 Bid from {driverName} ({driverId}) for {jobId} ({distKm:F1}km, {completedJobs} prior jobs)");
+        }
+    }
+
+    /// <summary>
+    /// Serialize current bid list and save to the job's bids_json column.
+    /// </summary>
+    private void PersistBidsToJob(string jobId, List<DriverBid> bids)
+    {
+        try
+        {
+            var bidRecords = bids.Select(b => new
+            {
+                b.DriverId,
+                b.DriverName,
+                b.Lat,
+                b.Lng,
+                b.DistanceKm,
+                b.CompletedJobs,
+                BidTime = b.BidTime.ToString("o")
+            });
+            var json = JsonSerializer.Serialize(bidRecords);
+            _db.UpdateJobBids(jobId, json);
+        }
+        catch (Exception ex)
+        {
+            OnLog?.Invoke($"⚠ Failed to persist bids for {jobId}: {ex.Message}");
         }
     }
 
@@ -225,6 +260,29 @@ public sealed class BiddingDispatcher : IDisposable
                 Score = 0.6 * (1.0 - b.DistanceKm / maxDist) +
                         0.4 * (1.0 - (double)b.CompletedJobs / maxJobs)
             }).OrderByDescending(x => x.Score).ToList();
+
+            // Persist final bids with scores to each job
+            foreach (var (jobId, bids) in closedSnapshot)
+            {
+                if (bids.Count == 0) continue;
+                var bidRecords = bids.Select(b =>
+                {
+                    var scored = scoredBids.FirstOrDefault(s => s.Bid.DriverId == b.DriverId && s.Bid.JobId == b.JobId);
+                    return new
+                    {
+                        b.DriverId,
+                        b.DriverName,
+                        b.Lat,
+                        b.Lng,
+                        b.DistanceKm,
+                        b.CompletedJobs,
+                        BidTime = b.BidTime.ToString("o"),
+                        Score = scored?.Score ?? 0
+                    };
+                });
+                var json = JsonSerializer.Serialize(bidRecords);
+                _db.UpdateJobBids(jobId, json);
+            }
 
             var assignedDrivers = new HashSet<string>();
             var assignedJobs = new HashSet<string>();
@@ -342,6 +400,7 @@ public sealed class BiddingDispatcher : IDisposable
 public class DriverBid
 {
     public string DriverId { get; set; } = "";
+    public string DriverName { get; set; } = "";
     public string JobId { get; set; } = "";
     public double Lat { get; set; }
     public double Lng { get; set; }
