@@ -9,9 +9,19 @@ interface UseMqttDriverOptions {
   onJobResult: (topic: string, data: any) => void;
 }
 
+export interface RadioMessage {
+  driver: string;
+  name: string;
+  audio: string;
+  mime: string;
+  ts: number;
+  targets?: string[];
+}
+
 export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDriverOptions) {
   const clientRef = useRef<mqtt.MqttClient | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
+  const [lastRadioMessage, setLastRadioMessage] = useState<RadioMessage | null>(null);
 
   const onJobRequestRef = useRef(onJobRequest);
   const onJobResultRef = useRef(onJobResult);
@@ -31,11 +41,28 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
       client.subscribe(`jobs/+/result/${driverId}`);
       client.subscribe(`drivers/${driverId}/bid-request`);
       client.subscribe(`drivers/${driverId}/jobs`);
+      // Radio topics
+      client.subscribe('radio/broadcast');
+      client.subscribe('radio/channel');
+      client.subscribe(`radio/driver/${driverId}`);
     });
 
     client.on('message', (topic: string, message: Buffer) => {
       try {
         const data = JSON.parse(message.toString());
+
+        // Radio messages
+        if (topic === 'radio/broadcast' || topic === 'radio/channel' || topic === `radio/driver/${driverId}`) {
+          if (data.driver !== driverId && data.audio) {
+            // If broadcast has targets, only accept if we're in the list
+            if (topic === 'radio/broadcast' && data.targets && Array.isArray(data.targets)) {
+              if (!data.targets.includes(driverId)) return;
+            }
+            setLastRadioMessage(data as RadioMessage);
+          }
+          return;
+        }
+
         if (topic.startsWith('pubs/requests/') || topic.includes('/bid-request') || topic.includes('/jobs')) {
           onJobRequestRef.current(topic, data);
         }
@@ -58,5 +85,5 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
     clientRef.current?.publish(topic, JSON.stringify(payload));
   }, []);
 
-  return { connectionStatus, publish };
+  return { connectionStatus, publish, lastRadioMessage };
 }

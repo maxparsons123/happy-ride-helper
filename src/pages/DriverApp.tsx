@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useDriverState, type JobData } from '@/hooks/use-driver-state';
+import { DriverRadio } from '@/components/driver/DriverRadio';
 import { useMqttDriver } from '@/hooks/use-mqtt-driver';
 import { useGpsTracking } from '@/hooks/use-gps-tracking';
 import { useGeocodeJob } from '@/hooks/use-geocode-job';
@@ -111,6 +112,15 @@ export default function DriverApp() {
           onReject={handleReject}
         />
       )}
+
+      {/* Radio PTT */}
+      <DriverRadio
+        driverId={driver.driverId}
+        driverName={`Driver ${driver.driverId}`}
+        publish={mqtt.publish}
+        mqttConnected={mqtt.connectionStatus === 'connected'}
+        lastRadioMessage={mqtt.lastRadioMessage}
+      />
 
       {/* Menu Overlay */}
       <DriverMenu
