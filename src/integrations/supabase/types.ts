@@ -240,6 +240,7 @@ export type Database = {
       }
       bookings: {
         Row: {
+          bids: Json | null
           booked_at: string
           booking_details: Json | null
           call_id: string
@@ -267,6 +268,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          bids?: Json | null
           booked_at?: string
           booking_details?: Json | null
           call_id: string
@@ -294,6 +296,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          bids?: Json | null
           booked_at?: string
           booking_details?: Json | null
           call_id?: string

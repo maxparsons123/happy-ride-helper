@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import mqtt from 'mqtt';
+import { supabase } from '@/integrations/supabase/client';
 
 const BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
 
@@ -44,6 +45,39 @@ export interface OnlineDriver {
 }
 
 export function useMqttDispatch() {
+  // Persist a driver bid to the bookings table bids JSONB array
+  const persistBidToDb = useCallback(async (bid: DriverBid) => {
+    try {
+      // Fetch current bids array
+      const { data: booking } = await supabase
+        .from('bookings')
+        .select('bids')
+        .or(`call_id.eq.${bid.jobId},id.eq.${bid.jobId}`)
+        .maybeSingle();
+
+      const currentBids = (booking?.bids as any[]) || [];
+      // Avoid duplicates
+      if (currentBids.some((b: any) => b.driverId === bid.driverId)) return;
+
+      const newBid = {
+        driverId: bid.driverId,
+        lat: bid.lat,
+        lng: bid.lng,
+        pickupAddress: bid.pickupAddress,
+        dropoff: bid.dropoff,
+        fare: bid.fare,
+        bidTime: new Date().toISOString(),
+      };
+
+      await supabase
+        .from('bookings')
+        .update({ bids: [...currentBids, newBid] })
+        .or(`call_id.eq.${bid.jobId},id.eq.${bid.jobId}`);
+    } catch (e) {
+      console.error('Failed to persist bid to DB:', e);
+    }
+  }, []);
+
   const clientRef = useRef<mqtt.MqttClient | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
   const [bookings, setBookings] = useState<MqttBooking[]>([]);
@@ -124,9 +158,10 @@ export function useMqttDispatch() {
               fare: data.fare,
             };
             setIncomingBids(prev => {
-              // Deduplicate by driverId+jobId
               const exists = prev.find(b => b.driverId === bid.driverId && b.jobId === bid.jobId);
               if (exists) return prev;
+              // Persist bid to bookings table
+              persistBidToDb(bid);
               return [bid, ...prev].slice(0, 100);
             });
           }
