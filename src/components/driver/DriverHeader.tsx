@@ -10,6 +10,7 @@ interface DriverHeaderProps {
 const presenceConfig = {
   available: { label: 'Available', dotClass: 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.7)]' },
   busy: { label: 'On Job', dotClass: 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.7)]' },
+  on_break: { label: 'On Break', dotClass: 'bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.7)]' },
   offline: { label: 'Offline', dotClass: 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]' },
 };
 

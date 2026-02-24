@@ -168,20 +168,21 @@ function SettingsView({ presence, onPresenceChange, driverId }: {
     <div className="space-y-6">
       <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
         <h3 className="font-bold text-gray-800 mb-4 text-lg">Driver Status</h3>
-        <div className="flex gap-3">
-          {(['available', 'busy', 'offline'] as const).map(p => (
+        <div className="grid grid-cols-2 gap-3">
+          {([
+            { key: 'available' as const, label: 'Available', activeClass: 'bg-green-500 text-white shadow-md' },
+            { key: 'on_break' as const, label: 'On Break', activeClass: 'bg-orange-500 text-white shadow-md' },
+            { key: 'busy' as const, label: 'On Job', activeClass: 'bg-yellow-500 text-white shadow-md' },
+            { key: 'offline' as const, label: 'Offline', activeClass: 'bg-red-500 text-white shadow-md' },
+          ]).map(({ key, label, activeClass }) => (
             <button
-              key={p}
-              onClick={() => onPresenceChange(p)}
-              className={`flex-1 py-3 rounded-xl font-bold text-sm capitalize transition-all ${
-                presence === p 
-                  ? p === 'available' ? 'bg-green-500 text-white shadow-md' 
-                    : p === 'busy' ? 'bg-yellow-500 text-white shadow-md'
-                    : 'bg-red-500 text-white shadow-md'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              key={key}
+              onClick={() => onPresenceChange(key)}
+              className={`py-3 rounded-xl font-bold text-sm transition-all ${
+                presence === key ? activeClass : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              {p}
+              {label}
             </button>
           ))}
         </div>

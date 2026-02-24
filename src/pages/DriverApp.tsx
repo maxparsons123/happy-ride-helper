@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { DriverRadioHandle } from '@/components/driver/DriverRadio';
 import { useDriverState, type JobData } from '@/hooks/use-driver-state';
 import { DriverRadio } from '@/components/driver/DriverRadio';
@@ -37,24 +37,43 @@ export default function DriverApp() {
     }
   }, [driver.addJob]);
 
+  const publishRef = useRef<(topic: string, payload: any) => void>(() => {});
+
+  // Publish presence changes to MQTT so desktop dispatcher sees them
+  const handlePresenceChange = useCallback((p: typeof driver.presence) => {
+    driver.setPresence(p);
+    const mqttStatus = p === 'on_break' ? 'break' : p === 'busy' ? 'onjob' : p;
+    publishRef.current(`drivers/${driver.driverId}/status`, {
+      status: mqttStatus,
+      lat: gps.coords?.lat || 0,
+      lng: gps.coords?.lng || 0,
+      name: `Driver ${driver.driverId}`,
+    });
+  }, [driver.setPresence, driver.driverId, gps.coords]);
+
   const handleJobResult = useCallback((_topic: string, data: any) => {
     const jobId = data.jobId || data.job;
     if (data.result === 'won') {
       driver.updateJobStatus(jobId, 'allocated');
-      driver.setPresence('busy');
+      handlePresenceChange('busy');
       toast.success('🎉 You won the job!');
       setActiveJobRequest(null);
     } else if (data.result === 'lost') {
       driver.updateJobStatus(jobId, 'lost');
       toast.error('Job was allocated to another driver.');
     }
-  }, [driver.updateJobStatus, driver.setPresence]);
+  }, [driver.updateJobStatus, handlePresenceChange]);
 
   const mqtt = useMqttDriver({
     driverId: driver.driverId,
     onJobRequest: handleJobRequest,
     onJobResult: handleJobResult,
   });
+
+  // Keep publish ref in sync
+  useEffect(() => {
+    publishRef.current = mqtt.publish;
+  }, [mqtt.publish]);
 
   const handleAccept = useCallback((job: JobData) => {
     const bidPayload = {
@@ -79,7 +98,7 @@ export default function DriverApp() {
     // Notify dispatcher of bid
     mqtt.publish('dispatch/bids/incoming', bidPayload);
     driver.updateJobStatus(job.jobId, 'allocated');
-    driver.setPresence('busy');
+    handlePresenceChange('busy');
     setActiveJobRequest(null);
     toast.success('Bid submitted! Awaiting allocation...');
   }, [mqtt.publish, driver.driverId, gps.coords, driver.updateJobStatus, driver.setPresence]);
@@ -140,7 +159,7 @@ export default function DriverApp() {
         allocatedJob={driver.allocatedJob}
         jobs={driver.jobs}
         presence={driver.presence}
-        onPresenceChange={driver.setPresence}
+        onPresenceChange={handlePresenceChange}
         driverId={driver.driverId}
         onJobStatusChange={driver.updateJobStatus}
       />
