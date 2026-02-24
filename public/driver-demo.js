@@ -1185,10 +1185,15 @@ function setRadioVolume(val){
   radioVolume = parseInt(val) / 100;
 }
 
+var radioGainNode = null;
+
 async function initRadioAudio(){
   if(radioAudioCtx) return;
   try {
-    radioAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    radioAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    radioGainNode = radioAudioCtx.createGain();
+    radioGainNode.gain.value = radioVolume;
+    radioGainNode.connect(radioAudioCtx.destination);
     dbg('[RADIO] AudioContext initialized, sampleRate=' + radioAudioCtx.sampleRate);
   } catch(e){
     dbg('[RADIO] AudioContext failed: ' + e.message);
@@ -1209,7 +1214,7 @@ async function pttStart(evt){
 
   try {
     if(!radioMediaStream){
-      radioMediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 }, video: false });
+      radioMediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }, video: false });
       dbg('[RADIO] Microphone access granted');
     }
 
@@ -1220,7 +1225,7 @@ async function pttStart(evt){
       if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
     }
 
-    radioMediaRecorder = new MediaRecorder(radioMediaStream, { mimeType: mimeType, audioBitsPerSecond: 16000 });
+    radioMediaRecorder = new MediaRecorder(radioMediaStream, { mimeType: mimeType, audioBitsPerSecond: 32000 });
 
     radioMediaRecorder.ondataavailable = function(e){
       if(e.data.size > 0 && pttActive){
@@ -1293,18 +1298,29 @@ function handleRadioReceive(data, source){
     }
   }, 2000);
 
-  // Decode and play the audio
+  // Decode and play via Web Audio API for better quality
   try {
+    initRadioAudio();
     var binaryStr = atob(data.audio);
     var bytes = new Uint8Array(binaryStr.length);
     for(var i=0; i<binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
     var blob = new Blob([bytes], { type: data.mime || 'audio/webm;codecs=opus' });
-    var url = URL.createObjectURL(blob);
-    var audio = new Audio(url);
-    audio.volume = radioVolume;
-    audio.onended = function(){ URL.revokeObjectURL(url); };
-    audio.onerror = function(){ URL.revokeObjectURL(url); dbg('[RADIO] Playback error'); };
-    audio.play().catch(function(e){ dbg('[RADIO] Play blocked: ' + e.message); });
+    blob.arrayBuffer().then(function(arrayBuf){
+      if(radioAudioCtx.state === 'suspended') radioAudioCtx.resume();
+      radioAudioCtx.decodeAudioData(arrayBuf, function(audioBuf){
+        var source = radioAudioCtx.createBufferSource();
+        source.buffer = audioBuf;
+        if(radioGainNode){
+          radioGainNode.gain.value = radioVolume;
+          source.connect(radioGainNode);
+        } else {
+          source.connect(radioAudioCtx.destination);
+        }
+        source.start();
+      }, function(err){
+        dbg('[RADIO] decodeAudioData error: ' + err);
+      });
+    });
   } catch(e){
     dbg('[RADIO] Decode error: ' + e.message);
   }
