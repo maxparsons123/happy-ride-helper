@@ -76,6 +76,7 @@ export default function DriverApp() {
   }, [mqtt.publish]);
 
   const handleAccept = useCallback((job: JobData) => {
+    const lastCompleted = driver.jobs.filter(j => j.status === 'completed').sort((a, b) => b.timestamp - a.timestamp)[0];
     const bidPayload = {
       driverId: driver.driverId,
       jobId: job.jobId,
@@ -85,6 +86,11 @@ export default function DriverApp() {
       pickupAddress: job.pickupAddress,
       dropoff: job.dropoff,
       fare: job.fare,
+      // Enhanced fields for dispatch scoring
+      lastJobCompletedAt: lastCompleted?.timestamp ? new Date(lastCompleted.timestamp).toISOString() : null,
+      speedKmh: gps.coords?.speed ? Math.round((gps.coords.speed < 0 ? 0 : gps.coords.speed) * 3.6) : 0,
+      heading: gps.coords?.heading || 0,
+      gpsAccuracyMeters: gps.coords?.accuracy || 999,
     };
     // Send bid (for bidding mode)
     mqtt.publish(`jobs/${job.jobId}/bids`, bidPayload);

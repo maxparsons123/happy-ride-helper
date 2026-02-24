@@ -106,7 +106,8 @@ public sealed class BiddingDispatcher : IDisposable
     /// Record a bid from a driver for a job. A driver can bid on multiple jobs.
     /// Also runs spoof detection against last known location.
     /// </summary>
-    public void RecordBid(string jobId, string driverId, double lat, double lng)
+    public void RecordBid(string jobId, string driverId, double lat, double lng,
+        double speedKmh = 0, double heading = 0, double gpsAccuracyMeters = 999, string? lastJobCompletedAt = null)
     {
         lock (_lock)
         {
@@ -137,7 +138,7 @@ public sealed class BiddingDispatcher : IDisposable
             // Spoof detection
             var currentSample = new LocationSample { Lat = lat, Lng = lng, TsMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
             _lastLocations.TryGetValue(driverId, out var prevSample);
-            var (spoofRisk, spoofFlags) = SpoofDetector.Evaluate(prevSample, currentSample);
+            var (spoofRisk, spoofFlags) = SpoofDetector.Evaluate(prevSample, currentSample, speedKmh);
             _lastLocations[driverId] = currentSample;
 
             // Driver stats for reliability
@@ -156,7 +157,11 @@ public sealed class BiddingDispatcher : IDisposable
                 BidTime = DateTime.UtcNow,
                 SpoofRisk = spoofRisk,
                 SpoofFlags = spoofFlags,
-                ReliabilityScore = reliabilityScore
+                ReliabilityScore = reliabilityScore,
+                SpeedKmh = speedKmh,
+                Heading = heading,
+                GpsAccuracyMeters = gpsAccuracyMeters,
+                LastJobCompletedAt = lastJobCompletedAt
             });
 
             // Persist bids to job record in DB
@@ -203,6 +208,10 @@ public sealed class BiddingDispatcher : IDisposable
                 b.ReliabilityScore,
                 b.SpoofRisk,
                 b.SpoofFlags,
+                b.SpeedKmh,
+                b.Heading,
+                b.GpsAccuracyMeters,
+                b.LastJobCompletedAt,
                 Score = b.FinalScore
             });
             var json = JsonSerializer.Serialize(bidRecords);
@@ -310,13 +319,20 @@ public sealed class BiddingDispatcher : IDisposable
             for (int ji = 0; ji < nJobs; ji++)
             {
                 var (jobId, bids) = jobsWithBids[ji];
+                var job = _db.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
                 foreach (var bid in bids)
                 {
                     int di = driverIds.IndexOf(bid.DriverId);
                     if (di < 0) continue;
 
+                    // Compute bearing from driver to pickup for heading bonus
+                    double pickupBearing = -1;
+                    if (job != null)
+                        pickupBearing = BearingDegrees(bid.Lat, bid.Lng, job.PickupLat, job.PickupLng);
+
                     var stats = _db.GetDriverStats(bid.DriverId);
-                    var utility = _scorer.Utility(bid.DistanceKm, bid.CompletedJobs, stats, bid.SpoofRisk);
+                    var utility = _scorer.Utility(bid.DistanceKm, bid.CompletedJobs, stats, bid.SpoofRisk,
+                        bid.GpsAccuracyMeters, bid.Heading, pickupBearing, bid.LastJobCompletedAt);
                     bid.FinalScore = utility;
 
                     cost[ji, di] = 1.0 - utility;
@@ -419,6 +435,17 @@ public sealed class BiddingDispatcher : IDisposable
         }
     }
 
+    /// <summary>Compute bearing in degrees from point A to point B.</summary>
+    private static double BearingDegrees(double lat1, double lng1, double lat2, double lng2)
+    {
+        var dLng = (lng2 - lng1) * Math.PI / 180.0;
+        var y = Math.Sin(dLng) * Math.Cos(lat2 * Math.PI / 180.0);
+        var x = Math.Cos(lat1 * Math.PI / 180.0) * Math.Sin(lat2 * Math.PI / 180.0) -
+                Math.Sin(lat1 * Math.PI / 180.0) * Math.Cos(lat2 * Math.PI / 180.0) * Math.Cos(dLng);
+        var bearing = Math.Atan2(y, x) * 180.0 / Math.PI;
+        return (bearing + 360) % 360;
+    }
+
     /// <summary>Check if a job is currently in a bidding round.</summary>
     public bool IsJobBidding(string jobId)
     {
@@ -462,4 +489,9 @@ public class DriverBid
     public List<string> SpoofFlags { get; set; } = new();
     public double ReliabilityScore { get; set; } = 1.0;
     public double? FinalScore { get; set; }
+    // Driver-reported fields
+    public double SpeedKmh { get; set; }
+    public double Heading { get; set; }
+    public double GpsAccuracyMeters { get; set; } = 999;
+    public string? LastJobCompletedAt { get; set; }
 }

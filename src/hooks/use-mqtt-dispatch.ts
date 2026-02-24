@@ -13,6 +13,11 @@ export interface DriverBid {
   pickupAddress?: string;
   dropoff?: string;
   fare?: string;
+  // Enhanced fields for dispatch scoring
+  lastJobCompletedAt?: string | null;
+  speedKmh?: number;
+  heading?: number;
+  gpsAccuracyMeters?: number;
 }
 
 export interface MqttBooking {
@@ -156,6 +161,10 @@ export function useMqttDispatch() {
               pickupAddress: data.pickupAddress,
               dropoff: data.dropoff,
               fare: data.fare,
+              lastJobCompletedAt: data.lastJobCompletedAt || null,
+              speedKmh: data.speedKmh || 0,
+              heading: data.heading || 0,
+              gpsAccuracyMeters: data.gpsAccuracyMeters || 999,
             };
             setIncomingBids(prev => {
               const exists = prev.find(b => b.driverId === bid.driverId && b.jobId === bid.jobId);

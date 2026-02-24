@@ -440,9 +440,9 @@ public class MainForm : Form
             };
             _mqtt.OnJobStatusUpdate += OnJobStatusUpdate;
             _mqtt.OnDriverJobResponse += OnDriverJobResponse;
-            _mqtt.OnDriverBidReceived += (jobId, driverId, lat, lng) =>
+            _mqtt.OnDriverBidReceived += (jobId, driverId, lat, lng, speedKmh, heading, gpsAccuracy, lastJobCompletedAt) =>
             {
-                _bidding?.RecordBid(jobId, driverId, lat, lng);
+                _bidding?.RecordBid(jobId, driverId, lat, lng, speedKmh, heading, gpsAccuracy, lastJobCompletedAt);
 
                 // Treat bid as acceptance for manually offered jobs
                 BeginInvoke(() =>
