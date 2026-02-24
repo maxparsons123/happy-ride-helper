@@ -457,10 +457,14 @@ public class MainForm : Form
                 });
             };
 
-            // Wire radio messages to RadioPanel
-            _mqtt.OnRadioReceived += (topic, json) =>
+            // Wire WebRTC radio signaling to RadioPanel
+            _mqtt.OnWebRtcPresence += (json) =>
             {
-                BeginInvoke(() => _radioPanel.HandleIncomingRadio(json));
+                BeginInvoke(() => _radioPanel.HandlePresence(json));
+            };
+            _mqtt.OnWebRtcSignaling += (json) =>
+            {
+                BeginInvoke(() => _radioPanel.HandleSignaling(json));
             };
 
             await _mqtt.ConnectAsync();

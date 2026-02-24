@@ -35,6 +35,8 @@ public sealed class MqttDispatchClient : IDisposable
     public event Action<string, string, bool>? OnDriverJobResponse;          // jobId, driverId, accepted
     public event Action<string, string, double, double>? OnDriverBidReceived; // jobId, driverId, lat, lng
     public event Action<string, string>? OnRadioReceived;                    // topic, jsonPayload
+    public event Action<string>? OnWebRtcPresence;                          // jsonPayload
+    public event Action<string>? OnWebRtcSignaling;                         // jsonPayload
 
     public bool IsConnected => _client?.IsConnected ?? false;
 
@@ -94,9 +96,11 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.SubscribeAsync("jobs/+/response");
         await _client.SubscribeAsync("jobs/+/bid");
         await _client.SubscribeAsync("jobs/+/bids");      // Driver app publishes bids here
-        await _client.SubscribeAsync("radio/channel");        // Driver-to-dispatch radio
-        await _client.SubscribeAsync("radio/broadcast");      // Broadcast radio (to filter own)
-        OnLog?.Invoke("📡 Subscribed to dispatch + radio topics");
+        await _client.SubscribeAsync("radio/channel");        // Driver-to-dispatch radio (legacy)
+        await _client.SubscribeAsync("radio/broadcast");      // Broadcast radio (legacy)
+        await _client.SubscribeAsync("radio/webrtc/presence");       // WebRTC peer discovery
+        await _client.SubscribeAsync("radio/webrtc/signal/DISPATCH"); // WebRTC signaling to this dispatcher
+        OnLog?.Invoke("📡 Subscribed to dispatch + radio + WebRTC topics");
     }
 
     private Task HandleMessage(MqttApplicationMessageReceivedEventArgs e)
@@ -278,6 +282,14 @@ public sealed class MqttDispatchClient : IDisposable
             else if (topic == "radio/channel" || topic == "radio/broadcast")
             {
                 OnRadioReceived?.Invoke(topic, json);
+            }
+            else if (topic == "radio/webrtc/presence")
+            {
+                OnWebRtcPresence?.Invoke(json);
+            }
+            else if (topic.StartsWith("radio/webrtc/signal/"))
+            {
+                OnWebRtcSignaling?.Invoke(json);
             }
         }
         catch (Exception ex)

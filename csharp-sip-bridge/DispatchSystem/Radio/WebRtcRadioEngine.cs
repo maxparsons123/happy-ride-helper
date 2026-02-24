@@ -23,6 +23,7 @@ public class WebRtcRadioEngine : IDisposable
     private readonly ConcurrentDictionary<string, RTCPeerConnection> _peers = new();
     private readonly ConcurrentDictionary<string, bool> _makingOffer = new();
     private bool _pttActive;
+    private HashSet<string>? _pttTargets;
     private bool _disposed;
 
     // Audio capture
@@ -146,13 +147,10 @@ public class WebRtcRadioEngine : IDisposable
 
         var pc = new RTCPeerConnection(config);
 
-        // Add audio track (16kHz mono PCM)
+        // Add audio track (8kHz mono PCMU)
         var audioFormat = new AudioFormat(AudioCodecsEnum.PCMU, 0, 8000, 1);
-        var track = new MediaStreamTrack(audioFormat.FormatCodec, MediaStreamStatusEnum.SendRecv);
+        var track = new MediaStreamTrack(audioFormat, MediaStreamStatusEnum.SendRecv);
         pc.addTrack(track);
-
-        // Mute track initially (PTT off)
-        track.Enabled = false;
 
         pc.onicecandidate += (candidate) =>
         {
@@ -272,16 +270,8 @@ public class WebRtcRadioEngine : IDisposable
         if (_pttActive) return;
         _pttActive = true;
 
-        // Enable send tracks on targeted (or all) peers
-        var targets = targetIds?.ToHashSet();
-        foreach (var kvp in _peers)
-        {
-            if (targets == null || targets.Count == 0 || targets.Contains(kvp.Key))
-            {
-                foreach (var t in kvp.Value.AudioStreamList)
-                    t.Enabled = true;
-            }
-        }
+        // Track which peers to send to
+        _pttTargets = targetIds?.ToHashSet();
 
         // Start mic capture
         lock (_captureLock)
@@ -316,12 +306,7 @@ public class WebRtcRadioEngine : IDisposable
             catch { }
         }
 
-        // Mute all send tracks
-        foreach (var kvp in _peers)
-        {
-            foreach (var t in kvp.Value.AudioStreamList)
-                t.Enabled = false;
-        }
+        _pttTargets = null;
 
         OnLog?.Invoke("⬛ PTT released", false);
     }
@@ -335,16 +320,11 @@ public class WebRtcRadioEngine : IDisposable
 
         foreach (var kvp in _peers)
         {
+            if (_pttTargets != null && _pttTargets.Count > 0 && !_pttTargets.Contains(kvp.Key))
+                continue;
             try
             {
-                foreach (var track in kvp.Value.AudioStreamList)
-                {
-                    if (track.Enabled)
-                    {
-                        // Send via RTP
-                        kvp.Value.SendAudio((uint)(muLawBytes.Length * 1000 / 8), muLawBytes);
-                    }
-                }
+                kvp.Value.SendAudio((uint)(muLawBytes.Length * 1000 / 8), muLawBytes);
             }
             catch { /* peer may have disconnected */ }
         }
