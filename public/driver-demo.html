@@ -797,14 +797,13 @@ function publishDriverStatus() {
 }
 
 // ── REAL MQTT CONNECTION ──
-// Try multiple brokers — HiveMQ public broker can be unreliable
-const MQTT_BROKERS = [
-  'wss://broker.hivemq.com:8884/mqtt',
-  'wss://test.mosquitto.org:8081/mqtt'
-];
-let MQTT_BROKER = MQTT_BROKERS[0];
+const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
 let mqttClient = null;
 let mqttConnected = false;
+const otherDrivers = {};
+const driverStatus = {};
+const chatMessages = { group: [] };
+let currentView = 'jobs'; // track active view for chat updates
 
 function mqttJobFromPayload(data){
   // Normalise payloads from C# bridge (pubs/requests, taxi/bookings, passengers/*/created)
@@ -863,22 +862,20 @@ function updateMqttStatus(status){
   else { pill.style.background='rgba(245,158,11,.15)'; pill.style.color='var(--orange)'; text.textContent='MQTT Reconnecting…'; }
 }
 
-let mqttBrokerIndex = 0;
-let mqttConnectAttempts = 0;
-
 function connectMqtt(){
-  console.log('[MQTT] Attempting connection to:', MQTT_BROKER);
+  console.log('🔌 Connecting to MQTT broker:', MQTT_BROKER);
   try {
+    const clientId = `driver_${DRIVER_ID}_${Math.random().toString(36).substr(2, 8)}`;
     mqttClient = mqtt.connect(MQTT_BROKER, {
-      clientId: `${DRIVER_ID}_${Date.now().toString(36)}`,
-      reconnectPeriod: 3000,
-      connectTimeout: 8000,
+      clientId: clientId,
+      reconnectPeriod: 2000,
+      connectTimeout: 10000,
       keepalive: 60,
       clean: true
     });
 
     mqttClient.on('connect', ()=>{
-      mqttConnectAttempts = 0;
+      console.log('✅ MQTT connected as:', DRIVER_ID);
       updateMqttStatus('connected');
       mqttClient.subscribe('pubs/requests/+');
       mqttClient.subscribe('taxi/bookings');
@@ -889,17 +886,38 @@ function connectMqtt(){
       mqttClient.subscribe('drivers/+/location');
       mqttClient.subscribe('drivers/+/status');
       mqttClient.subscribe('chat/group');
-      console.log('[MQTT] Connected & subscribed. Driver ID:', DRIVER_ID, 'Broker:', MQTT_BROKER);
+      console.log('📡 Subscribed to all topics. Driver ID:', DRIVER_ID);
       publishDriverStatus();
     });
 
     mqttClient.on('message', (topic, message)=>{
       try {
         const data = JSON.parse(message.toString());
-        console.log('[MQTT] Received on', topic, data);
+        console.log('📡 MQTT received:', topic, data);
+
+        // Handle driver status updates from other drivers
+        if(topic.startsWith('drivers/') && topic.endsWith('/status')){
+          const dId = topic.split('/')[1];
+          if(dId !== DRIVER_ID){
+            otherDrivers[dId] = { lat: data.lat||52.4068, lng: data.lng||-1.5197, status: data.status||'offline', lastUpdate: Date.now() };
+            driverStatus[dId] = data.status || 'offline';
+          }
+        }
+
+        // Handle chat messages
+        if(topic === 'chat/group'){
+          const msg = { id: Date.now().toString(), sender: data.driver||'unknown', text: data.text||'', timestamp: data.ts||Date.now() };
+          chatMessages.group.push(msg);
+          if(chatMessages.group.length > 50) chatMessages.group.shift();
+          localStorage.setItem(`chat_group_${DRIVER_ID}`, JSON.stringify(chatMessages.group));
+        }
+
+        // Handle job requests
         if(topic.startsWith('pubs/requests/') || topic==='taxi/bookings' || topic.includes('/created') || topic.includes('/bid-request') || topic.includes('/jobs')){
           handleMqttJob(data);
         }
+
+        // Handle job results
         if(topic.includes(`/result/${DRIVER_ID}`)){
           const jobId = data.jobId || data.job;
           const j = availableJobs.find(x=>x.jobId===jobId);
@@ -919,26 +937,24 @@ function connectMqtt(){
             if(j) announceBidResult(false,j);
           }
         }
-      } catch(e){ console.error('[MQTT] Parse error:', e); }
+      } catch(e){
+        console.error('MQTT message error:', e);
+        updateMqttStatus('error');
+      }
     });
 
     mqttClient.on('error', (err)=>{
-      console.error('[MQTT] Error:', err);
-      mqttConnectAttempts++;
-      // Try fallback broker after 2 failed attempts
-      if(mqttConnectAttempts >= 2 && mqttBrokerIndex < MQTT_BROKERS.length - 1){
-        mqttBrokerIndex++;
-        MQTT_BROKER = MQTT_BROKERS[mqttBrokerIndex];
-        console.log('[MQTT] Switching to fallback broker:', MQTT_BROKER);
-        mqttClient.end(true);
-        mqttConnectAttempts = 0;
-        setTimeout(connectMqtt, 500);
-        return;
-      }
+      console.error('❌ MQTT error:', err);
       updateMqttStatus('error');
     });
-    mqttClient.on('reconnect', ()=>{ mqttConnectAttempts++; updateMqttStatus('reconnecting'); });
-    mqttClient.on('offline', ()=> updateMqttStatus('reconnecting'));
+    mqttClient.on('reconnect', ()=>{
+      console.log('🔄 Reconnecting to broker...');
+      updateMqttStatus('reconnecting');
+    });
+    mqttClient.on('offline', ()=>{
+      console.log('📴 Broker offline - will retry');
+      updateMqttStatus('reconnecting');
+    });
   } catch(e){
     console.error('[MQTT] Connection failed:', e);
     updateMqttStatus('error');
