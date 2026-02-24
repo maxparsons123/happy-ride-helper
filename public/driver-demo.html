@@ -175,9 +175,9 @@
 
 <!-- TOP BAR -->
 <div class="topbar">
-  <div class="brand">🚕 Black Cab Unite</div>
+  <div class="brand">🚕 Black Cab Unite — <span id="driverIdLabel" style="font-size:12px;color:#aaa;font-weight:400"></span></div>
   <div class="status-group">
-    <div class="status-pill status-online" id="driverStatus"><span class="dot"></span> <span id="statusText">Online</span></div>
+    <div class="status-pill status-online" id="driverStatus" style="cursor:pointer" onclick="cycleDriverStatus()"><span class="dot"></span> <span id="statusText">Online</span></div>
     <div class="status-pill mqtt-pill" id="mqttPill"><span class="dot"></span> <span id="mqttText">MQTT Connecting…</span></div>
     <div class="status-pill" style="cursor:pointer" onclick="toggleTTS()" id="ttsPill">🔊 TTS On</div>
     <div class="earnings">Today: £<span id="earningsTotal">0.00</span></div>
@@ -726,9 +726,70 @@ function toast(msg,type='info'){
   setTimeout(()=>t.remove(),3000);
 }
 
+// ── DRIVER REGISTRATION (same as driver-app) ──
+function getOrPromptDriverId() {
+  let id = localStorage.getItem('bcu_demo_driver_id');
+  if (id && /^[a-zA-Z0-9_-]+$/.test(id)) return id;
+  id = prompt('Enter your Driver ID (as registered with dispatch):');
+  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    alert('Invalid Driver ID. Please reload and try again.');
+    return null;
+  }
+  localStorage.setItem('bcu_demo_driver_id', id);
+  return id;
+}
+
+const DRIVER_ID = getOrPromptDriverId();
+if (!DRIVER_ID) throw new Error('No driver ID');
+document.getElementById('driverIdLabel').textContent = DRIVER_ID;
+
+let driverPresence = localStorage.getItem('bcu_demo_driver_presence') || 'available';
+
+function cycleDriverStatus() {
+  const states = ['available', 'busy', 'offline'];
+  const idx = (states.indexOf(driverPresence) + 1) % states.length;
+  driverPresence = states[idx];
+  localStorage.setItem('bcu_demo_driver_presence', driverPresence);
+  updateDriverStatusUI();
+  publishDriverStatus();
+}
+
+function updateDriverStatusUI() {
+  const pill = document.getElementById('driverStatus');
+  const text = document.getElementById('statusText');
+  pill.classList.remove('status-online');
+  pill.style.background = '';
+  pill.style.color = '';
+  if (driverPresence === 'available') {
+    pill.classList.add('status-online');
+    text.textContent = 'Available';
+  } else if (driverPresence === 'busy') {
+    pill.style.background = 'rgba(6,182,212,.15)';
+    pill.style.color = 'var(--cyan)';
+    text.textContent = 'Busy';
+  } else {
+    pill.style.background = 'rgba(128,128,128,.15)';
+    pill.style.color = '#888';
+    text.textContent = 'Offline';
+  }
+}
+updateDriverStatusUI();
+
+function publishDriverStatus() {
+  if (!mqttClient || !mqttConnected) return;
+  const payload = {
+    status: driverPresence,
+    lat: driverLat,
+    lng: driverLng,
+    name: DRIVER_ID,
+    ts: Date.now()
+  };
+  mqttClient.publish(`drivers/${DRIVER_ID}/status`, JSON.stringify(payload));
+  console.log('[MQTT] Published status:', driverPresence);
+}
+
 // ── REAL MQTT CONNECTION ──
 const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
-const DRIVER_ID = 'driver_demo_' + Math.random().toString(36).substr(2,6);
 let mqttClient = null;
 let mqttConnected = false;
 
@@ -808,7 +869,12 @@ function connectMqtt(){
       mqttClient.subscribe(`drivers/${DRIVER_ID}/bid-request`);
       mqttClient.subscribe(`drivers/${DRIVER_ID}/jobs`);
       mqttClient.subscribe(`jobs/+/result/${DRIVER_ID}`);
+      mqttClient.subscribe('drivers/+/location');          // Other drivers' GPS
+      mqttClient.subscribe('drivers/+/status');            // Other drivers' status
       console.log('[MQTT] Connected & subscribed. Driver ID:', DRIVER_ID);
+      // Publish initial status so dispatch system registers us
+      publishDriverStatus();
+    });
     });
 
     mqttClient.on('message', (topic, message)=>{
@@ -919,8 +985,10 @@ setInterval(()=>{
   driverMarker.setLatLng([driverLat,driverLng]);
   availableJobs.forEach(j=>{ j.distanceFromDriver=haversine(driverLat,driverLng,j.pickup.lat,j.pickup.lng); j.etaToPickup=Math.round(j.distanceFromDriver/500*60); });
   if(document.getElementById('tabAvail').classList.contains('active')&&!activeInboxJob) renderAvailableJobs();
-  // Publish driver location via MQTT
+  // Publish driver location via MQTT (matches driver-app format)
   if(mqttClient && mqttConnected){
-    mqttClient.publish(`drivers/${DRIVER_ID}/location`, JSON.stringify({ lat:driverLat, lng:driverLng, ts:Date.now() }));
+    mqttClient.publish(`drivers/${DRIVER_ID}/location`, JSON.stringify({
+      driver: DRIVER_ID, lat:driverLat, lng:driverLng, status:driverPresence, ts:Date.now(), heading:0
+    }));
   }
 },5000);
