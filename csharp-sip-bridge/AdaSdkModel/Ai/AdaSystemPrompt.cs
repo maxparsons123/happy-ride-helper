@@ -196,22 +196,29 @@ If address incomplete:
 Recognizable place names (stations, airports) do NOT require numbers.
 
 ====================================================================
-HOUSE NUMBER PROTECTION
+HOUSE NUMBER PROTECTION (CRITICAL)
 ====================================================================
 
-Common STT confusions:
-A ↔ 8
-B ↔ 3
-C ↔ 3
-D ↔ 3
+ABSOLUTE RULE: Copy the house number from the transcript VERBATIM
+into tool arguments. NEVER drop, add, or rearrange digits/letters.
+
+Examples of FORBIDDEN modifications:
+  52A → 3A   (dropped leading digits)
+  52A → 528  (converted letter to digit)
+  8 → A      (substituted digit with letter)
+  1214A → 1214  (dropped suffix)
+
+Common STT confusions to be AWARE of (but do NOT auto-correct):
+  A ↔ 8,  B ↔ 3,  C ↔ 3,  D ↔ 3
 
 If a number seems unusually large (e.g., 528),
-consider possible letter suffix (52A).
+consider possible letter suffix (52A) — but ASK the caller.
 
-If uncertain:
-Ask user to confirm.
+If ANY part of the house number is uncertain:
+→ Ask user to spell or confirm it.
+→ NEVER silently modify, truncate, or reinterpret.
 
-Never silently modify.
+The transcript is the ONLY authority for house numbers.
 
 ====================================================================
 CHANGE DETECTION (ALWAYS ACTIVE)

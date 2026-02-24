@@ -755,17 +755,31 @@ public partial class MainForm : Form
         catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
     }
 
-    /// <summary>Disconnect and immediately reconnect Simli so it's warm for the next call.</summary>
+    private int _simliReconnectGuard; // 0 = idle, 1 = reconnecting
+
+    /// <summary>Disconnect and immediately reconnect Simli so it's warm for the next call.
+    /// Uses an interlocked guard to prevent double-reconnect races.</summary>
     private async Task ReconnectSimliAsync()
     {
+        // Prevent concurrent reconnects — only the first caller proceeds
+        if (Interlocked.CompareExchange(ref _simliReconnectGuard, 1, 0) != 0)
+        {
+            Log("🎭 Simli reconnect skipped — already in progress");
+            return;
+        }
+
         try
         {
             await DisconnectSimliAsync();
-            await Task.Delay(500); // brief cooldown before re-establishing WebRTC
+            await Task.Delay(800); // cooldown before re-establishing WebRTC (avoids SDP race)
             await ConnectSimliAsync();
             Log("🎭 Simli reconnected — ready for next call");
         }
         catch (Exception ex) { Log($"🎭 Simli reconnect error: {ex.Message}"); }
+        finally
+        {
+            Interlocked.Exchange(ref _simliReconnectGuard, 0);
+        }
     }
 
     private void StartSimliFeeder()
