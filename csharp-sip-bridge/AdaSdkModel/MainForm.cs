@@ -298,7 +298,8 @@ public partial class MainForm : Form
                 lblSipStatus.ForeColor = Color.LimeGreen;
                 statusLabel.Text = "SIP Registered";
                 // Pre-connect Simli so avatar is warm when first call arrives
-                if (!_operatorMode)
+                // Skip if already in a call — prevents mid-call avatar teardown on SIP re-registration
+                if (!_operatorMode && !_inCall)
                     _ = ConnectSimliAsync();
             });
 
