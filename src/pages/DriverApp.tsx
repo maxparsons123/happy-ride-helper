@@ -88,7 +88,7 @@ export default function DriverApp() {
   }, [driver.updateJobStatus, driver.driverId, mqtt.publish]);
 
   return (
-    <div className="relative w-full h-screen overflow-hidden bg-gray-100" style={{ touchAction: 'manipulation' }}>
+    <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-background" style={{ touchAction: 'manipulation' }}>
       {/* Map Layer */}
       <DriverMap coords={gps.coords} allocatedJob={driver.allocatedJob} geocodedCoords={geocoded} liveEtaMinutes={etaMinutes} liveDistanceKm={distanceKm} />
 
