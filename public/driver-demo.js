@@ -870,3 +870,19 @@ setInterval(()=>{
     }));
   }
 },5000);
+
+// ── FULLSCREEN TOGGLE ──
+function toggleFullscreen(){
+  var pill=document.getElementById('fsPill');
+  if(document.fullscreenElement){
+    document.exitFullscreen();
+    if(pill) pill.innerHTML='⛶ Fullscreen';
+  } else {
+    document.documentElement.requestFullscreen();
+    if(pill) pill.innerHTML='⊡ Exit FS';
+  }
+}
+document.addEventListener('fullscreenchange',function(){
+  var pill=document.getElementById('fsPill');
+  if(pill) pill.innerHTML=document.fullscreenElement?'⊡ Exit FS':'⛶ Fullscreen';
+});
