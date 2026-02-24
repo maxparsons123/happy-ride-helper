@@ -738,7 +738,10 @@ public sealed class CallSession : ICallSession
     {
         _logger.LogDebug("[{SessionId}] Tool call: {Name} (args: {ArgCount})", SessionId, name, args.Count);
 
+        var previousIntent = _lastToolIntent;
         _lastToolIntent = name; // Track for intent-gating (e.g. block cancel after status check)
+        if (name != "sync_booking_data") // skip noisy sync logs
+            _logger.LogInformation("[{SessionId}] 🎯 Tool intent: {Tool} (previous: {Previous})", SessionId, name, previousIntent ?? "none");
         return name switch
         {
             "sync_booking_data" => HandleSyncBookingData(args),
