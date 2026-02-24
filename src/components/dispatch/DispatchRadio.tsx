@@ -62,17 +62,19 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
   const startPtt = useCallback(() => {
     if (!mqttConnected) return;
     radio.startTransmitting();
+    publish('radio/ptt-state', { from: 'DISPATCH', name: 'Dispatch', active: true, ts: Date.now() });
     const targetLabel = isAllMode
       ? 'All Drivers'
       : selectedDrivers.size === 1
         ? onlineDrivers.find(d => selectedDrivers.has(d.id))?.name || 'Driver'
         : `${selectedDrivers.size} drivers`;
     addLog('outgoing', targetLabel);
-  }, [mqttConnected, radio, isAllMode, selectedDrivers, onlineDrivers, addLog]);
+  }, [mqttConnected, radio, isAllMode, selectedDrivers, onlineDrivers, addLog, publish]);
 
   const stopPtt = useCallback(() => {
     radio.stopTransmitting();
-  }, [radio]);
+    publish('radio/ptt-state', { from: 'DISPATCH', name: 'Dispatch', active: false, ts: Date.now() });
+  }, [radio, publish]);
 
   const handleVolumeChange = useCallback((val: number) => {
     setVolume(val);

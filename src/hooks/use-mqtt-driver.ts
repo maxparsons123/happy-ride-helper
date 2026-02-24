@@ -22,6 +22,7 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
   const clientRef = useRef<mqtt.MqttClient | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
   const [lastRadioMessage, setLastRadioMessage] = useState<RadioMessage | null>(null);
+  const [remotePttState, setRemotePttState] = useState<{ from: string; name: string; active: boolean } | null>(null);
 
   const onJobRequestRef = useRef(onJobRequest);
   const onJobResultRef = useRef(onJobResult);
@@ -47,16 +48,28 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
       client.subscribe(`radio/driver/${driverId}`);
       client.subscribe(`radio/webrtc/signal/${driverId}`);
       client.subscribe('radio/webrtc/presence');
+      client.subscribe('radio/ptt-state');
     });
 
     client.on('message', (topic: string, message: Buffer) => {
       try {
         const data = JSON.parse(message.toString());
 
+        // PTT state messages
+        if (topic === 'radio/ptt-state') {
+          if (data.from !== driverId) {
+            setRemotePttState({ from: data.from, name: data.name || data.from, active: data.active });
+            if (!data.active) {
+              // Clear after a short delay so UI flashes
+              setTimeout(() => setRemotePttState(null), 500);
+            }
+          }
+          return;
+        }
+
         // Radio messages
         if (topic === 'radio/broadcast' || topic === 'radio/channel' || topic === `radio/driver/${driverId}`) {
           if (data.driver !== driverId && data.audio) {
-            // If broadcast has targets, only accept if we're in the list
             if (topic === 'radio/broadcast' && data.targets && Array.isArray(data.targets)) {
               if (!data.targets.includes(driverId)) return;
             }
@@ -87,5 +100,5 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
     clientRef.current?.publish(topic, JSON.stringify(payload));
   }, []);
 
-  return { connectionStatus, publish, lastRadioMessage };
+  return { connectionStatus, publish, lastRadioMessage, remotePttState };
 }
