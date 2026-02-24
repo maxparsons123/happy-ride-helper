@@ -221,28 +221,25 @@ public class WebRtcRadioEngine : IDisposable
 
         pc.OnRtpPacketReceived += (rep, media, pkt) =>
         {
-            OnLog?.Invoke($"🔊 RTP received: media={media}, payload={pkt.Payload.Length} bytes, PT={pkt.Header.PayloadType}", false);
-            if (media == SDPMediaTypesEnum.audio && _playBuffer != null && _opusDecoder != null)
+            if (media != SDPMediaTypesEnum.audio || _playBuffer == null || _opusDecoder == null) return;
+
+            // Skip comfort noise / silence frames (very small Opus packets when track is muted)
+            if (pkt.Payload.Length <= 3) return;
+
+            try
             {
-                try
+                var pcmSamples = new short[OPUS_FRAME_SIZE];
+                int decoded = _opusDecoder.Decode(pkt.Payload, 0, pkt.Payload.Length, pcmSamples, 0, OPUS_FRAME_SIZE, false);
+                if (decoded > 0)
                 {
-                    var pcmSamples = new short[OPUS_FRAME_SIZE];
-                    int decoded = _opusDecoder.Decode(pkt.Payload, 0, pkt.Payload.Length, pcmSamples, 0, OPUS_FRAME_SIZE, false);
-                    if (decoded > 0)
-                    {
-                        var pcmBytes = new byte[decoded * 2];
-                        Buffer.BlockCopy(pcmSamples, 0, pcmBytes, 0, pcmBytes.Length);
-                        _playBuffer.AddSamples(pcmBytes, 0, pcmBytes.Length);
-                    }
-                    else
-                    {
-                        OnLog?.Invoke($"⚠ Opus decoded 0 samples from {pkt.Payload.Length} bytes", true);
-                    }
+                    var pcmBytes = new byte[decoded * 2];
+                    Buffer.BlockCopy(pcmSamples, 0, pcmBytes, 0, pcmBytes.Length);
+                    _playBuffer.AddSamples(pcmBytes, 0, pcmBytes.Length);
                 }
-                catch (Exception ex)
-                {
-                    OnLog?.Invoke($"⚠ Opus decode error: {ex.Message} (payload {pkt.Payload.Length} bytes, PT={pkt.Header.PayloadType})", true);
-                }
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"⚠ Opus decode error: {ex.Message} (payload {pkt.Payload.Length} bytes)", true);
             }
         };
 
