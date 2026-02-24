@@ -3,10 +3,8 @@ import { useDispatchZones, useCompanies, useSaveZone, useDeleteZone } from '@/ho
 import type { DispatchZone, ZonePoint } from '@/hooks/use-dispatch-zones';
 import { ZoneEditorMap } from '@/components/zones/ZoneEditorMap';
 import { ZoneSidebar } from '@/components/zones/ZoneSidebar';
-import { BookingDatagrid } from '@/components/zones/BookingDatagrid';
 import { useLiveBookings } from '@/hooks/use-live-bookings';
-import { useMqttDispatch, type MqttBooking } from '@/hooks/use-mqtt-dispatch';
-import type { LiveBookingMarker } from '@/hooks/use-live-bookings';
+import { useMqttDispatch } from '@/hooks/use-mqtt-dispatch';
 import { DispatchRadio } from '@/components/dispatch/DispatchRadio';
 import { toast } from 'sonner';
 
@@ -22,33 +20,6 @@ export default function ZoneEditor() {
   const [drawingMode, setDrawingMode] = useState(false);
   const [editingZone, setEditingZone] = useState<Partial<DispatchZone> | null>(null);
   const [pendingPoints, setPendingPoints] = useState<ZonePoint[] | null>(null);
-  const [selectedBookingId, setSelectedBookingId] = useState<string | undefined>(undefined);
-
-  // Merge MQTT bookings into map markers
-  const mqttMarkers: LiveBookingMarker[] = mqtt.bookings
-    .filter(b => b.pickupLat !== 0 && b.pickupLng !== 0)
-    .map(b => ({
-      id: `mqtt_${b.id}`,
-      pickup: b.pickup,
-      destination: b.dropoff,
-      passengers: parseInt(b.passengers) || 1,
-      caller_phone: b.customerPhone,
-      caller_name: b.customerName,
-      status: b.status,
-      lat: b.pickupLat,
-      lng: b.pickupLng,
-      dest_lat: b.dropoffLat || undefined,
-      dest_lng: b.dropoffLng || undefined,
-      created_at: new Date(b.receivedAt).toISOString(),
-    }));
-
-  const allBookings = [...dbBookings];
-  for (const m of mqttMarkers) {
-    const isDuplicate = allBookings.some(
-      db => Math.abs(db.lat - m.lat) < 0.0005 && Math.abs(db.lng - m.lng) < 0.0005
-    );
-    if (!isDuplicate) allBookings.push(m);
-  }
 
   const handleStartDraw = () => {
     setSelectedZoneId(null);
@@ -174,15 +145,6 @@ export default function ZoneEditor() {
             onEditChange={handleEditChange}
           />
         </div>
-        <div className="h-[40%] flex-shrink-0">
-          <BookingDatagrid
-            bookings={mqtt.bookings}
-            connectionStatus={mqtt.connectionStatus}
-            selectedBookingId={selectedBookingId}
-            onSelectBooking={(b) => setSelectedBookingId(b.id)}
-            onClearCompleted={mqtt.clearCompleted}
-          />
-        </div>
       </div>
 
       <div className="flex-1 relative">
@@ -197,7 +159,7 @@ export default function ZoneEditor() {
             handleSelectZone(id);
           }}
           onPointsUpdated={handlePointsUpdated}
-          liveBookings={allBookings}
+          liveBookings={dbBookings}
         />
       </div>
 
