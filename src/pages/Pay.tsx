@@ -10,6 +10,10 @@ declare global {
         locale?: string;
         currency?: string;
         amount?: string;
+        merchantCode?: string;
+        merchantName?: string;
+        googlePay?: boolean;
+        applePay?: boolean;
         showEmail?: boolean;
         showFooter?: boolean;
         onResponse?: (type: string, body: unknown) => void;
@@ -50,8 +54,12 @@ const Pay = () => {
         locale: "en-GB",
         currency,
         amount: amount || undefined,
+        merchantCode: "MW93CBFR",
+        merchantName: "Happy Ride",
         showEmail: true,
         showFooter: true,
+        googlePay: true,
+        applePay: true,
         onLoad: () => setStatus("ready"),
         onResponse: (type: string, body: unknown) => {
           console.log("[SumUp Widget]", type, body);
@@ -114,11 +122,7 @@ const Pay = () => {
                 {amount}
               </p>
             )}
-            <div className="flex items-center justify-center gap-2 mt-3 text-xs">
-              <span className="bg-black rounded-md px-3 py-1.5 font-semibold tracking-wide"> Pay</span>
-              <span className="bg-white text-gray-900 rounded-md px-3 py-1.5 font-semibold tracking-wide">G Pay</span>
-              <span className="bg-white/20 rounded-md px-3 py-1.5 font-semibold">💳 Card</span>
-            </div>
+            <p className="text-blue-200 text-xs mt-3">Apple Pay • Google Pay • Card accepted</p>
           </div>
 
           {/* Widget container */}
