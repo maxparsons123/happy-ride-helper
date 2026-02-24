@@ -369,11 +369,26 @@ function selectJob(id){
   renderAvailableJobs();
 }
 
-function showJobOnMap(j){
+async function showJobOnMap(j){
   clearMapOverlays();
   jobMarkers.pickup = L.marker([j.pickup.lat,j.pickup.lng],{icon:pickupIcon('#22c55e')}).addTo(map).bindPopup(`<b>Pickup</b><br>${j.pickup.address}`);
   jobMarkers.dropoff = L.marker([j.dropoff.lat,j.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup(`<b>Dropoff</b><br>${j.dropoff.address}`);
-  routeLine = L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map);
+  try {
+    const coords = `${driverLng},${driverLat};${j.pickup.lng},${j.pickup.lat};${j.dropoff.lng},${j.dropoff.lat}`;
+    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`);
+    const data = await res.json();
+    if(data.routes && data.routes[0]){
+      const geom = data.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+      routeLine = L.polyline(geom,{color:'#FFD700',weight:5,opacity:0.9}).addTo(map);
+      const dur = Math.round(data.routes[0].duration/60);
+      const dist = (data.routes[0].distance/1000).toFixed(1);
+      toast(`🛣️ Route: ${dist} km · ${dur} min to pickup`,'info');
+    } else {
+      routeLine = L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map);
+    }
+  } catch(e){
+    routeLine = L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map);
+  }
   map.fitBounds(routeLine.getBounds().pad(0.15));
 }
 
