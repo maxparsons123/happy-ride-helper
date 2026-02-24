@@ -1,11 +1,18 @@
 # Radio PTT Integration Guide
 
-## Files
-- `RadioPanel.cs` — Drop-in WinForms panel with PTT, driver selection, audio capture/playback
+## Architecture
+The radio system uses **WebRTC peer-to-peer** audio streaming with **MQTT as the signaling channel**.
+This replaces the previous base64-over-MQTT approach for dramatically lower latency and better audio quality.
 
-## NuGet Dependency
+## Files
+- `Radio/WebRtcRadioEngine.cs` — WebRTC peer connection management, G.711 μ-law codec, MQTT signaling
+- `UI/RadioPanel.cs` — WinForms PTT panel using the WebRTC engine
+
+## NuGet Dependencies
 ```
 Install-Package NAudio
+Install-Package SIPSorcery
+Install-Package SIPSorceryMedia.Abstractions
 ```
 
 ## Integration into MainForm.cs
@@ -27,67 +34,58 @@ _radioPanel.OnLog += (msg, color) => _logPanel.AppendLog(msg, color);
 ```
 
 ### 3. Add to layout
-Option A — Add a tab to the right panel:
+Option A — Tab-based:
 ```csharp
-// In the right-side panel where _driverList lives:
 var rightTabs = new TabControl { Dock = DockStyle.Fill };
 var tabDrivers = new TabPage("🚕 Drivers") { BackColor = Color.FromArgb(28, 28, 32) };
 tabDrivers.Controls.Add(_driverList);
 var tabRadio = new TabPage("📻 Radio") { BackColor = Color.FromArgb(28, 28, 32) };
 tabRadio.Controls.Add(_radioPanel);
 rightTabs.TabPages.AddRange(new[] { tabDrivers, tabRadio });
-// Replace _driverList with rightTabs in splitTop.Panel2
 splitTop.Panel2.Controls.Add(rightTabs);
 ```
 
-Option B — Split the right panel vertically:
+### 4. MQTT subscriptions (in ConnectAsync)
 ```csharp
-var rightSplit = new SplitContainer
-{
-    Dock = DockStyle.Fill,
-    Orientation = Orientation.Horizontal,
-    SplitterDistance = 400
-};
-rightSplit.Panel1.Controls.Add(_driverList);
-rightSplit.Panel2.Controls.Add(_radioPanel);
-splitTop.Panel2.Controls.Add(rightSplit);
+// Subscribe to WebRTC signaling topics
+await _mqtt.SubscribeAsync("radio/webrtc/signal/DISPATCH");
+await _mqtt.SubscribeAsync("radio/webrtc/presence");
 ```
 
-### 4. MQTT subscriptions (in ConnectAsync, after existing subscriptions)
+### 5. MQTT message handler
 ```csharp
-// Subscribe to driver radio channel
-await _mqtt.SubscribeAsync("radio/channel");
-```
-
-### 5. MQTT message handler (in your MQTT OnMessage handler)
-```csharp
-if (topic == "radio/channel")
+if (topic == "radio/webrtc/presence")
 {
-    _radioPanel.HandleIncomingRadio(message);
+    _radioPanel.HandlePresence(message);
+    return;
+}
+if (topic == "radio/webrtc/signal/DISPATCH")
+{
+    _radioPanel.HandleSignaling(message);
     return;
 }
 ```
 
-### 6. Update driver list (in RefreshUI or wherever you update driver lists)
+### 6. Update driver list
 ```csharp
 _radioPanel.UpdateDriverList(
     drivers.Select(d => (d.Id, d.Name, d.Status.ToString()))
 );
 ```
 
-### 7. Keyboard shortcut (override ProcessCmdKey in MainForm)
+### 7. Keyboard shortcut (ProcessCmdKey in MainForm)
 ```csharp
 protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
 {
     if (keyData == Keys.Space)
     {
         _radioPanel.HandleKeyDown(Keys.Space);
-        return true; // suppress space from other controls
+        return true;
     }
     return base.ProcessCmdKey(ref msg, keyData);
 }
 
-// Also handle KeyUp for space release — add to MainForm constructor:
+// KeyUp handler in constructor:
 KeyPreview = true;
 KeyUp += (_, args) =>
 {
@@ -100,11 +98,10 @@ KeyUp += (_, args) =>
 
 | Topic | Direction | Purpose |
 |-------|-----------|---------|
-| `radio/broadcast` | Dispatch → All drivers | Broadcast audio (optional `targets` array) |
-| `radio/driver/{id}` | Dispatch → One driver | Targeted audio |
-| `radio/channel` | Driver → Dispatch | Driver transmission |
+| `radio/webrtc/signal/{peerId}` | Bidirectional | SDP offers/answers + ICE candidates |
+| `radio/webrtc/presence` | Bidirectional | Peer discovery/announcement |
 
 ## Audio Format
-- **Desktop TX**: PCM 16kHz mono wrapped in WAV header, base64 encoded
-- **Web RX**: The web driver app can decode WAV via Web Audio API
-- **Web TX**: Opus/WebM base64 — desktop uses MediaFoundationReader to decode
+- **Codec**: G.711 μ-law (PCMU) over RTP via WebRTC
+- **Sample Rate**: 8kHz mono
+- **Latency**: ~20ms capture frames, real-time RTP delivery
