@@ -1,4 +1,5 @@
-import { Menu } from 'lucide-react';
+import { Menu, Maximize, Minimize } from 'lucide-react';
+import { useState, useCallback, useEffect } from 'react';
 import type { DriverPresence } from '@/hooks/use-driver-state';
 
 interface DriverHeaderProps {
@@ -14,6 +15,21 @@ const presenceConfig = {
 
 export function DriverHeader({ presence, onMenuToggle }: DriverHeaderProps) {
   const p = presenceConfig[presence];
+  const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen();
+    }
+  }, []);
 
   return (
     <header className="absolute top-0 left-0 right-0 z-[1001] flex items-center justify-between px-4 py-3 bg-gradient-to-r from-black to-[#1a1a1a] border-b-2 border-[#FFD700] shadow-lg">
@@ -27,12 +43,21 @@ export function DriverHeader({ presence, onMenuToggle }: DriverHeaderProps) {
           {p.label}
         </div>
       </div>
-      <button
-        onClick={onMenuToggle}
-        className="w-11 h-11 rounded-full bg-gradient-to-br from-[#FFD700] to-[#FFC107] text-black flex items-center justify-center font-extrabold shadow-lg active:scale-[0.92] transition-transform"
-      >
-        <Menu size={20} />
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={toggleFullscreen}
+          className="w-11 h-11 rounded-full bg-[#222] text-[#FFD700] flex items-center justify-center shadow-lg active:scale-[0.92] transition-transform"
+          title={isFullscreen ? 'Exit fullscreen' : 'Go fullscreen'}
+        >
+          {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+        </button>
+        <button
+          onClick={onMenuToggle}
+          className="w-11 h-11 rounded-full bg-gradient-to-br from-[#FFD700] to-[#FFC107] text-black flex items-center justify-center font-extrabold shadow-lg active:scale-[0.92] transition-transform"
+        >
+          <Menu size={20} />
+        </button>
+      </div>
     </header>
   );
 }
