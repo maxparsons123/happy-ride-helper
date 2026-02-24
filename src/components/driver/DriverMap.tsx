@@ -27,12 +27,20 @@ function createPinIcon(svg: string) {
   });
 }
 
+interface GeocodedCoords {
+  pickupLat: number;
+  pickupLng: number;
+  dropoffLat: number;
+  dropoffLng: number;
+}
+
 interface DriverMapProps {
   coords: DriverCoords | null;
   allocatedJob?: JobData | null;
+  geocodedCoords?: GeocodedCoords | null;
 }
 
-export function DriverMap({ coords, allocatedJob }: DriverMapProps) {
+export function DriverMap({ coords, allocatedJob, geocodedCoords }: DriverMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
@@ -79,29 +87,37 @@ export function DriverMap({ coords, allocatedJob }: DriverMapProps) {
     if (dropoffMarkerRef.current) { dropoffMarkerRef.current.remove(); dropoffMarkerRef.current = null; }
     if (routeLayerRef.current) { routeLayerRef.current.remove(); routeLayerRef.current = null; }
 
-    if (!allocatedJob || !allocatedJob.lat || !allocatedJob.lng) return;
+    if (!allocatedJob) return;
+
+    // Use geocoded coords (Nominatim) if available, fall back to MQTT payload coords
+    const pLat = geocodedCoords?.pickupLat ?? allocatedJob.lat;
+    const pLng = geocodedCoords?.pickupLng ?? allocatedJob.lng;
+    const dLat = geocodedCoords?.dropoffLat ?? allocatedJob.dropoffLat;
+    const dLng = geocodedCoords?.dropoffLng ?? allocatedJob.dropoffLng;
+
+    if (!pLat || !pLng) return;
 
     // Pickup marker
-    pickupMarkerRef.current = L.marker([allocatedJob.lat, allocatedJob.lng], { icon: createPinIcon(PICKUP_SVG) })
+    pickupMarkerRef.current = L.marker([pLat, pLng], { icon: createPinIcon(PICKUP_SVG) })
       .addTo(map)
       .bindPopup(`📍 Pickup: ${allocatedJob.pickupAddress}`);
 
     // Dropoff marker
-    if (allocatedJob.dropoffLat && allocatedJob.dropoffLng && Math.abs(allocatedJob.dropoffLat) > 0.01) {
-      dropoffMarkerRef.current = L.marker([allocatedJob.dropoffLat, allocatedJob.dropoffLng], { icon: createPinIcon(DROPOFF_SVG) })
+    if (dLat && dLng && Math.abs(dLat) > 0.01) {
+      dropoffMarkerRef.current = L.marker([dLat, dLng], { icon: createPinIcon(DROPOFF_SVG) })
         .addTo(map)
         .bindPopup(`🏁 Dropoff: ${allocatedJob.dropoff}`);
     }
 
     // Fit bounds to show driver + pickup
-    const bounds = L.latLngBounds([[allocatedJob.lat, allocatedJob.lng]]);
+    const bounds = L.latLngBounds([[pLat, pLng]]);
     if (coords) bounds.extend([coords.lat, coords.lng]);
-    if (dropoffMarkerRef.current) bounds.extend([allocatedJob.dropoffLat, allocatedJob.dropoffLng]);
+    if (dropoffMarkerRef.current) bounds.extend([dLat, dLng]);
     map.fitBounds(bounds, { padding: [60, 60] });
 
     // Fetch OSRM route from driver to pickup
     if (coords) {
-      fetch(`https://router.project-osrm.org/route/v1/driving/${coords.lng},${coords.lat};${allocatedJob.lng},${allocatedJob.lat}?overview=full&geometries=geojson`)
+      fetch(`https://router.project-osrm.org/route/v1/driving/${coords.lng},${coords.lat};${pLng},${pLat}?overview=full&geometries=geojson`)
         .then(r => r.json())
         .then(data => {
           if (data.routes?.[0]?.geometry) {
@@ -112,7 +128,7 @@ export function DriverMap({ coords, allocatedJob }: DriverMapProps) {
         })
         .catch(() => {});
     }
-  }, [allocatedJob?.jobId, allocatedJob?.lat, allocatedJob?.lng, coords?.lat, coords?.lng]);
+  }, [allocatedJob?.jobId, geocodedCoords, coords?.lat, coords?.lng]);
 
   return <div ref={containerRef} className="absolute inset-0" />;
 }

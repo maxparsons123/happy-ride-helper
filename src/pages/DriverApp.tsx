@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { useDriverState, type JobData } from '@/hooks/use-driver-state';
 import { useMqttDriver } from '@/hooks/use-mqtt-driver';
 import { useGpsTracking } from '@/hooks/use-gps-tracking';
+import { useGeocodeJob } from '@/hooks/use-geocode-job';
 import { DriverHeader } from '@/components/driver/DriverHeader';
 import { DriverMap } from '@/components/driver/DriverMap';
 import { GpsStatusBar } from '@/components/driver/GpsStatusBar';
@@ -15,6 +16,7 @@ export default function DriverApp() {
   const [activeJobRequest, setActiveJobRequest] = useState<JobData | null>(null);
 
   const gps = useGpsTracking(driver.setCoords);
+  const geocoded = useGeocodeJob(driver.allocatedJob);
 
   const handleJobRequest = useCallback((_topic: string, data: any) => {
     const job = driver.addJob(data);
@@ -80,7 +82,7 @@ export default function DriverApp() {
   return (
     <div className="relative w-full h-screen overflow-hidden bg-gray-100" style={{ touchAction: 'manipulation' }}>
       {/* Map Layer */}
-      <DriverMap coords={gps.coords} allocatedJob={driver.allocatedJob} />
+      <DriverMap coords={gps.coords} allocatedJob={driver.allocatedJob} geocodedCoords={geocoded} />
 
       {/* Header */}
       <DriverHeader presence={driver.presence} onMenuToggle={() => setMenuOpen(prev => !prev)} />
