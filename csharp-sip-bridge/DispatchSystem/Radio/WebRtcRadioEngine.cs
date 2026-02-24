@@ -31,6 +31,7 @@ public class WebRtcRadioEngine : IDisposable
     // Audio capture
     private NAudio.Wave.WaveInEvent? _waveIn;
     private readonly object _captureLock = new();
+    private float _micGain = 3.0f; // Boost outgoing mic volume
 
     // Audio playback
     private NAudio.Wave.WaveOutEvent? _waveOut;
@@ -417,6 +418,16 @@ public class WebRtcRadioEngine : IDisposable
     {
         try
         {
+            // Apply mic gain boost
+            if (Math.Abs(_micGain - 1.0f) > 0.01f)
+            {
+                for (int i = 0; i < frameSize; i++)
+                {
+                    int amplified = (int)(pcmSamples[i] * _micGain);
+                    pcmSamples[i] = (short)Math.Clamp(amplified, short.MinValue, short.MaxValue);
+                }
+            }
+
             var encodedBuffer = new byte[4000];
             int encodedLength = _opusEncoder!.Encode(pcmSamples, 0, frameSize, encodedBuffer, 0, encodedBuffer.Length);
             if (encodedLength <= 0) return;
