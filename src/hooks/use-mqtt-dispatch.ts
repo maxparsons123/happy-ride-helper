@@ -3,6 +3,17 @@ import mqtt from 'mqtt';
 
 const BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
 
+export interface DriverBid {
+  driverId: string;
+  jobId: string;
+  lat: number;
+  lng: number;
+  timestamp: number;
+  pickupAddress?: string;
+  dropoff?: string;
+  fare?: string;
+}
+
 export interface MqttBooking {
   id: string;
   jobId: string;
@@ -37,7 +48,7 @@ export function useMqttDispatch() {
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
   const [bookings, setBookings] = useState<MqttBooking[]>([]);
   const [onlineDrivers, setOnlineDrivers] = useState<OnlineDriver[]>([]);
-
+  const [incomingBids, setIncomingBids] = useState<DriverBid[]>([]);
   useEffect(() => {
     const clientId = `dispatch_${Math.random().toString(36).substr(2, 8)}`;
     const client = mqtt.connect(BROKER_URL, {
@@ -56,6 +67,8 @@ export function useMqttDispatch() {
       client.subscribe('drivers/+/status');
       client.subscribe('drivers/+/location');
       client.subscribe('radio/channel');
+      client.subscribe('dispatch/bids/incoming');
+      client.subscribe('jobs/+/bids');
     });
 
     client.on('message', (topic: string, message: Buffer) => {
@@ -85,6 +98,29 @@ export function useMqttDispatch() {
             }
             return [...prev, driver];
           });
+          return;
+        }
+
+        // Driver bids
+        if (topic === 'dispatch/bids/incoming' || topic.match(/^jobs\/.*\/bids$/)) {
+          if (data.driverId && data.jobId) {
+            const bid: DriverBid = {
+              driverId: data.driverId,
+              jobId: data.jobId,
+              lat: data.lat || 0,
+              lng: data.lng || 0,
+              timestamp: data.timestamp || Date.now(),
+              pickupAddress: data.pickupAddress,
+              dropoff: data.dropoff,
+              fare: data.fare,
+            };
+            setIncomingBids(prev => {
+              // Deduplicate by driverId+jobId
+              const exists = prev.find(b => b.driverId === bid.driverId && b.jobId === bid.jobId);
+              if (exists) return prev;
+              return [bid, ...prev].slice(0, 100);
+            });
+          }
           return;
         }
 
@@ -153,5 +189,5 @@ export function useMqttDispatch() {
     }
   }, []);
 
-  return { connectionStatus, bookings, updateBookingStatus, clearCompleted, publish, onlineDrivers };
+  return { connectionStatus, bookings, updateBookingStatus, clearCompleted, publish, onlineDrivers, incomingBids };
 }

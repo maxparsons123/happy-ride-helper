@@ -101,16 +101,27 @@ export function useDriverState() {
 
   const addJob = useCallback((raw: any): JobData | null => {
     const job = normalizeJobPayload(raw);
-    // Always accept — overwrite if same ID exists
+    // Deduplicate: if we already have this job as queued, skip re-adding
+    const alreadyExists = seenJobIds.current.has(job.jobId);
     seenJobIds.current.add(job.jobId);
     setJobsState(prev => {
+      const existing = prev.find(j => j.jobId === job.jobId);
+      // If job already exists and is still queued, skip (prevents duplicate toasts)
+      if (existing && existing.status === 'queued') return prev;
       const filtered = prev.filter(j => j.jobId !== job.jobId);
       const next = [job, ...filtered].slice(0, 50);
       localStorage.setItem(getStorageKey(driverId, 'jobs'), JSON.stringify(next));
       return next;
     });
+    // Only return job (triggering toast) if it's new
+    if (alreadyExists) {
+      // Check if it was already queued
+      const prev = jobs;
+      const existing = prev.find(j => j.jobId === job.jobId && j.status === 'queued');
+      if (existing) return null;
+    }
     return job;
-  }, [driverId]);
+  }, [driverId, jobs]);
 
   const updateJobStatus = useCallback((jobId: string, status: JobData['status']) => {
     setJobsState(prev => {
