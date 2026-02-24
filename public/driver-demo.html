@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Black Cab Unite — Driver Tablet App</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{
+    --gold:#FFD700;--gold-dark:#D4A800;--bg:#0a0a0a;--panel:#111;--card:#1a1a1a;
+    --card-hover:#222;--text:#eee;--muted:#888;--green:#22c55e;--red:#ef4444;
+    --blue:#3b82f6;--orange:#f59e0b;--cyan:#06b6d4;
+  }
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);overflow:hidden;height:100vh}
+
+  /* TOP BAR */
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:linear-gradient(90deg,#000,#1a1a1a);border-bottom:2px solid var(--gold);height:52px;z-index:10}
+  .topbar .brand{display:flex;align-items:center;gap:8px;font-weight:800;color:var(--gold);font-size:16px}
+  .topbar .status-group{display:flex;align-items:center;gap:16px;font-size:13px}
+  .status-pill{padding:4px 12px;border-radius:20px;font-weight:700;font-size:12px;display:flex;align-items:center;gap:6px}
+  .status-pill .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .status-online .dot{background:var(--green);box-shadow:0 0 8px rgba(34,197,94,.7)}
+  .status-online{background:rgba(34,197,94,.15);color:var(--green)}
+  .mqtt-pill{background:rgba(6,182,212,.12);color:var(--cyan)}
+  .mqtt-pill .dot{background:var(--cyan);box-shadow:0 0 8px rgba(6,182,212,.7)}
+  .earnings{color:var(--gold);font-weight:700}
+
+  /* MAIN SPLIT */
+  .main{display:flex;height:calc(100vh - 52px)}
+  .left-panel{width:40%;min-width:340px;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid #222;overflow:hidden}
+  .right-panel{flex:1;position:relative}
+
+  /* TABS */
+  .tabs{display:flex;border-bottom:1px solid #333}
+  .tab{flex:1;padding:10px;text-align:center;font-weight:700;font-size:13px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:.2s}
+  .tab.active{color:var(--gold);border-bottom-color:var(--gold)}
+  .tab .badge{background:var(--gold);color:#000;border-radius:10px;padding:1px 7px;font-size:11px;margin-left:4px}
+
+  /* JOB LIST */
+  .job-list{flex:1;overflow-y:auto;padding:8px}
+  .job-list::-webkit-scrollbar{width:4px}
+  .job-list::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
+
+  /* JOB CARD */
+  .job-card{background:var(--card);border:1px solid #2a2a2a;border-radius:10px;padding:12px;margin-bottom:8px;cursor:pointer;transition:.15s}
+  .job-card:hover{background:var(--card-hover);border-color:#444}
+  .job-card.selected{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold)}
+  .job-card.bid-pending{opacity:.7}
+  .job-card.bid-won{border-color:var(--green);background:rgba(34,197,94,.08)}
+
+  .jc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+  .jc-pickup{font-weight:700;font-size:14px;display:flex;align-items:center;gap:4px}
+  .jc-pickup::before{content:'📍';font-size:12px}
+  .jc-dist{font-weight:800;font-size:18px;color:var(--gold);white-space:nowrap}
+  .jc-dist small{font-size:11px;color:var(--muted);font-weight:400}
+
+  .jc-dropoff{font-size:13px;color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:4px}
+  .jc-dropoff::before{content:'🏁';font-size:11px}
+  .jc-meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:12px}
+  .jc-meta span{background:#222;padding:2px 8px;border-radius:6px}
+  .jc-fare{color:var(--green);font-weight:700}
+  .jc-time{color:var(--cyan)}
+  .jc-notes{font-size:12px;color:var(--orange);margin-bottom:8px}
+
+  .jc-tags{display:flex;gap:4px;margin-bottom:8px}
+  .tag{font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600}
+  .tag-asap{background:rgba(239,68,68,.2);color:var(--red)}
+  .tag-airport{background:rgba(59,130,246,.2);color:var(--blue)}
+  .tag-wheelchair{background:rgba(245,158,11,.2);color:var(--orange)}
+
+  .jc-actions{display:flex;gap:6px}
+  .btn{padding:8px 16px;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:4px}
+  .btn:active{transform:scale(.95)}
+  .btn-bid{background:var(--gold);color:#000;flex:1;justify-content:center}
+  .btn-bid:hover{background:var(--gold-dark)}
+  .btn-bid:disabled{opacity:.5;cursor:not-allowed}
+  .btn-preview{background:#222;color:var(--text)}
+  .btn-connect{background:#222;color:var(--cyan)}
+
+  /* INBOX DETAIL */
+  .inbox-detail{display:none;flex-direction:column;height:100%;padding:12px}
+  .inbox-detail.visible{display:flex}
+  .inbox-back{color:var(--gold);cursor:pointer;font-size:13px;margin-bottom:8px;font-weight:600}
+
+  .id-header{margin-bottom:12px}
+  .id-header h3{font-size:16px;margin-bottom:4px}
+  .id-passenger{font-size:13px;color:var(--muted)}
+
+  .timeline{flex:1;padding:0 8px;overflow-y:auto}
+  .tl-step{display:flex;align-items:flex-start;gap:10px;padding:8px 0;position:relative}
+  .tl-dot{width:12px;height:12px;border-radius:50%;border:2px solid #444;flex-shrink:0;margin-top:2px;position:relative;z-index:1}
+  .tl-step.done .tl-dot{background:var(--green);border-color:var(--green)}
+  .tl-step.current .tl-dot{background:var(--gold);border-color:var(--gold);box-shadow:0 0 10px rgba(255,215,0,.5)}
+  .tl-step:not(:last-child)::after{content:'';position:absolute;left:5px;top:18px;bottom:-8px;width:2px;background:#333}
+  .tl-step.done::after{background:var(--green)}
+  .tl-label{font-size:13px;color:var(--muted)}
+  .tl-step.current .tl-label{color:var(--text);font-weight:700}
+  .tl-step.done .tl-label{color:var(--green)}
+
+  .primary-action{padding:14px;border-radius:10px;background:var(--gold);color:#000;font-weight:800;font-size:16px;border:none;cursor:pointer;width:100%;margin-top:8px;transition:.15s}
+  .primary-action:active{transform:scale(.97)}
+
+  .secondary-actions{display:flex;gap:6px;margin-top:8px}
+  .btn-secondary{flex:1;padding:10px;border-radius:8px;border:1px solid #333;background:transparent;color:var(--text);font-weight:600;font-size:12px;cursor:pointer}
+  .btn-msg{border-color:var(--cyan);color:var(--cyan)}
+  .btn-cancel{border-color:var(--red);color:var(--red)}
+
+  /* MESSAGE PANEL */
+  .msg-panel{display:none;position:absolute;bottom:0;left:0;right:0;background:var(--card);border-top:2px solid var(--cyan);border-radius:12px 12px 0 0;padding:12px;z-index:20;max-height:50%}
+  .msg-panel.visible{display:block}
+  .msg-presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .msg-preset{padding:8px 12px;border-radius:20px;border:1px solid #444;background:#222;color:var(--text);font-size:12px;cursor:pointer;transition:.15s}
+  .msg-preset:hover{border-color:var(--cyan);color:var(--cyan)}
+  .msg-thread{max-height:120px;overflow-y:auto;margin-top:8px}
+  .msg-bubble{padding:6px 10px;border-radius:8px;margin-bottom:4px;font-size:12px;max-width:80%}
+  .msg-driver{background:rgba(6,182,212,.15);color:var(--cyan);margin-left:auto}
+  .msg-pax{background:#222;color:var(--text)}
+
+  /* CONNECTING JOBS */
+  .connectors{margin-top:12px;border-top:1px solid #333;padding-top:8px}
+  .connectors h4{font-size:12px;color:var(--muted);margin-bottom:6px}
+  .conn-card{background:#1e1e1e;border:1px solid #2a2a2a;border-radius:8px;padding:8px;margin-bottom:4px;font-size:12px}
+  .conn-card .cc-dist{color:var(--gold);font-weight:700}
+
+  /* MAP OVERLAY ELEMENTS */
+  .map-info{position:absolute;top:8px;right:8px;z-index:800;background:rgba(0,0,0,.8);color:var(--text);padding:8px 14px;border-radius:8px;font-size:12px;backdrop-filter:blur(4px);pointer-events:none}
+
+  /* TOAST */
+  .toast-container{position:fixed;top:60px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:6px}
+  .toast{padding:10px 16px;border-radius:8px;font-size:13px;font-weight:600;animation:slideIn .3s ease;box-shadow:0 4px 16px rgba(0,0,0,.5)}
+  .toast-success{background:rgba(34,197,94,.9);color:#fff}
+  .toast-error{background:rgba(239,68,68,.9);color:#fff}
+  .toast-info{background:rgba(59,130,246,.9);color:#fff}
+  @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+  /* EMPTY STATE */
+  .empty-state{text-align:center;padding:40px 20px;color:var(--muted)}
+  .empty-state .icon{font-size:48px;margin-bottom:12px}
+
+  /* COMPLETION MODAL */
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9000;align-items:center;justify-content:center}
+  .modal-overlay.visible{display:flex}
+  .modal{background:var(--card);border:1px solid #333;border-radius:16px;padding:24px;max-width:400px;width:90%;text-align:center}
+  .modal h2{color:var(--gold);margin-bottom:12px}
+  .modal .summary{text-align:left;font-size:13px;margin:16px 0}
+  .modal .summary div{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #222}
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="brand">🚕 Black Cab Unite</div>
+  <div class="status-group">
+    <div class="status-pill status-online" id="driverStatus"><span class="dot"></span> <span id="statusText">Online</span></div>
+    <div class="status-pill mqtt-pill"><span class="dot"></span> MQTT Connected</div>
+    <div class="earnings">Today: £<span id="earningsTotal">0.00</span></div>
+  </div>
+</div>
+
+<!-- MAIN SPLIT -->
+<div class="main">
+  <!-- LEFT PANEL -->
+  <div class="left-panel">
+    <div class="tabs">
+      <div class="tab active" id="tabAvail" onclick="switchTab('available')">Available <span class="badge" id="availCount">0</span></div>
+      <div class="tab" id="tabInbox" onclick="switchTab('inbox')">Inbox <span class="badge" id="inboxCount">0</span></div>
+      <div class="tab" id="tabHistory" onclick="switchTab('history')">History</div>
+    </div>
+
+    <!-- Available Jobs List -->
+    <div class="job-list" id="availableList"></div>
+
+    <!-- Inbox Detail -->
+    <div class="inbox-detail" id="inboxDetail"></div>
+
+    <!-- History -->
+    <div class="job-list" id="historyList" style="display:none">
+      <div class="empty-state"><div class="icon">📋</div>No completed jobs yet</div>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL (MAP) -->
+  <div class="right-panel">
+    <div id="map" style="width:100%;height:100%"></div>
+    <div class="map-info" id="mapInfo">Driver location — Coventry</div>
+  </div>
+</div>
+
+<!-- TOAST CONTAINER -->
+<div class="toast-container" id="toasts"></div>
+
+<!-- COMPLETION MODAL -->
+<div class="modal-overlay" id="completionModal">
+  <div class="modal">
+    <h2>✅ Job Completed</h2>
+    <div class="summary" id="completionSummary"></div>
+    <button class="primary-action" onclick="closeCompletion()">Back to Available Jobs</button>
+  </div>
+</div>
+
+<script>
+// ── MAP SETUP ──
+const DRIVER_START = [52.4068, -1.5197]; // Coventry
+const map = L.map('map').setView(DRIVER_START, 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'© OpenStreetMap', maxZoom:19 }).addTo(map);
+
+const cabSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 58 36" width="46" height="28"><rect x="4" y="14" width="50" height="14" rx="3" fill="#000"/><path d="M18 14v-4c0-3 2-5 5-5h12c3 0 5 2 5 5v4h-22z" fill="#000"/><rect x="25" y="4" width="8" height="3" rx="1" fill="#FFD700" stroke="#000" stroke-width="0.5"/><text x="29" y="6.6" text-anchor="middle" font-size="2.2" font-weight="bold" fill="#000">TAXI</text><rect x="21" y="7" width="6" height="6" rx="1" fill="#fff"/><rect x="31" y="7" width="6" height="6" rx="1" fill="#fff"/><circle cx="15" cy="28" r="4" fill="#fff" stroke="#000" stroke-width="1"/><circle cx="43" cy="28" r="4" fill="#fff" stroke="#000" stroke-width="1"/></svg>`;
+const driverIcon = L.divIcon({ html: cabSvg, iconSize:[46,28], iconAnchor:[23,14], className:'' });
+const driverMarker = L.marker(DRIVER_START, { icon: driverIcon, zIndexOffset: 1000 }).addTo(map);
+
+let driverLat = DRIVER_START[0], driverLng = DRIVER_START[1];
+const jobMarkers = {};
+let routeLine = null;
+
+function pickupIcon(color='#F44336') {
+  return L.divIcon({ className:'', iconSize:[24,36], iconAnchor:[12,36],
+    html:`<svg width="24" height="36" viewBox="0 0 24 36"><path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 24 12 24s12-15 12-24C24 5.4 18.6 0 12 0z" fill="${color}" stroke="#fff" stroke-width="1.5"/><circle cx="12" cy="11" r="5" fill="#fff"/></svg>`
+  });
+}
+function dropoffIcon() {
+  return L.divIcon({ className:'', iconSize:[24,36], iconAnchor:[12,36],
+    html:`<svg width="24" height="36" viewBox="0 0 24 36"><path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 24 12 24s12-15 12-24C24 5.4 18.6 0 12 0z" fill="#3b82f6" stroke="#fff" stroke-width="1.5"/><rect x="7" y="7" width="10" height="8" rx="1" fill="#fff"/></svg>`
+  });
+}
+
+// ── DATA ──
+const JOB_STATES = ['ASSIGNED','EN_ROUTE_TO_PICKUP','ARRIVED_PICKUP','EN_ROUTE_TO_DROPOFF','AT_DROPOFF','COMPLETED'];
+const STATE_LABELS = { ASSIGNED:'Assigned', EN_ROUTE_TO_PICKUP:'On the Way', ARRIVED_PICKUP:'Arrived at Pickup', EN_ROUTE_TO_DROPOFF:'Passenger On Board', AT_DROPOFF:'At Dropoff', COMPLETED:'Completed' };
+const STATE_BUTTONS = { ASSIGNED:'Navigate to Pickup', EN_ROUTE_TO_PICKUP:'Arrived at Pickup', ARRIVED_PICKUP:'Passenger On Board', EN_ROUTE_TO_DROPOFF:'Arrived at Dropoff', AT_DROPOFF:'End Job' };
+
+let availableJobs = [];
+let inboxJobs = [];
+let historyJobs = [];
+let selectedJobId = null;
+let activeInboxJob = null;
+let msgPanelOpen = false;
+let messages = [];
+let totalEarnings = 0;
+
+// ── MOCK JOB GENERATOR ──
+const ADDRESSES = [
+  { name:'Coventry Station', lat:52.4003, lng:-1.5131 },
+  { name:'University Hospital', lat:52.4210, lng:-1.4461 },
+  { name:'Ricoh Arena', lat:52.4488, lng:-1.4958 },
+  { name:'War Memorial Park', lat:52.3946, lng:-1.5059 },
+  { name:'Belgrade Theatre', lat:52.4082, lng:-1.5107 },
+  { name:'Coventry Cathedral', lat:52.4087, lng:-1.5073 },
+  { name:'Westwood Business Park', lat:52.3821, lng:-1.5688 },
+  { name:'Tile Hill Station', lat:52.3933, lng:-1.5813 },
+  { name:'Whitley Business Park', lat:52.3903, lng:-1.4602 },
+  { name:'Kenilworth Road', lat:52.3544, lng:-1.5697 },
+  { name:'Binley Mega', lat:52.3976, lng:-1.4558 },
+  { name:'Walsgrave Hospital', lat:52.4227, lng:-1.4373 },
+];
+
+function haversine(lat1,lng1,lat2,lng2){
+  const R=6371e3,p=Math.PI/180;
+  const a=Math.sin((lat2-lat1)*p/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin((lng2-lng1)*p/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+function generateJob(){
+  const p = ADDRESSES[Math.floor(Math.random()*ADDRESSES.length)];
+  let d; do { d = ADDRESSES[Math.floor(Math.random()*ADDRESSES.length)]; } while(d.name===p.name);
+  const dist = haversine(driverLat,driverLng,p.lat,p.lng);
+  const fare = (5 + Math.random()*25).toFixed(2);
+  const notes = ['','Gate code 4321','Wheelchair access needed','2 suitcases','Airport transfer','VIP passenger'][Math.floor(Math.random()*6)];
+  const tags = [];
+  if(Math.random()>.7) tags.push('airport');
+  if(Math.random()>.85) tags.push('wheelchair');
+  if(Math.random()>.5) tags.push('asap');
+  return {
+    jobId: 'J'+Date.now().toString(36).toUpperCase(),
+    createdAt: new Date().toISOString(),
+    pickup: { lat:p.lat, lng:p.lng, address:p.name },
+    dropoff: { lat:d.lat, lng:d.lng, address:d.name },
+    pickupTime: tags.includes('asap')?'ASAP': new Date(Date.now()+Math.random()*3600000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
+    passenger: { name:['Smith','Jones','Williams','Brown','Taylor','Wilson'][Math.floor(Math.random()*6)], phoneMasked:'+44*******' },
+    notes, tags,
+    pricing: { estimate:parseFloat(fare), currency:'GBP' },
+    distanceFromDriver: Math.round(dist),
+    etaToPickup: Math.round(dist/500*60),
+    bidStatus: 'none',
+  };
+}
+
+// ── RENDERING ──
+function renderAvailableJobs(){
+  availableJobs.sort((a,b)=>a.distanceFromDriver-b.distanceFromDriver);
+  const el = document.getElementById('availableList');
+  document.getElementById('availCount').textContent = availableJobs.length;
+  if(!availableJobs.length){ el.innerHTML='<div class="empty-state"><div class="icon">🔍</div>Waiting for jobs…</div>'; return; }
+  el.innerHTML = availableJobs.map(j=>{
+    const km = (j.distanceFromDriver/1000).toFixed(1);
+    const sel = j.jobId===selectedJobId?'selected':'';
+    const pending = j.bidStatus==='pending'?'bid-pending':'';
+    return `<div class="job-card ${sel} ${pending}" onclick="selectJob('${j.jobId}')">
+      <div class="jc-top">
+        <div class="jc-pickup">${j.pickup.address}</div>
+        <div class="jc-dist">${km}<small> km</small></div>
+      </div>
+      <div class="jc-dropoff">${j.dropoff.address}</div>
+      <div class="jc-meta">
+        <span class="jc-fare">£${j.pricing.estimate.toFixed(2)}</span>
+        <span class="jc-time">${j.pickupTime}</span>
+        <span>ETA ${j.etaToPickup}min</span>
+      </div>
+      ${j.notes?`<div class="jc-notes">📝 ${j.notes}</div>`:''}
+      <div class="jc-tags">${j.tags.map(t=>`<span class="tag tag-${t}">${t.toUpperCase()}</span>`).join('')}</div>
+      <div class="jc-actions">
+        <button class="btn btn-preview" onclick="event.stopPropagation();previewJob('${j.jobId}')">👁 Preview</button>
+        <button class="btn btn-connect" onclick="event.stopPropagation();showConnectors('${j.jobId}')">🔗</button>
+        <button class="btn btn-bid" ${j.bidStatus!=='none'?'disabled':''} onclick="event.stopPropagation();bidOnJob('${j.jobId}')">
+          ${j.bidStatus==='pending'?'⏳ Pending…':'⚡ BID'}
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function selectJob(id){
+  selectedJobId = id;
+  const j = availableJobs.find(x=>x.jobId===id);
+  if(j) showJobOnMap(j);
+  renderAvailableJobs();
+}
+
+function showJobOnMap(j){
+  clearMapOverlays();
+  jobMarkers.pickup = L.marker([j.pickup.lat,j.pickup.lng],{icon:pickupIcon('#22c55e')}).addTo(map).bindPopup(`<b>Pickup</b><br>${j.pickup.address}`);
+  jobMarkers.dropoff = L.marker([j.dropoff.lat,j.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup(`<b>Dropoff</b><br>${j.dropoff.address}`);
+  routeLine = L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map);
+  map.fitBounds(routeLine.getBounds().pad(0.15));
+}
+
+function clearMapOverlays(){
+  Object.values(jobMarkers).forEach(m=>map.removeLayer(m));
+  Object.keys(jobMarkers).forEach(k=>delete jobMarkers[k]);
+  if(routeLine){map.removeLayer(routeLine);routeLine=null;}
+}
+
+function previewJob(id){
+  const j = availableJobs.find(x=>x.jobId===id);
+  if(j) showJobOnMap(j);
+}
+
+function showConnectors(id){
+  const j = availableJobs.find(x=>x.jobId===id);
+  if(!j) return;
+  const nearby = availableJobs.filter(x=>x.jobId!==id).map(x=>({...x, distFromDropoff:haversine(j.dropoff.lat,j.dropoff.lng,x.pickup.lat,x.pickup.lng)})).sort((a,b)=>a.distFromDropoff-b.distFromDropoff).slice(0,3);
+  toast(`🔗 ${nearby.length} connecting jobs near ${j.dropoff.address}`,'info');
+}
+
+// ── BIDDING ──
+function bidOnJob(id){
+  const j = availableJobs.find(x=>x.jobId===id);
+  if(!j) return;
+  j.bidStatus = 'pending';
+  renderAvailableJobs();
+  toast('⚡ Bid submitted — waiting…','info');
+  setTimeout(()=>{
+    if(Math.random()>.3){
+      j.bidStatus = 'won';
+      availableJobs = availableJobs.filter(x=>x.jobId!==id);
+      j.state = 'ASSIGNED';
+      inboxJobs.push(j);
+      document.getElementById('inboxCount').textContent = inboxJobs.length;
+      toast('🎉 You won the job!','success');
+      renderAvailableJobs();
+      switchTab('inbox');
+      showInboxJob(j);
+    } else {
+      j.bidStatus = 'none';
+      availableJobs = availableJobs.filter(x=>x.jobId!==id);
+      toast('❌ Another driver selected','error');
+      renderAvailableJobs();
+    }
+  }, 1500+Math.random()*2000);
+}
+
+// ── INBOX ──
+function showInboxJob(j){
+  activeInboxJob = j;
+  messages = [];
+  const el = document.getElementById('inboxDetail');
+  document.getElementById('availableList').style.display='none';
+  document.getElementById('historyList').style.display='none';
+  el.classList.add('visible');
+  renderInboxDetail();
+  showJobOnMap(j);
+}
+
+function renderInboxDetail(){
+  const j = activeInboxJob;
+  if(!j) return;
+  const stateIdx = JOB_STATES.indexOf(j.state);
+  const el = document.getElementById('inboxDetail');
+  el.innerHTML = `
+    <div class="inbox-back" onclick="backToList()">← Back to list</div>
+    <div class="id-header">
+      <h3>${j.pickup.address} → ${j.dropoff.address}</h3>
+      <div class="id-passenger">👤 ${j.passenger.name} · £${j.pricing.estimate.toFixed(2)} · ${j.pickupTime}</div>
+      ${j.notes?`<div class="jc-notes" style="margin-top:4px">📝 ${j.notes}</div>`:''}
+    </div>
+    <div class="timeline">
+      ${JOB_STATES.filter(s=>s!=='COMPLETED').map((s,i)=>{
+        const cls = i<stateIdx?'done':i===stateIdx?'current':'';
+        return `<div class="tl-step ${cls}"><div class="tl-dot"></div><div class="tl-label">${STATE_LABELS[s]}</div></div>`;
+      }).join('')}
+    </div>
+    ${j.state!=='COMPLETED'?`<button class="primary-action" onclick="advanceState()">${STATE_BUTTONS[j.state]||'Done'}</button>`:''}
+    <div class="secondary-actions">
+      <button class="btn-secondary btn-msg" onclick="toggleMsgPanel()">💬 Message</button>
+      <button class="btn-secondary btn-cancel" onclick="cancelJob()">✖ Cancel</button>
+    </div>
+    <div class="msg-panel ${msgPanelOpen?'visible':''}" id="msgPanel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="color:var(--cyan)">Message Passenger</b>
+        <span style="cursor:pointer" onclick="toggleMsgPanel()">✕</span>
+      </div>
+      <div class="msg-thread" id="msgThread">${messages.map(m=>`<div class="msg-bubble ${m.from==='driver'?'msg-driver':'msg-pax'}">${m.text}</div>`).join('')}</div>
+      <div class="msg-presets">
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">I'm on my way</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">I've arrived</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">Where are you?</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">Please come to pickup</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">Running 5 min late</div>
+      </div>
+    </div>
+  `;
+}
+
+function advanceState(){
+  const j = activeInboxJob;
+  if(!j) return;
+  const idx = JOB_STATES.indexOf(j.state);
+  if(idx<JOB_STATES.length-2){
+    j.state = JOB_STATES[idx+1];
+    toast(`✅ ${STATE_LABELS[j.state]}`,'success');
+    renderInboxDetail();
+    if(j.state==='EN_ROUTE_TO_PICKUP') document.getElementById('statusText').textContent='Busy';
+  } else {
+    // Complete
+    j.state = 'COMPLETED';
+    totalEarnings += j.pricing.estimate;
+    document.getElementById('earningsTotal').textContent = totalEarnings.toFixed(2);
+    inboxJobs = inboxJobs.filter(x=>x.jobId!==j.jobId);
+    historyJobs.push(j);
+    document.getElementById('inboxCount').textContent = inboxJobs.length;
+    showCompletion(j);
+  }
+}
+
+function cancelJob(){
+  if(!activeInboxJob) return;
+  toast('❌ Job cancelled','error');
+  inboxJobs = inboxJobs.filter(x=>x.jobId!==activeInboxJob.jobId);
+  document.getElementById('inboxCount').textContent = inboxJobs.length;
+  activeInboxJob = null;
+  backToList();
+}
+
+function toggleMsgPanel(){ msgPanelOpen=!msgPanelOpen; renderInboxDetail(); }
+
+function sendPreset(text){
+  messages.push({from:'driver',text});
+  toast('💬 Message sent','info');
+  renderInboxDetail();
+  setTimeout(()=>{ messages.push({from:'passenger',text:'OK, thanks!'}); renderInboxDetail(); },2000);
+}
+
+function showCompletion(j){
+  document.getElementById('completionSummary').innerHTML=`
+    <div><span>Pickup</span><span>${j.pickup.address}</span></div>
+    <div><span>Dropoff</span><span>${j.dropoff.address}</span></div>
+    <div><span>Fare</span><span style="color:var(--green)">£${j.pricing.estimate.toFixed(2)}</span></div>
+    <div><span>Total Earnings</span><span style="color:var(--gold)">£${totalEarnings.toFixed(2)}</span></div>
+  `;
+  document.getElementById('completionModal').classList.add('visible');
+}
+
+function closeCompletion(){
+  document.getElementById('completionModal').classList.remove('visible');
+  activeInboxJob=null;
+  document.getElementById('statusText').textContent='Online';
+  switchTab('available');
+}
+
+function backToList(){
+  document.getElementById('inboxDetail').classList.remove('visible');
+  document.getElementById('availableList').style.display='';
+  document.getElementById('historyList').style.display='none';
+  activeInboxJob=null;
+  msgPanelOpen=false;
+  clearMapOverlays();
+  map.setView(DRIVER_START,13);
+  renderAvailableJobs();
+}
+
+// ── TABS ──
+function switchTab(tab){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  if(tab==='available'){
+    document.getElementById('tabAvail').classList.add('active');
+    document.getElementById('availableList').style.display='';
+    document.getElementById('historyList').style.display='none';
+    document.getElementById('inboxDetail').classList.remove('visible');
+    renderAvailableJobs();
+  } else if(tab==='inbox'){
+    document.getElementById('tabInbox').classList.add('active');
+    document.getElementById('availableList').style.display='none';
+    document.getElementById('historyList').style.display='none';
+    if(inboxJobs.length) showInboxJob(inboxJobs[0]);
+    else { document.getElementById('inboxDetail').classList.add('visible');document.getElementById('inboxDetail').innerHTML='<div class="empty-state"><div class="icon">📥</div>No active jobs</div>'; }
+  } else {
+    document.getElementById('tabHistory').classList.add('active');
+    document.getElementById('availableList').style.display='none';
+    document.getElementById('inboxDetail').classList.remove('visible');
+    document.getElementById('historyList').style.display='';
+    renderHistory();
+  }
+}
+
+function renderHistory(){
+  const el = document.getElementById('historyList');
+  if(!historyJobs.length){ el.innerHTML='<div class="empty-state"><div class="icon">📋</div>No completed jobs yet</div>'; return; }
+  el.innerHTML = historyJobs.map(j=>`<div class="job-card"><div class="jc-top"><div class="jc-pickup">${j.pickup.address}</div><div class="jc-dist" style="color:var(--green)">£${j.pricing.estimate.toFixed(2)}</div></div><div class="jc-dropoff">${j.dropoff.address}</div></div>`).join('');
+}
+
+// ── TOAST ──
+function toast(msg,type='info'){
+  const c=document.getElementById('toasts');
+  const t=document.createElement('div');
+  t.className=`toast toast-${type}`;t.textContent=msg;
+  c.appendChild(t);
+  setTimeout(()=>t.remove(),3000);
+}
+
+// ── SIMULATE MQTT FEED ──
+function addMockJobs(){
+  for(let i=0;i<4;i++) availableJobs.push(generateJob());
+  renderAvailableJobs();
+  // Add pickup markers to map
+  availableJobs.forEach(j=>{
+    const m = L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
+    jobMarkers['avail_'+j.jobId]=m;
+  });
+}
+
+addMockJobs();
+
+// Drip new jobs every 8-15s
+setInterval(()=>{
+  if(availableJobs.length<10){
+    const j=generateJob();
+    availableJobs.push(j);
+    renderAvailableJobs();
+    const m=L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
+    jobMarkers['avail_'+j.jobId]=m;
+    toast(`📍 New job: ${j.pickup.address}`,'info');
+  }
+},8000+Math.random()*7000);
+
+// Simulate driver GPS drift
+setInterval(()=>{
+  driverLat += (Math.random()-.5)*0.001;
+  driverLng += (Math.random()-.5)*0.001;
+  driverMarker.setLatLng([driverLat,driverLng]);
+  availableJobs.forEach(j=>{ j.distanceFromDriver=haversine(driverLat,driverLng,j.pickup.lat,j.pickup.lng); j.etaToPickup=Math.round(j.distanceFromDriver/500*60); });
+  if(document.getElementById('tabAvail').classList.contains('active')&&!activeInboxJob) renderAvailableJobs();
+},5000);
+</script>
+</body>
+</html>
