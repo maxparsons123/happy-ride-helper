@@ -60,30 +60,46 @@ public class WebRtcRadioEngine : IDisposable
     {
         var msg = JsonSerializer.Serialize(new
         {
-            from = _localId,
-            type = "announce",
-            role = "dispatch",
+            type = "join",
+            peerId = _localId,
+            name = "Dispatch",
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
         OnSignalingSend?.Invoke("radio/webrtc/presence", msg);
     }
 
-    /// <summary>Handle an incoming presence message from a driver.</summary>
+    /// <summary>Handle an incoming presence message.</summary>
     public void HandlePresence(string json)
     {
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-            var from = root.GetProperty("from").GetString() ?? "";
-            if (from == _localId || string.IsNullOrEmpty(from)) return;
+            var remotePeerId = root.TryGetProperty("peerId", out var pid) ? pid.GetString() ?? "" : "";
+            // Fallback for legacy "from" field
+            if (string.IsNullOrEmpty(remotePeerId))
+                remotePeerId = root.TryGetProperty("from", out var f) ? f.GetString() ?? "" : "";
+            if (remotePeerId == _localId || string.IsNullOrEmpty(remotePeerId)) return;
 
-            var type = root.TryGetProperty("type", out var t) ? t.GetString() : "announce";
+            var type = root.TryGetProperty("type", out var t) ? t.GetString() : "join";
 
-            if (type == "announce" && !_peers.ContainsKey(from))
+            if ((type == "join" || type == "here") && !_peers.ContainsKey(remotePeerId))
             {
-                OnLog?.Invoke($"📡 Driver {from} announced — initiating connection", false);
-                _ = Task.Run(() => CreatePeerConnection(from, isInitiator: true));
+                OnLog?.Invoke($"📡 Peer {remotePeerId} announced — initiating connection", false);
+                _ = Task.Run(() => CreatePeerConnection(remotePeerId, isInitiator: true));
+            }
+
+            // Reply with "here" when someone joins
+            if (type == "join")
+            {
+                var reply = JsonSerializer.Serialize(new
+                {
+                    type = "here",
+                    peerId = _localId,
+                    name = "Dispatch",
+                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                });
+                OnSignalingSend?.Invoke("radio/webrtc/presence", reply);
             }
         }
         catch (Exception ex)
@@ -103,26 +119,37 @@ public class WebRtcRadioEngine : IDisposable
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
-            var from = root.GetProperty("from").GetString() ?? "";
+            var from = root.TryGetProperty("from", out var f) ? f.GetString() ?? "" : "";
             if (from == _localId || string.IsNullOrEmpty(from)) return;
+
+            // Check "to" field — only process messages addressed to us
+            if (root.TryGetProperty("to", out var toEl))
+            {
+                var to = toEl.GetString() ?? "";
+                if (!string.IsNullOrEmpty(to) && to != _localId) return;
+            }
 
             var type = root.GetProperty("type").GetString() ?? "";
 
             if (type == "offer")
             {
-                var sdp = root.GetProperty("sdp").GetString()!;
+                // Payload contains { type, sdp }
+                var payload = root.GetProperty("payload");
+                var sdp = payload.GetProperty("sdp").GetString()!;
                 await HandleOffer(from, sdp);
             }
             else if (type == "answer")
             {
-                var sdp = root.GetProperty("sdp").GetString()!;
+                var payload = root.GetProperty("payload");
+                var sdp = payload.GetProperty("sdp").GetString()!;
                 await HandleAnswer(from, sdp);
             }
-            else if (type == "ice")
+            else if (type == "ice-candidate")
             {
-                var candidate = root.GetProperty("candidate").GetString()!;
-                var sdpMid = root.TryGetProperty("sdpMid", out var m) ? m.GetString() : "0";
-                var sdpMLineIndex = root.TryGetProperty("sdpMLineIndex", out var idx) ? (ushort)idx.GetInt32() : (ushort)0;
+                var payload = root.GetProperty("payload");
+                var candidate = payload.GetProperty("candidate").GetString()!;
+                var sdpMid = payload.TryGetProperty("sdpMid", out var m) ? m.GetString() : "0";
+                var sdpMLineIndex = payload.TryGetProperty("sdpMLineIndex", out var idx) ? (ushort)idx.GetInt32() : (ushort)0;
                 HandleIceCandidate(from, candidate, sdpMid, sdpMLineIndex);
             }
         }
@@ -156,11 +183,15 @@ public class WebRtcRadioEngine : IDisposable
         {
             var msg = JsonSerializer.Serialize(new
             {
+                type = "ice-candidate",
+                payload = new
+                {
+                    candidate = candidate.candidate,
+                    sdpMid = candidate.sdpMid,
+                    sdpMLineIndex = candidate.sdpMLineIndex
+                },
                 from = _localId,
-                type = "ice",
-                candidate = candidate.candidate,
-                sdpMid = candidate.sdpMid,
-                sdpMLineIndex = candidate.sdpMLineIndex
+                to = remoteId
             });
             OnSignalingSend?.Invoke($"radio/webrtc/signal/{remoteId}", msg);
         };
@@ -206,9 +237,10 @@ public class WebRtcRadioEngine : IDisposable
 
             var msg = JsonSerializer.Serialize(new
             {
-                from = _localId,
                 type = "offer",
-                sdp = offer.sdp
+                payload = new { type = "offer", sdp = offer.sdp },
+                from = _localId,
+                to = remoteId
             });
             OnSignalingSend?.Invoke($"radio/webrtc/signal/{remoteId}", msg);
         }
@@ -235,9 +267,10 @@ public class WebRtcRadioEngine : IDisposable
 
         var msg = JsonSerializer.Serialize(new
         {
-            from = _localId,
             type = "answer",
-            sdp = answer.sdp
+            payload = new { type = "answer", sdp = answer.sdp },
+            from = _localId,
+            to = from
         });
         OnSignalingSend?.Invoke($"radio/webrtc/signal/{from}", msg);
     }
