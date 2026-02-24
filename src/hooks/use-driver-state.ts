@@ -27,7 +27,7 @@ export interface DriverCoords {
   speed: number;
 }
 
-export type DriverPresence = 'available' | 'busy' | 'offline';
+export type DriverPresence = 'available' | 'busy' | 'offline' | 'on_break';
 
 function extractField(obj: any, fieldNames: string[], defaultValue: any = '—'): any {
   for (const name of fieldNames) {
