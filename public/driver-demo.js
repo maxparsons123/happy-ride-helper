@@ -933,18 +933,58 @@ setInterval(function(){
   }
 },5000);
 
+// ── SCREEN WAKE LOCK ──
+let wakeLock = null;
+
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      dbg('[WAKE] Screen wake lock acquired');
+      wakeLock.addEventListener('release', function() {
+        dbg('[WAKE] Screen wake lock released');
+      });
+    }
+  } catch(e) {
+    dbg('[WAKE] Wake lock failed: ' + e.message);
+  }
+}
+
+async function releaseWakeLock() {
+  if (wakeLock) {
+    await wakeLock.release();
+    wakeLock = null;
+  }
+}
+
+// Re-acquire wake lock when page becomes visible again
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible' && document.fullscreenElement) {
+    requestWakeLock();
+  }
+});
+
 // ── FULLSCREEN TOGGLE ──
 function toggleFullscreen(){
   var pill=document.getElementById('fsPill');
   if(document.fullscreenElement){
     document.exitFullscreen();
+    releaseWakeLock();
     if(pill) pill.innerHTML='⛶ Fullscreen';
   } else {
-    document.documentElement.requestFullscreen();
+    document.documentElement.requestFullscreen().then(function(){
+      requestWakeLock();
+    });
     if(pill) pill.innerHTML='⊡ Exit FS';
   }
 }
 document.addEventListener('fullscreenchange',function(){
   var pill=document.getElementById('fsPill');
-  if(pill) pill.innerHTML=document.fullscreenElement?'⊡ Exit FS':'⛶ Fullscreen';
+  if(document.fullscreenElement){
+    pill.innerHTML='⊡ Exit FS';
+    requestWakeLock();
+  } else {
+    pill.innerHTML='⛶ Fullscreen';
+    releaseWakeLock();
+  }
 });

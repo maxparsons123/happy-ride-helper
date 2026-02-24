@@ -1,5 +1,5 @@
 import { Menu, Maximize, Minimize } from 'lucide-react';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { DriverPresence } from '@/hooks/use-driver-state';
 
 interface DriverHeaderProps {
@@ -16,12 +16,41 @@ const presenceConfig = {
 export function DriverHeader({ presence, onMenuToggle }: DriverHeaderProps) {
   const p = presenceConfig[presence];
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+      }
+    } catch {}
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (wakeLockRef.current) {
+      await wakeLockRef.current.release();
+      wakeLockRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
-    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    const handler = () => {
+      const fs = !!document.fullscreenElement;
+      setIsFullscreen(fs);
+      if (fs) requestWakeLock(); else releaseWakeLock();
+    };
     document.addEventListener('fullscreenchange', handler);
-    return () => document.removeEventListener('fullscreenchange', handler);
-  }, []);
+    // Re-acquire on visibility change
+    const visHandler = () => {
+      if (document.visibilityState === 'visible' && document.fullscreenElement) requestWakeLock();
+    };
+    document.addEventListener('visibilitychange', visHandler);
+    return () => {
+      document.removeEventListener('fullscreenchange', handler);
+      document.removeEventListener('visibilitychange', visHandler);
+      releaseWakeLock();
+    };
+  }, [requestWakeLock, releaseWakeLock]);
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
