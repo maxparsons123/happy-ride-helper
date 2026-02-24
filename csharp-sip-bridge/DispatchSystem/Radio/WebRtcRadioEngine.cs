@@ -99,8 +99,17 @@ public class WebRtcRadioEngine : IDisposable
 
             if ((type == "join" || type == "here") && !_peers.ContainsKey(remotePeerId))
             {
-                OnLog?.Invoke($"📡 Peer {remotePeerId} announced — initiating connection", false);
-                _ = Task.Run(() => CreatePeerConnection(remotePeerId, isInitiator: true));
+                // Polite peer: only initiate if our ID is lexicographically lower
+                var shouldInitiate = string.Compare(_localId, remotePeerId, StringComparison.Ordinal) < 0;
+                if (shouldInitiate)
+                {
+                    OnLog?.Invoke($"📡 Peer {remotePeerId} announced — initiating connection (we are polite)", false);
+                    _ = Task.Run(() => CreatePeerConnection(remotePeerId, isInitiator: true));
+                }
+                else
+                {
+                    OnLog?.Invoke($"📡 Peer {remotePeerId} announced — waiting for their offer (they initiate)", false);
+                }
             }
 
             // Reply with "here" when someone joins
