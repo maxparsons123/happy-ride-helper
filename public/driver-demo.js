@@ -856,31 +856,65 @@ setInterval(()=>{
   }
 },12000);
 
-// ── REAL GPS TRACKING ──
+// ── GPS INITIALIZATION ──
 let gpsActive = false;
 let gpsWatchId = null;
+let driverHeading = 0;
 
-if (navigator.geolocation) {
+function initGPS() {
+  var mapInfo = document.getElementById('mapInfo');
+  if (!navigator.geolocation) {
+    mapInfo.innerHTML = '<span class="gps-source gps-poor"></span>No GPS available';
+    dbg('[GPS] Geolocation API not available — using simulated drift');
+    return;
+  }
+
+  mapInfo.innerHTML = '<span class="gps-source gps-poor"></span>Searching for GPS...';
   dbg('[GPS] Requesting device location...');
+
   gpsWatchId = navigator.geolocation.watchPosition(
-    function(pos) {
+    function(position) {
       gpsActive = true;
-      driverLat = pos.coords.latitude;
-      driverLng = pos.coords.longitude;
+      driverLat = position.coords.latitude;
+      driverLng = position.coords.longitude;
+      var accuracy = position.coords.accuracy || 50;
+      driverHeading = position.coords.heading || 0;
+
+      // Update marker position
       driverMarker.setLatLng([driverLat, driverLng]);
-      var acc = pos.coords.accuracy ? Math.round(pos.coords.accuracy) : '?';
-      document.getElementById('mapInfo').textContent = 'GPS: ' + driverLat.toFixed(5) + ', ' + driverLng.toFixed(5) + ' (±' + acc + 'm)';
-      dbg('[GPS] Position: ' + driverLat.toFixed(5) + ',' + driverLng.toFixed(5) + ' acc=' + acc + 'm');
+
+      // Pan map to follow driver (only if user isn't dragging)
+      if (!map.dragging || !map.dragging.moved || !map.dragging.moved()) {
+        map.panTo([driverLat, driverLng], { animate: false });
+      }
+
+      // Determine GPS quality indicator
+      var cls = 'gps-gps';
+      if (accuracy > 50) cls = 'gps-poor';
+      else if (accuracy > 20) cls = 'gps-network';
+
+      mapInfo.innerHTML = '<span class="gps-source ' + cls + '"></span>' +
+        'GPS: ' + driverLat.toFixed(5) + ', ' + driverLng.toFixed(5) +
+        ' <span style="margin-left:8px;font-size:12px;opacity:0.8">(±' + Math.round(accuracy) + 'm)</span>';
+
+      dbg('[GPS] ' + driverLat.toFixed(5) + ',' + driverLng.toFixed(5) + ' acc=' + Math.round(accuracy) + 'm');
     },
-    function(err) {
-      dbg('[GPS] Error: ' + err.message + ' — using simulated drift');
-      document.getElementById('mapInfo').textContent = 'GPS unavailable — simulated location';
+    function(error) {
+      var errorMsg = 'GPS error: ';
+      switch(error.code) {
+        case 1: errorMsg += 'Location access denied.'; break;
+        case 2: errorMsg += 'Location unavailable.'; break;
+        case 3: errorMsg += 'Location request timed out.'; break;
+        default: errorMsg += error.message;
+      }
+      mapInfo.innerHTML = '<span class="gps-source gps-poor"></span>' + errorMsg;
+      dbg('[GPS] ' + errorMsg + ' — using simulated drift');
     },
     { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
   );
-} else {
-  dbg('[GPS] Geolocation API not available — using simulated drift');
 }
+
+initGPS();
 
 // Fallback simulated drift + periodic updates
 setInterval(function(){
@@ -894,7 +928,7 @@ setInterval(function(){
   if(mqttClient && mqttConnected){
     mqttClient.publish('drivers/'+DRIVER_ID+'/location', JSON.stringify({
       driver: DRIVER_ID, name: DRIVER_NAME, registration: VEHICLE_REG, vehicle: VEHICLE_TYPE,
-      lat:driverLat, lng:driverLng, status:driverPresence, ts:Date.now(), heading:0
+      lat:driverLat, lng:driverLng, status:driverPresence, ts:Date.now(), heading:driverHeading
     }));
   }
 },5000);
