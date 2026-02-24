@@ -128,7 +128,7 @@ const Pay = () => {
           {/* Wallet buttons */}
           <div className="px-6 pt-5 pb-2 flex gap-3">
             <a
-              href={`https://pay.sumup.com/b2c/${checkoutId}`}
+              href={`https://checkout.sumup.com/pay/${checkoutId}`}
               target="_blank"
               rel="noopener noreferrer"
               className="flex-1 flex items-center justify-center gap-2 bg-black text-white rounded-lg py-3 px-4 font-semibold text-sm hover:bg-gray-900 transition-colors"
@@ -136,7 +136,7 @@ const Pay = () => {
                Pay
             </a>
             <a
-              href={`https://pay.sumup.com/b2c/${checkoutId}`}
+              href={`https://checkout.sumup.com/pay/${checkoutId}`}
               target="_blank"
               rel="noopener noreferrer"
               className="flex-1 flex items-center justify-center gap-2 bg-white border border-gray-300 text-gray-900 rounded-lg py-3 px-4 font-semibold text-sm hover:bg-gray-50 transition-colors"
