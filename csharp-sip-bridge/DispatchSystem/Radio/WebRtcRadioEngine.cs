@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Concentus.Enums;
+using Concentus.Structs;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
@@ -35,6 +37,14 @@ public class WebRtcRadioEngine : IDisposable
     private NAudio.Wave.BufferedWaveProvider? _playBuffer;
     private float _volume = 0.8f;
 
+    // Opus codec
+    private OpusEncoder? _opusEncoder;
+    private OpusDecoder? _opusDecoder;
+    private const int OPUS_SAMPLE_RATE = 48000;
+    private const int OPUS_CHANNELS = 1;
+    private const int OPUS_FRAME_MS = 20;
+    private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE * OPUS_FRAME_MS / 1000; // 960 samples
+
     /// <summary>Fires when a signaling message should be published via MQTT. Args: (topic, jsonPayload)</summary>
     public event Action<string, string>? OnSignalingSend;
 
@@ -48,6 +58,9 @@ public class WebRtcRadioEngine : IDisposable
 
     public WebRtcRadioEngine()
     {
+        _opusEncoder = new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
+        _opusEncoder.Bitrate = 24000;
+        _opusDecoder = new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
         InitPlayback();
     }
 
@@ -174,8 +187,8 @@ public class WebRtcRadioEngine : IDisposable
 
         var pc = new RTCPeerConnection(config);
 
-        // Add audio track (8kHz mono PCMU)
-        var audioFormat = new AudioFormat(AudioCodecsEnum.PCMU, 0, 8000, 1);
+        // Add audio track (48kHz mono Opus)
+        var audioFormat = new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, 1);
         var track = new MediaStreamTrack(audioFormat, MediaStreamStatusEnum.SendRecv);
         pc.addTrack(track);
 
@@ -198,11 +211,20 @@ public class WebRtcRadioEngine : IDisposable
 
         pc.OnRtpPacketReceived += (rep, media, pkt) =>
         {
-            if (media == SDPMediaTypesEnum.audio && _playBuffer != null)
+            if (media == SDPMediaTypesEnum.audio && _playBuffer != null && _opusDecoder != null)
             {
-                // Decode G.711 μ-law to PCM 16-bit
-                var pcmBytes = MuLawDecode(pkt.Payload);
-                _playBuffer.AddSamples(pcmBytes, 0, pcmBytes.Length);
+                try
+                {
+                    var pcmSamples = new short[OPUS_FRAME_SIZE];
+                    int decoded = _opusDecoder.Decode(pkt.Payload, 0, pkt.Payload.Length, pcmSamples, 0, OPUS_FRAME_SIZE, false);
+                    if (decoded > 0)
+                    {
+                        var pcmBytes = new byte[decoded * 2];
+                        Buffer.BlockCopy(pcmSamples, 0, pcmBytes, 0, pcmBytes.Length);
+                        _playBuffer.AddSamples(pcmBytes, 0, pcmBytes.Length);
+                    }
+                }
+                catch { /* decode error — skip frame */ }
             }
         };
 
@@ -311,8 +333,8 @@ public class WebRtcRadioEngine : IDisposable
         {
             _waveIn = new NAudio.Wave.WaveInEvent
             {
-                WaveFormat = new NAudio.Wave.WaveFormat(8000, 16, 1),
-                BufferMilliseconds = 20 // 20ms frames for RTP
+                WaveFormat = new NAudio.Wave.WaveFormat(OPUS_SAMPLE_RATE, 16, OPUS_CHANNELS),
+                BufferMilliseconds = OPUS_FRAME_MS // 20ms frames
             };
 
             _waveIn.DataAvailable += OnMicData;
@@ -346,10 +368,20 @@ public class WebRtcRadioEngine : IDisposable
 
     private void OnMicData(object? sender, NAudio.Wave.WaveInEventArgs args)
     {
-        if (!_pttActive || args.BytesRecorded == 0) return;
+        if (!_pttActive || args.BytesRecorded == 0 || _opusEncoder == null) return;
 
-        // Convert PCM 16-bit to G.711 μ-law for RTP
-        var muLawBytes = MuLawEncode(args.Buffer, args.BytesRecorded);
+        // Convert PCM bytes to short samples
+        int sampleCount = args.BytesRecorded / 2;
+        var pcmSamples = new short[sampleCount];
+        Buffer.BlockCopy(args.Buffer, 0, pcmSamples, 0, args.BytesRecorded);
+
+        // Opus encode
+        var encodedBuffer = new byte[4000]; // max Opus frame
+        int encodedLength = _opusEncoder.Encode(pcmSamples, 0, OPUS_FRAME_SIZE, encodedBuffer, 0, encodedBuffer.Length);
+        if (encodedLength <= 0) return;
+
+        var opusFrame = new byte[encodedLength];
+        Array.Copy(encodedBuffer, opusFrame, encodedLength);
 
         foreach (var kvp in _peers)
         {
@@ -357,7 +389,7 @@ public class WebRtcRadioEngine : IDisposable
                 continue;
             try
             {
-                kvp.Value.SendAudio((uint)(muLawBytes.Length * 1000 / 8), muLawBytes);
+                kvp.Value.SendAudio((uint)(OPUS_FRAME_MS * OPUS_SAMPLE_RATE / 1000), opusFrame);
             }
             catch { /* peer may have disconnected */ }
         }
@@ -369,7 +401,7 @@ public class WebRtcRadioEngine : IDisposable
 
     private void InitPlayback()
     {
-        _playBuffer = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(8000, 16, 1))
+        _playBuffer = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(OPUS_SAMPLE_RATE, 16, OPUS_CHANNELS))
         {
             BufferDuration = TimeSpan.FromSeconds(10),
             DiscardOnBufferOverflow = true
@@ -387,59 +419,7 @@ public class WebRtcRadioEngine : IDisposable
         if (_waveOut != null) _waveOut.Volume = vol;
     }
 
-    // ═══════════════════════════════════════════
-    //  G.711 μ-LAW CODEC
-    // ═══════════════════════════════════════════
-
-    private static byte[] MuLawEncode(byte[] pcm16, int length)
-    {
-        int sampleCount = length / 2;
-        var encoded = new byte[sampleCount];
-        for (int i = 0; i < sampleCount; i++)
-        {
-            short sample = BitConverter.ToInt16(pcm16, i * 2);
-            encoded[i] = LinearToMuLaw(sample);
-        }
-        return encoded;
-    }
-
-    private static byte[] MuLawDecode(byte[] muLaw)
-    {
-        var pcm = new byte[muLaw.Length * 2];
-        for (int i = 0; i < muLaw.Length; i++)
-        {
-            short sample = MuLawToLinear(muLaw[i]);
-            pcm[i * 2] = (byte)(sample & 0xFF);
-            pcm[i * 2 + 1] = (byte)(sample >> 8);
-        }
-        return pcm;
-    }
-
-    private static byte LinearToMuLaw(short sample)
-    {
-        const int BIAS = 0x84;
-        const int CLIP = 32635;
-        int sign = (sample >> 8) & 0x80;
-        if (sign != 0) sample = (short)-sample;
-        if (sample > CLIP) sample = CLIP;
-        sample = (short)(sample + BIAS);
-        int exponent = 7;
-        for (int mask = 0x4000; (sample & mask) == 0 && exponent > 0; exponent--, mask >>= 1) { }
-        int mantissa = (sample >> (exponent + 3)) & 0x0F;
-        byte muLaw = (byte)(~(sign | (exponent << 4) | mantissa));
-        return muLaw;
-    }
-
-    private static short MuLawToLinear(byte muLaw)
-    {
-        muLaw = (byte)~muLaw;
-        int sign = muLaw & 0x80;
-        int exponent = (muLaw >> 4) & 0x07;
-        int mantissa = muLaw & 0x0F;
-        int sample = ((mantissa << 3) + 0x84) << exponent;
-        sample -= 0x84;
-        return (short)(sign != 0 ? -sample : sample);
-    }
+    // (G.711 μ-law codec removed — now using Opus via Concentus)
 
     // ═══════════════════════════════════════════
     //  CLEANUP
