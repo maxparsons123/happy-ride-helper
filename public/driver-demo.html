@@ -108,7 +108,7 @@
   .btn-cancel{border-color:var(--red);color:var(--red)}
 
   /* MESSAGE PANEL */
-  .msg-panel{display:none;background:var(--card);border:1px solid var(--cyan);border-radius:10px;padding:10px;margin-top:8px;flex-shrink:0}
+  .msg-panel{display:none;background:var(--card);border:1px solid var(--cyan);border-radius:10px;padding:10px;margin-top:4px;margin-bottom:8px;flex-shrink:0;width:85%;max-width:300px}
   .msg-panel.visible{display:block}
   .msg-presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
   .msg-preset{padding:8px 12px;border-radius:20px;border:1px solid #444;background:#222;color:var(--text);font-size:12px;cursor:pointer;transition:.15s}
@@ -405,6 +405,20 @@ function renderInboxDetail(){
       <div class="id-passenger">👤 ${j.passenger.name} · £${j.pricing.estimate.toFixed(2)} · ${j.pickupTime}</div>
       ${j.notes?`<div class="jc-notes" style="margin-top:4px">📝 ${j.notes}</div>`:''}
     </div>
+    <div class="msg-panel ${msgPanelOpen?'visible':''}" id="msgPanel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="color:var(--cyan);font-size:12px">💬 Message Passenger</b>
+        <span style="cursor:pointer;font-size:14px" onclick="toggleMsgPanel()">✕</span>
+      </div>
+      <div class="msg-thread" id="msgThread">${messages.map(m=>`<div class="msg-bubble ${m.from==='driver'?'msg-driver':'msg-pax'}">${m.text}</div>`).join('')}</div>
+      <div class="msg-presets">
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">I'm on my way</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">I've arrived</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">Where are you?</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">Please come to pickup</div>
+        <div class="msg-preset" onclick="sendPreset(this.textContent)">Running 5 min late</div>
+      </div>
+    </div>
     <div class="timeline">
       ${JOB_STATES.filter(s=>s!=='COMPLETED').map((s,i)=>{
         const cls = i<stateIdx?'done':i===stateIdx?'current':'';
@@ -416,20 +430,6 @@ function renderInboxDetail(){
     <div class="secondary-actions">
       <button class="btn-secondary btn-msg" onclick="toggleMsgPanel()">💬 Message</button>
       <button class="btn-secondary btn-cancel" onclick="cancelJob()">✖ Cancel</button>
-    </div>
-    <div class="msg-panel ${msgPanelOpen?'visible':''}" id="msgPanel">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <b style="color:var(--cyan)">Message Passenger</b>
-        <span style="cursor:pointer" onclick="toggleMsgPanel()">✕</span>
-      </div>
-      <div class="msg-thread" id="msgThread">${messages.map(m=>`<div class="msg-bubble ${m.from==='driver'?'msg-driver':'msg-pax'}">${m.text}</div>`).join('')}</div>
-      <div class="msg-presets">
-        <div class="msg-preset" onclick="sendPreset(this.textContent)">I'm on my way</div>
-        <div class="msg-preset" onclick="sendPreset(this.textContent)">I've arrived</div>
-        <div class="msg-preset" onclick="sendPreset(this.textContent)">Where are you?</div>
-        <div class="msg-preset" onclick="sendPreset(this.textContent)">Please come to pickup</div>
-        <div class="msg-preset" onclick="sendPreset(this.textContent)">Running 5 min late</div>
-      </div>
     </div>
   `;
 }
