@@ -16,6 +16,7 @@ public class MainForm : Form
     private readonly JobHistoryPanel _jobHistory;
     private readonly DriverListPanel _driverList;
     private readonly LogPanel _logPanel;
+    private readonly RadioPanel _radioPanel;
     private readonly TabControl _jobTabs;
 
     // ── Controls ──
@@ -41,6 +42,10 @@ public class MainForm : Form
     private WebhookListener? _webhook;
     private readonly System.Windows.Forms.Timer _refreshTimer;
 
+    // ── Long-press PTT on driver grid ──
+    private readonly System.Windows.Forms.Timer _longPressTimer;
+    private string? _longPressTargetDriverId;
+    private bool _longPressPttActive;
     // ── Settings ──
     private int _webhookPort = 5080;
     private int _autoDispatchSec = 60;
@@ -202,8 +207,20 @@ public class MainForm : Form
 
         _jobTabs.TabPages.AddRange(new[] { tabActive, tabHistory });
 
-        // Right side: drivers (narrower)
+        // Right side: drivers + radio in tabs
         _driverList = new DriverListPanel { Dock = DockStyle.Fill };
+        _radioPanel = new RadioPanel { Dock = DockStyle.Fill };
+
+        var rightTabs = new TabControl
+        {
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9F)
+        };
+        var tabDrivers = new TabPage("🚕 Drivers") { BackColor = Color.FromArgb(28, 28, 32) };
+        tabDrivers.Controls.Add(_driverList);
+        var tabRadio = new TabPage("📻 Radio") { BackColor = Color.FromArgb(28, 28, 32) };
+        tabRadio.Controls.Add(_radioPanel);
+        rightTabs.TabPages.AddRange(new[] { tabDrivers, tabRadio });
 
         _logPanel = new LogPanel { Dock = DockStyle.Fill };
 
@@ -222,7 +239,6 @@ public class MainForm : Form
         _logModal.Controls.Add(_logPanel);
         _logModal.FormClosing += (_, args) =>
         {
-            // Hide instead of close so we can re-show
             args.Cancel = true;
             _logModal.Hide();
         };
@@ -244,6 +260,22 @@ public class MainForm : Form
                 _ = _map.ZoomToLocation(driver.Lat, driver.Lng, 16);
         };
 
+        // ── Wire long-press PTT on driver list ──
+        _driverList.OnDriverLongPressStart += driverId => StartLongPressDetection(driverId);
+        _driverList.OnDriverLongPressEnd += () => CancelLongPress();
+
+        // ── Wire RadioPanel events ──
+        _radioPanel.OnRadioTransmit += (topic, json) =>
+        {
+            if (_mqtt != null)
+                _ = _mqtt.PublishAsync(topic, json);
+        };
+        _radioPanel.OnLog += (msg, color) => _logPanel.AppendLog(msg, color);
+
+        // ── Long-press PTT timer for driver grid ──
+        _longPressTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _longPressTimer.Tick += LongPressTimer_Tick;
+
         // Context menu on job grid
         SetupJobContextMenu();
 
@@ -251,7 +283,7 @@ public class MainForm : Form
         splitMapJobs.Panel2.Controls.Add(_jobTabs);
 
         splitTop.Panel1.Controls.Add(splitMapJobs);
-        splitTop.Panel2.Controls.Add(_driverList);
+        splitTop.Panel2.Controls.Add(rightTabs);
 
         Controls.Add(splitTop);
         Controls.Add(toolbar);
@@ -423,6 +455,12 @@ public class MainForm : Form
                         OnDriverJobResponse(jobId, driverId, accepted: true);
                     }
                 });
+            };
+
+            // Wire radio messages to RadioPanel
+            _mqtt.OnRadioReceived += (topic, json) =>
+            {
+                BeginInvoke(() => _radioPanel.HandleIncomingRadio(json));
             };
 
             await _mqtt.ConnectAsync();
@@ -848,6 +886,9 @@ public class MainForm : Form
         _driverList.RefreshDrivers(drivers);
         _jobList.RefreshJobs(jobs);
 
+        // Update radio panel driver list
+        _radioPanel.UpdateDriverList(drivers.Select(d => (d.Id, d.Name, d.Status.ToString())));
+
         RefreshStatsFromData(drivers, jobs);
     }
 
@@ -922,4 +963,59 @@ public class MainForm : Form
             "offline" or "off" => DriverStatus.Offline,
             _ => Enum.TryParse<DriverStatus>(mqttStatus, true, out var p) ? p : null
         };
+
+    // ── Keyboard PTT (SPACE key) ──
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Space)
+        {
+            _radioPanel.HandleKeyDown(Keys.Space);
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Space)
+        {
+            _radioPanel.HandleKeyUp(Keys.Space);
+            e.Handled = true;
+        }
+        base.OnKeyUp(e);
+    }
+
+    // ── Long-press PTT on Driver Grid ──
+
+    private void LongPressTimer_Tick(object? sender, EventArgs e)
+    {
+        _longPressTimer.Stop();
+        if (string.IsNullOrEmpty(_longPressTargetDriverId)) return;
+
+        _longPressPttActive = true;
+        _radioPanel.StartTargetedPtt(_longPressTargetDriverId);
+        _lblStats.Text = $"🔴 PTT → Driver {_longPressTargetDriverId}";
+        _lblStats.ForeColor = Color.Red;
+    }
+
+    /// <summary>Call from DriverListPanel mouse events to start long-press detection.</summary>
+    public void StartLongPressDetection(string driverId)
+    {
+        _longPressTargetDriverId = driverId;
+        _longPressTimer.Start();
+    }
+
+    /// <summary>Call from DriverListPanel mouse events to cancel long-press.</summary>
+    public void CancelLongPress()
+    {
+        _longPressTimer.Stop();
+        if (_longPressPttActive)
+        {
+            _radioPanel.StopPtt();
+            _longPressPttActive = false;
+            _lblStats.ForeColor = Color.LightBlue;
+        }
+        _longPressTargetDriverId = null;
+    }
 }

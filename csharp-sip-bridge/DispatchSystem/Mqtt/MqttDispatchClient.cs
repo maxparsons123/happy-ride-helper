@@ -34,6 +34,7 @@ public sealed class MqttDispatchClient : IDisposable
     public event Action<string, string, string>? OnJobStatusUpdate;          // jobId, driverId, status
     public event Action<string, string, bool>? OnDriverJobResponse;          // jobId, driverId, accepted
     public event Action<string, string, double, double>? OnDriverBidReceived; // jobId, driverId, lat, lng
+    public event Action<string, string>? OnRadioReceived;                    // topic, jsonPayload
 
     public bool IsConnected => _client?.IsConnected ?? false;
 
@@ -93,7 +94,9 @@ public sealed class MqttDispatchClient : IDisposable
         await _client.SubscribeAsync("jobs/+/response");
         await _client.SubscribeAsync("jobs/+/bid");
         await _client.SubscribeAsync("jobs/+/bids");      // Driver app publishes bids here
-        OnLog?.Invoke("📡 Subscribed to dispatch topics (incl. pubs/requests/+ and jobs/+/bids)");
+        await _client.SubscribeAsync("radio/channel");        // Driver-to-dispatch radio
+        await _client.SubscribeAsync("radio/broadcast");      // Broadcast radio (to filter own)
+        OnLog?.Invoke("📡 Subscribed to dispatch + radio topics");
     }
 
     private Task HandleMessage(MqttApplicationMessageReceivedEventArgs e)
@@ -271,6 +274,10 @@ public sealed class MqttDispatchClient : IDisposable
                     var bidDriverId = bid.driverId ?? bid.driver ?? "";
                     OnDriverBidReceived?.Invoke(jobId, bidDriverId, bid.lat, bid.lng);
                 }
+            }
+            else if (topic == "radio/channel" || topic == "radio/broadcast")
+            {
+                OnRadioReceived?.Invoke(topic, json);
             }
         }
         catch (Exception ex)
