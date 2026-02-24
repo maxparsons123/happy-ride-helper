@@ -862,7 +862,7 @@ function connectMqtt(){
 
     mqttClient.on('connect', ()=>{
       updateMqttStatus('connected');
-      // Subscribe to all job-related topics from C# bridge
+      // Subscribe to all job-related topics (synced with driver-app v11.9.10)
       mqttClient.subscribe('pubs/requests/+');            // SIP bridge job requests
       mqttClient.subscribe('taxi/bookings');               // WhatsApp dispatcher
       mqttClient.subscribe('passengers/+/created');        // Passenger created events
@@ -871,10 +871,10 @@ function connectMqtt(){
       mqttClient.subscribe(`jobs/+/result/${DRIVER_ID}`);
       mqttClient.subscribe('drivers/+/location');          // Other drivers' GPS
       mqttClient.subscribe('drivers/+/status');            // Other drivers' status
+      mqttClient.subscribe('chat/group');                  // Group chat
       console.log('[MQTT] Connected & subscribed. Driver ID:', DRIVER_ID);
       // Publish initial status so dispatch system registers us
       publishDriverStatus();
-    });
     });
 
     mqttClient.on('message', (topic, message)=>{
