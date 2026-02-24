@@ -23,6 +23,7 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
   const [lastRadioMessage, setLastRadioMessage] = useState<RadioMessage | null>(null);
   const [remotePttState, setRemotePttState] = useState<{ from: string; name: string; active: boolean } | null>(null);
+  const webrtcHandlerRef = useRef<((topic: string, data: any) => boolean) | null>(null);
 
   const onJobRequestRef = useRef(onJobRequest);
   const onJobResultRef = useRef(onJobResult);
@@ -54,6 +55,12 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
     client.on('message', (topic: string, message: Buffer) => {
       try {
         const data = JSON.parse(message.toString());
+
+        // Route WebRTC signaling/presence to radio hook
+        if (topic.startsWith('radio/webrtc/')) {
+          webrtcHandlerRef.current?.(topic, data);
+          return;
+        }
 
         // PTT state messages
         if (topic === 'radio/ptt-state') {
@@ -100,5 +107,9 @@ export function useMqttDriver({ driverId, onJobRequest, onJobResult }: UseMqttDr
     clientRef.current?.publish(topic, JSON.stringify(payload));
   }, []);
 
-  return { connectionStatus, publish, lastRadioMessage, remotePttState };
+  const setWebRtcHandler = useCallback((handler: (topic: string, data: any) => boolean) => {
+    webrtcHandlerRef.current = handler;
+  }, []);
+
+  return { connectionStatus, publish, lastRadioMessage, remotePttState, setWebRtcHandler };
 }
