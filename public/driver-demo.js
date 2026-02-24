@@ -831,6 +831,8 @@ function connectMqtt(){
       mqttClient.subscribe('radio/broadcast');
       mqttClient.subscribe('radio/channel');
       mqttClient.subscribe('radio/driver/' + DRIVER_ID);
+      mqttClient.subscribe('radio/webrtc/signal/' + DRIVER_ID);
+      mqttClient.subscribe('radio/webrtc/presence');
       dbg('📡 Subscribed to all topics. Driver ID: ' + DRIVER_ID);
       publishDriverStatus();
     });
@@ -855,15 +857,19 @@ function connectMqtt(){
           localStorage.setItem(`chat_group_${DRIVER_ID}`, JSON.stringify(chatMessages.group));
         }
 
-        // Radio audio messages (broadcast, channel, or private)
-        if(topic === 'radio/broadcast' || topic === 'radio/channel' || topic === 'radio/driver/' + DRIVER_ID){
+        // WebRTC radio signaling
+        if(handleRadioMqttMessage(topic, data)) {
+          // handled by WebRTC radio module
+        }
+
+        // Legacy radio audio fallback (broadcast from dispatch C# app)
+        else if(topic === 'radio/broadcast' || topic === 'radio/driver/' + DRIVER_ID){
           if(data.driver !== DRIVER_ID && data.audio){
-            // If broadcast has a targets list, only play if we're in it
             if(topic === 'radio/broadcast' && data.targets && Array.isArray(data.targets)){
               if(!data.targets.includes(DRIVER_ID)) return;
             }
-            var source = topic === 'radio/channel' ? 'driver' : 'dispatch';
-            handleRadioReceive(data, source);
+            // Play legacy base64 audio from dispatch
+            handleLegacyRadioReceive(data);
           }
         }
 
@@ -1164,47 +1170,331 @@ document.addEventListener('fullscreenchange',function(){
 });
 
 // ══════════════════════════════════════════════════════
-// ── WALKIE-TALKIE RADIO (Push-to-Talk over MQTT) ──
+// ── WALKIE-TALKIE RADIO (WebRTC PTT over MQTT signaling) ──
 // ══════════════════════════════════════════════════════
 
 var radioOpen = false;
 var pttActive = false;
 var radioVolume = 0.8;
-var radioMediaStream = null;
-var radioMediaRecorder = null;
-var radioAudioCtx = null;
 var radioLogMessages = [];
+
+// WebRTC state
+var rtcPeerConnections = {}; // peerId -> RTCPeerConnection
+var rtcLocalStream = null;
+var rtcPendingCandidates = {}; // peerId -> [candidates]
+var rtcConnectedPeers = [];
+var rtcAudioElements = {};
+var radioAudioCtx = null;
+
+var ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
 
 function toggleRadioPanel(){
   radioOpen = !radioOpen;
   document.getElementById('radioWidget').style.display = radioOpen ? 'block' : 'none';
-  if(radioOpen) initRadioAudio();
+  if(radioOpen) joinRadioChannel();
 }
 
 function setRadioVolume(val){
   radioVolume = parseInt(val) / 100;
+  // Update all audio element volumes
+  Object.values(rtcAudioElements).forEach(function(audio){
+    audio.volume = radioVolume;
+  });
 }
 
-var radioGainNode = null;
-
-async function initRadioAudio(){
-  if(radioAudioCtx) return;
+// ── Start local media (mic) ──
+async function startRadioMedia(){
+  if(rtcLocalStream) return rtcLocalStream;
   try {
-    radioAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    radioGainNode = radioAudioCtx.createGain();
-    radioGainNode.gain.value = radioVolume;
-    radioGainNode.connect(radioAudioCtx.destination);
-    dbg('[RADIO] AudioContext initialized, sampleRate=' + radioAudioCtx.sampleRate);
+    rtcLocalStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    // Mute by default — PTT enables
+    rtcLocalStream.getAudioTracks().forEach(function(t){ t.enabled = false; });
+    dbg('[RADIO] Microphone access granted (WebRTC mode)');
+    return rtcLocalStream;
   } catch(e){
-    dbg('[RADIO] AudioContext failed: ' + e.message);
+    dbg('[RADIO] Mic error: ' + e.message);
+    toast('📻 Microphone access denied','error');
+    return null;
   }
 }
 
-async function pttStart(evt){
+// ── Background audio keep-alive (prevents tab throttling) ──
+var bgOscillator = null;
+function startBackgroundKeepAlive(){
+  if(bgOscillator) return;
+  try {
+    if(!radioAudioCtx) radioAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var gain = radioAudioCtx.createGain();
+    gain.gain.value = 0.001;
+    bgOscillator = radioAudioCtx.createOscillator();
+    bgOscillator.frequency.value = 1;
+    bgOscillator.connect(gain);
+    gain.connect(radioAudioCtx.destination);
+    bgOscillator.start();
+    dbg('[RADIO] Background keep-alive started');
+  } catch(e){}
+}
+
+// ── Join radio channel — announce presence via MQTT ──
+function joinRadioChannel(){
+  if(!mqttClient || !mqttConnected) return;
+  // Subscribe to WebRTC signaling topic
+  mqttClient.subscribe('radio/webrtc/signal/' + DRIVER_ID);
+  mqttClient.subscribe('radio/webrtc/presence');
+  // Announce our presence
+  mqttClient.publish('radio/webrtc/presence', JSON.stringify({
+    type: 'join', peerId: DRIVER_ID, name: DRIVER_NAME, ts: Date.now()
+  }));
+  dbg('[RADIO] Joined WebRTC radio channel');
+  startRadioMedia().then(function(){
+    startBackgroundKeepAlive();
+  });
+  document.getElementById('radioStatus').textContent = 'Ready — Hold to talk';
+  document.getElementById('radioStatus').className = 'radio-status';
+}
+
+// ── Create peer connection ──
+function createPeerConnection(remotePeerId){
+  if(rtcPeerConnections[remotePeerId]){
+    var state = rtcPeerConnections[remotePeerId].connectionState;
+    if(state !== 'closed' && state !== 'failed') return rtcPeerConnections[remotePeerId];
+  }
+
+  dbg('[RADIO] Creating peer connection for: ' + remotePeerId);
+  var pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  rtcPendingCandidates[remotePeerId] = [];
+
+  pc.onicecandidate = function(event){
+    if(event.candidate && mqttClient){
+      mqttClient.publish('radio/webrtc/signal/' + remotePeerId, JSON.stringify({
+        type: 'ice-candidate',
+        payload: event.candidate.toJSON(),
+        from: DRIVER_ID,
+        to: remotePeerId,
+      }));
+    }
+  };
+
+  pc.ontrack = function(event){
+    dbg('[RADIO] Received remote track from ' + remotePeerId + ': ' + event.track.kind);
+    var stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
+
+    // Create or update audio element for this peer
+    var existingAudio = rtcAudioElements[remotePeerId];
+    if(!existingAudio){
+      var audio = document.createElement('audio');
+      audio.id = 'rtc-audio-' + remotePeerId;
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.volume = radioVolume;
+      document.body.appendChild(audio);
+      rtcAudioElements[remotePeerId] = audio;
+      existingAudio = audio;
+    }
+    existingAudio.srcObject = stream;
+    existingAudio.play().catch(function(){});
+  };
+
+  pc.onconnectionstatechange = function(){
+    dbg('[RADIO] Connection state with ' + remotePeerId + ': ' + pc.connectionState);
+    updateConnectedPeersList();
+    if(pc.connectionState === 'failed' || pc.connectionState === 'closed'){
+      cleanupPeer(remotePeerId);
+    }
+  };
+
+  // Add local tracks
+  if(rtcLocalStream){
+    rtcLocalStream.getTracks().forEach(function(track){
+      pc.addTrack(track, rtcLocalStream);
+    });
+  }
+
+  rtcPeerConnections[remotePeerId] = pc;
+  return pc;
+}
+
+function updateConnectedPeersList(){
+  rtcConnectedPeers = [];
+  Object.keys(rtcPeerConnections).forEach(function(peerId){
+    if(rtcPeerConnections[peerId].connectionState === 'connected'){
+      rtcConnectedPeers.push(peerId);
+    }
+  });
+  // Update status display
+  var count = rtcConnectedPeers.length;
+  if(count > 0 && !pttActive){
+    document.getElementById('radioStatus').textContent = count + ' peer(s) connected — Hold to talk';
+  }
+}
+
+function cleanupPeer(peerId){
+  if(rtcAudioElements[peerId]){
+    rtcAudioElements[peerId].pause();
+    rtcAudioElements[peerId].remove();
+    delete rtcAudioElements[peerId];
+  }
+  if(rtcPeerConnections[peerId]){
+    try { rtcPeerConnections[peerId].close(); } catch(e){}
+    delete rtcPeerConnections[peerId];
+  }
+  delete rtcPendingCandidates[peerId];
+  updateConnectedPeersList();
+}
+
+// ── Initiate connection to a peer ──
+async function connectToPeer(remotePeerId){
+  if(!rtcLocalStream) await startRadioMedia();
+  if(!rtcLocalStream) return;
+
+  var pc = createPeerConnection(remotePeerId);
+
+  // Ensure tracks are added
+  var senders = pc.getSenders();
+  rtcLocalStream.getTracks().forEach(function(track){
+    if(!senders.find(function(s){ return s.track === track; })){
+      pc.addTrack(track, rtcLocalStream);
+    }
+  });
+
+  var offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  mqttClient.publish('radio/webrtc/signal/' + remotePeerId, JSON.stringify({
+    type: 'offer',
+    payload: offer,
+    from: DRIVER_ID,
+    to: remotePeerId,
+  }));
+  dbg('[RADIO] Sent offer to ' + remotePeerId);
+}
+
+// ── Handle incoming WebRTC signals ──
+async function handleWebRTCSignal(signal){
+  var remotePeerId = signal.from;
+  if(remotePeerId === DRIVER_ID) return;
+  if(signal.to && signal.to !== DRIVER_ID) return;
+
+  var pc = createPeerConnection(remotePeerId);
+
+  try {
+    if(signal.type === 'offer'){
+      // Polite peer pattern: lower ID is polite
+      var isPolite = DRIVER_ID < remotePeerId;
+      if(pc.signalingState !== 'stable'){
+        if(!isPolite){
+          dbg('[RADIO] Ignoring offer due to glare (impolite)');
+          return;
+        }
+        await pc.setLocalDescription({ type: 'rollback' });
+      }
+
+      if(!rtcLocalStream) await startRadioMedia();
+      if(rtcLocalStream){
+        var senders = pc.getSenders();
+        rtcLocalStream.getTracks().forEach(function(track){
+          if(!senders.find(function(s){ return s.track === track; })){
+            pc.addTrack(track, rtcLocalStream);
+          }
+        });
+      }
+
+      await pc.setRemoteDescription(new RTCSessionDescription(signal.payload));
+
+      // Flush pending ICE candidates
+      var pending = rtcPendingCandidates[remotePeerId] || [];
+      for(var i=0; i<pending.length; i++){
+        await pc.addIceCandidate(new RTCIceCandidate(pending[i]));
+      }
+      rtcPendingCandidates[remotePeerId] = [];
+
+      var answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      mqttClient.publish('radio/webrtc/signal/' + remotePeerId, JSON.stringify({
+        type: 'answer',
+        payload: answer,
+        from: DRIVER_ID,
+        to: remotePeerId,
+      }));
+      dbg('[RADIO] Sent answer to ' + remotePeerId);
+      addRadioLog('incoming', remotePeerId, 'Peer connected');
+
+    } else if(signal.type === 'answer'){
+      if(pc.signalingState !== 'have-local-offer'){
+        dbg('[RADIO] Ignoring unexpected answer');
+        return;
+      }
+      await pc.setRemoteDescription(new RTCSessionDescription(signal.payload));
+
+      var pending2 = rtcPendingCandidates[remotePeerId] || [];
+      for(var j=0; j<pending2.length; j++){
+        await pc.addIceCandidate(new RTCIceCandidate(pending2[j]));
+      }
+      rtcPendingCandidates[remotePeerId] = [];
+      addRadioLog('incoming', remotePeerId, 'Peer connected');
+
+    } else if(signal.type === 'ice-candidate'){
+      if(!pc.remoteDescription){
+        if(!rtcPendingCandidates[remotePeerId]) rtcPendingCandidates[remotePeerId] = [];
+        rtcPendingCandidates[remotePeerId].push(signal.payload);
+        return;
+      }
+      await pc.addIceCandidate(new RTCIceCandidate(signal.payload));
+    }
+  } catch(e){
+    dbg('[RADIO] Signal handling error: ' + e.message);
+  }
+}
+
+// ── Handle presence messages ──
+function handleRadioPresence(data){
+  if(data.peerId === DRIVER_ID) return;
+
+  if(data.type === 'join'){
+    dbg('[RADIO] Peer joined: ' + data.peerId);
+    // Only initiate if we have lower ID (prevents duplicate connections)
+    var shouldInitiate = DRIVER_ID < data.peerId;
+    var alreadyConnected = !!rtcPeerConnections[data.peerId] &&
+      rtcPeerConnections[data.peerId].connectionState !== 'closed' &&
+      rtcPeerConnections[data.peerId].connectionState !== 'failed';
+
+    if(shouldInitiate && !alreadyConnected){
+      connectToPeer(data.peerId).catch(function(e){ dbg('[RADIO] Connect error: ' + e.message); });
+    }
+    // Reply with our own presence so the new peer knows about us
+    if(mqttClient){
+      mqttClient.publish('radio/webrtc/presence', JSON.stringify({
+        type: 'here', peerId: DRIVER_ID, name: DRIVER_NAME, ts: Date.now()
+      }));
+    }
+  } else if(data.type === 'here'){
+    // A peer is already in the channel — connect if needed
+    var shouldInit = DRIVER_ID < data.peerId;
+    var exists = !!rtcPeerConnections[data.peerId] &&
+      rtcPeerConnections[data.peerId].connectionState !== 'closed' &&
+      rtcPeerConnections[data.peerId].connectionState !== 'failed';
+
+    if(shouldInit && !exists){
+      connectToPeer(data.peerId).catch(function(e){ dbg('[RADIO] Connect error: ' + e.message); });
+    }
+  } else if(data.type === 'leave'){
+    cleanupPeer(data.peerId);
+  }
+}
+
+// ── PTT: enable/disable audio tracks ──
+function pttStart(evt){
   if(evt) evt.preventDefault();
   if(pttActive) return;
-  if(!mqttClient || !mqttConnected){
-    toast('📻 Radio needs MQTT connection','error');
+  if(!rtcLocalStream){
+    toast('📻 Mic not ready yet','error');
     return;
   }
   pttActive = true;
@@ -1212,49 +1502,10 @@ async function pttStart(evt){
   document.getElementById('radioStatus').textContent = '🔴 TRANSMITTING...';
   document.getElementById('radioStatus').className = 'radio-status live';
 
-  try {
-    if(!radioMediaStream){
-      radioMediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }, video: false });
-      dbg('[RADIO] Microphone access granted');
-    }
-
-    // Use MediaRecorder to capture audio in small chunks
-    var mimeType = 'audio/webm;codecs=opus';
-    if(!MediaRecorder.isTypeSupported(mimeType)){
-      mimeType = 'audio/webm';
-      if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'audio/ogg;codecs=opus';
-    }
-
-    radioMediaRecorder = new MediaRecorder(radioMediaStream, { mimeType: mimeType, audioBitsPerSecond: 32000 });
-
-    radioMediaRecorder.ondataavailable = function(e){
-      if(e.data.size > 0 && pttActive){
-        var reader = new FileReader();
-        reader.onloadend = function(){
-          var base64 = reader.result.split(',')[1];
-          if(base64 && mqttClient && mqttConnected){
-            mqttClient.publish('radio/channel', JSON.stringify({
-              driver: DRIVER_ID,
-              name: DRIVER_NAME,
-              audio: base64,
-              mime: mimeType,
-              ts: Date.now(),
-              seq: Date.now()
-            }));
-          }
-        };
-        reader.readAsDataURL(e.data);
-      }
-    };
-
-    radioMediaRecorder.start(500); // 500ms chunks
-    dbg('[RADIO] Recording started, chunk interval=500ms');
-    addRadioLog('outgoing', DRIVER_NAME, 'Transmitting...');
-  } catch(e){
-    dbg('[RADIO] Mic error: ' + e.message);
-    toast('📻 Microphone access denied','error');
-    pttStop();
-  }
+  // Enable audio tracks — peers hear us instantly
+  rtcLocalStream.getAudioTracks().forEach(function(t){ t.enabled = true; });
+  addRadioLog('outgoing', DRIVER_NAME, 'Transmitting...');
+  dbg('[RADIO] PTT ON — audio tracks enabled');
 }
 
 function pttStop(evt){
@@ -1262,69 +1513,45 @@ function pttStop(evt){
   if(!pttActive) return;
   pttActive = false;
   document.getElementById('pttBtn').classList.remove('active');
-  document.getElementById('radioStatus').textContent = 'Ready — Hold to talk';
+  document.getElementById('radioStatus').textContent = rtcConnectedPeers.length > 0
+    ? rtcConnectedPeers.length + ' peer(s) connected — Hold to talk'
+    : 'Ready — Hold to talk';
   document.getElementById('radioStatus').className = 'radio-status';
 
-  if(radioMediaRecorder && radioMediaRecorder.state !== 'inactive'){
-    radioMediaRecorder.stop();
-    dbg('[RADIO] Recording stopped');
+  // Disable audio tracks — stop transmitting
+  if(rtcLocalStream){
+    rtcLocalStream.getAudioTracks().forEach(function(t){ t.enabled = false; });
   }
-  radioMediaRecorder = null;
+  dbg('[RADIO] PTT OFF — audio tracks disabled');
 }
 
-// Receive and play incoming radio audio
-var radioPlayQueue = [];
-var radioPlaying = false;
-
-function handleRadioReceive(data, source){
-  var label = source === 'dispatch' ? '📡 ' + (data.name || 'Dispatch') : '🚕 ' + (data.name || data.driver);
-  addRadioLog('incoming', label, 'Audio received');
-
-  // Flash the toggle button if panel is closed
-  if(!radioOpen){
-    var btn = document.getElementById('radioToggleBtn');
-    btn.classList.add('has-activity');
-    setTimeout(function(){ btn.classList.remove('has-activity'); }, 3000);
+// ── Wire up MQTT message handler for radio ──
+// This is called from the main MQTT message handler
+function handleRadioMqttMessage(topic, data){
+  if(topic === 'radio/webrtc/signal/' + DRIVER_ID){
+    handleWebRTCSignal(data);
+    return true;
   }
-
-  // Update status
-  document.getElementById('radioStatus').textContent = '🟢 ' + label + ' speaking...';
-  document.getElementById('radioStatus').className = 'radio-status receiving';
-  clearTimeout(window._radioStatusTimer);
-  window._radioStatusTimer = setTimeout(function(){
-    if(!pttActive){
-      document.getElementById('radioStatus').textContent = 'Ready — Hold to talk';
-      document.getElementById('radioStatus').className = 'radio-status';
-    }
-  }, 2000);
-
-  // Decode and play via Web Audio API for better quality
-  try {
-    initRadioAudio();
-    var binaryStr = atob(data.audio);
-    var bytes = new Uint8Array(binaryStr.length);
-    for(var i=0; i<binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-    var blob = new Blob([bytes], { type: data.mime || 'audio/webm;codecs=opus' });
-    blob.arrayBuffer().then(function(arrayBuf){
-      if(radioAudioCtx.state === 'suspended') radioAudioCtx.resume();
-      radioAudioCtx.decodeAudioData(arrayBuf, function(audioBuf){
-        var source = radioAudioCtx.createBufferSource();
-        source.buffer = audioBuf;
-        if(radioGainNode){
-          radioGainNode.gain.value = radioVolume;
-          source.connect(radioGainNode);
-        } else {
-          source.connect(radioAudioCtx.destination);
-        }
-        source.start();
-      }, function(err){
-        dbg('[RADIO] decodeAudioData error: ' + err);
-      });
-    });
-  } catch(e){
-    dbg('[RADIO] Decode error: ' + e.message);
+  if(topic === 'radio/webrtc/presence'){
+    handleRadioPresence(data);
+    return true;
   }
+  return false;
 }
+
+// ── Cleanup on page unload ──
+window.addEventListener('beforeunload', function(){
+  if(mqttClient && mqttConnected){
+    mqttClient.publish('radio/webrtc/presence', JSON.stringify({
+      type: 'leave', peerId: DRIVER_ID, ts: Date.now()
+    }));
+  }
+  Object.keys(rtcPeerConnections).forEach(function(peerId){ cleanupPeer(peerId); });
+  if(rtcLocalStream){
+    rtcLocalStream.getTracks().forEach(function(t){ t.stop(); });
+    rtcLocalStream = null;
+  }
+});
 
 function addRadioLog(type, name, text){
   var now = new Date();
@@ -1343,4 +1570,44 @@ function renderRadioLog(){
   el.scrollTop = el.scrollHeight;
 }
 
-dbg('[RADIO] Walkie-talkie module loaded');
+// ── Legacy fallback: play base64 audio from C# dispatcher ──
+function handleLegacyRadioReceive(data){
+  var label = '📡 ' + (data.name || 'Dispatch');
+  addRadioLog('incoming', label, 'Audio received');
+
+  document.getElementById('radioStatus').textContent = '🟢 ' + label + ' speaking...';
+  document.getElementById('radioStatus').className = 'radio-status receiving';
+  clearTimeout(window._radioStatusTimer);
+  window._radioStatusTimer = setTimeout(function(){
+    if(!pttActive){
+      document.getElementById('radioStatus').textContent = rtcConnectedPeers.length > 0
+        ? rtcConnectedPeers.length + ' peer(s) — Hold to talk'
+        : 'Ready — Hold to talk';
+      document.getElementById('radioStatus').className = 'radio-status';
+    }
+  }, 2000);
+
+  try {
+    if(!radioAudioCtx) radioAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var binaryStr = atob(data.audio);
+    var bytes = new Uint8Array(binaryStr.length);
+    for(var i=0; i<binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    var blob = new Blob([bytes], { type: data.mime || 'audio/webm;codecs=opus' });
+    blob.arrayBuffer().then(function(arrayBuf){
+      if(radioAudioCtx.state === 'suspended') radioAudioCtx.resume();
+      radioAudioCtx.decodeAudioData(arrayBuf, function(audioBuf){
+        var source = radioAudioCtx.createBufferSource();
+        source.buffer = audioBuf;
+        var gain = radioAudioCtx.createGain();
+        gain.gain.value = radioVolume;
+        source.connect(gain);
+        gain.connect(radioAudioCtx.destination);
+        source.start();
+      });
+    });
+  } catch(e){
+    dbg('[RADIO] Legacy decode error: ' + e.message);
+  }
+}
+
+dbg('[RADIO] WebRTC walkie-talkie module loaded');
