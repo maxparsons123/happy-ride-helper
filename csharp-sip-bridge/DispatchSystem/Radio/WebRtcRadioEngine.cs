@@ -41,7 +41,8 @@ public class WebRtcRadioEngine : IDisposable
     private OpusEncoder? _opusEncoder;
     private OpusDecoder? _opusDecoder;
     private const int OPUS_SAMPLE_RATE = 48000;
-    private const int OPUS_CHANNELS = 1;
+    private const int OPUS_CHANNELS = 1;        // Actual encoder/decoder channels (mono)
+    private const int OPUS_SDP_CHANNELS = 2;    // WebRTC spec mandates opus/48000/2 in SDP negotiation
     private const int OPUS_FRAME_MS = 20;
     private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE * OPUS_FRAME_MS / 1000; // 960 samples
 
@@ -188,7 +189,7 @@ public class WebRtcRadioEngine : IDisposable
         var pc = new RTCPeerConnection(config);
 
         // Add audio track (48kHz mono Opus)
-        var audioFormat = new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, 1);
+        var audioFormat = new AudioFormat(AudioCodecsEnum.OPUS, 111, OPUS_SAMPLE_RATE, OPUS_SDP_CHANNELS);
         var track = new MediaStreamTrack(audioFormat, MediaStreamStatusEnum.SendRecv);
         pc.addTrack(track);
 
