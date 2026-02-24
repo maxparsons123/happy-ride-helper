@@ -380,36 +380,61 @@ public class WebRtcRadioEngine : IDisposable
         }
 
         _pttTargets = null;
+        _micAccumCount = 0;
 
         OnLog?.Invoke("⬛ PTT released", false);
     }
+
+    // Accumulate mic samples into exact OPUS_FRAME_SIZE chunks
+    private short[] _micAccum = new short[OPUS_FRAME_SIZE * 4];
+    private int _micAccumCount;
 
     private void OnMicData(object? sender, NAudio.Wave.WaveInEventArgs args)
     {
         if (!_pttActive || args.BytesRecorded == 0 || _opusEncoder == null) return;
 
-        // Convert PCM bytes to short samples
         int sampleCount = args.BytesRecorded / 2;
-        var pcmSamples = new short[sampleCount];
-        Buffer.BlockCopy(args.Buffer, 0, pcmSamples, 0, args.BytesRecorded);
+        var incoming = new short[sampleCount];
+        Buffer.BlockCopy(args.Buffer, 0, incoming, 0, args.BytesRecorded);
 
-        // Opus encode
-        var encodedBuffer = new byte[4000]; // max Opus frame
-        int encodedLength = _opusEncoder.Encode(pcmSamples, 0, OPUS_FRAME_SIZE, encodedBuffer, 0, encodedBuffer.Length);
-        if (encodedLength <= 0) return;
-
-        var opusFrame = new byte[encodedLength];
-        Array.Copy(encodedBuffer, opusFrame, encodedLength);
-
-        foreach (var kvp in _peers)
+        int offset = 0;
+        while (offset < sampleCount)
         {
-            if (_pttTargets != null && _pttTargets.Count > 0 && !_pttTargets.Contains(kvp.Key))
-                continue;
-            try
+            int toCopy = Math.Min(sampleCount - offset, OPUS_FRAME_SIZE - _micAccumCount);
+            Array.Copy(incoming, offset, _micAccum, _micAccumCount, toCopy);
+            _micAccumCount += toCopy;
+            offset += toCopy;
+
+            if (_micAccumCount >= OPUS_FRAME_SIZE)
             {
-                kvp.Value.SendAudio((uint)(OPUS_FRAME_MS * OPUS_SAMPLE_RATE / 1000), opusFrame);
+                EncodeAndSend(_micAccum, OPUS_FRAME_SIZE);
+                _micAccumCount = 0;
             }
-            catch { /* peer may have disconnected */ }
+        }
+    }
+
+    private void EncodeAndSend(short[] pcmSamples, int frameSize)
+    {
+        try
+        {
+            var encodedBuffer = new byte[4000];
+            int encodedLength = _opusEncoder!.Encode(pcmSamples, 0, frameSize, encodedBuffer, 0, encodedBuffer.Length);
+            if (encodedLength <= 0) return;
+
+            var opusFrame = new byte[encodedLength];
+            Array.Copy(encodedBuffer, opusFrame, encodedLength);
+
+            foreach (var kvp in _peers)
+            {
+                if (_pttTargets != null && _pttTargets.Count > 0 && !_pttTargets.Contains(kvp.Key))
+                    continue;
+                try { kvp.Value.SendAudio((uint)OPUS_FRAME_SIZE, opusFrame); }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            OnLog?.Invoke($"⚠ Opus encode error: {ex.Message}", true);
         }
     }
 
