@@ -63,8 +63,7 @@ public class WebRtcRadioEngine : IDisposable
         _opusEncoder = new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
         _opusEncoder.Bitrate = 48000;        // 48kbps for clear voice (was 24kbps)
         _opusEncoder.Complexity = 10;         // Max quality encoding
-        _opusEncoder.UseInbandFEC = true;     // Forward error correction for packet loss
-        _opusEncoder.PacketLossPercentage = 5; // Hint for FEC redundancy
+        _opusEncoder.UseInbandFEC = true;
         _opusDecoder = new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
         InitPlayback();
     }
