@@ -78,6 +78,9 @@
   .btn-bid:disabled{opacity:.5;cursor:not-allowed}
   .btn-preview{background:#222;color:var(--text)}
   .btn-connect{background:#222;color:var(--cyan)}
+  .card-connectors{margin-top:8px;border-top:1px solid #333;padding-top:8px}
+  .conn-mini{background:#111;border:1px solid #2a2a2a;border-radius:6px;padding:6px 8px;margin-bottom:4px;cursor:pointer;transition:.15s}
+  .conn-mini:hover{border-color:var(--cyan);background:#1a1a1a}
 
   /* CONNECTING JOBS */
   .connectors-section{margin-top:12px;border:1px solid #333;border-radius:10px;padding:10px;background:rgba(6,182,212,.05)}
@@ -254,6 +257,7 @@ let availableJobs = [];
 let inboxJobs = [];
 let historyJobs = [];
 let selectedJobId = null;
+let expandedConnectors = null;
 let activeInboxJob = null;
 let msgPanelOpen = false;
 let messages = [];
@@ -316,6 +320,23 @@ function renderAvailableJobs(){
     const km = (j.distanceFromDriver/1000).toFixed(1);
     const sel = j.jobId===selectedJobId?'selected':'';
     const pending = j.bidStatus==='pending'?'bid-pending':'';
+    const conns = getConnectingJobs(j);
+    const connCount = conns.length;
+    const expanded = expandedConnectors===j.jobId;
+    const connHTML = expanded && connCount ? `<div class="card-connectors">
+      <div style="font-size:11px;color:var(--cyan);font-weight:700;margin-bottom:4px">🔗 Connecting jobs near dropoff:</div>
+      ${conns.map(c=>{
+        const ckm = (c.distFromDropoff/1000).toFixed(1);
+        return `<div class="conn-mini" onclick="event.stopPropagation();previewConnector('${c.jobId}','${j.jobId}')">
+          <div style="display:flex;justify-content:space-between">
+            <span style="font-size:11px;font-weight:600">📍 ${c.pickup.address}</span>
+            <span style="font-size:10px;color:var(--cyan)">${ckm}km</span>
+          </div>
+          <div style="font-size:10px;color:var(--muted)">🏁 ${c.dropoff.address} · <span style="color:var(--green);font-weight:700">£${c.pricing.estimate.toFixed(2)}</span>${c.savedKm>0?` · <span style="color:var(--gold)">Save ${c.savedKm}km</span>`:''}</div>
+        </div>`;
+      }).join('')}
+      ${connCount?`<div style="font-size:11px;color:var(--gold);font-weight:700;margin-top:4px">💰 Chain total: £${(j.pricing.estimate+conns.reduce((s,c)=>s+c.pricing.estimate,0)).toFixed(2)}</div>`:''}
+    </div>` : '';
     return `<div class="job-card ${sel} ${pending}" onclick="selectJob('${j.jobId}')">
       <div class="jc-top">
         <div class="jc-pickup">${j.pickup.address}</div>
@@ -331,11 +352,12 @@ function renderAvailableJobs(){
       <div class="jc-tags">${j.tags.map(t=>`<span class="tag tag-${t}">${t.toUpperCase()}</span>`).join('')}</div>
       <div class="jc-actions">
         <button class="btn btn-preview" onclick="event.stopPropagation();previewJob('${j.jobId}')">👁 Preview</button>
-        <button class="btn btn-connect" onclick="event.stopPropagation();showConnectors('${j.jobId}')">🔗 ${getConnectingJobs(j).length}</button>
+        <button class="btn btn-connect" onclick="event.stopPropagation();toggleConnectors('${j.jobId}')">🔗 ${connCount}${connCount?'':'  '}</button>
         <button class="btn btn-bid" ${j.bidStatus!=='none'?'disabled':''} onclick="event.stopPropagation();bidOnJob('${j.jobId}')">
           ${j.bidStatus==='pending'?'⏳ Pending…':'⚡ BID'}
         </button>
       </div>
+      ${connHTML}
     </div>`;
   }).join('');
 }
@@ -415,12 +437,12 @@ function previewConnector(connId, parentId){
   map.fitBounds(routeLine.getBounds().pad(0.15));
 }
 
-function showConnectors(id){
-  const j = availableJobs.find(x=>x.jobId===id);
-  if(!j) return;
-  const conns = getConnectingJobs(j);
-  toast(`🔗 ${conns.length} connecting jobs near ${j.dropoff.address}`,'info');
+function toggleConnectors(id){
+  expandedConnectors = expandedConnectors===id ? null : id;
+  renderAvailableJobs();
 }
+
+function showConnectors(id){ toggleConnectors(id); }
 
 // ── BIDDING ──
 function bidOnJob(id){
