@@ -3,12 +3,11 @@ using DispatchSystem.Data;
 namespace DispatchSystem.Dispatch;
 
 /// <summary>
-/// Bidding-based dispatch with global optimal matching.
-/// Multiple jobs can be open for bidding simultaneously. Drivers can bid on
-/// multiple jobs. After each job's bidding window closes, ALL open windows
-/// are checked — once all pending windows have closed, a global assignment
-/// runs using a greedy scoring algorithm: 60% proximity + 40% fairness.
-/// Each driver is assigned at most one job (the best match across all bids).
+/// Bidding-based dispatch with global optimal matching via Hungarian algorithm.
+/// Phases: (A) Bidding — collect bids + compute rich scores, (B) Allocation — 
+/// Hungarian optimal 1:1 assignment, (C) Bundling — suggest follow-on jobs.
+/// 
+/// Scoring includes: proximity, fairness, reliability, ETA quality, GPS spoof penalty.
 /// </summary>
 public sealed class BiddingDispatcher : IDisposable
 {
@@ -16,12 +15,15 @@ public sealed class BiddingDispatcher : IDisposable
     private readonly int _biddingWindowMs;
     private readonly double _maxBidRadiusKm;
     private readonly object _lock = new();
+    private readonly DispatchScorer _scorer;
 
     // Active bidding sessions: jobId → list of bids
     private readonly Dictionary<string, List<DriverBid>> _activeBids = new();
     private readonly Dictionary<string, System.Threading.Timer> _timers = new();
     // Jobs whose windows have closed but haven't been globally resolved yet
     private readonly Dictionary<string, List<DriverBid>> _closedBids = new();
+    // Rolling last-known location per driver (for spoof detection)
+    private readonly Dictionary<string, LocationSample> _lastLocations = new();
 
     public event Action<string>? OnLog;
     /// <summary>Fired when bidding starts — publish bid request to these drivers via MQTT.</summary>
@@ -32,6 +34,8 @@ public sealed class BiddingDispatcher : IDisposable
     public event Action<Job, string>? OnBidLost;
     /// <summary>Fired when no bids received.</summary>
     public event Action<Job>? OnNoBids;
+    /// <summary>Fired when a bundle/chain opportunity is detected. Args: primary job, candidate next jobs.</summary>
+    public event Action<Job, List<Job>>? OnBundleOpportunity;
 
     public bool Enabled { get; set; } = false;
 
@@ -42,6 +46,7 @@ public sealed class BiddingDispatcher : IDisposable
         _db = db;
         _biddingWindowMs = biddingWindowMs;
         _maxBidRadiusKm = maxBidRadiusKm;
+        _scorer = new DispatchScorer(new SimpleEtaModel());
     }
 
     /// <summary>
@@ -99,6 +104,7 @@ public sealed class BiddingDispatcher : IDisposable
 
     /// <summary>
     /// Record a bid from a driver for a job. A driver can bid on multiple jobs.
+    /// Also runs spoof detection against last known location.
     /// </summary>
     public void RecordBid(string jobId, string driverId, double lat, double lng)
     {
@@ -123,10 +129,20 @@ public sealed class BiddingDispatcher : IDisposable
             var distKm = AutoDispatcher.HaversineKm(job.PickupLat, job.PickupLng, lat, lng);
             var completedJobs = _db.GetCompletedJobCountForDriver(driverId);
 
-            // Get driver name for the record
+            // Get driver name
             var allDrivers = _db.GetAllDrivers();
             var driverRecord = allDrivers.FirstOrDefault(d => d.Id == driverId);
             var driverName = driverRecord?.Name ?? driverId;
+
+            // Spoof detection
+            var currentSample = new LocationSample { Lat = lat, Lng = lng, TsMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+            _lastLocations.TryGetValue(driverId, out var prevSample);
+            var (spoofRisk, spoofFlags) = SpoofDetector.Evaluate(prevSample, currentSample);
+            _lastLocations[driverId] = currentSample;
+
+            // Driver stats for reliability
+            var stats = _db.GetDriverStats(driverId);
+            var reliabilityScore = Reliability.Score(stats);
 
             bids.Add(new DriverBid
             {
@@ -137,13 +153,34 @@ public sealed class BiddingDispatcher : IDisposable
                 Lng = lng,
                 DistanceKm = distKm,
                 CompletedJobs = completedJobs,
-                BidTime = DateTime.UtcNow
+                BidTime = DateTime.UtcNow,
+                SpoofRisk = spoofRisk,
+                SpoofFlags = spoofFlags,
+                ReliabilityScore = reliabilityScore
             });
 
             // Persist bids to job record in DB
             PersistBidsToJob(jobId, bids);
 
-            OnLog?.Invoke($"💬 Bid from {driverName} ({driverId}) for {jobId} ({distKm:F1}km, {completedJobs} prior jobs)");
+            var spoofNote = spoofFlags.Count > 0 ? $" ⚠ spoof:{string.Join(",", spoofFlags)}" : "";
+            OnLog?.Invoke($"💬 Bid from {driverName} ({driverId}) for {jobId} ({distKm:F1}km, reliability={reliabilityScore:F2}{spoofNote})");
+        }
+    }
+
+    /// <summary>
+    /// Update the last known location for a driver (called from GPS status updates).
+    /// Feeds into spoof detection.
+    /// </summary>
+    public void UpdateDriverLocation(string driverId, double lat, double lng)
+    {
+        lock (_lock)
+        {
+            _lastLocations[driverId] = new LocationSample
+            {
+                Lat = lat,
+                Lng = lng,
+                TsMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
         }
     }
 
@@ -162,7 +199,11 @@ public sealed class BiddingDispatcher : IDisposable
                 b.Lng,
                 b.DistanceKm,
                 b.CompletedJobs,
-                BidTime = b.BidTime.ToString("o")
+                BidTime = b.BidTime.ToString("o"),
+                b.ReliabilityScore,
+                b.SpoofRisk,
+                b.SpoofFlags,
+                Score = b.FinalScore
             });
             var json = JsonSerializer.Serialize(bidRecords);
             _db.UpdateJobBids(jobId, json);
@@ -208,10 +249,10 @@ public sealed class BiddingDispatcher : IDisposable
 
     /// <summary>
     /// Global optimal matching across all closed bidding sessions.
-    /// Uses greedy assignment: score each (driver, job) pair, pick the best,
-    /// assign it, remove that driver and job from the pool, repeat.
-    /// Score = 60% proximity (closer is better) + 40% fairness (fewer completed jobs is better).
+    /// Uses Hungarian algorithm for true optimal 1:1 assignment.
+    /// Score = f(proximity, fairness, reliability, ETA, spoofPenalty).
     /// Each driver gets at most 1 job.
+    /// After allocation, runs bundle detection.
     /// </summary>
     private void RunGlobalOptimalMatch()
     {
@@ -224,8 +265,8 @@ public sealed class BiddingDispatcher : IDisposable
 
         try
         {
-            // Collect all bids into a flat list with job context
-            var allBids = new List<DriverBid>();
+            // Separate jobs with/without bids
+            var jobsWithBids = new List<(string jobId, List<DriverBid> bids)>();
             var jobsWithNoBids = new List<string>();
 
             foreach (var (jobId, bids) in closedSnapshot)
@@ -233,7 +274,7 @@ public sealed class BiddingDispatcher : IDisposable
                 if (bids.Count == 0)
                     jobsWithNoBids.Add(jobId);
                 else
-                    allBids.AddRange(bids);
+                    jobsWithBids.Add((jobId, bids));
             }
 
             // Handle jobs with no bids — return to pending
@@ -245,125 +286,134 @@ public sealed class BiddingDispatcher : IDisposable
                 if (noJob != null) OnNoBids?.Invoke(noJob);
             }
 
-            if (allBids.Count == 0) return;
+            if (jobsWithBids.Count == 0) return;
 
-            // Compute global normalization values across ALL bids
-            double maxDist = allBids.Max(b => b.DistanceKm);
-            double maxJobs = allBids.Max(b => b.CompletedJobs);
-            if (maxDist == 0) maxDist = 1;
-            if (maxJobs == 0) maxJobs = 1;
-
-            // Score every bid
-            var scoredBids = allBids.Select(b => new
-            {
-                Bid = b,
-                Score = 0.6 * (1.0 - b.DistanceKm / maxDist) +
-                        0.4 * (1.0 - (double)b.CompletedJobs / maxJobs)
-            }).OrderByDescending(x => x.Score).ToList();
-
-            // Persist final bids with scores to each job
-            foreach (var (jobId, bids) in closedSnapshot)
-            {
-                if (bids.Count == 0) continue;
-                var bidRecords = bids.Select(b =>
-                {
-                    var scored = scoredBids.FirstOrDefault(s => s.Bid.DriverId == b.DriverId && s.Bid.JobId == b.JobId);
-                    return new
-                    {
-                        b.DriverId,
-                        b.DriverName,
-                        b.Lat,
-                        b.Lng,
-                        b.DistanceKm,
-                        b.CompletedJobs,
-                        BidTime = b.BidTime.ToString("o"),
-                        Score = scored?.Score ?? 0
-                    };
-                });
-                var json = JsonSerializer.Serialize(bidRecords);
-                _db.UpdateJobBids(jobId, json);
-            }
-
-            var assignedDrivers = new HashSet<string>();
-            var assignedJobs = new HashSet<string>();
+            // Collect unique drivers who bid
+            var driverIds = jobsWithBids.SelectMany(j => j.bids).Select(b => b.DriverId).Distinct().ToList();
             var allDrivers = _db.GetAllDrivers();
 
-            OnLog?.Invoke($"🧮 Running global optimal match: {closedSnapshot.Count} jobs, " +
-                          $"{allBids.Select(b => b.DriverId).Distinct().Count()} unique drivers, " +
-                          $"{allBids.Count} total bids");
+            OnLog?.Invoke($"🧮 Running Hungarian optimal match: {jobsWithBids.Count} jobs, " +
+                          $"{driverIds.Count} unique drivers");
 
-            // Greedy assignment: best score first
-            foreach (var entry in scoredBids)
+            // Build cost matrix (jobs = rows, drivers = columns)
+            int nJobs = jobsWithBids.Count;
+            int nDrivers = driverIds.Count;
+            int N = Math.Max(nJobs, nDrivers);
+            var cost = new double[N, N];
+
+            // Fill with high cost (1.0 = no match possible)
+            for (int i = 0; i < N; i++)
+                for (int j = 0; j < N; j++)
+                    cost[i, j] = 1.0;
+
+            // Compute utility for each (job, driver) pair where bid exists
+            for (int ji = 0; ji < nJobs; ji++)
             {
-                var bid = entry.Bid;
-                if (assignedDrivers.Contains(bid.DriverId) || assignedJobs.Contains(bid.JobId))
-                    continue;
-
-                var driver = allDrivers.FirstOrDefault(d => d.Id == bid.DriverId);
-                if (driver == null) continue;
-
-                // Assign this driver to this job
-                assignedDrivers.Add(bid.DriverId);
-                assignedJobs.Add(bid.JobId);
-
-                var etaMins = (int)Math.Ceiling(bid.DistanceKm / 0.5);
-                _db.UpdateJobStatus(bid.JobId, JobStatus.Allocated, driver.Id, bid.DistanceKm, etaMins);
-                driver.Status = DriverStatus.OnJob;
-                _db.UpsertDriver(driver);
-
-                OnLog?.Invoke($"🏆 Global match: {bid.JobId} → {driver.Name} " +
-                              $"(score={entry.Score:F3}, {bid.DistanceKm:F1}km, {bid.CompletedJobs} prior, ~{etaMins}min ETA)");
-
-                // Fire allocated event
-                var activeJobs = _db.GetActiveJobs();
-                var allocatedJob = activeJobs.FirstOrDefault(j => j.Id == bid.JobId);
-                if (allocatedJob != null)
+                var (jobId, bids) = jobsWithBids[ji];
+                foreach (var bid in bids)
                 {
-                    allocatedJob.AllocatedDriverId = driver.Id;
-                    allocatedJob.DriverDistanceKm = bid.DistanceKm;
-                    allocatedJob.DriverEtaMinutes = etaMins;
-                    OnJobAllocated?.Invoke(allocatedJob, driver);
+                    int di = driverIds.IndexOf(bid.DriverId);
+                    if (di < 0) continue;
+
+                    var stats = _db.GetDriverStats(bid.DriverId);
+                    var utility = _scorer.Utility(bid.DistanceKm, bid.CompletedJobs, stats, bid.SpoofRisk);
+                    bid.FinalScore = utility;
+
+                    cost[ji, di] = 1.0 - utility;
                 }
             }
 
-            // Notify losing bidders and handle unassigned jobs
-            foreach (var (jobId, bids) in closedSnapshot)
-            {
-                if (bids.Count == 0) continue;
+            // Run Hungarian algorithm
+            var assignment = Hungarian.Solve(cost);
 
-                if (!assignedJobs.Contains(jobId))
+            // Process assignments
+            var assignedJobs = new HashSet<string>();
+
+            for (int ji = 0; ji < nJobs; ji++)
+            {
+                var (jobId, bids) = jobsWithBids[ji];
+                int di = assignment[ji];
+
+                // Persist scored bids
+                PersistBidsToJob(jobId, bids);
+
+                // Check if assignment is valid
+                if (di < 0 || di >= nDrivers)
                 {
-                    // No driver available (all drivers assigned to other jobs)
-                    OnLog?.Invoke($"⚠ Job {jobId} unmatched — all bidding drivers assigned elsewhere, returning to pending");
+                    OnLog?.Invoke($"⚠ Job {jobId} unmatched by Hungarian — returning to pending");
                     _db.UpdateJobStatus(jobId, JobStatus.Pending);
                     var unmatchedJob = _db.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
                     if (unmatchedJob != null) OnNoBids?.Invoke(unmatchedJob);
                     continue;
                 }
 
-                // Find the winning driver for this job
-                var winnerBid = scoredBids.FirstOrDefault(s =>
-                    s.Bid.JobId == jobId && assignedDrivers.Contains(s.Bid.DriverId) &&
-                    assignedJobs.Contains(s.Bid.JobId));
+                var winnerId = driverIds[di];
+                var winnerBid = bids.FirstOrDefault(b => b.DriverId == winnerId);
 
-                var activeJobsForLost = _db.GetActiveJobs();
-                var jobForLost = activeJobsForLost.FirstOrDefault(j => j.Id == jobId);
-                if (jobForLost == null) continue;
-
-                foreach (var loser in bids.Where(b => b.DriverId != winnerBid?.Bid.DriverId))
+                // Must have actually bid on this job
+                if (winnerBid == null || (winnerBid.FinalScore ?? 0) < 0.01)
                 {
-                    OnLog?.Invoke($"📤 Bid lost → {loser.DriverId} for {jobId}");
-                    OnBidLost?.Invoke(jobForLost, loser.DriverId);
+                    OnLog?.Invoke($"⚠ Job {jobId} — assigned driver {winnerId} didn't bid or score too low, returning to pending");
+                    _db.UpdateJobStatus(jobId, JobStatus.Pending);
+                    var unmatchedJob = _db.GetActiveJobs().FirstOrDefault(j => j.Id == jobId);
+                    if (unmatchedJob != null) OnNoBids?.Invoke(unmatchedJob);
+                    continue;
+                }
+
+                var driver = allDrivers.FirstOrDefault(d => d.Id == winnerId);
+                if (driver == null || driver.Status != DriverStatus.Online)
+                {
+                    OnLog?.Invoke($"⚠ Job {jobId} — winner {winnerId} offline, returning to pending");
+                    _db.UpdateJobStatus(jobId, JobStatus.Pending);
+                    continue;
+                }
+
+                // Allocate
+                var etaModel = new SimpleEtaModel();
+                var etaMins = etaModel.PredictEtaMinutes(winnerBid.DistanceKm, DateTime.UtcNow);
+                _db.UpdateJobStatus(jobId, JobStatus.Allocated, driver.Id, winnerBid.DistanceKm, etaMins);
+                driver.Status = DriverStatus.OnJob;
+                _db.UpsertDriver(driver);
+                assignedJobs.Add(jobId);
+
+                OnLog?.Invoke($"🏆 Hungarian match: {jobId} → {driver.Name} " +
+                              $"(score={winnerBid.FinalScore:F3}, dist={winnerBid.DistanceKm:F1}km, " +
+                              $"reliability={winnerBid.ReliabilityScore:F2}, spoofRisk={winnerBid.SpoofRisk:F2}, ~{etaMins}min ETA)");
+
+                // Fire allocated event
+                var activeJobs = _db.GetActiveJobs();
+                var allocatedJob = activeJobs.FirstOrDefault(j => j.Id == jobId);
+                if (allocatedJob != null)
+                {
+                    allocatedJob.AllocatedDriverId = driver.Id;
+                    allocatedJob.DriverDistanceKm = winnerBid.DistanceKm;
+                    allocatedJob.DriverEtaMinutes = etaMins;
+                    OnJobAllocated?.Invoke(allocatedJob, driver);
+
+                    // Bundle detection: find follow-on jobs near this dropoff
+                    var pendingJobs = _db.GetPendingJobs();
+                    var connectors = Bundler.FindConnectors(allocatedJob, pendingJobs);
+                    if (connectors.Count > 0)
+                    {
+                        OnLog?.Invoke($"🔗 Bundle opportunity: {connectors.Count} jobs near dropoff of {jobId}");
+                        OnBundleOpportunity?.Invoke(allocatedJob, connectors);
+                    }
+                }
+
+                // Notify losers
+                var jobForNotify = allocatedJob ?? new Job { Id = jobId };
+                foreach (var loser in bids.Where(b => b.DriverId != winnerId))
+                {
+                    OnLog?.Invoke($"📤 Bid lost → {loser.DriverName} ({loser.DriverId}) for {jobId}");
+                    OnBidLost?.Invoke(jobForNotify, loser.DriverId);
                 }
             }
 
-            OnLog?.Invoke($"✅ Global matching complete: {assignedJobs.Count} jobs assigned, " +
-                          $"{closedSnapshot.Count - assignedJobs.Count - jobsWithNoBids.Count} unmatched");
+            OnLog?.Invoke($"✅ Hungarian matching complete: {assignedJobs.Count}/{jobsWithBids.Count} jobs assigned");
         }
         catch (Exception ex)
         {
             OnLog?.Invoke($"❌ Global matching error: {ex.Message}");
-            // Return all jobs to pending on error
             foreach (var jobId in closedSnapshot.Keys)
                 _db.UpdateJobStatus(jobId, JobStatus.Pending);
         }
@@ -395,7 +445,7 @@ public sealed class BiddingDispatcher : IDisposable
 }
 
 /// <summary>
-/// A bid from a driver for a specific job.
+/// A bid from a driver for a specific job — enriched with reliability + spoof data.
 /// </summary>
 public class DriverBid
 {
@@ -407,4 +457,9 @@ public class DriverBid
     public double DistanceKm { get; set; }
     public int CompletedJobs { get; set; }
     public DateTime BidTime { get; set; }
+    // Enhanced fields
+    public double SpoofRisk { get; set; }
+    public List<string> SpoofFlags { get; set; } = new();
+    public double ReliabilityScore { get; set; } = 1.0;
+    public double? FinalScore { get; set; }
 }

@@ -61,6 +61,16 @@ public sealed class DispatchDb : IDisposable
 
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_drivers_status ON drivers(status);
+
+            CREATE TABLE IF NOT EXISTS driver_stats (
+                driver_id TEXT PRIMARY KEY,
+                completed_jobs INTEGER NOT NULL DEFAULT 0,
+                cancelled_jobs INTEGER NOT NULL DEFAULT 0,
+                no_show_cancels INTEGER NOT NULL DEFAULT 0,
+                accept_rate REAL NOT NULL DEFAULT 1.0,
+                avg_rating REAL NOT NULL DEFAULT 5.0,
+                last_updated_utc TEXT
+            );
         """;
         cmd.ExecuteNonQuery();
 
@@ -378,6 +388,74 @@ public sealed class DispatchDb : IDisposable
         cmd.CommandText = "UPDATE drivers SET total_jobs_completed = total_jobs_completed + 1 WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", driverId);
         cmd.ExecuteNonQuery();
+    }
+
+    // ── Driver Stats ──
+
+    public Dispatch.DriverStats GetDriverStats(string driverId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT * FROM driver_stats WHERE driver_id = $id";
+        cmd.Parameters.AddWithValue("$id", driverId);
+        using var r = cmd.ExecuteReader();
+        if (r.Read())
+        {
+            return new Dispatch.DriverStats
+            {
+                DriverId = r.GetString(0),
+                CompletedJobs = r.GetInt32(1),
+                CancelledJobs = r.GetInt32(2),
+                NoShowCancels = r.GetInt32(3),
+                AcceptRate = r.GetDouble(4),
+                AvgRating = r.GetDouble(5),
+                LastUpdatedUtc = DateTime.TryParse(r.IsDBNull(6) ? null : r.GetString(6), out var dt) ? dt : DateTime.UtcNow
+            };
+        }
+        // Return default stats for new drivers
+        return new Dispatch.DriverStats { DriverId = driverId };
+    }
+
+    public void UpsertDriverStats(Dispatch.DriverStats s)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO driver_stats (driver_id, completed_jobs, cancelled_jobs, no_show_cancels, accept_rate, avg_rating, last_updated_utc)
+            VALUES ($id, $cj, $xj, $ns, $ar, $rt, $lu)
+            ON CONFLICT(driver_id) DO UPDATE SET
+                completed_jobs = excluded.completed_jobs,
+                cancelled_jobs = excluded.cancelled_jobs,
+                no_show_cancels = excluded.no_show_cancels,
+                accept_rate = excluded.accept_rate,
+                avg_rating = excluded.avg_rating,
+                last_updated_utc = excluded.last_updated_utc
+        """;
+        cmd.Parameters.AddWithValue("$id", s.DriverId);
+        cmd.Parameters.AddWithValue("$cj", s.CompletedJobs);
+        cmd.Parameters.AddWithValue("$xj", s.CancelledJobs);
+        cmd.Parameters.AddWithValue("$ns", s.NoShowCancels);
+        cmd.Parameters.AddWithValue("$ar", s.AcceptRate);
+        cmd.Parameters.AddWithValue("$rt", s.AvgRating);
+        cmd.Parameters.AddWithValue("$lu", s.LastUpdatedUtc.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Increment completed jobs in driver_stats.</summary>
+    public void RecordDriverCompletion(string driverId)
+    {
+        var stats = GetDriverStats(driverId);
+        stats.CompletedJobs++;
+        stats.LastUpdatedUtc = DateTime.UtcNow;
+        UpsertDriverStats(stats);
+    }
+
+    /// <summary>Increment cancelled jobs in driver_stats.</summary>
+    public void RecordDriverCancellation(string driverId, bool noShow = false)
+    {
+        var stats = GetDriverStats(driverId);
+        stats.CancelledJobs++;
+        if (noShow) stats.NoShowCancels++;
+        stats.LastUpdatedUtc = DateTime.UtcNow;
+        UpsertDriverStats(stats);
     }
 
     public void Dispose() => _conn?.Dispose();
