@@ -6,7 +6,7 @@
 <title>Black Cab Unite — Driver Tablet App</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   :root{
@@ -225,13 +225,24 @@
   </div>
 </div>
 
+<!-- Debug log visible on screen -->
+<div id="debugLog" style="position:fixed;bottom:0;left:0;right:0;z-index:99999;background:rgba(0,0,0,0.9);color:#0f0;font-family:monospace;font-size:11px;max-height:150px;overflow-y:auto;padding:4px 8px;display:none;"></div>
+
 <script>
+// Visible debug logger
+var _dbg = document.getElementById('debugLog');
+_dbg.style.display = 'block';
+function dbg(msg){
+  var d = document.getElementById('debugLog');
+  if(d){ d.innerHTML += new Date().toLocaleTimeString() + ' ' + msg + '<br>'; d.scrollTop = d.scrollHeight; }
+  console.log(msg);
+}
 window.onerror = function(msg, url, line, col, err) {
-  console.error('[GLOBAL ERROR]', msg, 'at line', line, ':', err);
+  dbg('❌ ERROR L' + line + ': ' + msg);
   var pill = document.getElementById('mqttText');
   if(pill) pill.textContent = 'JS Error L' + line;
 };
-console.log('[BOOT] Script starting...');
+dbg('[BOOT] Script starting...');
 // ── MAP SETUP ──
 const DRIVER_START = [52.4068, -1.5197]; // Coventry
 const map = L.map('map').setView(DRIVER_START, 13);
@@ -797,9 +808,15 @@ function publishDriverStatus() {
 }
 
 // ── REAL MQTT CONNECTION ──
-const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+const MQTT_BROKERS = [
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt'
+];
+let currentBrokerIdx = 0;
+let MQTT_BROKER = MQTT_BROKERS[0];
 let mqttClient = null;
 let mqttConnected = false;
+let mqttRetryCount = 0;
 const otherDrivers = {};
 const driverStatus = {};
 const chatMessages = { group: [] };
@@ -863,9 +880,17 @@ function updateMqttStatus(status){
 }
 
 function connectMqtt(){
-  console.log('🔌 Connecting to MQTT broker:', MQTT_BROKER);
+  dbg('🔌 Connecting to MQTT broker: ' + MQTT_BROKER);
+  document.getElementById('mqttText').textContent = 'MQTT Connecting...';
+  if(typeof mqtt === 'undefined' || !mqtt.connect){
+    dbg('❌ mqtt library not loaded! typeof mqtt=' + typeof mqtt);
+    document.getElementById('mqttText').textContent = 'MQTT lib missing';
+    return;
+  }
+  dbg('✅ mqtt lib found, version: ' + (mqtt.version || 'unknown'));
   try {
     const clientId = `driver_${DRIVER_ID}_${Math.random().toString(36).substr(2, 8)}`;
+    dbg('🔌 ClientId: ' + clientId);
     mqttClient = mqtt.connect(MQTT_BROKER, {
       clientId: clientId,
       reconnectPeriod: 2000,
@@ -873,9 +898,10 @@ function connectMqtt(){
       keepalive: 60,
       clean: true
     });
+    dbg('🔌 mqtt.connect() called, waiting for events...');
 
     mqttClient.on('connect', ()=>{
-      console.log('✅ MQTT connected as:', DRIVER_ID);
+      dbg('✅ MQTT connected as: ' + DRIVER_ID);
       updateMqttStatus('connected');
       mqttClient.subscribe('pubs/requests/+');
       mqttClient.subscribe('taxi/bookings');
@@ -886,7 +912,7 @@ function connectMqtt(){
       mqttClient.subscribe('drivers/+/location');
       mqttClient.subscribe('drivers/+/status');
       mqttClient.subscribe('chat/group');
-      console.log('📡 Subscribed to all topics. Driver ID:', DRIVER_ID);
+      dbg('📡 Subscribed to all topics. Driver ID: ' + DRIVER_ID);
       publishDriverStatus();
     });
 
@@ -944,21 +970,54 @@ function connectMqtt(){
     });
 
     mqttClient.on('error', (err)=>{
-      console.error('❌ MQTT error:', err);
+      dbg('❌ MQTT error: ' + (err.message||err));
+      mqttRetryCount++;
+      // After 3 errors, try next broker
+      if(mqttRetryCount >= 3 && currentBrokerIdx < MQTT_BROKERS.length - 1){
+        currentBrokerIdx++;
+        MQTT_BROKER = MQTT_BROKERS[currentBrokerIdx];
+        dbg('🔀 Switching to fallback broker: ' + MQTT_BROKER);
+        mqttClient.end(true);
+        mqttRetryCount = 0;
+        setTimeout(connectMqtt, 500);
+        return;
+      }
       updateMqttStatus('error');
     });
     mqttClient.on('reconnect', ()=>{
-      console.log('🔄 Reconnecting to broker...');
+      mqttRetryCount++;
+      dbg('🔄 Reconnecting... (attempt ' + mqttRetryCount + ')');
+      if(mqttRetryCount >= 3 && currentBrokerIdx < MQTT_BROKERS.length - 1){
+        currentBrokerIdx++;
+        MQTT_BROKER = MQTT_BROKERS[currentBrokerIdx];
+        dbg('🔀 Switching to fallback broker: ' + MQTT_BROKER);
+        mqttClient.end(true);
+        mqttRetryCount = 0;
+        setTimeout(connectMqtt, 500);
+        return;
+      }
       updateMqttStatus('reconnecting');
     });
     mqttClient.on('offline', ()=>{
-      console.log('📴 Broker offline - will retry');
+      dbg('📴 Broker offline - will retry');
       updateMqttStatus('reconnecting');
     });
   } catch(e){
-    console.error('[MQTT] Connection failed:', e);
+    dbg('❌ Connection failed: ' + e.message);
     updateMqttStatus('error');
   }
+}
+
+// Test raw WebSocket connectivity before MQTT
+function testWsConnectivity(){
+  dbg('🧪 Testing raw WebSocket to HiveMQ...');
+  try {
+    var ws = new WebSocket('wss://broker.hivemq.com:8884/mqtt', ['mqtt']);
+    ws.onopen = function(){ dbg('🧪 ✅ WebSocket opened to HiveMQ!'); ws.close(); };
+    ws.onerror = function(e){ dbg('🧪 ❌ WebSocket failed to HiveMQ: ' + JSON.stringify(e)); };
+    ws.onclose = function(e){ dbg('🧪 WebSocket closed. Code: ' + e.code + ' Clean: ' + e.wasClean); };
+    setTimeout(function(){ if(ws.readyState === 0){ dbg('🧪 ⏰ WebSocket timed out after 5s'); ws.close(); } }, 5000);
+  } catch(e){ dbg('🧪 ❌ WebSocket constructor threw: ' + e.message); }
 }
 
 // Override bidOnJob to publish real MQTT bids
@@ -1007,7 +1066,9 @@ bidOnJob = function(id){
   },2000);
 };
 
-// Connect MQTT immediately
+// Test WebSocket connectivity then connect MQTT
+dbg('🚀 Starting MQTT connection sequence...');
+testWsConnectivity();
 connectMqtt();
 
 // Still seed some mock jobs for demo + drip if no real MQTT jobs
