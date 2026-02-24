@@ -6,7 +6,7 @@
 <title>Black Cab Unite — Driver Tablet App</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/mqtt@5.5.0/dist/mqtt.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   :root{
@@ -226,6 +226,12 @@
 </div>
 
 <script>
+window.onerror = function(msg, url, line, col, err) {
+  console.error('[GLOBAL ERROR]', msg, 'at line', line, ':', err);
+  var pill = document.getElementById('mqttText');
+  if(pill) pill.textContent = 'JS Error L' + line;
+};
+console.log('[BOOT] Script starting...');
 // ── MAP SETUP ──
 const DRIVER_START = [52.4068, -1.5197]; // Coventry
 const map = L.map('map').setView(DRIVER_START, 13);
@@ -791,7 +797,12 @@ function publishDriverStatus() {
 }
 
 // ── REAL MQTT CONNECTION ──
-const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+// Try multiple brokers — HiveMQ public broker can be unreliable
+const MQTT_BROKERS = [
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt'
+];
+let MQTT_BROKER = MQTT_BROKERS[0];
 let mqttClient = null;
 let mqttConnected = false;
 
@@ -852,30 +863,33 @@ function updateMqttStatus(status){
   else { pill.style.background='rgba(245,158,11,.15)'; pill.style.color='var(--orange)'; text.textContent='MQTT Reconnecting…'; }
 }
 
+let mqttBrokerIndex = 0;
+let mqttConnectAttempts = 0;
+
 function connectMqtt(){
+  console.log('[MQTT] Attempting connection to:', MQTT_BROKER);
   try {
     mqttClient = mqtt.connect(MQTT_BROKER, {
       clientId: `${DRIVER_ID}_${Date.now().toString(36)}`,
       reconnectPeriod: 3000,
-      connectTimeout: 10000,
+      connectTimeout: 8000,
       keepalive: 60,
       clean: true
     });
 
     mqttClient.on('connect', ()=>{
+      mqttConnectAttempts = 0;
       updateMqttStatus('connected');
-      // Subscribe to all job-related topics (synced with driver-app v11.9.10)
-      mqttClient.subscribe('pubs/requests/+');            // SIP bridge job requests
-      mqttClient.subscribe('taxi/bookings');               // WhatsApp dispatcher
-      mqttClient.subscribe('passengers/+/created');        // Passenger created events
+      mqttClient.subscribe('pubs/requests/+');
+      mqttClient.subscribe('taxi/bookings');
+      mqttClient.subscribe('passengers/+/created');
       mqttClient.subscribe(`drivers/${DRIVER_ID}/bid-request`);
       mqttClient.subscribe(`drivers/${DRIVER_ID}/jobs`);
       mqttClient.subscribe(`jobs/+/result/${DRIVER_ID}`);
-      mqttClient.subscribe('drivers/+/location');          // Other drivers' GPS
-      mqttClient.subscribe('drivers/+/status');            // Other drivers' status
-      mqttClient.subscribe('chat/group');                  // Group chat
-      console.log('[MQTT] Connected & subscribed. Driver ID:', DRIVER_ID);
-      // Publish initial status so dispatch system registers us
+      mqttClient.subscribe('drivers/+/location');
+      mqttClient.subscribe('drivers/+/status');
+      mqttClient.subscribe('chat/group');
+      console.log('[MQTT] Connected & subscribed. Driver ID:', DRIVER_ID, 'Broker:', MQTT_BROKER);
       publishDriverStatus();
     });
 
@@ -908,8 +922,22 @@ function connectMqtt(){
       } catch(e){ console.error('[MQTT] Parse error:', e); }
     });
 
-    mqttClient.on('error', ()=> updateMqttStatus('error'));
-    mqttClient.on('reconnect', ()=> updateMqttStatus('reconnecting'));
+    mqttClient.on('error', (err)=>{
+      console.error('[MQTT] Error:', err);
+      mqttConnectAttempts++;
+      // Try fallback broker after 2 failed attempts
+      if(mqttConnectAttempts >= 2 && mqttBrokerIndex < MQTT_BROKERS.length - 1){
+        mqttBrokerIndex++;
+        MQTT_BROKER = MQTT_BROKERS[mqttBrokerIndex];
+        console.log('[MQTT] Switching to fallback broker:', MQTT_BROKER);
+        mqttClient.end(true);
+        mqttConnectAttempts = 0;
+        setTimeout(connectMqtt, 500);
+        return;
+      }
+      updateMqttStatus('error');
+    });
+    mqttClient.on('reconnect', ()=>{ mqttConnectAttempts++; updateMqttStatus('reconnecting'); });
     mqttClient.on('offline', ()=> updateMqttStatus('reconnecting'));
   } catch(e){
     console.error('[MQTT] Connection failed:', e);
