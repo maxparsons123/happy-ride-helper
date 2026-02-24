@@ -232,19 +232,34 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers, setWebRtc
 
       {/* Log */}
       {radioLog.length > 0 && (
-        <div className="mt-3 max-h-24 overflow-y-auto text-[11px] space-y-1">
-          {radioLog.map((entry, i) => (
-            <div
-              key={i}
-              className={`px-2 py-1 rounded flex items-center justify-between ${
-                entry.type === 'outgoing' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-green-500/10 text-green-400'
-              }`}
+        <div className="mt-3">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] text-gray-500">Radio Log</span>
+            <button
+              onClick={() => {
+                const text = radioLog.map(e => `[${e.time}] ${e.type === 'outgoing' ? '→' : '←'} ${e.name}`).join('\n');
+                navigator.clipboard.writeText(text);
+              }}
+              className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+              title="Copy log to clipboard"
             >
-              <span className="font-bold">{entry.name}</span>
-              <span className="text-gray-600 text-[9px]">{entry.time}</span>
-            </div>
-          ))}
-          <div ref={logEndRef} />
+              📋 Copy
+            </button>
+          </div>
+          <div className="max-h-24 overflow-y-auto text-[11px] space-y-1">
+            {radioLog.map((entry, i) => (
+              <div
+                key={i}
+                className={`px-2 py-1 rounded flex items-center justify-between ${
+                  entry.type === 'outgoing' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-green-500/10 text-green-400'
+                }`}
+              >
+                <span className="font-bold">{entry.name}</span>
+                <span className="text-gray-600 text-[9px]">{entry.time}</span>
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
         </div>
       )}
     </div>
