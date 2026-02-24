@@ -235,7 +235,7 @@ const driverMarker = L.marker(DRIVER_START, { icon: driverIcon, zIndexOffset: 10
 
 let driverLat = DRIVER_START[0], driverLng = DRIVER_START[1];
 const jobMarkers = {};
-let routeLine = null;
+let routeLines = [];
 
 function pickupIcon(color='#F44336') {
   return L.divIcon({ className:'', iconSize:[24,36], iconAnchor:[12,36],
@@ -369,33 +369,51 @@ function selectJob(id){
   renderAvailableJobs();
 }
 
+
+
+async function fetchRoute(coords){
+  try {
+    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`);
+    const data = await res.json();
+    if(data.routes && data.routes[0]) return { geom: data.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]), duration: data.routes[0].duration, distance: data.routes[0].distance };
+  } catch(e){}
+  return null;
+}
+
 async function showJobOnMap(j){
   clearMapOverlays();
   jobMarkers.pickup = L.marker([j.pickup.lat,j.pickup.lng],{icon:pickupIcon('#22c55e')}).addTo(map).bindPopup(`<b>Pickup</b><br>${j.pickup.address}`);
   jobMarkers.dropoff = L.marker([j.dropoff.lat,j.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup(`<b>Dropoff</b><br>${j.dropoff.address}`);
-  try {
-    const coords = `${driverLng},${driverLat};${j.pickup.lng},${j.pickup.lat};${j.dropoff.lng},${j.dropoff.lat}`;
-    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`);
-    const data = await res.json();
-    if(data.routes && data.routes[0]){
-      const geom = data.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
-      routeLine = L.polyline(geom,{color:'#FFD700',weight:5,opacity:0.9}).addTo(map);
-      const dur = Math.round(data.routes[0].duration/60);
-      const dist = (data.routes[0].distance/1000).toFixed(1);
-      toast(`🛣️ Route: ${dist} km · ${dur} min to pickup`,'info');
-    } else {
-      routeLine = L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map);
-    }
-  } catch(e){
-    routeLine = L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map);
+
+  // Fetch both route segments in parallel
+  const [toPickup, toDrop] = await Promise.all([
+    fetchRoute(`${driverLng},${driverLat};${j.pickup.lng},${j.pickup.lat}`),
+    fetchRoute(`${j.pickup.lng},${j.pickup.lat};${j.dropoff.lng},${j.dropoff.lat}`)
+  ]);
+
+  if(toPickup){
+    routeLines.push(L.polyline(toPickup.geom,{color:'#3b82f6',weight:5,opacity:0.85}).addTo(map));
+    const dur = Math.round(toPickup.duration/60);
+    const dist = (toPickup.distance/1000).toFixed(1);
+    toast(`🛣️ To pickup: ${dist} km · ${dur} min`,'info');
+  } else {
+    routeLines.push(L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng]],{color:'#3b82f6',weight:4,dashArray:'10,6'}).addTo(map));
   }
-  map.fitBounds(routeLine.getBounds().pad(0.15));
+  if(toDrop){
+    routeLines.push(L.polyline(toDrop.geom,{color:'#FFD700',weight:5,opacity:0.9}).addTo(map));
+  } else {
+    routeLines.push(L.polyline([[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map));
+  }
+
+  const allBounds = L.featureGroup(routeLines).getBounds();
+  map.fitBounds(allBounds.pad(0.15));
 }
 
 function clearMapOverlays(){
   Object.values(jobMarkers).forEach(m=>map.removeLayer(m));
   Object.keys(jobMarkers).forEach(k=>delete jobMarkers[k]);
-  if(routeLine){map.removeLayer(routeLine);routeLine=null;}
+  routeLines.forEach(l=>map.removeLayer(l));
+  routeLines=[];
 }
 
 function previewJob(id){
@@ -445,11 +463,12 @@ function previewConnector(connId, parentId){
   jobMarkers.dropoff = L.marker([parent.dropoff.lat,parent.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup('Current Dropoff');
   jobMarkers.connPickup = L.marker([conn.pickup.lat,conn.pickup.lng],{icon:pickupIcon('#06b6d4')}).addTo(map).bindPopup('Next Pickup');
   jobMarkers.connDropoff = L.marker([conn.dropoff.lat,conn.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup('Next Dropoff');
-  routeLine = L.polyline([
+  const line = L.polyline([
     [driverLat,driverLng],[parent.pickup.lat,parent.pickup.lng],[parent.dropoff.lat,parent.dropoff.lng],
     [conn.pickup.lat,conn.pickup.lng],[conn.dropoff.lat,conn.dropoff.lng]
   ],{color:'#06b6d4',weight:4,dashArray:'8,6'}).addTo(map);
-  map.fitBounds(routeLine.getBounds().pad(0.15));
+  routeLines.push(line);
+  map.fitBounds(line.getBounds().pad(0.15));
 }
 
 function toggleConnectors(id){
