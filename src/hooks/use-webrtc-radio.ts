@@ -106,6 +106,25 @@ export function useWebRTCRadio({ peerId, peerName, publish, mqttConnected }: Use
     }
 
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    // Prefer PCMU (G.711 μ-law) codec to match C# SIPSorcery dispatcher
+    try {
+      const transceivers = pc.getTransceivers();
+      if (transceivers.length === 0) {
+        // Add transceiver with PCMU preference before any tracks are added
+        const transceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
+        const codecs = RTCRtpReceiver.getCapabilities?.('audio')?.codecs ?? [];
+        const pcmuCodecs = codecs.filter(c => c.mimeType === 'audio/PCMU');
+        const otherCodecs = codecs.filter(c => c.mimeType !== 'audio/PCMU');
+        if (pcmuCodecs.length > 0) {
+          transceiver.setCodecPreferences([...pcmuCodecs, ...otherCodecs]);
+          console.log('[WebRTC Radio] Set PCMU as preferred codec');
+        }
+      }
+    } catch (e) {
+      console.warn('[WebRTC Radio] Could not set codec preferences:', e);
+    }
+
     const peerData: PeerData = { pc, pendingCandidates: [], audioEl: null };
 
     pc.onicecandidate = (event) => {
@@ -146,10 +165,18 @@ export function useWebRTCRadio({ peerId, peerName, publish, mqttConnected }: Use
       console.log(`[WebRTC Radio] ${remotePeerId} ICE gathering: ${pc.iceGatheringState}`);
     };
 
-    // Add local tracks
+    // Add local tracks — use existing transceiver if available
     if (localStreamRef.current) {
+      const existingTransceiver = pc.getTransceivers().find(t => t.sender.track === null && t.receiver.track?.kind === 'audio');
       localStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current!);
+        if (existingTransceiver && !existingTransceiver.sender.track) {
+          existingTransceiver.sender.replaceTrack(track);
+        } else {
+          const senders = pc.getSenders();
+          if (!senders.find(s => s.track === track)) {
+            pc.addTrack(track, localStreamRef.current!);
+          }
+        }
       });
     }
 
