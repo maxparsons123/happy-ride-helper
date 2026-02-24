@@ -49,6 +49,7 @@ export function useMqttDispatch() {
   const [bookings, setBookings] = useState<MqttBooking[]>([]);
   const [onlineDrivers, setOnlineDrivers] = useState<OnlineDriver[]>([]);
   const [incomingBids, setIncomingBids] = useState<DriverBid[]>([]);
+  const webrtcHandlerRef = useRef<((topic: string, data: any) => boolean) | null>(null);
   useEffect(() => {
     const clientId = `dispatch_${Math.random().toString(36).substr(2, 8)}`;
     const client = mqtt.connect(BROKER_URL, {
@@ -78,6 +79,11 @@ export function useMqttDispatch() {
       try {
         const data = JSON.parse(message.toString());
 
+        // Route WebRTC signaling/presence to radio hook
+        if (topic.startsWith('radio/webrtc/')) {
+          webrtcHandlerRef.current?.(topic, data);
+          return;
+        }
         // Driver status/location updates
         if (topic.startsWith('drivers/') && (topic.endsWith('/status') || topic.endsWith('/location'))) {
           const driverId = topic.split('/')[1];
@@ -192,5 +198,9 @@ export function useMqttDispatch() {
     }
   }, []);
 
-  return { connectionStatus, bookings, updateBookingStatus, clearCompleted, publish, onlineDrivers, incomingBids };
+  const setWebRtcHandler = useCallback((handler: (topic: string, data: any) => boolean) => {
+    webrtcHandlerRef.current = handler;
+  }, []);
+
+  return { connectionStatus, bookings, updateBookingStatus, clearCompleted, publish, onlineDrivers, incomingBids, setWebRtcHandler };
 }

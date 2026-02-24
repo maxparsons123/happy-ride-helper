@@ -14,6 +14,7 @@ interface DriverRadioProps {
   mqttConnected: boolean;
   lastRadioMessage?: any;
   remotePttState?: { from: string; name: string; active: boolean } | null;
+  setWebRtcHandler: (handler: (topic: string, data: any) => boolean) => void;
 }
 
 interface RadioLogEntry {
@@ -23,7 +24,7 @@ interface RadioLogEntry {
 }
 
 export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(function DriverRadio(
-  { driverId, driverName, publish, mqttConnected, remotePttState },
+  { driverId, driverName, publish, mqttConnected, remotePttState, setWebRtcHandler },
   ref
 ) {
   const [isOpen, setIsOpen] = useState(false);
@@ -37,6 +38,11 @@ export const DriverRadio = forwardRef<DriverRadioHandle, DriverRadioProps>(funct
     publish,
     mqttConnected,
   });
+
+  // Wire MQTT WebRTC messages to the radio hook
+  useEffect(() => {
+    setWebRtcHandler(radio.handleMqttMessage);
+  }, [setWebRtcHandler, radio.handleMqttMessage]);
 
   const addLog = useCallback((type: RadioLogEntry['type'], name: string) => {
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });

@@ -130,6 +130,7 @@ export default function DriverApp() {
         mqttConnected={mqtt.connectionStatus === 'connected'}
         lastRadioMessage={mqtt.lastRadioMessage}
         remotePttState={mqtt.remotePttState}
+        setWebRtcHandler={mqtt.setWebRtcHandler}
       />
 
       {/* Menu Overlay */}

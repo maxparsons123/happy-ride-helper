@@ -7,6 +7,7 @@ interface DispatchRadioProps {
   publish: (topic: string, payload: any) => void;
   mqttConnected: boolean;
   onlineDrivers: OnlineDriver[];
+  setWebRtcHandler: (handler: (topic: string, data: any) => boolean) => void;
 }
 
 interface RadioLogEntry {
@@ -15,7 +16,7 @@ interface RadioLogEntry {
   time: string;
 }
 
-export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: DispatchRadioProps) {
+export function DispatchRadio({ publish, mqttConnected, onlineDrivers, setWebRtcHandler }: DispatchRadioProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [volume, setVolume] = useState(80);
   const [radioLog, setRadioLog] = useState<RadioLogEntry[]>([]);
@@ -29,6 +30,11 @@ export function DispatchRadio({ publish, mqttConnected, onlineDrivers }: Dispatc
     publish,
     mqttConnected,
   });
+
+  // Wire MQTT WebRTC messages to the radio hook
+  useEffect(() => {
+    setWebRtcHandler(radio.handleMqttMessage);
+  }, [setWebRtcHandler, radio.handleMqttMessage]);
 
   const isAllMode = selectedDrivers.size === 0;
 
