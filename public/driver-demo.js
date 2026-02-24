@@ -54,6 +54,33 @@ let historyJobs = [];
 let selectedJobId = null;
 let expandedConnectors = null;
 let activeInboxJob = null;
+
+// ── LOCAL STORAGE PERSISTENCE ──
+const LS_KEY_AVAIL = 'bcu_demo_available_jobs';
+const LS_KEY_INBOX = 'bcu_demo_inbox_jobs';
+const LS_KEY_HISTORY = 'bcu_demo_history_jobs';
+
+function saveJobsToStorage() {
+  try {
+    localStorage.setItem(LS_KEY_AVAIL, JSON.stringify(availableJobs));
+    localStorage.setItem(LS_KEY_INBOX, JSON.stringify(inboxJobs));
+    localStorage.setItem(LS_KEY_HISTORY, JSON.stringify(historyJobs));
+  } catch(e) { dbg('[LS] Save error: ' + e.message); }
+}
+
+function loadJobsFromStorage() {
+  try {
+    var a = localStorage.getItem(LS_KEY_AVAIL);
+    var i = localStorage.getItem(LS_KEY_INBOX);
+    var h = localStorage.getItem(LS_KEY_HISTORY);
+    if (a) availableJobs = JSON.parse(a);
+    if (i) inboxJobs = JSON.parse(i);
+    if (h) historyJobs = JSON.parse(h);
+    dbg('[LS] Loaded ' + availableJobs.length + ' available, ' + inboxJobs.length + ' inbox, ' + historyJobs.length + ' history jobs');
+  } catch(e) { dbg('[LS] Load error: ' + e.message); }
+}
+
+loadJobsFromStorage();
 let msgPanelOpen = false;
 let messages = [];
 let totalEarnings = 0;
@@ -107,6 +134,7 @@ function generateJob(){
 
 // ── RENDERING ──
 function renderAvailableJobs(){
+  saveJobsToStorage();
   availableJobs.sort((a,b)=>a.distanceFromDriver-b.distanceFromDriver);
   const el = document.getElementById('availableList');
   document.getElementById('availCount').textContent = availableJobs.length;
@@ -826,8 +854,19 @@ bidOnJob = function(id){
   },2000);
 };
 
-// Seed initial mock jobs for demo
+// Seed initial mock jobs for demo (only if no saved jobs)
 function addMockJobs(){
+  if (availableJobs.length > 0) {
+    dbg('[BOOT] Restored ' + availableJobs.length + ' saved available jobs');
+    // Re-add map markers for restored jobs
+    availableJobs.forEach(function(j){
+      var m = L.circleMarker([j.pickup.lat,j.pickup.lng],{radius:5,fillColor:'#ef4444',color:'#fff',weight:1,fillOpacity:.8}).addTo(map).bindTooltip(j.pickup.address);
+      jobMarkers['avail_'+j.jobId] = m;
+    });
+    renderAvailableJobs();
+    document.getElementById('inboxCount').textContent = inboxJobs.length;
+    return;
+  }
   for(let i=0;i<4;i++){
     const j=generateJob();
     availableJobs.push(j);
