@@ -41,9 +41,9 @@ public class WebRtcRadioEngine : IDisposable
     private OpusEncoder? _opusEncoder;
     private OpusDecoder? _opusDecoder;
     private const int OPUS_SAMPLE_RATE = 48000;
-    private const int OPUS_CHANNELS = 1;
+    private const int OPUS_CHANNELS = 2; // WebRTC standard: opus/48000/2
     private const int OPUS_FRAME_MS = 20;
-    private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE * OPUS_FRAME_MS / 1000; // 960 samples
+    private const int OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE * OPUS_FRAME_MS / 1000; // 960 samples per channel
 
     /// <summary>Fires when a signaling message should be published via MQTT. Args: (topic, jsonPayload)</summary>
     public event Action<string, string>? OnSignalingSend;
@@ -60,6 +60,7 @@ public class WebRtcRadioEngine : IDisposable
     {
         _opusEncoder = new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusApplication.OPUS_APPLICATION_VOIP);
         _opusEncoder.Bitrate = 24000;
+        _opusEncoder.ForceChannels = 1; // Send mono even though SDP says 2 channels
         _opusDecoder = new OpusDecoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
         InitPlayback();
     }
@@ -187,8 +188,8 @@ public class WebRtcRadioEngine : IDisposable
 
         var pc = new RTCPeerConnection(config);
 
-        // Add audio track (48kHz mono Opus)
-        var audioFormat = new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, 1);
+        // Add audio track (48kHz stereo Opus — WebRTC standard opus/48000/2)
+        var audioFormat = new AudioFormat(AudioCodecsEnum.OPUS, 111, 48000, 2);
         var track = new MediaStreamTrack(audioFormat, MediaStreamStatusEnum.SendRecv);
         pc.addTrack(track);
 
@@ -215,16 +216,21 @@ public class WebRtcRadioEngine : IDisposable
             {
                 try
                 {
-                    var pcmSamples = new short[OPUS_FRAME_SIZE];
+                    // Decode stereo Opus (OPUS_CHANNELS=2): output is interleaved L,R,L,R...
+                    var pcmSamples = new short[OPUS_FRAME_SIZE * OPUS_CHANNELS];
                     int decoded = _opusDecoder.Decode(pkt.Payload, 0, pkt.Payload.Length, pcmSamples, 0, OPUS_FRAME_SIZE, false);
                     if (decoded > 0)
                     {
-                        var pcmBytes = new byte[decoded * 2];
+                        // decoded = samples per channel; total samples = decoded * channels
+                        var pcmBytes = new byte[decoded * OPUS_CHANNELS * 2];
                         Buffer.BlockCopy(pcmSamples, 0, pcmBytes, 0, pcmBytes.Length);
                         _playBuffer.AddSamples(pcmBytes, 0, pcmBytes.Length);
                     }
                 }
-                catch { /* decode error — skip frame */ }
+                catch (Exception ex)
+                {
+                    OnLog?.Invoke($"⚠ Opus decode error: {ex.Message} (payload {pkt.Payload.Length} bytes)", true);
+                }
             }
         };
 
@@ -333,7 +339,7 @@ public class WebRtcRadioEngine : IDisposable
         {
             _waveIn = new NAudio.Wave.WaveInEvent
             {
-                WaveFormat = new NAudio.Wave.WaveFormat(OPUS_SAMPLE_RATE, 16, OPUS_CHANNELS),
+                WaveFormat = new NAudio.Wave.WaveFormat(OPUS_SAMPLE_RATE, 16, 1), // Capture mono from mic
                 BufferMilliseconds = OPUS_FRAME_MS // 20ms frames
             };
 
@@ -370,14 +376,22 @@ public class WebRtcRadioEngine : IDisposable
     {
         if (!_pttActive || args.BytesRecorded == 0 || _opusEncoder == null) return;
 
-        // Convert PCM bytes to short samples
+        // Convert mono PCM bytes to short samples
         int sampleCount = args.BytesRecorded / 2;
         var pcmSamples = new short[sampleCount];
         Buffer.BlockCopy(args.Buffer, 0, pcmSamples, 0, args.BytesRecorded);
 
-        // Opus encode
+        // Upmix mono to stereo for the encoder (interleave L=R)
+        var stereoSamples = new short[sampleCount * 2];
+        for (int i = 0; i < sampleCount; i++)
+        {
+            stereoSamples[i * 2] = pcmSamples[i];
+            stereoSamples[i * 2 + 1] = pcmSamples[i];
+        }
+
+        // Opus encode (stereo input, encoder may output mono via ForceChannels=1)
         var encodedBuffer = new byte[4000]; // max Opus frame
-        int encodedLength = _opusEncoder.Encode(pcmSamples, 0, OPUS_FRAME_SIZE, encodedBuffer, 0, encodedBuffer.Length);
+        int encodedLength = _opusEncoder.Encode(stereoSamples, 0, OPUS_FRAME_SIZE, encodedBuffer, 0, encodedBuffer.Length);
         if (encodedLength <= 0) return;
 
         var opusFrame = new byte[encodedLength];
@@ -401,7 +415,7 @@ public class WebRtcRadioEngine : IDisposable
 
     private void InitPlayback()
     {
-        _playBuffer = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(OPUS_SAMPLE_RATE, 16, OPUS_CHANNELS))
+        _playBuffer = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(OPUS_SAMPLE_RATE, 16, OPUS_CHANNELS)) // stereo playback
         {
             BufferDuration = TimeSpan.FromSeconds(10),
             DiscardOnBufferOverflow = true
