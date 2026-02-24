@@ -420,16 +420,33 @@ async function fetchRoute(coords){
   return null;
 }
 
+let activeRouteJobId = null;
+let routeRequestId = 0;
+
 async function showJobOnMap(j){
+  const thisRequest = ++routeRequestId;
+  activeRouteJobId = j.jobId;
   clearMapOverlays();
   jobMarkers.pickup = L.marker([j.pickup.lat,j.pickup.lng],{icon:pickupIcon('#22c55e')}).addTo(map).bindPopup(`<b>Pickup</b><br>${j.pickup.address}`);
   jobMarkers.dropoff = L.marker([j.dropoff.lat,j.dropoff.lng],{icon:dropoffIcon()}).addTo(map).bindPopup(`<b>Dropoff</b><br>${j.dropoff.address}`);
 
-  // Fetch both route segments in parallel
+  // Fallback straight lines immediately so something is visible
+  routeLines.push(L.polyline([[driverLat,driverLng],[j.pickup.lat,j.pickup.lng]],{color:'#3b82f6',weight:3,dashArray:'10,6',opacity:0.4}).addTo(map));
+  routeLines.push(L.polyline([[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:3,dashArray:'10,6',opacity:0.4}).addTo(map));
+  map.fitBounds(L.featureGroup(routeLines).getBounds().pad(0.15));
+
+  // Fetch real routes
   const [toPickup, toDrop] = await Promise.all([
     fetchRoute(`${driverLng},${driverLat};${j.pickup.lng},${j.pickup.lat}`),
     fetchRoute(`${j.pickup.lng},${j.pickup.lat};${j.dropoff.lng},${j.dropoff.lat}`)
   ]);
+
+  // Abort if a newer request superseded this one
+  if(thisRequest !== routeRequestId) return;
+
+  // Remove fallback lines and draw real routes
+  routeLines.forEach(l=>map.removeLayer(l));
+  routeLines=[];
 
   if(toPickup){
     routeLines.push(L.polyline(toPickup.geom,{color:'#3b82f6',weight:5,opacity:0.85}).addTo(map));
@@ -445,13 +462,15 @@ async function showJobOnMap(j){
     routeLines.push(L.polyline([[j.pickup.lat,j.pickup.lng],[j.dropoff.lat,j.dropoff.lng]],{color:'#FFD700',weight:4,dashArray:'10,6'}).addTo(map));
   }
 
-  const allBounds = L.featureGroup(routeLines).getBounds();
-  map.fitBounds(allBounds.pad(0.15));
+  map.fitBounds(L.featureGroup(routeLines).getBounds().pad(0.15));
 }
 
-function clearMapOverlays(){
-  Object.values(jobMarkers).forEach(m=>map.removeLayer(m));
-  Object.keys(jobMarkers).forEach(k=>delete jobMarkers[k]);
+function clearMapOverlays(force){
+  // Don't clear if we have an active route unless forced
+  Object.entries(jobMarkers).forEach(([k,m])=>{
+    if(!k.startsWith('avail_')) map.removeLayer(m);
+    if(!k.startsWith('avail_')) delete jobMarkers[k];
+  });
   routeLines.forEach(l=>map.removeLayer(l));
   routeLines=[];
 }
