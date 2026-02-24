@@ -726,22 +726,20 @@ function toast(msg,type='info'){
   setTimeout(()=>t.remove(),3000);
 }
 
-// ── DRIVER REGISTRATION (same as driver-app) ──
-function getOrPromptDriverId() {
-  let id = localStorage.getItem('bcu_demo_driver_id');
-  if (id && /^[a-zA-Z0-9_-]+$/.test(id)) return id;
-  id = prompt('Enter your Driver ID (as registered with dispatch):');
-  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-    alert('Invalid Driver ID. Please reload and try again.');
-    return null;
-  }
-  localStorage.setItem('bcu_demo_driver_id', id);
-  return id;
+// ── DRIVER REGISTRATION ──
+// Redirect to setup if not configured
+const DRIVER_ID = localStorage.getItem('bcu_demo_driver_id');
+if (!DRIVER_ID || !/^[a-zA-Z0-9_-]+$/.test(DRIVER_ID)) {
+  window.location.href = 'driver-setup.html';
+  throw new Error('Redirecting to setup');
 }
 
-const DRIVER_ID = getOrPromptDriverId();
-if (!DRIVER_ID) throw new Error('No driver ID');
-document.getElementById('driverIdLabel').textContent = DRIVER_ID;
+const DRIVER_NAME = localStorage.getItem('bcu_demo_driver_name') || DRIVER_ID;
+const DRIVER_PHONE = localStorage.getItem('bcu_demo_driver_phone') || '';
+const VEHICLE_REG = localStorage.getItem('bcu_demo_vehicle_reg') || '';
+const VEHICLE_TYPE = localStorage.getItem('bcu_demo_vehicle_type') || 'Saloon';
+
+document.getElementById('driverIdLabel').textContent = `${DRIVER_NAME} (${DRIVER_ID}) • ${VEHICLE_REG}`;
 
 let driverPresence = localStorage.getItem('bcu_demo_driver_presence') || 'available';
 
@@ -778,10 +776,14 @@ updateDriverStatusUI();
 function publishDriverStatus() {
   if (!mqttClient || !mqttConnected) return;
   const payload = {
+    driver: DRIVER_ID,
     status: driverPresence,
+    name: DRIVER_NAME,
+    phone: DRIVER_PHONE,
+    registration: VEHICLE_REG,
+    vehicle: VEHICLE_TYPE,
     lat: driverLat,
     lng: driverLng,
-    name: DRIVER_ID,
     ts: Date.now()
   };
   mqttClient.publish(`drivers/${DRIVER_ID}/status`, JSON.stringify(payload));
@@ -988,7 +990,8 @@ setInterval(()=>{
   // Publish driver location via MQTT (matches driver-app format)
   if(mqttClient && mqttConnected){
     mqttClient.publish(`drivers/${DRIVER_ID}/location`, JSON.stringify({
-      driver: DRIVER_ID, lat:driverLat, lng:driverLng, status:driverPresence, ts:Date.now(), heading:0
+      driver: DRIVER_ID, name: DRIVER_NAME, registration: VEHICLE_REG, vehicle: VEHICLE_TYPE,
+      lat:driverLat, lng:driverLng, status:driverPresence, ts:Date.now(), heading:0
     }));
   }
 },5000);
