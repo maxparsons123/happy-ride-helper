@@ -1013,8 +1013,63 @@ public sealed class CallSession : ICallSession
                 };
             }
         }
-        // House number validation is handled by Gemini AI during geocoding/fare calculation.
-        // No pre-flight check here — Gemini will request clarification if the address is ambiguous.
+        // ── HOUSE NUMBER PRE-FLIGHT GUARD ──────────────────────────────────────
+        // If a street-type address (Road, Street, Avenue, etc.) was synced WITHOUT
+        // a house number, reject immediately and tell Ada to ask the caller.
+        // Named places (stations, supermarkets, etc.) and "near"/"opposite" are exempt.
+        {
+            var pickupComp = Services.AddressParser.ParseAddress(_booking.Pickup);
+            if (pickupComp.IsStreetTypeAddress && !pickupComp.HasHouseNumber
+                && !HasProximityPrefix(_booking.Pickup))
+            {
+                _logger.LogWarning("[{SessionId}] 🏠 PICKUP missing house number: '{Pickup}'", SessionId, _booking.Pickup);
+                return new
+                {
+                    success = false,
+                    warning = $"HOUSE NUMBER REQUIRED: The pickup '{_booking.Pickup}' is a street address but has no house number. " +
+                              $"Ask the caller: 'What's the house number on {pickupComp.StreetName}?' " +
+                              "Do NOT call sync_booking_data until you have the house number. " +
+                              "Exception: if the caller says 'near', 'opposite', 'outside', or 'corner of' — accept without a number."
+                };
+            }
+
+            if (!string.IsNullOrWhiteSpace(_booking.Destination) && !IsAirportDestination(_booking.Destination))
+            {
+                var destComp = Services.AddressParser.ParseAddress(_booking.Destination);
+                if (destComp.IsStreetTypeAddress && !destComp.HasHouseNumber
+                    && !HasProximityPrefix(_booking.Destination))
+                {
+                    _logger.LogWarning("[{SessionId}] 🏠 DESTINATION missing house number: '{Dest}'", SessionId, _booking.Destination);
+                    return new
+                    {
+                        success = false,
+                        warning = $"HOUSE NUMBER REQUIRED: The destination '{_booking.Destination}' is a street address but has no house number. " +
+                                  $"Ask the caller: 'What's the house number on {destComp.StreetName}?' " +
+                                  "Do NOT call sync_booking_data until you have the house number. " +
+                                  "Exception: if the caller says 'near', 'opposite', 'outside', or 'corner of' — accept without a number."
+                    };
+                }
+            }
+        }
+
+        // ── POSTCODE TRUTH ANCHOR ─────────────────────────────────────────────────
+        // If the caller provided a UK postcode in their address, capture it now.
+        // It will be sent to address-dispatch as the authoritative geocoding anchor
+        // and verified against the resolved address after geocoding.
+        {
+            var pickupPostcode = ExtractUkPostcode(_booking.Pickup);
+            if (pickupPostcode != null)
+            {
+                _spokenPickupPostcode = pickupPostcode;
+                _logger.LogInformation("[{SessionId}] 📮 Pickup postcode anchor: {Postcode}", SessionId, pickupPostcode);
+            }
+            var destPostcode = ExtractUkPostcode(_booking.Destination);
+            if (destPostcode != null)
+            {
+                _spokenDestPostcode = destPostcode;
+                _logger.LogInformation("[{SessionId}] 📮 Destination postcode anchor: {Postcode}", SessionId, destPostcode);
+            }
+        }
 
         // ── AIRPORT DESTINATION INTERCEPT ──────────────────────────────────────────
         // If the destination is an airport, bypass fare calculation entirely.
@@ -1044,20 +1099,52 @@ public sealed class CallSession : ICallSession
             && _booking.Passengers > 0
             && !string.IsNullOrWhiteSpace(_booking.PickupTime);
 
-        // ── City Context Guard ──────────────────────────────────────────────────────
-        // Before triggering fare calculation, ensure the destination has enough location
-        // context so the geocoder can resolve it unambiguously.
-        //
-        // NEW Resolution order:
-        //   1. If the destination already has a house number (e.g. "1214A Warwick Road"),
-        //      it is specific enough — pass it bare to the geocoder first. The geocoder can
-        //      often resolve a numbered address globally without a city hint. City inference
-        //      from caller history is SKIPPED to avoid pinning the wrong locale
-        //      (e.g. Birmingham trips wrongly enriched with "Coventry").
-        //   2. If there is NO house number (e.g. "Warwick Road"), it's too vague — try
-        //      the caller's address history to infer a city and silently enrich.
-        //   3. If history has no match either, block and ask Ada to collect the city.
-        if (allFieldsFilled && DestinationLacksCityContext(_booking.Destination))
+        // ── City Context Guard (PICKUP) ─────────────────────────────────────────
+        // Apply the same city-context check to the pickup address. Without it,
+        // bare pickups like "School Road" go straight to Gemini and may resolve
+        // to the wrong city entirely.
+        if (allFieldsFilled && LacksCityContext(_booking.Pickup))
+        {
+            var pickupRaw = _booking.Pickup!;
+            var pickupComp2 = Services.AddressParser.ParseAddress(pickupRaw);
+
+            if (pickupComp2.HasHouseNumber)
+            {
+                _logger.LogInformation("[{SessionId}] 🏠 Pickup '{Pickup}' has house number '{Num}' — skipping city inference",
+                    SessionId, pickupRaw, pickupComp2.HouseNumber);
+            }
+            else
+            {
+                var cityFromHistory = TryExtractCityFromHistory(pickupRaw);
+                if (cityFromHistory != null)
+                {
+                    var enriched = $"{pickupRaw}, {cityFromHistory}";
+                    _logger.LogInformation("[{SessionId}] 🏙️ Inferred city '{City}' from caller history for pickup '{Pickup}' → '{Enriched}'",
+                        SessionId, cityFromHistory, pickupRaw, enriched);
+                    _booking.Pickup = enriched;
+                    _ = _aiClient.InjectSystemMessageAsync(
+                        $"[CITY CONTEXT RESOLVED] The pickup '{pickupRaw}' matched a known address from the caller's history. " +
+                        $"Update your memory: pickup = '{enriched}'. Continue normally.");
+                }
+                else
+                {
+                    _logger.LogWarning("[{SessionId}] 🏙️ Pickup '{Pickup}' has no house number, no city, and no history match — asking for city", SessionId, pickupRaw);
+                    return new
+                    {
+                        success = false,
+                        warning = $"PICKUP CITY REQUIRED: The pickup '{pickupRaw}' does not include a city or area. " +
+                                  $"Ask the caller: 'What city or area is {pickupRaw} in?' " +
+                                  "Once they provide the city, call sync_booking_data again with the full pickup including the city (e.g. '{pickupRaw}, Birmingham'). " +
+                                  "Do NOT guess the city from the destination address."
+                    };
+                }
+            }
+        }
+
+        // ── City Context Guard (DESTINATION) ────────────────────────────────────────
+        // Ensure the destination has enough location context for the geocoder.
+        // Resolution: house number → history inference → ask caller for city.
+        if (allFieldsFilled && LacksCityContext(_booking.Destination))
         {
             var destRaw = _booking.Destination!;
             var destComponents = Services.AddressParser.ParseAddress(destRaw);
@@ -1115,7 +1202,9 @@ public sealed class CallSession : ICallSession
                 {
                     var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                        spokenPickupPostcode: _spokenPickupPostcode,
+                        spokenDestPostcode: _spokenDestPostcode);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
                     FareResult result;
@@ -3734,22 +3823,62 @@ public sealed class CallSession : ICallSession
         return AirportKeywords.Any(k => lower.Contains(k));
     }
 
-    private static bool DestinationLacksCityContext(string? destination)
+    /// <summary>UK full postcode regex (e.g. "B13 9NT", "CV1 4QN", "SW1A 1AA").</summary>
+    private static readonly Regex UkPostcodeRegex = new(
+        @"\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Extracts a UK full postcode from an address string, or null if none found.
+    /// </summary>
+    private static string? ExtractUkPostcode(string? address)
     {
-        if (string.IsNullOrWhiteSpace(destination)) return false;
+        if (string.IsNullOrWhiteSpace(address)) return null;
+        var m = UkPostcodeRegex.Match(address);
+        return m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
+    }
 
-        var dest = destination.Trim();
+    /// <summary>Spoken postcodes captured from the caller — used as geocoding truth anchors.</summary>
+    private string? _spokenPickupPostcode;
+    private string? _spokenDestPostcode;
 
-        // If the destination explicitly contains a known UK city/airport, city context is present —
-        // do NOT let history inference overwrite it with the caller's local city.
-        var destLower = dest.ToLowerInvariant();
-        if (KnownUkCities.Any(c => destLower.Contains(c)))
+    /// <summary>
+    /// Returns true if the address starts with a proximity prefix like "near", "opposite",
+    /// "outside", "corner of", indicating a house number is not required.
+    /// </summary>
+    private static bool HasProximityPrefix(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return false;
+        var lower = address.Trim().ToLowerInvariant();
+        return lower.StartsWith("near ") || lower.StartsWith("opposite ") || lower.StartsWith("outside ")
+            || lower.StartsWith("corner of ") || lower.StartsWith("next to ") || lower.StartsWith("by the ")
+            || lower.StartsWith("behind ") || lower.StartsWith("in front of ");
+    }
+
+    /// <summary>
+    /// Returns true if the address lacks city context (no known city, no postcode, no area).
+    /// Replaces the old DestinationLacksCityContext and now works for both pickup and destination.
+    /// Now recognises UK postcodes as valid city context.
+    /// </summary>
+    private static bool LacksCityContext(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return false;
+
+        var addr = address.Trim();
+        var addrLower = addr.ToLowerInvariant();
+
+        // If the address contains a known UK city/airport, city context is present
+        if (KnownUkCities.Any(c => addrLower.Contains(c)))
+            return false;
+
+        // If the address contains a UK full postcode (e.g. "B13 9NT"), that IS city context
+        if (UkPostcodeRegex.IsMatch(addr))
             return false;
 
         // No comma at all → almost certainly no city
-        if (!dest.Contains(',')) return true;
+        if (!addr.Contains(',')) return true;
 
-        var parts = dest.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var parts = addr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (parts.Length < 2) return true;
 
         var lastPart = parts[^1];
@@ -3762,6 +3891,9 @@ public sealed class CallSession : ICallSession
 
         return false;
     }
+
+    /// <summary>Legacy alias — routes to LacksCityContext.</summary>
+    private static bool DestinationLacksCityContext(string? destination) => LacksCityContext(destination);
 
     /// <summary>
     /// Searches the caller's known address history for any address that contains the same
