@@ -44,5 +44,6 @@ public interface IFareCalculator
         string? destination,
         string? phoneNumber,
         string? spokenPickupNumber = null,
-        string? spokenDestNumber = null);
+        string? spokenDestNumber = null,
+        string? callerArea = null);
 }

@@ -36,7 +36,8 @@ public sealed class FareCalculator : IFareCalculator
         string? destination,
         string? phoneNumber,
         string? spokenPickupNumber = null,
-        string? spokenDestNumber = null)
+        string? spokenDestNumber = null,
+        string? callerArea = null)
     {
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
@@ -49,7 +50,8 @@ public sealed class FareCalculator : IFareCalculator
                 destination = destination ?? "",
                 phone = phoneNumber ?? "",
                 spoken_pickup_number = spokenPickupNumber ?? "",
-                spoken_dest_number = spokenDestNumber ?? ""
+                spoken_dest_number = spokenDestNumber ?? "",
+                caller_area = callerArea ?? ""
             });
             var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
