@@ -563,6 +563,23 @@ public sealed class CallStateEngine
         _logger.LogInformation("[{SessionId}] 💰 Engine: fare received → AwaitingPaymentChoice", _sessionId);
     }
 
+    /// <summary>Called when caller selects card/meter after fare presentation.</summary>
+    public void NotifyPaymentPreferenceSelected(string preference)
+    {
+        var normalized = preference.Trim().ToLowerInvariant() switch
+        {
+            "card" or "fixed" or "link" => "card",
+            _ => "meter"
+        };
+
+        PaymentPreference = normalized;
+        if (State == CallState.AwaitingPaymentChoice)
+            State = CallState.AwaitingBookingConfirmation;
+
+        _logger.LogInformation("[{SessionId}] 💳 Engine: payment preference set to {Preference} (state={State})",
+            _sessionId, PaymentPreference, State);
+    }
+
     /// <summary>Called when disambiguation is needed (address ambiguous).</summary>
     public void NotifyDisambiguationNeeded(bool isPickup)
     {

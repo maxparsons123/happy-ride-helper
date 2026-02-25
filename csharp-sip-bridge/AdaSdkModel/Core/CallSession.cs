@@ -2210,6 +2210,7 @@ public sealed class CallSession : ICallSession
             var normalizedPref = (rawPref.Contains("card") || rawPref.Contains("fixed") || rawPref.Contains("link") || rawPref.Contains("sumup"))
                 ? "card" : "meter";
             _booking.PaymentPreference = normalizedPref;
+            _engine?.NotifyPaymentPreferenceSelected(normalizedPref);
             _logger.LogInformation("[{SessionId}] 💳 payment_preference raw='{Raw}' → normalized='{Normalized}'", SessionId, rawPref, normalizedPref);
         }
         else
