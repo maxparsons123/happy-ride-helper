@@ -1060,7 +1060,7 @@ public sealed class CallSession : ICallSession
                 CallState.CollectingTime => BookingStage.CollectingTime,
                 CallState.FareCalculating => BookingStage.FareCalculating,
                 CallState.AwaitingPaymentChoice or CallState.AwaitingBookingConfirmation => BookingStage.FarePresented,
-                CallState.Disambiguation => BookingStage.Disambiguation,
+                CallState.DisambiguatingPickup or CallState.DisambiguatingDestination => BookingStage.Disambiguation,
                 _ => _lastAdaStageHint // preserve current hint
             };
 
