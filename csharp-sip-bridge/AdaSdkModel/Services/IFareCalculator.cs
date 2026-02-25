@@ -52,6 +52,7 @@ public interface IFareCalculator
     /// <param name="spokenDestNumber">House number extracted from the caller's speech — used as a guard against geocoder substitution.</param>
     /// <param name="spokenPickupPostcode">Full UK postcode spoken by the caller — used as the authoritative geocoding anchor.</param>
     /// <param name="spokenDestPostcode">Full UK postcode spoken by the caller — used as the authoritative geocoding anchor.</param>
+    /// <param name="callerArea">Caller's self-reported area/district (e.g. "Foleshill") — used as bias for address resolution.</param>
     Task<FareResult> ExtractAndCalculateWithAiAsync(
         string? pickup,
         string? destination,
@@ -60,5 +61,6 @@ public interface IFareCalculator
         string? spokenPickupNumber = null,
         string? spokenDestNumber = null,
         string? spokenPickupPostcode = null,
-        string? spokenDestPostcode = null);
+        string? spokenDestPostcode = null,
+        string? callerArea = null);
 }

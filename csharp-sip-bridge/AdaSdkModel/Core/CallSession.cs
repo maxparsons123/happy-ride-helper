@@ -959,6 +959,11 @@ public sealed class CallSession : ICallSession
             _booking.SpecialInstructions = si.ToString();
             _logger.LogInformation("[{SessionId}] 📝 Special instructions: {Notes}", SessionId, _booking.SpecialInstructions);
         }
+        if (args.TryGetValue("caller_area", out var ca) && !string.IsNullOrWhiteSpace(ca?.ToString()))
+        {
+            _booking.CallerArea = ca.ToString();
+            _logger.LogInformation("[{SessionId}] 📍 Caller area: {Area}", SessionId, _booking.CallerArea);
+        }
 
         // Extract interpretation if provided
         string? interpretation = null;
@@ -1218,7 +1223,8 @@ public sealed class CallSession : ICallSession
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
                         spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
                         spokenPickupPostcode: _spokenPickupPostcode,
-                        spokenDestPostcode: _spokenDestPostcode);
+                        spokenDestPostcode: _spokenDestPostcode,
+                        callerArea: _booking.CallerArea);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
                     FareResult result;
@@ -1313,7 +1319,8 @@ public sealed class CallSession : ICallSession
                                             var retryTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
                                                 retryPickup, retryDest, callerId, _booking.PickupTime,
                                                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                                                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                                                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                                                callerArea: _booking.CallerArea);
                                             var retryCompleted = await Task.WhenAny(retryTask, Task.Delay(18000));
 
                                             if (retryCompleted == retryTask)
@@ -1380,7 +1387,8 @@ public sealed class CallSession : ICallSession
                                             var suffixTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
                                                 pickup, strippedDest, callerId, _booking.PickupTime,
                                                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                                                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                                                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                                                callerArea: _booking.CallerArea);
                                             var suffixCompleted = await Task.WhenAny(suffixTask, Task.Delay(18000));
 
                                             if (suffixCompleted == suffixTask)
@@ -1991,7 +1999,8 @@ public sealed class CallSession : ICallSession
             _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after Address Lock resolution", sessionId);
             var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                callerArea: _booking.CallerArea);
             if (result.NeedsClarification)
             {
                 var pickupAlts = result.PickupAlternatives ?? Array.Empty<string>();
@@ -2196,7 +2205,8 @@ public sealed class CallSession : ICallSession
 
                     var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId, _booking.PickupTime,
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                        callerArea: _booking.CallerArea);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
                     FareResult result;
@@ -2432,7 +2442,8 @@ public sealed class CallSession : ICallSession
                     var (ep, ed) = GetEnrichedAddresses();
                     var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(ep, ed, CallerId, _booking.PickupTime,
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                        callerArea: _booking.CallerArea);
                     ApplyFareResultNullSafe(result);
                 }
                 catch (Exception ex)
@@ -2715,7 +2726,8 @@ public sealed class CallSession : ICallSession
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
                 enrichedPickup, enrichedDest, CallerId, _booking.PickupTime,
                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                callerArea: _booking.CallerArea);
             var completed = await Task.WhenAny(aiTask, Task.Delay(18000));
 
             FareResult result;

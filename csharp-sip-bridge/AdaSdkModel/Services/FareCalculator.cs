@@ -69,7 +69,8 @@ public sealed class FareCalculator : IFareCalculator
         string? spokenPickupNumber = null,
         string? spokenDestNumber = null,
         string? spokenPickupPostcode = null,
-        string? spokenDestPostcode = null)
+        string? spokenDestPostcode = null,
+        string? callerArea = null)
     {
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
@@ -108,7 +109,8 @@ public sealed class FareCalculator : IFareCalculator
                 pickup_house_number = spokenPickupNumber ?? "",
                 destination_house_number = spokenDestNumber ?? "",
                 pickup_postcode = spokenPickupPostcode ?? "",
-                destination_postcode = spokenDestPostcode ?? ""
+                destination_postcode = spokenDestPostcode ?? "",
+                caller_area = callerArea ?? ""
             });
             var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
