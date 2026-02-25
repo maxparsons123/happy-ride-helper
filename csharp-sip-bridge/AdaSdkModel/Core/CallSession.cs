@@ -54,6 +54,10 @@ public sealed class CallSession : ICallSession
     // ── DESTRUCTIVE ACTION GUARD (replaces old _cancelBlockedCount + keyword scanning) ──
     private DestructiveActionGuard? _destructiveGuard;
 
+    // ── SPLIT-BRAIN STATE ENGINE (Phase 1 — Overlay) ──
+    // Gates destructive tool calls and tracks workflow state deterministically.
+    private CallStateEngine? _engine;
+
     // ── DUAL-TRANSCRIPT AUDIT TRAIL ──
     // In-memory list of transcript entries pushed to Supabase live_calls.transcripts
     private readonly List<object> _transcriptLog = new();
@@ -438,10 +442,15 @@ public sealed class CallSession : ICallSession
             _logger.LogWarning(ex, "[{SessionId}] Active booking lookup failed (non-fatal)", SessionId);
         }
 
-        // Step 2: Connect to OpenAI (session configured, event loops started, but NO greeting yet)
+        // Step 2: Initialize Split-Brain engine (Phase 1 — Overlay)
+        _engine = new CallStateEngine(_logger, SessionId, hasActiveBooking: activeBookingInfo != null);
+        _logger.LogInformation("[{SessionId}] 🧠 CallStateEngine initialized (state={State}, hasActiveBooking={Active})",
+            SessionId, _engine.State, activeBookingInfo != null);
+
+        // Step 3: Connect to OpenAI (session configured, event loops started, but NO greeting yet)
         await _aiClient.ConnectAsync(CallerId, ct);
 
-        // Step 3: Inject caller history BEFORE greeting so Ada knows the caller's name
+        // Step 4: Inject caller history BEFORE greeting so Ada knows the caller's name
         if (callerHistory != null)
         {
             try
@@ -455,7 +464,7 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Step 3b: Inject active booking info if present
+        // Step 4b: Inject active booking info if present
         if (activeBookingInfo != null)
         {
             try
@@ -469,7 +478,7 @@ public sealed class CallSession : ICallSession
             }
         }
 
-        // Step 4: NOW send the greeting — pass caller name and active booking context
+        // Step 5: NOW send the greeting — pass caller name and active booking context
         if (activeBookingInfo != null)
             await _aiClient.SendGreetingWithBookingAsync(_booking.Name, _booking);
         else
@@ -1097,6 +1106,7 @@ public sealed class CallSession : ICallSession
         {
             _logger.LogInformation("[{SessionId}] ✈️ Airport destination detected: '{Dest}' — bypassing fare calc, directing to booking link",
                 SessionId, _booking.Destination);
+            _engine?.NotifyAirportDetected();
             return new
             {
                 success = true,
@@ -1508,6 +1518,7 @@ public sealed class CallSession : ICallSession
                     {
                         _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED — asking user to verify destination", sessionId);
                         Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                        _engine?.NotifyFareSanityFailed();
 
                         await _aiClient.InjectMessageAndRespondAsync(
                                 "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard or the city could not be determined. " +
@@ -2229,6 +2240,7 @@ public sealed class CallSession : ICallSession
 
                                 var altsList = string.Join(", ", pickupAlts);
                                 _pickupDisambiguated = false;
+                                _engine?.NotifyDisambiguationNeeded(isPickup: true);
 
                                 await _aiClient.InjectMessageAndRespondAsync(
                                         $"[PICKUP DISAMBIGUATION] The PICKUP address is ambiguous. The options are: {altsList}. " +
@@ -2239,6 +2251,7 @@ public sealed class CallSession : ICallSession
                             {
                                 var altsList = string.Join(", ", destAlts);
                                 _destDisambiguated = false;
+                                _engine?.NotifyDisambiguationNeeded(isPickup: false);
 
                                 await _aiClient.InjectMessageAndRespondAsync(
                                         $"[DESTINATION DISAMBIGUATION] The DESTINATION address is ambiguous. The options are: {altsList}. " +
@@ -2382,6 +2395,18 @@ public sealed class CallSession : ICallSession
 
         if (action == "confirmed")
         {
+            // ── SPLIT-BRAIN ENGINE GATE (Phase 1) ──
+            if (_engine != null)
+            {
+                var gateResult = _engine.GateBookTaxiConfirmed();
+                if (gateResult.BlockToolCall)
+                {
+                    _logger.LogWarning("[{SessionId}] ⛔ ENGINE: book_taxi(confirmed) BLOCKED — {Reason}", SessionId, gateResult.BlockReason);
+                    return new { success = false, error = gateResult.BlockReason };
+                }
+                // Engine approved — continue with existing guards below
+            }
+
             // FARE PREREQUISITE GUARD: Block confirmation if fare was never presented to the caller.
             // The AI must NOT skip fare calculation → presentation → user confirmation.
             if (_currentStage != BookingStage.FarePresented && _currentStage != BookingStage.AnythingElse
@@ -2900,6 +2925,20 @@ public sealed class CallSession : ICallSession
             };
         }
 
+        // ── SPLIT-BRAIN ENGINE GATE (Phase 1) ──
+        if (_engine != null)
+        {
+            var gateResult = _engine.GateCancelBooking(confirmed);
+            if (gateResult.BlockToolCall)
+            {
+                _logger.LogWarning("[{SessionId}] ⛔ ENGINE: cancel_booking BLOCKED — {Reason}", SessionId, gateResult.BlockReason);
+                return new { success = false, error = gateResult.BlockReason };
+            }
+            // Engine approved cancellation — apply VAD switch if requested
+            if (gateResult.UseSemanticVad.HasValue)
+                _ = _aiClient.SetVadModeAsync(gateResult.UseSemanticVad.Value, gateResult.VadEagerness);
+        }
+
         // ── Step 1: Not confirmed → begin confirmation flow ──
         if (!confirmed)
         {
@@ -3001,6 +3040,7 @@ public sealed class CallSession : ICallSession
             _destDisambiguated = true;
             _pickupLockedByClarify = false;
             _destLockedByClarify = false;
+            _engine?.Reset(preserveCallerIdentity: true);
 
             // Inject clean state so the AI knows ALL fields are now empty
             _ = InjectBookingStateAsync("[BOOKING RESET] Previous booking was cancelled. ALL fields are now empty. " +
@@ -3200,6 +3240,18 @@ public sealed class CallSession : ICallSession
     private object HandleEndCall(Dictionary<string, object?> args)
     {
         _currentStage = BookingStage.Ending;
+
+        // ── SPLIT-BRAIN ENGINE GATE (Phase 1) ──
+        if (_engine != null)
+        {
+            var gateResult = _engine.GateEndCall();
+            if (gateResult.BlockToolCall)
+            {
+                _logger.LogWarning("[{SessionId}] ⛔ ENGINE: end_call BLOCKED — {Reason}", SessionId, gateResult.BlockReason);
+                return new { success = false, error = gateResult.BlockReason };
+            }
+        }
+
         // ── END-CALL GUARD: Block premature hangup if booking flow was started but never completed ──
         bool fareWasCalculated = !string.IsNullOrWhiteSpace(_booking.Fare);
         bool bookingCompleted = Volatile.Read(ref _bookTaxiCompleted) == 1;
@@ -3534,6 +3586,9 @@ public sealed class CallSession : ICallSession
         _booking.DestCity = result.DestCity;
         _booking.DestFormatted = result.DestFormatted;
         _booking.DestArea = result.DestArea;
+
+        // ── SPLIT-BRAIN ENGINE: Notify fare received ──
+        _engine?.NotifyFareReceived();
     }
 
     private void ApplyFareResultNullSafe(FareResult result)
