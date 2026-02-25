@@ -37,8 +37,8 @@ public sealed class ALawRtpPlayout : IDisposable
     private const byte AlawSilence = 0xD5;
 
     // Fix #4: split thresholds — cold start needs deeper buffer, resume is immediate
-    private const int ColdStartThresholdFrames = 10;  // 200ms for initial buffering
-    private const int ResumeThresholdFrames = 5;       // 100ms for mid-stream resume (reduces underruns)
+    private const int ColdStartThresholdFrames = 4;   // 80ms for initial buffering (was 10/200ms — too much latency)
+    private const int ResumeThresholdFrames = 3;       // 60ms for mid-stream resume (was 5/100ms)
 
     // Fix #1: pool cap to prevent unbounded memory growth after bursts
     private const int MaxPoolSize = 200;
@@ -296,7 +296,8 @@ public sealed class ALawRtpPlayout : IDisposable
             ReturnFrame(f);
         }
         _buffering = true;
-        _hasPlayedAudio = false; // reset so cold-start threshold applies on next speech
+        // Keep _hasPlayedAudio = true after first speech — use shallow resume threshold
+        // instead of full cold-start after barge-in/clear (reduces jitter gaps)
         Volatile.Write(ref _clearRequested, false);
     }
 
