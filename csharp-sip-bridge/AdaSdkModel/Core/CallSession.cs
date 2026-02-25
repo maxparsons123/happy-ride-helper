@@ -2828,25 +2828,25 @@ public sealed class CallSession : ICallSession
         var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
 
         // If the PREVIOUS tool call was also cancel_booking (i.e. Ada already asked for
-        // confirmation after a blocked attempt), allow confirmation keywords through.
-        // This handles the flow: user says garbled "cancel" → blocked → Ada asks "are you sure?" → user says "yes"
-        var isConfirmationAfterPreviousAttempt = _previousToolIntent == "cancel_booking" &&
-            recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
+        // confirmation after a blocked attempt), allow through unconditionally.
+        // This handles: user says garbled "cancel" → blocked → Ada asks "are you sure?" → user confirms
+        // We don't require specific confirm keywords because STT may garble those too.
+        var isRetryAfterPreviousBlock = _previousToolIntent == "cancel_booking";
 
         // Also allow if Ada's last response offered cancellation as an option (e.g. "Would you like to cancel it, 
         // make changes, or check status?") and user confirmed — even without prior cancel_booking tool call.
         // This handles: returning caller → Ada offers cancel/change/status → user says "cancel" but STT garbles it → 
-        // Ada re-asks → user says "yes" but _previousToolIntent is null (no prior tool call).
-        var isConfirmationAfterAdaOfferedCancel = _previousToolIntent == null &&
+        // Ada re-asks → user confirms.
+        var isConfirmationWithNoToolHistory = _previousToolIntent == null &&
             _lastToolIntent == null &&
             recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
 
-        if (isConfirmationAfterPreviousAttempt)
+        if (isRetryAfterPreviousBlock)
         {
-            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — confirmation after previous blocked attempt. Transcripts: [{Transcripts}]",
+            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — retry after previous blocked attempt (previous_intent=cancel_booking). Transcripts: [{Transcripts}]",
                 SessionId, string.Join(" | ", recentUserMessages));
         }
-        else if (isConfirmationAfterAdaOfferedCancel)
+        else if (isConfirmationWithNoToolHistory)
         {
             _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — confirmation with no prior tool calls (Ada likely offered cancel option). Transcripts: [{Transcripts}]",
                 SessionId, string.Join(" | ", recentUserMessages));
