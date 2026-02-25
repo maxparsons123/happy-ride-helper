@@ -23,6 +23,7 @@ import TrackDriver from "./pages/TrackDriver";
 import IcabbiSettings from "./pages/IcabbiSettings";
 import Pay from "./pages/Pay";
 import AirportBooking from "./pages/AirportBooking";
+import AddressTest from "./pages/AddressTest";
 
 const queryClient = new QueryClient();
 
@@ -52,6 +53,7 @@ const App = () => (
           <Route path="/icabbi" element={<IcabbiSettings />} />
           <Route path="/pay/:checkoutId" element={<Pay />} />
           <Route path="/book/:token" element={<AirportBooking />} />
+          <Route path="/address-test" element={<AddressTest />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
