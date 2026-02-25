@@ -167,13 +167,45 @@ partial class MainForm
         grpCall.Controls.AddRange(new Control[] { btnHangUp, btnMute, lblCallInfo });
 
         // ══════════════════════════════════════
+        //  SIMLI AVATAR
+        // ══════════════════════════════════════
+        grpAvatar = new GroupBox
+        {
+            Text = "🎭 Avatar",
+            Location = new Point(580, 30),
+            Size = new Size(320, 180),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            ForeColor = fgLight,
+            BackColor = bgPanel
+        };
+
+        pnlAvatarHost = new Panel
+        {
+            Location = new Point(10, 22),
+            Size = new Size(300, 130),
+            BackColor = Color.Black
+        };
+
+        lblAvatarStatus = new Label
+        {
+            Text = "Waiting…",
+            Location = new Point(10, 155),
+            Size = new Size(300, 20),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8F),
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+
+        grpAvatar.Controls.AddRange(new Control[] { pnlAvatarHost, lblAvatarStatus });
+
+        // ══════════════════════════════════════
         //  ENGINE STATE GROUP
         // ══════════════════════════════════════
         grpEngine = new GroupBox
         {
             Text = "⚙ Booking Engine",
-            Location = new Point(580, 30),
-            Size = new Size(320, 298),
+            Location = new Point(580, 215),
+            Size = new Size(320, 148),
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
             ForeColor = fgLight,
             BackColor = bgPanel
@@ -191,7 +223,7 @@ partial class MainForm
         txtEngineSlots = new RichTextBox
         {
             Location = new Point(10, 48),
-            Size = new Size(300, 240),
+            Size = new Size(300, 90),
             Font = new Font("Cascadia Mono", 8.5F),
             BackColor = Color.FromArgb(20, 20, 20),
             ForeColor = Color.FromArgb(180, 220, 180),
@@ -254,7 +286,7 @@ partial class MainForm
         this.ForeColor = fgLight;
         this.MainMenuStrip = menuStrip;
 
-        this.Controls.AddRange(new Control[] { menuStrip, grpSip, grpCall, grpEngine, grpLogs, statusStrip });
+        this.Controls.AddRange(new Control[] { menuStrip, grpSip, grpCall, grpAvatar, grpEngine, grpLogs, statusStrip });
 
         this.ResumeLayout(false);
         this.PerformLayout();
@@ -305,6 +337,11 @@ partial class MainForm
     private GroupBox grpEngine;
     private Label lblEngineState;
     private RichTextBox txtEngineSlots;
+
+    // Avatar
+    private GroupBox grpAvatar;
+    private Panel pnlAvatarHost;
+    private Label lblAvatarStatus;
 
     // Logs
     private GroupBox grpLogs;
