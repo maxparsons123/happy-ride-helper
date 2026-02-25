@@ -82,6 +82,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
     private bool _useSemanticVad = true;
     private float _semanticEagerness = 0.5f;
     private string? _lastUserTranscript;
+    public bool SuppressWatchdog { get; set; }
 
     public string? LastUserTranscript => _lastUserTranscript;
 
@@ -879,6 +880,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _toolInFlight) == 1) return;
             if (Volatile.Read(ref _callEnded) != 0) return;
             if (!IsConnected) return;
+            if (SuppressWatchdog) { Log("⏳ Watchdog suppressed (fare calculating)"); return; }
 
             var sinceAdaFinished = NowMs() - Volatile.Read(ref _lastAdaFinishedAt);
             if (sinceAdaFinished < ECHO_GUARD_MS) return;

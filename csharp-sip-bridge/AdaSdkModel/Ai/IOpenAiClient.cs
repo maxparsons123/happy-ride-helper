@@ -25,6 +25,9 @@ public interface IOpenAiClient
     /// <summary>Set whether the system is awaiting a yes/no confirmation.</summary>
     void SetAwaitingConfirmation(bool awaiting);
 
+    /// <summary>Suppress watchdog while fare is calculating (set by CallSession).</summary>
+    bool SuppressWatchdog { get; set; }
+
     /// <summary>Cancel any pending deferred response.</summary>
     void CancelDeferredResponse();
 

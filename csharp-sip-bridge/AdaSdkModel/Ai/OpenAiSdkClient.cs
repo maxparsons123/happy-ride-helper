@@ -81,6 +81,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     private long _micGateUntilMs;                   // if NowMs() < this, buffer (not discard) SendAudio()
     private int _drainGateTaskId;                   // prevents overlapping drain tasks
     private int _suppressWatchdogUntilUserSpeech;   // set to 1 after greeting; cleared once user speaks
+    public bool SuppressWatchdog { get; set; }       // set by CallSession during fare calculation
     private int _bargeInActive;                     // 1 = user barged in, reduce echo tail on next playout complete
     private readonly List<byte[]> _micGateBuffer = new(); // Buffered audio during echo tail (prevents clipped syllables)
     private readonly object _micGateBufferLock = new();
@@ -1066,6 +1067,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (Volatile.Read(ref _callEnded) != 0) return;
             if (Volatile.Read(ref _ignoreUserAudio) == 1) return;
             if (!IsConnected) return;
+            if (SuppressWatchdog) { Log("⏳ Watchdog suppressed (fare calculating)"); return; }
 
             // v3.0: if mic is currently gated, don't watchdog prompt
             var gateUntil = Volatile.Read(ref _micGateUntilMs);
