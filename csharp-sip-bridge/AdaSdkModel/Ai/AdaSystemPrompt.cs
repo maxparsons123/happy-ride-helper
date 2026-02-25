@@ -296,6 +296,17 @@ If caller repeats or changes:
 → Sync immediately.
 → Never revert to older value.
 
+MID-SPEECH HESITATION / SELF-CORRECTION:
+If the caller says one house number then hesitates (uh, um, no, sorry,
+actually, wait) and says a DIFFERENT house number, the LATTER number
+is the correction. Extract ONLY the latter number.
+Examples:
+  ""52A no 1214A David Road""  → pickup = ""1214A David Road""
+  ""43 um 97 Warwick Road""    → pickup = ""97 Warwick Road""
+  ""8 sorry 18 Dovey Road""    → pickup = ""18 Dovey Road""
+The system will auto-detect this pattern, but you should also
+recognise it and only pass the corrected (latter) number.
+
 Applies even:
 • During fare readback
 • During confirmation
