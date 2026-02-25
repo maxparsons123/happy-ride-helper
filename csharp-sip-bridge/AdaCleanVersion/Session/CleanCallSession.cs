@@ -71,6 +71,19 @@ public class CleanCallSession
     /// </summary>
     public async Task ProcessCallerResponseAsync(string transcript, CancellationToken ct = default)
     {
+        // Step 1: Check for correction intent BEFORE normal slot processing
+        var correction = CorrectionDetector.Detect(
+            transcript,
+            _engine.RawData.NextMissingSlot(),
+            _engine.RawData.FilledSlots);
+
+        if (correction != null)
+        {
+            Log($"Correction detected: {correction.SlotName} → \"{correction.NewValue}\"");
+            await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
+            return;
+        }
+
         var currentSlot = _engine.RawData.NextMissingSlot();
         if (currentSlot == null)
         {
@@ -181,13 +194,21 @@ public class CleanCallSession
         }
     }
 
-    private Task HandlePostCollectionInput(string transcript, CancellationToken ct)
+    private async Task HandlePostCollectionInput(string transcript, CancellationToken ct)
     {
-        // After all slots are collected, handle confirmation/rejection/correction
-        // This is where you'd add keyword detection for "yes", "no", "change pickup", etc.
         Log($"Post-collection input: \"{transcript}\" (state: {_engine.State})");
 
-        // Simple keyword matching — no AI needed
+        // Check for correction intent first — even post-collection
+        var correction = CorrectionDetector.Detect(
+            transcript, null, _engine.RawData.FilledSlots);
+
+        if (correction != null)
+        {
+            Log($"Post-collection correction: {correction.SlotName} → \"{correction.NewValue}\"");
+            await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
+            return;
+        }
+
         var lower = transcript.ToLowerInvariant().Trim();
 
         switch (_engine.State)
@@ -195,7 +216,7 @@ public class CleanCallSession
             case CollectionState.AwaitingPaymentChoice:
                 if (lower.Contains("card")) AcceptPayment("card");
                 else if (lower.Contains("cash") || lower.Contains("meter")) AcceptPayment("meter");
-                else EmitCurrentInstruction(); // Re-ask
+                else EmitCurrentInstruction();
                 break;
 
             case CollectionState.AwaitingConfirmation:
@@ -204,15 +225,13 @@ public class CleanCallSession
                 else if (lower.Contains("no") || lower.Contains("cancel"))
                     EndCall();
                 else
-                    EmitCurrentInstruction(); // Re-ask
+                    EmitCurrentInstruction();
                 break;
 
             default:
                 EmitCurrentInstruction();
                 break;
         }
-
-        return Task.CompletedTask;
     }
 
     private void EmitCurrentInstruction()

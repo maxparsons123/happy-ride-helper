@@ -55,4 +55,19 @@ public class RawBookingData
         "pickup_time" => PickupTimeRaw,
         _ => null
     };
+
+    /// <summary>Returns the set of slot names that currently have non-empty values.</summary>
+    public IReadOnlySet<string> FilledSlots
+    {
+        get
+        {
+            var filled = new HashSet<string>();
+            if (!string.IsNullOrWhiteSpace(NameRaw)) filled.Add("name");
+            if (!string.IsNullOrWhiteSpace(PickupRaw)) filled.Add("pickup");
+            if (!string.IsNullOrWhiteSpace(DestinationRaw)) filled.Add("destination");
+            if (!string.IsNullOrWhiteSpace(PassengersRaw)) filled.Add("passengers");
+            if (!string.IsNullOrWhiteSpace(PickupTimeRaw)) filled.Add("pickup_time");
+            return filled;
+        }
+    }
 }
