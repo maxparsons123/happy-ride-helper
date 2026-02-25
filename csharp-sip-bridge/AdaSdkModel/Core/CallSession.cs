@@ -49,8 +49,10 @@ public sealed class CallSession : ICallSession
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private string? _lastToolIntent; // Tracks the last tool the AI called (e.g. "check_booking_status", "cancel_booking")
     private string? _previousToolIntent; // The tool intent before _lastToolIntent (for confirmation-after-block flows)
-    private int _cancelBlockedCount; // How many consecutive times cancel_booking was blocked — allows through on 2nd attempt
     private int _intentGuardFiring; // prevents re-entrant guard execution
+
+    // ── DESTRUCTIVE ACTION GUARD (replaces old _cancelBlockedCount + keyword scanning) ──
+    private DestructiveActionGuard? _destructiveGuard;
 
     // ── DUAL-TRANSCRIPT AUDIT TRAIL ──
     // In-memory list of transcript entries pushed to Supabase live_calls.transcripts
@@ -93,6 +95,7 @@ public sealed class CallSession : ICallSession
         _sumUp = sumUp;
 
         _booking.CallerPhone = callerId;
+        _destructiveGuard = new DestructiveActionGuard(logger, sessionId);
 
         // Init thinning filter if configured
         if (settings.Audio.ThinningAlpha > 0.01f)
@@ -2873,8 +2876,7 @@ public sealed class CallSession : ICallSession
     // =========================
     private async Task<object> HandleCancelBookingAsync(Dictionary<string, object?> args)
     {
-        // ── Confirmation gate: reject if caller hasn't explicitly confirmed ──
-        // NOTE: JsonSerializer deserializes bools as JsonElement, not native bool.
+        // ── Parse confirmed flag (JsonSerializer sends JsonElement, not native bool) ──
         var confirmed = false;
         if (args.TryGetValue("confirmed", out var c))
         {
@@ -2886,9 +2888,12 @@ public sealed class CallSession : ICallSession
                 _ => false
             };
         }
+
+        // ── Step 1: Not confirmed → begin confirmation flow ──
         if (!confirmed)
         {
-            _logger.LogInformation("[{SessionId}] 🛡️ cancel_booking rejected — confirmed=false, asking Ada to confirm with caller", SessionId);
+            _destructiveGuard!.BeginConfirmation(DestructiveActionType.CancelBooking);
+            _logger.LogInformation("[{SessionId}] 🛡️ cancel_booking: confirmation flow started, asking Ada to confirm with caller", SessionId);
             return new
             {
                 success = false,
@@ -2897,10 +2902,16 @@ public sealed class CallSession : ICallSession
             };
         }
 
-        // ── Intent-tracking guard: block cancel if last tool was a non-cancel action (e.g. status check) ──
+        // ── Step 2: Confirmed → validate via state machine ──
+        if (!_destructiveGuard!.TryValidate(DestructiveActionType.CancelBooking, out var blockError))
+        {
+            return new { success = false, error = blockError };
+        }
+
+        // ── Intent-tracking guard: block cancel if last tool was a status check ──
         if (_lastToolIntent == "check_booking_status")
         {
-            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — last tool was check_booking_status, caller likely didn't mean to cancel",
+            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — last tool was check_booking_status",
                 SessionId);
             return new
             {
@@ -2910,13 +2921,7 @@ public sealed class CallSession : ICallSession
             };
         }
 
-        // ── Ada's interpretation is the source of truth ──
-        // If Ada called cancel_booking(confirmed=true), she understood the caller's intent.
-        // Raw STT transcripts are less accurate than Ada's semantic interpretation,
-        // so we trust her judgment rather than keyword-matching against garbled transcripts.
-        _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — trusting Ada's interpretation (confirmed=true, double-confirmation passed)",
-            SessionId);
-        _cancelBlockedCount = 0; // Reset any previous block count
+        _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — state machine validated", SessionId);
 
         var reason = args.TryGetValue("reason", out var r) ? r?.ToString() ?? "caller_request" : "caller_request";
         var bookingId = _booking.ExistingBookingId;
