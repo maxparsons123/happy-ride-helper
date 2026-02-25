@@ -363,14 +363,14 @@ serve(async (req) => {
       return new Response(JSON.stringify({ status: "warm" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
     
-    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode } = body;
+    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode, caller_area } = body;
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}"`);
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}", callerArea="${caller_area || ''}"`);
 
     // Look up caller history from database
     let callerHistory = "";
@@ -435,8 +435,13 @@ serve(async (req) => {
       postcodeHints += `\nCaller's spoken destination postcode: ${destination_postcode}`;
     }
 
+    // Caller area bias — provided by Ada when the caller states their area (e.g. "I'm in Earlsdon")
+    const callerAreaHint = caller_area
+      ? `\nCALLER_AREA (the caller stated they are in this area/district — use as STRONG bias for all address resolution): "${caller_area}". Prefer street matches and POIs within or near this area. This is stronger than phone-prefix bias but weaker than an explicit city name in the address itself.`
+      : '';
+
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerHistory}`;
+User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerAreaHint}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",

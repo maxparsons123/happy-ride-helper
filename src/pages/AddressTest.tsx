@@ -57,6 +57,7 @@ export default function AddressTest() {
   const [pickup, setPickup] = useState("");
   const [destination, setDestination] = useState("");
   const [phone, setPhone] = useState("02476123456");
+  const [callerArea, setCallerArea] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<DispatchResponse | null>(null);
   const [rawJson, setRawJson] = useState("");
@@ -73,7 +74,7 @@ export default function AddressTest() {
 
     try {
       const { data, error: fnError } = await supabase.functions.invoke("address-dispatch", {
-        body: { pickup, destination, phone },
+        body: { pickup, destination, phone, ...(callerArea.trim() ? { caller_area: callerArea.trim() } : {}) },
       });
 
       const elapsed = Math.round(performance.now() - start);
@@ -138,6 +139,19 @@ export default function AddressTest() {
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
                   placeholder="e.g. 02476123456"
+                  className="pl-9"
+                  onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground mb-1 block">Caller Area (optional)</label>
+              <div className="relative">
+                <MapPin className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  value={callerArea}
+                  onChange={(e) => setCallerArea(e.target.value)}
+                  placeholder="e.g. Earlsdon, Tile Hill"
                   className="pl-9"
                   onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                 />
