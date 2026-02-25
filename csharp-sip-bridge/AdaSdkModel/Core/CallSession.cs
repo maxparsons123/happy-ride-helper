@@ -59,7 +59,6 @@ public sealed class CallSession : ICallSession
     // explicitly corrects it (e.g. "no, it's...", "change", "actually").
     private string? _adaConfirmedPickup;
     private string? _adaConfirmedDestination;
-    private int _intentGuardFiring; // prevents re-entrant guard execution
 
     // ── DESTRUCTIVE ACTION GUARD (replaces old _cancelBlockedCount + keyword scanning) ──
     private DestructiveActionGuard? _destructiveGuard;
