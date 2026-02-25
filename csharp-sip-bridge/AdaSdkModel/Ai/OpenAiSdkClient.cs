@@ -1255,17 +1255,18 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     public static ConversationFunctionTool BuildCancelBookingToolStatic() => new("cancel_booking")
     {
         Description = "Cancel an existing active booking. " +
-                      "WORKFLOW: 1) Ask the caller to confirm cancellation verbally. " +
-                      "2) WAIT for their response. 3) If they say yes/yeah/correct/sure, " +
-                      "call this tool with confirmed=true. " +
-                      "Only call this tool ONCE, AFTER hearing verbal confirmation, with confirmed=true.",
+                      "CRITICAL: Saying 'I'll cancel it' does NOT cancel anything — you MUST call this tool. " +
+                      "WORKFLOW: 1) Ask the caller 'Just to confirm, you'd like to cancel?' " +
+                      "2) WAIT for yes/yeah/sure. " +
+                      "3) Call this tool with confirmed=true. The booking is NOT cancelled until this tool returns success. " +
+                      "NEVER skip this tool call — verbal statements alone have zero effect.",
         Parameters = BinaryData.FromString(JsonSerializer.Serialize(new
         {
             type = "object",
             properties = new
             {
                 reason = new { type = "string", description = "Reason for cancellation (e.g. 'caller_request', 'plans_changed')" },
-                confirmed = new { type = "boolean", description = "MUST be true. Only call this tool after the caller has verbally confirmed cancellation." }
+                confirmed = new { type = "boolean", description = "MUST be true. Only call after caller verbally confirmed." }
             },
             required = new[] { "confirmed" }
         }))
