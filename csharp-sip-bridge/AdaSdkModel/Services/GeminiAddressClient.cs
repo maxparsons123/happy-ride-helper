@@ -366,6 +366,113 @@ public sealed class GeminiAddressClient
 
     private static readonly string[] KnownCities = { "Coventry", "Birmingham", "London", "Manchester", "Leeds", "Sheffield", "Nottingham", "Leicester", "Bristol", "Reading", "Liverpool", "Newcastle", "Brighton", "Oxford", "Cambridge", "Wolverhampton", "Derby", "Stoke", "Southampton", "Portsmouth", "Edinburgh", "Glasgow", "Cardiff", "Belfast", "Warwick", "Kenilworth", "Solihull", "Sutton Coldfield", "Leamington", "Rugby", "Nuneaton", "Bedworth", "Stratford", "Redditch", "Amsterdam", "Rotterdam", "The Hague", "Utrecht", "Eindhoven", "Gent", "Ghent", "Brussels", "Antwerp", "Bruges" };
 
+    /// <summary>Map UK postcode area prefix to city name. Returns null if unknown.</summary>
+    private static string? GetCityFromPostcodeArea(string area) => area.ToUpperInvariant() switch
+    {
+        "M" => "Manchester",
+        "B" => "Birmingham",
+        "CV" => "Coventry",
+        "L" => "Liverpool",
+        "LS" => "Leeds",
+        "S" => "Sheffield",
+        "NG" => "Nottingham",
+        "LE" => "Leicester",
+        "BS" => "Bristol",
+        "RG" => "Reading",
+        "NE" => "Newcastle",
+        "BN" => "Brighton",
+        "OX" => "Oxford",
+        "CB" => "Cambridge",
+        "WV" => "Wolverhampton",
+        "DE" => "Derby",
+        "ST" => "Stoke-on-Trent",
+        "SO" => "Southampton",
+        "PO" => "Portsmouth",
+        "EH" => "Edinburgh",
+        "G" => "Glasgow",
+        "CF" => "Cardiff",
+        "BT" => "Belfast",
+        "E" or "EC" or "N" or "NW" or "SE" or "SW" or "W" or "WC" => "London",
+        "WS" => "Walsall",
+        "DY" => "Dudley",
+        "WR" => "Worcester",
+        "HR" => "Hereford",
+        "GL" => "Gloucester",
+        "SN" => "Swindon",
+        "BA" => "Bath",
+        "EX" => "Exeter",
+        "PL" => "Plymouth",
+        "TR" => "Truro",
+        "CT" => "Canterbury",
+        "ME" => "Rochester",
+        "TN" => "Tonbridge",
+        "GU" => "Guildford",
+        "SL" => "Slough",
+        "HP" => "Hemel Hempstead",
+        "MK" => "Milton Keynes",
+        "LU" => "Luton",
+        "AL" => "St Albans",
+        "WD" => "Watford",
+        "EN" => "Enfield",
+        "HA" => "Harrow",
+        "UB" => "Southall",
+        "TW" => "Twickenham",
+        "KT" => "Kingston upon Thames",
+        "SM" => "Sutton",
+        "CR" => "Croydon",
+        "BR" => "Bromley",
+        "DA" => "Dartford",
+        "RM" => "Romford",
+        "IG" => "Ilford",
+        "SS" => "Southend-on-Sea",
+        "CM" => "Chelmsford",
+        "CO" => "Colchester",
+        "IP" => "Ipswich",
+        "NR" => "Norwich",
+        "PE" => "Peterborough",
+        "LN" => "Lincoln",
+        "DN" => "Doncaster",
+        "HU" => "Hull",
+        "YO" => "York",
+        "HG" => "Harrogate",
+        "BD" => "Bradford",
+        "HX" => "Halifax",
+        "HD" => "Huddersfield",
+        "WF" => "Wakefield",
+        "WN" => "Wigan",
+        "BL" => "Bolton",
+        "OL" => "Oldham",
+        "SK" => "Stockport",
+        "WA" => "Warrington",
+        "CH" => "Chester",
+        "CW" => "Crewe",
+        "PR" => "Preston",
+        "BB" => "Blackburn",
+        "FY" => "Blackpool",
+        "LA" => "Lancaster",
+        "CA" => "Carlisle",
+        "DL" => "Darlington",
+        "TS" => "Cleveland",
+        "SR" => "Sunderland",
+        "DH" => "Durham",
+        "TD" => "Galashiels",
+        "ML" => "Motherwell",
+        "KA" => "Kilmarnock",
+        "PA" => "Paisley",
+        "FK" => "Falkirk",
+        "KY" => "Kirkcaldy",
+        "DD" => "Dundee",
+        "AB" => "Aberdeen",
+        "PH" => "Perth",
+        "IV" => "Inverness",
+        "SA" => "Swansea",
+        "LD" => "Llandrindod Wells",
+        "SY" => "Shrewsbury",
+        "TF" => "Telford",
+        "NN" => "Northampton",
+        _ => null
+    };
+
     /// <summary>Extract street key for fuzzy comparison: "52a david road" from "52A David Road, Coventry CV1 2BW"</summary>
     private static string ExtractStreetKey(string input) =>
         System.Text.RegularExpressions.Regex.Replace(input, @"\b[a-z]{1,2}\d{1,2}\s?\d[a-z]{2}\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
@@ -451,6 +558,68 @@ public sealed class GeminiAddressClient
                 {
                     work["status"] = "ready";
                     work["clarification_message"] = null;
+                }
+            }
+        }
+
+        // ── POSTCODE → CITY OVERRIDE: ensure postcodes are resolved to correct city ──
+        // UK postcodes are authoritative city indicators — if Gemini biased to the wrong city, fix it.
+        foreach (var side in new[] { "pickup", "dropoff" })
+        {
+            var addr = work[side];
+            if (addr == null) continue;
+
+            var postalCode = addr["postal_code"]?.GetValue<string>()?.Trim().ToUpperInvariant() ?? "";
+            var resolvedCity = addr["city"]?.GetValue<string>() ?? "";
+            var originalInput = side == "pickup" ? (pickup ?? "") : (destination ?? "");
+
+            // Also check if original input IS a postcode
+            var inputPostcode = System.Text.RegularExpressions.Regex.Match(
+                originalInput.Trim().ToUpperInvariant(),
+                @"^([A-Z]{1,2})\d{1,2}\s?\d[A-Z]{2}$");
+
+            var postcodeToCheck = !string.IsNullOrEmpty(postalCode) ? postalCode :
+                                  inputPostcode.Success ? originalInput.Trim().ToUpperInvariant() : "";
+
+            if (!string.IsNullOrEmpty(postcodeToCheck))
+            {
+                var areaMatch = System.Text.RegularExpressions.Regex.Match(postcodeToCheck, @"^([A-Z]{1,2})");
+                if (areaMatch.Success)
+                {
+                    var expectedCity = GetCityFromPostcodeArea(areaMatch.Groups[1].Value);
+                    if (expectedCity != null && !string.Equals(resolvedCity, expectedCity, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation("📮 POSTCODE CITY OVERRIDE ({Side}): postcode \"{PC}\" → city should be \"{Expected}\" not \"{Actual}\"",
+                            side, postcodeToCheck, expectedCity, resolvedCity);
+                        addr["city"] = expectedCity;
+
+                        // If address field doesn't mention the correct city, update it
+                        var addrText = addr["address"]?.GetValue<string>() ?? "";
+                        if (!addrText.Contains(expectedCity, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Replace wrong city or append correct one
+                            if (!string.IsNullOrEmpty(resolvedCity) && addrText.Contains(resolvedCity, StringComparison.OrdinalIgnoreCase))
+                                addr["address"] = addrText.Replace(resolvedCity, expectedCity, StringComparison.OrdinalIgnoreCase);
+                            else if (!addrText.Contains(expectedCity, StringComparison.OrdinalIgnoreCase))
+                                addr["address"] = $"{addrText}, {expectedCity}".TrimStart(',').Trim();
+                        }
+
+                        // Clear any erroneous disambiguation caused by wrong-city bias
+                        var isAmbig = addr["is_ambiguous"]?.GetValue<bool>() ?? false;
+                        if (isAmbig)
+                        {
+                            _logger.LogInformation("📮 Clearing disambiguation for {Side} — postcode is authoritative", side);
+                            addr["is_ambiguous"] = false;
+                            addr["alternatives"] = new System.Text.Json.Nodes.JsonArray();
+                            var otherSide = side == "pickup" ? "dropoff" : "pickup";
+                            var otherAmbig = work[otherSide]?["is_ambiguous"]?.GetValue<bool>() ?? false;
+                            if (!otherAmbig)
+                            {
+                                work["status"] = "ready";
+                                work["clarification_message"] = null;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1291,20 +1460,31 @@ A taxi booking is a LOCAL journey. Both pickup and dropoff should be within a re
    - GPS coordinates if provided
 
 2. BIAS ALL ADDRESSES TO CUSTOMER LOCALITY:
-   - Once you determine the customer's likely area (e.g., Coventry from a 024 number), ALL address lookups should prefer results in or near that area.
-   - ""High Street"" from a Coventry caller → High Street, Coventry. NOT High Street, Edinburgh.
+    - Once you determine the customer's likely area (e.g., Coventry from a 024 number), ALL address lookups should prefer results in or near that area.
+    - ""High Street"" from a Coventry caller → High Street, Coventry. NOT High Street, Edinburgh.
+    - ⚠️ EXCEPTION: If the user provides a FULL UK POSTCODE (e.g. M18 7RH, B13 9NT, SW1A 1AA), the postcode is AUTHORITATIVE and overrides all locality bias. The postcode determines the city, NOT the pickup location. M18 = Manchester, B13 = Birmingham, SW1A = London, etc.
 
 3. CROSS-COUNTRY / ABSURD DISTANCE REJECTION:
-   - If your resolved pickup and dropoff are in DIFFERENT COUNTRIES, flag this as implausible.
-   - If the straight-line distance exceeds 100 miles, set a warning.
-   - Journeys over 200 miles are almost certainly errors — set is_ambiguous=true.
+    - If your resolved pickup and dropoff are in DIFFERENT COUNTRIES, flag this as implausible.
+    - If the straight-line distance exceeds 100 miles, set a warning.
+    - Journeys over 200 miles are almost certainly errors — set is_ambiguous=true.
+    - ⚠️ EXCEPTION: Long-distance journeys within the SAME COUNTRY are valid if BOTH postcodes are explicitly provided (e.g. CV1 2BW → M18 7RH is a valid Coventry→Manchester trip).
 
 4. PICKUP-TO-DROPOFF PROXIMITY BIAS:
-   - When the pickup is already resolved, use its coordinates as a CENTER POINT for dropoff search.
-   - Prefer dropoff matches within 30 miles of pickup. Accept up to 80 miles. Flag anything beyond.
+    - When the pickup is already resolved, use its coordinates as a CENTER POINT for dropoff search.
+    - Prefer dropoff matches within 30 miles of pickup. Accept up to 80 miles. Flag anything beyond.
+    - ⚠️ EXCEPTION: If the dropoff has an EXPLICIT POSTCODE, resolve it to that postcode's location regardless of distance from pickup.
 
 5. SAME-CITY DEFAULT:
-   - If only one address mentions a city, assume both are in the SAME city unless evidence suggests otherwise.
+    - If only one address mentions a city, assume both are in the SAME city unless evidence suggests otherwise.
+    - ⚠️ POSTCODES ARE EVIDENCE: A UK postcode like ""M18 7RH"" IS explicit evidence of a different city (Manchester). Do NOT apply same-city default when a postcode is provided.
+
+6. UK POSTCODE AREA → CITY MAPPING (use for bias):
+    - M = Manchester, B = Birmingham, CV = Coventry, L = Liverpool, LS = Leeds, S = Sheffield,
+      NG = Nottingham, LE = Leicester, BS = Bristol, RG = Reading, NE = Newcastle, BN = Brighton,
+      OX = Oxford, CB = Cambridge, WV = Wolverhampton, DE = Derby, ST = Stoke, SO = Southampton,
+      PO = Portsmouth, E/EC/N/NW/SE/SW/W/WC = London, EH = Edinburgh, G = Glasgow, CF = Cardiff, BT = Belfast
+    - When a postcode is provided, use this mapping to set the correct city. NEVER override with the pickup city.
 
 SPEECH-TO-TEXT MISHEARING AWARENESS (CRITICAL):
 Inputs come from live speech recognition and are often phonetically garbled. Apply phonetic reasoning.
