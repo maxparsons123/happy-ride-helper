@@ -47,6 +47,7 @@ public sealed class CallSession : ICallSession
     private volatile BookingStage _currentStage = BookingStage.Greeting;
     private string? _lastUserTranscript;
     private string? _lastAdaTranscript; // Tracks Ada's last speech for watchdog stage inference
+    private volatile BookingStage _lastAdaStageHint = BookingStage.Greeting; // Deterministic stage hint from engine actions
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private string? _lastToolIntent; // Tracks the last tool the AI called (e.g. "check_booking_status", "cancel_booking")
     private string? _previousToolIntent; // The tool intent before _lastToolIntent (for confirmation-after-block flows)
@@ -154,16 +155,16 @@ public sealed class CallSession : ICallSession
         _aiClient.OnBargeIn += () => OnBargeIn?.Invoke();
 
         // ── STAGE-AWARE WATCHDOG: Provide contextual re-prompts instead of generic "[SILENCE]" ──
+        // Uses 3-layer inference with monotonic progression (never regresses):
+        //   1. Primary: _currentStage (set by sync_booking_data tool calls)
+        //   2. Engine fallback: CallStateEngine.State (deterministic, model-independent)
+        //   3. Stage hint fallback: _lastAdaStageHint (set by engine actions, no NLP inference)
         _aiClient.NoReplyContextProvider = () =>
         {
-            // ── SAFETY NET: If the model failed to call sync_booking_data but the conversation
-            // clearly progressed (Ada already spoke about checking addresses / fares), do NOT
-            // fall back to the greeting stage. Detect this via _currentStage being stale
-            // while the engine or Ada's last speech indicates mid-booking progress.
             var effectiveStage = _currentStage;
 
-            // If stage is still early (Greeting/CollectingPickup) but the engine state is more advanced,
-            // trust the engine state — the model skipped sync calls
+            // Layer 2: If stage is still early but the engine state is more advanced,
+            // trust the engine — the model skipped sync calls
             if (_engine != null && effectiveStage <= BookingStage.CollectingPickup)
             {
                 var engineState = _engine.State;
@@ -179,21 +180,11 @@ public sealed class CallSession : ICallSession
                     effectiveStage = BookingStage.CollectingTime;
             }
 
-            // Additional safety: if Ada already spoke about checking/fare but stage didn't advance,
-            // infer from the last Ada transcript
-            if (effectiveStage <= BookingStage.CollectingPickup && !string.IsNullOrWhiteSpace(_lastAdaTranscript))
+            // Layer 3: Deterministic stage hint from last engine action output
+            // (no fragile transcript matching — uses tagged output from HandleInput)
+            if (effectiveStage <= BookingStage.CollectingPickup && _lastAdaStageHint > effectiveStage)
             {
-                var lastAda = _lastAdaTranscript.ToLowerInvariant();
-                if (lastAda.Contains("check") && (lastAda.Contains("address") || lastAda.Contains("fare") || lastAda.Contains("price")))
-                    effectiveStage = BookingStage.FareCalculating;
-                else if (lastAda.Contains("how many passengers"))
-                    effectiveStage = BookingStage.CollectingPassengers;
-                else if (lastAda.Contains("what time") || lastAda.Contains("when would"))
-                    effectiveStage = BookingStage.CollectingTime;
-                else if (lastAda.Contains("where") && lastAda.Contains("heading"))
-                    effectiveStage = BookingStage.CollectingDestination;
-                else if (lastAda.Contains("picked up"))
-                    effectiveStage = BookingStage.CollectingPickup;
+                effectiveStage = _lastAdaStageHint;
             }
 
             return effectiveStage switch
@@ -1059,6 +1050,19 @@ public sealed class CallSession : ICallSession
             var extraction = ExtractionResult.FromSyncArgs(args);
             var snapshot = BuildSnapshot();
             var engineAction = _engine.HandleInput(extraction, snapshot);
+
+            // Track deterministic stage hint from engine for watchdog fallback
+            _lastAdaStageHint = engineAction.NewState switch
+            {
+                CallState.CollectingPickup => BookingStage.CollectingPickup,
+                CallState.CollectingDestination => BookingStage.CollectingDestination,
+                CallState.CollectingPassengers => BookingStage.CollectingPassengers,
+                CallState.CollectingTime => BookingStage.CollectingTime,
+                CallState.FareCalculating => BookingStage.FareCalculating,
+                CallState.AwaitingPaymentChoice or CallState.AwaitingBookingConfirmation => BookingStage.FarePresented,
+                CallState.Disambiguation => BookingStage.Disambiguation,
+                _ => _lastAdaStageHint // preserve current hint
+            };
 
             // Log engine decision (prompt instruction indicates what the engine wants Ada to do next)
             if (engineAction.PromptInstruction != null)
