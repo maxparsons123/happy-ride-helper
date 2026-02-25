@@ -1360,6 +1360,7 @@ public sealed class CallSession : ICallSession
         {
             _currentStage = BookingStage.FareCalculating;
             _engine?.NotifyFareCalculating();
+            _aiClient.SuppressWatchdog = true; // Suppress watchdog during fare calculation
             _logger.LogInformation("[{SessionId}] 🚀 All fields filled — auto-triggering fare calculation (stage→FareCalculating)", SessionId);
 
             var (pickup, destination) = GetEnrichedAddresses();
@@ -1750,6 +1751,7 @@ public sealed class CallSession : ICallSession
 
                     OnBookingUpdated?.Invoke(_booking.Clone());
 
+                    _aiClient.SuppressWatchdog = false; // Fare ready — re-enable watchdog
                     var spokenFare = FormatFareForSpeech(_booking.Fare);
                     _logger.LogInformation("[{SessionId}] 💰 Auto fare ready: {Fare} ({Spoken}), ETA: {Eta}",
                                 sessionId, _booking.Fare, spokenFare, _booking.Eta);
@@ -3940,21 +3942,24 @@ public sealed class CallSession : ICallSession
         if (string.IsNullOrWhiteSpace(adaText)) return;
         var lower = adaText.ToLowerInvariant();
 
-        // Detect pickup confirmations
-        if (lower.Contains("got it") || lower.Contains("pickup from") || lower.Contains("pickup is") ||
-            lower.Contains("picking you up from") || lower.Contains("where are you heading") ||
-            lower.Contains("where would you like to go"))
+        // Detect pickup confirmations — broad patterns including bare address + next-field question
+        // Ada often says "52A David Road. And where are you heading?" without explicit "Got it" prefix
+        var hasAddress = AdaAddressExtractRegex.IsMatch(adaText);
+        bool isDestConfirmation = lower.Contains("heading to") || lower.Contains("destination is") ||
+                                   lower.Contains("going to") || lower.Contains("destination:");
+
+        if (hasAddress && !isDestConfirmation &&
+            (lower.Contains("got it") || lower.Contains("pickup from") || lower.Contains("pickup is") ||
+             lower.Contains("picking you up from") || lower.Contains("where are you heading") ||
+             lower.Contains("where would you like to go") || lower.Contains("and where") ||
+             lower.Contains("where do you") || lower.Contains("how many passenger") ||
+             lower.Contains("where to")))
         {
             var match = AdaAddressExtractRegex.Match(adaText);
             if (match.Success)
             {
-                var confirmed = match.Groups[1].Value.Trim();
-                // Only lock as pickup if destination isn't already mentioned in the same sentence
-                if (!lower.Contains("heading to") && !lower.Contains("destination"))
-                {
-                    _adaConfirmedPickup = confirmed;
-                    _logger.LogInformation("[{SessionId}] 🔒 Pickup locked by Ada confirmation: '{Address}'", SessionId, confirmed);
-                }
+                _adaConfirmedPickup = match.Groups[1].Value.Trim();
+                _logger.LogInformation("[{SessionId}] 🔒 Pickup locked by Ada confirmation: '{Address}'", SessionId, _adaConfirmedPickup);
             }
         }
 
