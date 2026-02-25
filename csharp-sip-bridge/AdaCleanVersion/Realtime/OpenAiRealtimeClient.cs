@@ -1,8 +1,7 @@
-using System.Buffers;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using AdaCleanVersion.Audio;
 using AdaCleanVersion.Session;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
@@ -10,29 +9,19 @@ using SIPSorcery.Net;
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession.
+/// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via MuLawRtpPlayout.
 ///
 /// Audio flow:
 ///   Caller → RTP (G.711 µ-law) → decode to PCM16 → base64 → OpenAI input_audio_buffer.append
-///   OpenAI response.audio.delta → base64 → PCM16 → encode to G.711 µ-law → RTP → Caller
+///   OpenAI response.audio.delta → base64 → PCM16 → encode to µ-law → MuLawRtpPlayout → RTP
 ///
-/// Transcript flow:
-///   OpenAI conversation.item.input_audio_transcription.completed → session.ProcessCallerResponseAsync
-///   OpenAI response.audio_transcript.done → logged only (AI output)
-///
-/// Session instructions:
-///   CleanCallSession.OnAiInstruction → session.update with new instructions
-///
-/// Key design:
-///   - One instance per call, disposed on hangup
-///   - No AI tools registered — voice-only
-///   - Mic gate during AI speech to prevent echo
-///   - Hard-cut barge-in via _clearEpoch guard on playout
+/// The playout engine runs on a dedicated high-priority thread with a WaitableTimer-based
+/// 20ms tick, providing jitter-free outbound audio instead of sending directly from the
+/// WebSocket receive thread.
 /// </summary>
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
 {
     private const string RealtimeUrl = "wss://api.openai.com/v1/realtime";
-    private const int SendBufferSize = 4096;
     private const int ReceiveBufferSize = 16384;
 
     private readonly string _apiKey;
@@ -47,11 +36,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private ClientWebSocket? _ws;
     private Task? _receiveTask;
 
+    /// <summary>
+    /// Jitter-buffered playout engine — all outbound audio is routed through this
+    /// instead of calling rtpSession.SendAudioFrame directly.
+    /// </summary>
+    private readonly MuLawRtpPlayout _playout;
+
     // Mic gate: suppress caller audio while AI is speaking
     private volatile bool _micGated;
 
-    // Playout epoch for barge-in hard-cut
-    private volatile int _playoutEpoch;
+    // Echo-tail buffer: stores audio received while mic is gated
+    private readonly List<byte[]> _micGateBuffer = new();
+    private readonly object _micGateLock = new();
 
     public event Action<string>? OnLog;
 
@@ -71,13 +67,22 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _rtpSession = rtpSession;
         _session = session;
         _logger = logger;
+
+        _playout = new MuLawRtpPlayout(rtpSession);
+        _playout.OnLog += msg => Log(msg);
+        _playout.OnQueueEmpty += () =>
+        {
+            // Playout drained — ungate mic (playout-aware ungating)
+            if (_micGated)
+            {
+                _micGated = false;
+                FlushMicGateBuffer();
+            }
+        };
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
 
-    /// <summary>
-    /// Connect to OpenAI Realtime, configure session, and start bidirectional streaming.
-    /// </summary>
     public async Task ConnectAsync()
     {
         _ws = new ClientWebSocket();
@@ -89,19 +94,21 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log("🔌 Connected to OpenAI Realtime");
 
-        // Configure session: voice, VAD, input transcription, no tools
         await SendSessionConfig();
 
         // Wire RTP → OpenAI (caller audio in)
         _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
 
-        // Wire CleanCallSession instructions → OpenAI session.update
+        // Wire session instructions → OpenAI session.update
         _session.OnAiInstruction += OnAiInstruction;
+
+        // Start playout engine
+        _playout.Start();
 
         // Start receive loop
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
-        Log("✅ Bidirectional audio bridge active");
+        Log("✅ Bidirectional audio bridge active (playout-buffered)");
     }
 
     public async ValueTask DisposeAsync()
@@ -111,9 +118,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
         _session.OnAiInstruction -= OnAiInstruction;
 
+        _playout.Stop();
+
         if (_receiveTask != null)
         {
-            try { await _receiveTask; } catch { /* swallow */ }
+            try { await _receiveTask; } catch { }
         }
 
         if (_ws?.State == WebSocketState.Open)
@@ -124,7 +133,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     WebSocketCloseStatus.NormalClosure, "call ended",
                     CancellationToken.None);
             }
-            catch { /* best effort */ }
+            catch { }
         }
 
         _ws?.Dispose();
@@ -157,7 +166,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     prefix_padding_ms = 300,
                     silence_duration_ms = 500
                 },
-                tools = Array.Empty<object>() // No tools — voice-only
+                tools = Array.Empty<object>()
             }
         };
 
@@ -173,25 +182,42 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         RTPPacket rtpPacket)
     {
         if (mediaType != SDPMediaTypesEnum.audio) return;
-        if (_micGated) return; // Suppress echo during AI speech
 
+        var payload = rtpPacket.Payload;
+
+        // Echo-tail: buffer audio while mic is gated
+        if (_micGated)
+        {
+            lock (_micGateLock)
+            {
+                if (_micGated) // double-check under lock
+                {
+                    var copy = new byte[payload.Length];
+                    Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
+                    _micGateBuffer.Add(copy);
+                    return;
+                }
+            }
+        }
+
+        ForwardToOpenAi(payload);
+    }
+
+    private void ForwardToOpenAi(byte[] mulawPayload)
+    {
         try
         {
             // Decode G.711 µ-law → PCM16
-            var payload = rtpPacket.Payload;
-            var pcm16 = new byte[payload.Length * 2];
-            for (int i = 0; i < payload.Length; i++)
+            var pcm16 = new byte[mulawPayload.Length * 2];
+            for (int i = 0; i < mulawPayload.Length; i++)
             {
-                var sample = MuLawDecode(payload[i]);
+                var sample = MuLawDecode(mulawPayload[i]);
                 pcm16[i * 2] = (byte)(sample & 0xFF);
                 pcm16[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
             }
 
-            // Send as base64 to OpenAI
             var b64 = Convert.ToBase64String(pcm16);
             var msg = new { type = "input_audio_buffer.append", audio = b64 };
-
-            // Fire-and-forget (non-blocking for RTP thread)
             _ = SendJsonAsync(msg);
         }
         catch (Exception ex)
@@ -200,7 +226,24 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         }
     }
 
-    // ─── OpenAI → RTP (AI Audio Out) ────────────────────────
+    /// <summary>
+    /// Flush echo-tail buffer: sends any audio captured while mic was gated.
+    /// </summary>
+    private void FlushMicGateBuffer()
+    {
+        List<byte[]> buffered;
+        lock (_micGateLock)
+        {
+            if (_micGateBuffer.Count == 0) return;
+            buffered = new List<byte[]>(_micGateBuffer);
+            _micGateBuffer.Clear();
+        }
+
+        foreach (var chunk in buffered)
+            ForwardToOpenAi(chunk);
+    }
+
+    // ─── OpenAI → RTP (AI Audio Out via Playout) ────────────
 
     private async Task ReceiveLoopAsync()
     {
@@ -230,7 +273,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 await HandleServerEvent(json);
             }
         }
-        catch (OperationCanceledException) { /* expected on dispose */ }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Log($"⚠ Receive loop error: {ex.Message}");
@@ -244,43 +287,39 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         switch (type)
         {
-            // ── AI audio chunk → decode and send via RTP ──
             case "response.audio.delta":
                 HandleAudioDelta(doc.RootElement);
                 break;
 
-            // ── AI started speaking → gate the mic ──
             case "response.audio.started":
             case "response.created":
                 _micGated = true;
                 break;
 
-            // ── AI finished speaking → ungate the mic ──
+            // NOTE: mic ungate is now driven by playout drain (OnQueueEmpty),
+            // not by response.audio.done — this prevents echo from early ungate.
             case "response.audio.done":
-                // Small delay to let playout drain before ungating
-                await Task.Delay(200);
-                _micGated = false;
+                // Flush any remaining partial frame in the accumulator
+                _playout.Flush();
                 break;
 
-            // ── Caller transcript (from Whisper) → feed to session ──
             case "conversation.item.input_audio_transcription.completed":
                 await HandleCallerTranscript(doc.RootElement);
                 break;
 
-            // ── AI transcript (what AI said) → log only ──
             case "response.audio_transcript.done":
                 var aiText = doc.RootElement.GetProperty("transcript").GetString();
                 Log($"🤖 AI: {aiText}");
                 break;
 
-            // ── VAD: speech started → barge-in: hard-cut playout ──
             case "input_audio_buffer.speech_started":
+                // Barge-in: hard-cut the playout and ungate mic
                 _micGated = false;
-                Interlocked.Increment(ref _playoutEpoch); // Invalidate queued audio
-                Log("🎤 Barge-in detected");
+                _playout.Clear();
+                lock (_micGateLock) _micGateBuffer.Clear();
+                Log("🎤 Barge-in detected — playout cleared");
                 break;
 
-            // ── Errors ──
             case "error":
                 var errMsg = doc.RootElement.GetProperty("error")
                     .GetProperty("message").GetString();
@@ -302,11 +341,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         var b64 = root.GetProperty("delta").GetString();
         if (string.IsNullOrEmpty(b64)) return;
 
-        var epoch = _playoutEpoch; // Capture epoch before processing
-
         var pcm16 = Convert.FromBase64String(b64);
 
-        // Encode PCM16 → G.711 µ-law for RTP
+        // Encode PCM16 → G.711 µ-law
         var mulaw = new byte[pcm16.Length / 2];
         for (int i = 0; i < mulaw.Length; i++)
         {
@@ -314,14 +351,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             mulaw[i] = MuLawEncode(sample);
         }
 
-        // Hard-cut guard: if epoch changed (barge-in), drop this frame
-        if (epoch != _playoutEpoch) return;
-
-        // Send via RTP
-        _rtpSession.SendAudioFrame(
-            (uint)(mulaw.Length), // timestamp increment (8kHz, 1 sample = 1 unit)
-            (int)SDPWellKnownMediaFormatsEnum.PCMU,
-            mulaw);
+        // Buffer through playout engine (not sent directly!)
+        _playout.BufferMuLaw(mulaw);
     }
 
     private async Task HandleCallerTranscript(JsonElement root)
@@ -345,29 +376,20 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     private void OnAiInstruction(string instruction)
     {
-        Log($"📋 Sending instruction update");
+        Log("📋 Sending instruction update");
 
         var msg = new
         {
             type = "session.update",
-            session = new
-            {
-                instructions = instruction
-            }
+            session = new { instructions = instruction }
         };
-
         _ = SendJsonAsync(msg);
 
-        // Also create a response to make AI speak the instruction
         var responseMsg = new
         {
             type = "response.create",
-            response = new
-            {
-                modalities = new[] { "text", "audio" }
-            }
+            response = new { modalities = new[] { "text", "audio" } }
         };
-
         _ = SendJsonAsync(responseMsg);
     }
 
@@ -385,8 +407,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         await _sendLock.WaitAsync(_cts.Token);
         try
         {
-            await _ws.SendAsync(
-                bytes, WebSocketMessageType.Text, true, _cts.Token);
+            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, _cts.Token);
         }
         finally
         {
@@ -415,9 +436,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         for (var expMask = 0x4000; (sample & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
 
         var mantissa = (sample >> (exponent + 3)) & 0x0F;
-        var mulaw = (byte)(~(sign | (exponent << 4) | mantissa));
-
-        return mulaw;
+        return (byte)(~(sign | (exponent << 4) | mantissa));
     }
 
     private static short[] BuildMuLawDecompressTable()
