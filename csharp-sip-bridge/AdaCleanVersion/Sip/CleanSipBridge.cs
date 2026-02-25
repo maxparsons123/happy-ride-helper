@@ -251,8 +251,14 @@ public class CleanSipBridge : IDisposable
         // Wire RTP lifecycle events
         rtpSession.OnTimeout += (mediaType) =>
         {
-            Log($"⏱ RTP timeout for {callId}");
-            uas.Hangup();
+            Log($"⏱ RTP timeout for {callId} — treating as call end");
+            if (_activeCalls.TryRemove(callId, out var timedOut))
+            {
+                timedOut.Session.EndCall();
+                timedOut.RtpSession?.Close(null);
+                OnCallEnded?.Invoke(callId);
+            }
+            try { uas.Hangup(); } catch { }
         };
 
         // Wire BYE / hangup
