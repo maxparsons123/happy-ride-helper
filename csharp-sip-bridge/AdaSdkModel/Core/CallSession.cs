@@ -2967,16 +2967,17 @@ public sealed class CallSession : ICallSession
         }
 
         // ── SINGLE-CONFIRM FAST-PATH ──
-        // If Ada already asked verbally and caller now says an explicit yes,
-        // allow confirmed=true in one shot by priming both guards once.
+        // If Ada asked verbally (without calling confirmed=false) and the model now sends
+        // confirmed=true, auto-prime both guards so the gate check below succeeds.
+        // We don't check _lastUserTranscript because the transcript event often arrives
+        // after/simultaneously with the tool call — the model already verified the user said yes.
         if (confirmed
             && _engine != null
             && !_destructiveGuard!.HasPending
-            && _engine.State != CallState.AwaitingCancelConfirmation
-            && IsAffirmativeCancelConfirmation(_lastUserTranscript))
+            && _engine.State != CallState.AwaitingCancelConfirmation)
         {
-            _logger.LogInformation("[{SessionId}] ✅ cancel_booking single-confirm fast-path: priming guards from affirmative transcript '{Transcript}'",
-                SessionId, _lastUserTranscript);
+            _logger.LogInformation("[{SessionId}] ✅ cancel_booking single-confirm fast-path: auto-priming guards (state was {State})",
+                SessionId, _engine.State);
 
             _ = _engine.GateCancelBooking(confirmed: false); // transition to AwaitingCancelConfirmation
             _destructiveGuard.BeginConfirmation(DestructiveActionType.CancelBooking);
