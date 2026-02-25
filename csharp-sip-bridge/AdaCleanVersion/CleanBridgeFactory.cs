@@ -42,7 +42,7 @@ public static class CleanBridgeFactory
         // Auto-wire OpenAI Realtime client for each connected call
         bridge.OnCallConnected += (callId, rtpSession, session) =>
         {
-            _ = SpawnRealtimeClientAsync(callId, rtpSession, session, settings, logger);
+            _ = SpawnRealtimeClientAsync(callId, rtpSession, session, settings, logger, bridge);
         };
 
         return bridge;
@@ -53,7 +53,8 @@ public static class CleanBridgeFactory
         RTPSession rtpSession,
         CleanCallSession session,
         CleanAppSettings settings,
-        ILogger logger)
+        ILogger logger,
+        CleanSipBridge bridge)
     {
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,
@@ -65,6 +66,10 @@ public static class CleanBridgeFactory
             logger: logger);
 
         client.OnLog += msg => logger.LogInformation(msg);
+
+        // Proxy audio/barge-in events to bridge for UI consumers (e.g. Simli avatar)
+        client.OnAudioOut += frame => bridge.RaiseAudioOut(frame);
+        client.OnBargeIn += () => bridge.RaiseBargeIn();
 
         try
         {
