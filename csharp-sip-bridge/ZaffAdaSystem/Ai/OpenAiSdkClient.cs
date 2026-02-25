@@ -1080,12 +1080,16 @@ Follow this order exactly:
 
 Greet  
 → NAME  
+→ AREA (ask naturally: 'And whereabouts are you?' or 'What area are you in?'. This is standard for taxi bookings — callers expect it.)  
 → PICKUP  
 → DESTINATION  
 → PASSENGERS  
 → TIME  
 
-If the caller voluntarily mentions their area (e.g. 'I'm in Earlsdon'), include caller_area in sync_booking_data. Do NOT proactively ask what area they are in — people travel and their area changes. The city context from the company is sufficient bias for address resolution.
+When the caller gives their area (e.g. 'Foleshill', 'Earlsdon', 'Tile Hill'), call sync_booking_data(caller_area=WHAT_THEY_SAID) BEFORE asking for pickup.
+This area biases ALL subsequent address resolution — so 'Morrisons' from a Foleshill caller resolves to Morrisons Foleshill, not the one in Walsgrave.
+If the caller gives their area AND pickup in the same sentence (e.g. 'I'm in Earlsdon, pick me up from Church Road'), extract BOTH and call sync_booking_data with caller_area AND pickup in ONE call.
+For returning callers with history, still ask — they may be in a different area today.
 
 ⚠️⚠️⚠️ CRITICAL TOOL CALL RULE ⚠️⚠️⚠️
 After the user answers EACH question, you MUST call sync_booking_data BEFORE speaking your next question.
