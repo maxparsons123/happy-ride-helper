@@ -1048,6 +1048,10 @@ public sealed class CallSession : ICallSession
                 Interlocked.Exchange(ref _bookTaxiCompleted, 0);
                 _suffixRetryAttempted = false;
             }
+            // Strip conversational prefixes (e.g. "going to Manchester" → "Manchester")
+            incoming = System.Text.RegularExpressions.Regex.Replace(incoming,
+                @"^(going\s+to|heading\s+to|off\s+to|traveling\s+to|travelling\s+to|driving\s+to)\s+",
+                "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
             _booking.Destination = incoming;
         }
         if (args.TryGetValue("passengers", out var pax) && int.TryParse(pax?.ToString(), out var pn))
@@ -2534,7 +2538,9 @@ public sealed class CallSession : ICallSession
                             $"[FARE RESULT] Verified pickup: {pickupAddr}. Verified destination: {destAddr}. Fare: {spokenFare}. " +
                             $"Driver ETA: {_booking.Eta ?? "around 10 minutes"}. " +
                             $"Use ONLY these verified addresses when reading back to the caller — do NOT use the caller's raw words. " +
-                            $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA (say the ETA text naturally, e.g. 'We''re not too busy at the moment, we should be able to get you a taxi quite quickly'), 4) payment choice. " +
+                            $"You MUST read back in this EXACT order: 1) addresses, 2) fare, 3) driver ETA, 4) payment choice. " +
+                            $"For the ETA, say the EXACT ETA text provided above VERBATIM — do NOT paraphrase, invert, or contradict it. " +
+                            $"If the ETA says 'busy', you MUST say 'busy'. If it says 'not too busy', say 'not too busy'. NEVER invert the meaning. " +
                             $"After the ETA, offer the payment choice using this EXACT script: " +
                             $"'We offer a fixed price of {spokenFare} — I can send you a payment link to guarantee that price now, or you can pay by meter on the day. Which would you prefer?' " +
                             $"Once they choose, call book_taxi(action='confirmed', payment_preference='card') for fixed price or book_taxi(action='confirmed', payment_preference='meter') for meter.");
