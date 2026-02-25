@@ -22,6 +22,7 @@ public class CleanCallSession
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
     private readonly HashSet<string> _changedSlots = new();
+    private int _clarificationAttempts; // loop-breaker counter
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -290,12 +291,37 @@ public class CleanCallSession
 
             if (fareResult.NeedsClarification)
             {
-                Log($"Address clarification needed: {fareResult.ClarificationMessage}");
-                // TODO: Route clarification back to caller via AI instruction
-                _engine.GeocodingFailed(fareResult.ClarificationMessage ?? "Address ambiguous");
+                _clarificationAttempts++;
+
+                // Loop breaker: after 2 consecutive clarification failures, fall through
+                if (_clarificationAttempts >= 2)
+                {
+                    Log($"Clarification loop breaker: {_clarificationAttempts} attempts — falling through");
+                    _clarificationAttempts = 0;
+                    _engine.GeocodingFailed("Address could not be resolved after multiple attempts");
+                    EmitCurrentInstruction();
+                    return;
+                }
+
+                var ambiguousField = fareResult.Pickup.IsAmbiguous ? "pickup" : "destination";
+                var ambiguousAddr = fareResult.Pickup.IsAmbiguous ? fareResult.Pickup : fareResult.Destination;
+
+                Log($"Address clarification needed ({ambiguousField}): {fareResult.ClarificationMessage}");
+
+                _engine.EnterClarification(new ClarificationInfo
+                {
+                    AmbiguousField = ambiguousField,
+                    Message = fareResult.ClarificationMessage ?? "Which area is that in?",
+                    Alternatives = ambiguousAddr.Alternatives,
+                    Attempt = _clarificationAttempts
+                });
+
                 EmitCurrentInstruction();
                 return;
             }
+
+            // Success — reset clarification counter
+            _clarificationAttempts = 0;
 
             _engine.CompleteGeocoding(fareResult);
             OnFareReady?.Invoke(fareResult);
@@ -332,6 +358,18 @@ public class CleanCallSession
 
         switch (_engine.State)
         {
+            case CollectionState.AwaitingClarification:
+                // Caller responded to "which area?" — accept and re-run pipeline
+                Log($"Clarification response: \"{transcript}\"");
+                _engine.AcceptClarification(transcript);
+
+                // Re-run extraction + geocoding with the clarified address
+                if (_engine.State == CollectionState.ReadyForExtraction)
+                    await RunExtractionAsync(ct);
+                else
+                    EmitCurrentInstruction();
+                break;
+
             case CollectionState.AwaitingPaymentChoice:
                 if (lower.Contains("card")) AcceptPayment("card");
                 else if (lower.Contains("cash") || lower.Contains("meter")) AcceptPayment("meter");
@@ -357,7 +395,8 @@ public class CleanCallSession
     {
         var instruction = PromptBuilder.BuildInstruction(
             _engine.State, _engine.RawData, _callerContext,
-            _engine.StructuredResult, _engine.FareResult);
+            _engine.StructuredResult, _engine.FareResult,
+            _engine.PendingClarification);
         OnAiInstruction?.Invoke(instruction);
     }
 

@@ -33,6 +33,9 @@ public enum CollectionState
     /// <summary>Geocoding addresses and calculating fare.</summary>
     Geocoding,
 
+    /// <summary>Address is ambiguous — waiting for caller to clarify (area, alternatives).</summary>
+    AwaitingClarification,
+
     /// <summary>Extraction + geocoding complete — presenting fare / summary to caller.</summary>
     PresentingFare,
 

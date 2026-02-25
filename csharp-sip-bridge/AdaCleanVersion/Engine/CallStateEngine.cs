@@ -132,6 +132,50 @@ public class CallStateEngine
     }
 
     /// <summary>
+    /// Address needs clarification — enter clarification state.
+    /// Stores the pending clarification info for the session to route back to caller.
+    /// </summary>
+    public ClarificationInfo? PendingClarification { get; private set; }
+
+    public void EnterClarification(ClarificationInfo info)
+    {
+        PendingClarification = info;
+        Log($"Clarification needed: {info.AmbiguousField} — \"{info.Message}\"");
+        TransitionTo(CollectionState.AwaitingClarification);
+    }
+
+    /// <summary>
+    /// Caller provided clarification — update the affected slot and re-run geocoding.
+    /// </summary>
+    public void AcceptClarification(string clarifiedValue)
+    {
+        if (State != CollectionState.AwaitingClarification || PendingClarification == null)
+        {
+            Log($"Clarification ignored in state {State}");
+            return;
+        }
+
+        var field = PendingClarification.AmbiguousField;
+        Log($"Clarification accepted for {field}: \"{clarifiedValue}\"");
+
+        // Update the raw slot with the clarified value
+        if (field == "pickup")
+        {
+            var existing = RawData.PickupRaw ?? "";
+            RawData.SetSlot("pickup", $"{existing}, {clarifiedValue}");
+        }
+        else if (field == "destination")
+        {
+            var existing = RawData.DestinationRaw ?? "";
+            RawData.SetSlot("destination", $"{existing}, {clarifiedValue}");
+        }
+
+        PendingClarification = null;
+        // Go back to ReadyForExtraction → re-extract → re-geocode
+        TransitionTo(CollectionState.ReadyForExtraction);
+    }
+
+    /// <summary>
     /// Extraction failed — go back to collection to fix issues.
     /// </summary>
     public void ExtractionFailed(string error)

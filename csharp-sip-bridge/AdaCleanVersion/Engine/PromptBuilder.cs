@@ -59,7 +59,8 @@ public static class PromptBuilder
         CollectionState state, RawBookingData rawData,
         CallerContext? context = null,
         StructuredBooking? booking = null,
-        FareResult? fareResult = null)
+        FareResult? fareResult = null,
+        ClarificationInfo? clarification = null)
     {
         return state switch
         {
@@ -107,6 +108,9 @@ public static class PromptBuilder
 
             CollectionState.Geocoding =>
                 "[INSTRUCTION] Stay silent — calculating fare.",
+
+            CollectionState.AwaitingClarification =>
+                BuildClarificationInstruction(rawData, clarification),
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
                 $"[INSTRUCTION] Present the booking summary and fare to the caller:\n" +
@@ -169,6 +173,36 @@ public static class PromptBuilder
     {
         return $"[INSTRUCTION] The caller corrected their {slotName} from \"{oldValue}\" to \"{newValue}\". " +
                "Acknowledge the correction and continue.";
+    }
+
+    /// <summary>
+    /// Build instruction for address clarification.
+    /// Per user preference: ask "Which area is that in?" — do NOT enumerate alternatives
+    /// unless the caller explicitly asks.
+    /// </summary>
+    public static string BuildClarificationInstruction(RawBookingData data, ClarificationInfo? info = null)
+    {
+        if (info == null)
+            return "[INSTRUCTION] The address is ambiguous. Ask which area it's in.";
+
+        var fieldLabel = info.AmbiguousField == "pickup" ? "pickup" : "destination";
+        var rawValue = info.AmbiguousField == "pickup" ? data.PickupRaw : data.DestinationRaw;
+
+        // Attempt 1: just ask "which area?"
+        // Attempt 2+: if alternatives available, offer them
+        if (info.Attempt <= 1 || info.Alternatives == null || info.Alternatives.Count == 0)
+        {
+            return $"[INSTRUCTION] The {fieldLabel} address \"{rawValue}\" exists in multiple areas. " +
+                   "Simply ask: \"Which area is that in?\" " +
+                   "Do NOT list the areas — only list them if the caller asks.";
+        }
+        else
+        {
+            var altList = string.Join(", ", info.Alternatives);
+            return $"[INSTRUCTION] The caller couldn't specify the area for \"{rawValue}\". " +
+                   $"This time, offer the options: {altList}. " +
+                   $"Ask which one they mean.";
+        }
     }
 
     private static string NameAck(RawBookingData data) =>
