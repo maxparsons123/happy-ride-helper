@@ -412,6 +412,204 @@ serve(async (req) => {
       }
     }
 
+    // ── PRE-FLIGHT CALLER HISTORY BYPASS ──
+    // If both pickup and destination fuzzy-match caller history addresses,
+    // skip the slow Gemini AI gateway entirely and resolve via zone_pois.
+    if (pickup && destination && callerHistory) {
+      const historyLines = callerHistory.split("\n").filter((l: string) => /^\d+\.\s/.test(l.trim()));
+      const histAddrs: string[] = [];
+      const CITY_NAMES = new Set(["coventry","birmingham","london","manchester","leeds","sheffield","nottingham","leicester","bristol","reading","wolverhampton","derby","edinburgh","glasgow","blackpool","amsterdam","rotterdam"]);
+      for (const line of historyLines) {
+        const addr = line.replace(/^\d+\.\s*/, "").trim();
+        // Filter out bare city names, very short entries, and entries without a street suffix or house number
+        if (!addr || addr.length < 8) continue;
+        const addrLower = addr.toLowerCase().replace(/[,\s]+/g, " ").trim();
+        if (CITY_NAMES.has(addrLower)) continue;
+        // Must contain a street suffix OR a house number to be a useful address
+        const hasStreetSuffix = /\b(road|street|avenue|lane|drive|crescent|close|way|place|court|grove|terrace|gardens|walk|rise|hill|square|mews|parade|rd|st|ave|ln)\b/i.test(addr);
+        const hasHouseNum = /\d/.test(addr.split(",")[0]);
+        if (hasStreetSuffix || hasHouseNum) histAddrs.push(addr);
+      }
+
+      if (histAddrs.length > 0) {
+        const fuzzyMatchHistory = (input: string): string | null => {
+          const inputLower = input.toLowerCase().replace(/\s+/g, " ").trim();
+          const inputKey = extractStreetKey(inputLower);
+          // Extract core street words (without numbers, "and", ordinals)
+          const coreWords = inputLower
+            .replace(/\b\d+(st|nd|rd|th)?\b/g, "")
+            .replace(/\b(and|the|in)\b/g, "")
+            .replace(/,.*/, "")
+            .replace(/\s+/g, " ").trim()
+            .split(" ").filter((w: string) => w.length > 2);
+
+          // Extract city from input for context matching
+          const inputParts = input.split(",").map(s => s.trim().toLowerCase());
+          const inputCity = inputParts.slice(1).find(s => s.length > 2 && !/^[a-z]{1,2}\d/.test(s)) || "";
+
+          const candidates: { addr: string; score: number }[] = [];
+
+          for (const h of histAddrs) {
+            const hLower = h.toLowerCase().replace(/\s+/g, " ").trim();
+            const hKey = extractStreetKey(hLower);
+            let score = 0;
+
+            if (hKey === inputKey) {
+              score = 10;
+            } else if (coreWords.length > 0) {
+              const hFirst = hLower.split(",")[0];
+              const matchingWords = coreWords.filter((w: string) => hFirst.includes(w));
+              const wordScore = matchingWords.length / coreWords.length;
+              if (wordScore >= 0.5) score = wordScore;
+            }
+            if (score === 0) {
+              if (hLower.length >= 10 && inputLower.includes(hLower)) score = 5;
+              else if (inputLower.length >= 10 && hLower.includes(inputLower)) score = 5;
+            }
+
+            if (score > 0) {
+              // Bonus for matching city context (+5) — this is the key differentiator
+              if (inputCity && hLower.includes(inputCity)) score += 5;
+              // Small bonus for having a postcode (more complete address)
+              if (/[A-Z]{1,2}\d/i.test(h)) score += 0.5;
+              // Tiny bonus for length, but much less than city match
+              score += h.length / 1000;
+              candidates.push({ addr: h, score });
+            }
+          }
+
+          candidates.sort((a, b) => b.score - a.score);
+          return candidates.length > 0 ? candidates[0].addr : null;
+        };
+
+        const pickupMatch = fuzzyMatchHistory(pickup);
+        const destMatch = fuzzyMatchHistory(destination);
+
+        if (pickupMatch && destMatch) {
+          console.log(`⚡ PRE-FLIGHT: both addresses matched caller history — skipping Gemini`);
+          console.log(`   Pickup: "${pickup}" → "${pickupMatch}"`);
+          console.log(`   Dest:   "${destination}" → "${destMatch}"`);
+
+          try {
+            const pfSupabaseUrl = Deno.env.get("SUPABASE_URL")!;
+            const pfSupabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+            const pfSupabase = createClient(pfSupabaseUrl, pfSupabaseKey);
+
+            const pickupStreetName = pickupMatch.split(",")[0].replace(/^\d+[A-Za-z]?\s*/, "").trim();
+            const destStreetName = destMatch.split(",")[0].replace(/^\d+[A-Za-z]?\s*/, "").trim();
+
+            // Extract city context from history match for zone filtering
+            const pickupCity = pickupMatch.split(",").slice(1).map(s => s.trim()).find(s => s.length > 2 && !/^[A-Z]{1,2}\d/.test(s)) || "";
+            const destCity = destMatch.split(",").slice(1).map(s => s.trim()).find(s => s.length > 2 && !/^[A-Z]{1,2}\d/.test(s)) || "";
+            const contextCity = (pickupCity || destCity).toLowerCase();
+
+            // Look up zone ID for the context city
+            let contextZoneId: string | null = null;
+            if (contextCity) {
+              const { data: zones } = await pfSupabase.from("dispatch_zones").select("id, zone_name").ilike("zone_name", `%${contextCity}%`).limit(1);
+              if (zones?.[0]) contextZoneId = zones[0].id;
+            }
+
+            const [pickupPois, destPois] = await Promise.all([
+              pfSupabase.rpc("word_fuzzy_match_zone_poi", { p_address: pickupStreetName, p_min_similarity: 0.5, p_limit: 20 }),
+              pfSupabase.rpc("word_fuzzy_match_zone_poi", { p_address: destStreetName, p_min_similarity: 0.5, p_limit: 20 }),
+            ]);
+
+            // Filter by context zone if available, otherwise take first result
+            const filterByZone = (results: any[] | null): any | null => {
+              if (!results || results.length === 0) return null;
+              if (contextZoneId) {
+                const zoneMatch = results.find((r: any) => r.zone_id === contextZoneId);
+                if (zoneMatch) return zoneMatch;
+              }
+              return results[0];
+            };
+
+            const pickupPoi = filterByZone(pickupPois.data);
+            const destPoi = filterByZone(destPois.data);
+
+            if (pickupPoi?.lat && pickupPoi?.lng && destPoi?.lat && destPoi?.lng) {
+              const extractComponents = (histAddr: string) => {
+                const parts = histAddr.split(",").map((p: string) => p.trim());
+                const streetPart = parts[0] || "";
+                const numMatch = streetPart.match(/^(\d+[A-Za-z]?)\s+(.+)/);
+                // Identify city vs postcode from remaining parts
+                let city = "";
+                let postal_code = "";
+                for (const p of parts.slice(1)) {
+                  if (/^[A-Z]{1,2}\d{1,2}\s?\d?[A-Z]{0,2}$/i.test(p)) {
+                    postal_code = p;
+                  } else if (p.length > 2) {
+                    city = p;
+                  }
+                }
+                return {
+                  street_number: numMatch ? numMatch[1] : "",
+                  street_name: numMatch ? numMatch[2] : streetPart,
+                  city,
+                  postal_code,
+                };
+              };
+
+              const pickupComp = extractComponents(pickupMatch);
+              const destComp = extractComponents(destMatch);
+              const distMiles = haversineDistanceMiles(pickupPoi.lat, pickupPoi.lng, destPoi.lat, destPoi.lng);
+              const fareCalc = calculateFare(distMiles, "UK");
+
+              let matchedZone = null;
+              try {
+                const { data: zoneHits } = await pfSupabase.rpc("find_zone_for_point", {
+                  p_lat: pickupPoi.lat, p_lng: pickupPoi.lng,
+                });
+                if (zoneHits?.[0]) {
+                  matchedZone = {
+                    zone_id: zoneHits[0].zone_id, zone_name: zoneHits[0].zone_name,
+                    company_id: zoneHits[0].company_id, priority: zoneHits[0].priority,
+                  };
+                  console.log(`🗺️ Zone match: ${zoneHits[0].zone_name} → company ${zoneHits[0].company_id}`);
+                }
+              } catch (zErr) {
+                console.warn(`⚠️ Pre-flight zone error (non-fatal):`, zErr);
+              }
+
+              const preflightResult = {
+                detected_area: pickupComp.city || destComp.city || "unknown",
+                region_source: "caller_history",
+                phone_analysis: { detected_country: "UK", is_mobile: true, landline_city: null },
+                pickup: {
+                  address: pickupMatch, lat: pickupPoi.lat, lon: pickupPoi.lng,
+                  street_name: pickupComp.street_name, street_number: pickupComp.street_number,
+                  postal_code: pickupComp.postal_code, city: pickupComp.city,
+                  is_ambiguous: false, alternatives: [], matched_from_history: true,
+                  resolved_area: pickupPoi.area || "",
+                },
+                dropoff: {
+                  address: destMatch, lat: destPoi.lat, lon: destPoi.lng,
+                  street_name: destComp.street_name, street_number: destComp.street_number,
+                  postal_code: destComp.postal_code, city: destComp.city,
+                  is_ambiguous: false, alternatives: [], matched_from_history: true,
+                  resolved_area: destPoi.area || "",
+                },
+                scheduled_at: null, status: "ready", fare: fareCalc,
+                matched_zone: matchedZone, preflight_bypass: true,
+              };
+
+              console.log(`💰 Fare calculated: ${fareCalc.fare} (${fareCalc.distance_miles} miles, ETA ${fareCalc.eta})`);
+              console.log(`✅ Address dispatch result: area=${preflightResult.detected_area}, status=ready, fare=${fareCalc.fare}, zone=${matchedZone?.zone_name || 'none'}`);
+
+              return new Response(JSON.stringify(preflightResult), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            } else {
+              console.log(`⚠️ Pre-flight: zone_pois coords missing for one/both sides — falling through to Gemini`);
+            }
+          } catch (pfErr) {
+            console.warn(`⚠️ Pre-flight bypass error (non-fatal), falling through to Gemini:`, pfErr);
+          }
+        }
+      }
+    }
+
     // Build the user message with reference datetime for time parsing
     const refDatetime = new Date().toISOString();
     const timePart = pickup_time ? `\nPickup Time Requested: "${pickup_time}"\nREFERENCE_DATETIME (current UTC): ${refDatetime}` : '';
