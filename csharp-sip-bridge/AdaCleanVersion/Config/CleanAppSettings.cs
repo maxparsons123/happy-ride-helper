@@ -6,7 +6,7 @@ namespace AdaCleanVersion.Config;
 public class CleanAppSettings
 {
     public SipSettings Sip { get; set; } = new();
-    public VaxVoipSettings VaxVoIP { get; set; } = new();
+    public RtpSettings Rtp { get; set; } = new();
     public OpenAiSettings OpenAi { get; set; } = new();
     public TaxiSettings Taxi { get; set; } = new();
     public string SupabaseUrl { get; set; } = "";
@@ -25,15 +25,15 @@ public class SipSettings
     public bool EnableStun { get; set; } = true;
     public string? StunServer { get; set; }
     public int StunPort { get; set; } = 19302;
+    public int ListenPort { get; set; } = 5060;
 
     public string EffectiveAuthUser => string.IsNullOrWhiteSpace(AuthUser) ? Username : AuthUser;
 }
 
-public class VaxVoipSettings
+public class RtpSettings
 {
-    public int ListenPort { get; set; } = 5060;
-    public int RtpPortMin { get; set; } = 10000;
-    public int RtpPortMax { get; set; } = 10100;
+    public int PortRangeStart { get; set; } = 10000;
+    public int PortRangeEnd { get; set; } = 10100;
 }
 
 public class OpenAiSettings
