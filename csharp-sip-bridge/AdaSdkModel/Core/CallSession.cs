@@ -3811,24 +3811,74 @@ public sealed class CallSession : ICallSession
         ["4"] = "D",   // 'D' misheard as 'four'
     };
 
+    /// <summary>
+    /// Regex to detect mid-speech hesitation corrections where the caller provides two house numbers.
+    /// E.g. "52A no 1214A David Road" or "52A um 1214A Warwick Road" → take "1214A".
+    /// Hesitation markers: no, uh, um, sorry, actually, wait, I mean, err, oh, or just whitespace between two numbers.
+    /// </summary>
+    private static readonly Regex HesitationCorrectionRegex = new(
+        @"^(\d+[A-Za-z]?)\s+(?:no|uh|um|sorry|actually|wait|I\s*mean|err|oh|,)\s+(\d+[A-Za-z]?)\s+(.+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Fallback: two bare house numbers before the street (no hesitation word needed).
+    /// E.g. "52A 1214A David Road" → take "1214A David Road" (latter is the correction).
+    /// Only triggers when both tokens look like house numbers (digit-only or digit+letter).
+    /// </summary>
+    private static readonly Regex DuplicateHouseNumberRegex = new(
+        @"^(\d+[A-Za-z]?)\s+(\d+[A-Za-z]?)\s+([A-Za-z].+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private string? NormalizeHouseNumber(string? address, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(address)) return address;
 
         var trimmed = address.Trim();
+
+        // ── HESITATION CORRECTION: "52A no 1214A David Road" → "1214A David Road" ──
+        var hesitationMatch = HesitationCorrectionRegex.Match(trimmed);
+        if (hesitationMatch.Success)
+        {
+            var discarded = hesitationMatch.Groups[1].Value;
+            var corrected = hesitationMatch.Groups[2].Value;
+            var street = hesitationMatch.Groups[3].Value;
+            var result = $"{corrected} {street}";
+            _logger.LogInformation(
+                "[{SessionId}] 🔄 Hesitation correction ({Field}): discarded '{Discarded}', using '{Corrected}' → '{Result}'",
+                SessionId, fieldName, discarded, corrected, result);
+            trimmed = result; // continue processing with corrected address
+        }
+        else
+        {
+            // ── DUPLICATE HOUSE NUMBER: "52A 1214A David Road" → "1214A David Road" ──
+            var dupMatch = DuplicateHouseNumberRegex.Match(trimmed);
+            if (dupMatch.Success)
+            {
+                var discarded = dupMatch.Groups[1].Value;
+                var corrected = dupMatch.Groups[2].Value;
+                var street = dupMatch.Groups[3].Value;
+                var result = $"{corrected} {street}";
+                _logger.LogInformation(
+                    "[{SessionId}] 🔄 Duplicate house number ({Field}): discarded '{Discarded}', using latter '{Corrected}' → '{Result}'",
+                    SessionId, fieldName, discarded, corrected, result);
+                trimmed = result;
+            }
+        }
+
+        // ── STT HYPHEN FIX (existing logic) ──
         var match = _sttHyphenFixRegex.Match(trimmed);
-        if (!match.Success) return address;
+        if (!match.Success) return trimmed;
 
         var baseNum = match.Groups[1].Value;
         var digit = match.Groups[2].Value;
         var letter = _digitToLetter[digit];
-        var corrected = $"{baseNum}{letter}{trimmed[(match.Length)..]}";
+        var correctedHyphen = $"{baseNum}{letter}{trimmed[(match.Length)..]}";
 
         _logger.LogInformation(
             "[{SessionId}] 🔤 STT hyphen fix ({Field}): '{Original}' → '{Corrected}'",
             SessionId, fieldName, match.Value, $"{baseNum}{letter}");
 
-        return corrected;
+        return correctedHyphen;
     }
 
     /// <summary>
