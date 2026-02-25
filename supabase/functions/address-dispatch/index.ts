@@ -666,15 +666,15 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
     }
 
     // ── Post-processing: enforce disambiguation for multi-district streets ──
-    // Gemini populates districts_found[] when it detects a street in multiple areas.
-    // This block honours that signal and falls back to the uk_locations DB if Gemini
-    // flagged ambiguity without supplying district names.
+    // PRIMARY source: zone_pois from the zone editor (definitive list of streets per area).
+    // FALLBACK: Gemini's districts_found, then uk_locations DB.
     const supabaseUrl2 = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey2 = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase2 = createClient(supabaseUrl2, supabaseKey2);
 
     // Cache: city → district list (avoids duplicate DB calls for pickup+dropoff)
     const districtCache: Record<string, string[]> = {};
+    const streetAreaCache: Record<string, string[]> = {};
 
     async function getCityDistricts(city: string): Promise<string[]> {
       if (districtCache[city]) return districtCache[city];
@@ -694,6 +694,38 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       }
     }
 
+    // Query zone_pois for a street name — returns distinct area names where it appears
+    async function getStreetAreasFromZonePoi(streetName: string): Promise<string[]> {
+      if (!streetName?.trim()) return [];
+      const key = streetName.trim().toLowerCase();
+      if (streetAreaCache[key]) return streetAreaCache[key];
+      try {
+        const { data } = await supabase2.rpc("word_fuzzy_match_zone_poi", {
+          p_address: streetName.trim(),
+          p_min_similarity: 0.6,
+          p_limit: 50,
+        });
+        if (data && data.length > 0) {
+          // Only keep results where the POI name closely matches the street name
+          const areas = [...new Set(
+            data
+              .filter((r: any) => r.similarity_score >= 0.6 && r.poi_name.toLowerCase().includes(streetName.trim().toLowerCase()))
+              .map((r: any) => r.area as string)
+              .filter((a: string) => a)
+          )];
+          streetAreaCache[key] = areas;
+          if (areas.length > 1) {
+            console.log(`🗺️ zone_pois: "${streetName}" found in ${areas.length} areas: ${areas.slice(0, 6).join(", ")}`);
+          }
+          return areas;
+        }
+      } catch (err) {
+        console.warn(`⚠️ getStreetAreasFromZonePoi failed for "${streetName}" (non-fatal):`, err);
+      }
+      streetAreaCache[key] = [];
+      return [];
+    }
+
     for (const side of ["pickup", "dropoff"] as const) {
       const addr = parsed[side];
       if (!addr) continue;
@@ -710,11 +742,43 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       const houseNumber = houseNumberMatch ? parseInt(houseNumberMatch[1], 10) : 0;
       const isHighHouseNumber = houseNumber >= 500;
 
+      // Skip if postcode or high house number already discriminates
+      if (hasPostcode || isHighHouseNumber) continue;
+
       const streetName = addr.street_name || "";
       const city = addr.city || parsed.detected_area || "";
       const districtsFound: string[] = addr.districts_found || [];
 
-      // CASE 1: Gemini flagged ambiguous AND provided districts — honour directly
+      // ── PRIMARY: Query zone_pois for this street name ──
+      const zonePoiAreas = await getStreetAreasFromZonePoi(streetName);
+      const userNamedZoneArea = zonePoiAreas.some(a => originalInput.toLowerCase().includes(a.toLowerCase()));
+
+      if (zonePoiAreas.length > 1 && !userNamedZoneArea) {
+        console.log(`⚠️ zone_pois: "${streetName}" exists in ${zonePoiAreas.length} areas — forcing disambiguation`);
+        addr.is_ambiguous = true;
+        parsed.status = "clarification_needed";
+        addr.alternatives = zonePoiAreas.slice(0, 6).map(a => `${streetName}, ${a}`);
+        parsed.clarification_message = `There are several ${streetName}s in the area. Which area is it in? For example: ${zonePoiAreas.slice(0, 3).join(", or ")}?`;
+        continue;
+      } else if (zonePoiAreas.length === 1) {
+        console.log(`✅ zone_pois: "${streetName}" uniquely in ${zonePoiAreas[0]} — no disambiguation needed`);
+        continue;
+      } else if (userNamedZoneArea) {
+        console.log(`✅ zone_pois: user named a matching area for "${streetName}" — no disambiguation needed`);
+        if (addr.is_ambiguous) {
+          addr.is_ambiguous = false;
+          addr.alternatives = [];
+          const otherSide = side === "pickup" ? "dropoff" : "pickup";
+          const otherAmbig = parsed[otherSide]?.is_ambiguous;
+          if (!otherAmbig) { parsed.status = "ready"; parsed.clarification_message = undefined; }
+        }
+        continue;
+      }
+
+      // ── FALLBACK: Gemini's districts_found ──
+      const userNamedDistrict = districtsFound.some(d => originalInput.toLowerCase().includes(d.toLowerCase()));
+
+      // CASE 1: Gemini flagged ambiguous AND provided districts
       if (addr.is_ambiguous && districtsFound.length > 0) {
         console.log(`🏙️ Gemini flagged multi-district ambiguity for "${streetName}" in ${city}: [${districtsFound.join(", ")}]`);
         parsed.status = "clarification_needed";
@@ -726,10 +790,8 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
         continue;
       }
 
-      // CASE 2: Gemini resolved confidently BUT still returned districts_found with 2+ entries.
-      // This means it "knew" the street is multi-district but picked one anyway — we must intervene
-      // unless the caller gave enough discriminating info (postcode, high house number).
-      if (!addr.is_ambiguous && districtsFound.length >= 2 && !hasPostcode && !isHighHouseNumber) {
+      // CASE 2: Gemini resolved confidently BUT districts_found has 2+ entries
+      if (!addr.is_ambiguous && districtsFound.length >= 2 && !userNamedDistrict) {
         console.log(`⚠️ Safety net: "${streetName}" in ${city} resolved without ambiguity but Gemini found ${districtsFound.length} districts — forcing clarification`);
         addr.is_ambiguous = true;
         parsed.status = "clarification_needed";
@@ -740,7 +802,7 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       }
 
       // CASE 3: Gemini flagged ambiguous but gave no districts — DB fallback
-      if (addr.is_ambiguous && districtsFound.length === 0 && !hasPostcode && !isHighHouseNumber) {
+      if (addr.is_ambiguous && districtsFound.length === 0) {
         const dbDistricts = await getCityDistricts(city);
         console.log(`🔍 DB fallback for "${streetName}" in ${city}: ${dbDistricts.length} districts available`);
         parsed.status = "clarification_needed";
