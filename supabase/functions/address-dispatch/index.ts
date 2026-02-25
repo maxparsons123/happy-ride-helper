@@ -694,11 +694,14 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       }
     }
 
-    // Query zone_pois for a street name — returns distinct area names where it appears
-    async function getStreetAreasFromZonePoi(streetName: string): Promise<string[]> {
+    // Query zone_pois for a street name — returns distinct area names + coords where it appears
+    interface ZonePoiAreaMatch { area: string; lat: number | null; lng: number | null; poi_name: string; score: number; }
+    const streetPoiCache: Record<string, ZonePoiAreaMatch[]> = {};
+
+    async function getStreetMatchesFromZonePoi(streetName: string): Promise<ZonePoiAreaMatch[]> {
       if (!streetName?.trim()) return [];
       const key = streetName.trim().toLowerCase();
-      if (streetAreaCache[key]) return streetAreaCache[key];
+      if (streetPoiCache[key]) return streetPoiCache[key];
       try {
         const { data } = await supabase2.rpc("word_fuzzy_match_zone_poi", {
           p_address: streetName.trim(),
@@ -707,23 +710,49 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
         });
         if (data && data.length > 0) {
           // Only keep results where the POI name closely matches the street name
-          const areas = [...new Set(
-            data
-              .filter((r: any) => r.similarity_score >= 0.6 && r.poi_name.toLowerCase().includes(streetName.trim().toLowerCase()))
-              .map((r: any) => r.area as string)
-              .filter((a: string) => a)
-          )];
-          streetAreaCache[key] = areas;
-          if (areas.length > 1) {
-            console.log(`🗺️ zone_pois: "${streetName}" found in ${areas.length} areas: ${areas.slice(0, 6).join(", ")}`);
+          const filtered = data
+            .filter((r: any) => r.similarity_score >= 0.6 && r.poi_name.toLowerCase().includes(streetName.trim().toLowerCase()));
+          
+          // Deduplicate by area, keeping the highest-scoring match per area
+          const byArea = new Map<string, ZonePoiAreaMatch>();
+          for (const r of filtered) {
+            const area = r.area as string;
+            if (!area) continue;
+            const existing = byArea.get(area);
+            if (!existing || r.similarity_score > existing.score) {
+              byArea.set(area, { area, lat: r.lat, lng: r.lng, poi_name: r.poi_name, score: r.similarity_score });
+            }
           }
-          return areas;
+          const matches = [...byArea.values()];
+          streetPoiCache[key] = matches;
+          if (matches.length > 1) {
+            console.log(`🗺️ zone_pois: "${streetName}" found in ${matches.length} areas: ${matches.map(m => m.area).slice(0, 6).join(", ")}`);
+          }
+          return matches;
         }
       } catch (err) {
-        console.warn(`⚠️ getStreetAreasFromZonePoi failed for "${streetName}" (non-fatal):`, err);
+        console.warn(`⚠️ getStreetMatchesFromZonePoi failed for "${streetName}" (non-fatal):`, err);
       }
-      streetAreaCache[key] = [];
+      streetPoiCache[key] = [];
       return [];
+    }
+
+    // Helper: apply POI coords as initial/fallback coordinates on an address
+    function applyPoiCoords(addr: any, match: ZonePoiAreaMatch, side: string) {
+      if (match.lat != null && match.lng != null) {
+        // Only use POI coords if Gemini didn't provide any, or as a zone-level seed
+        const hasGeminiCoords = addr.lat != null && addr.lon != null && addr.lat !== 0 && addr.lon !== 0;
+        if (!hasGeminiCoords) {
+          addr.lat = match.lat;
+          addr.lon = match.lng;
+          console.log(`📌 ${side}: applied POI coords (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — Gemini had no coords`);
+        } else {
+          // Store as fallback for downstream verification
+          addr.poi_lat = match.lat;
+          addr.poi_lng = match.lng;
+          console.log(`📌 ${side}: POI coords (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) stored as seed — Gemini coords preserved`);
+        }
+      }
     }
 
     for (const side of ["pickup", "dropoff"] as const) {
@@ -750,24 +779,27 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       const districtsFound: string[] = addr.districts_found || [];
 
       // ── PRIMARY: Query zone_pois for this street name ──
-      const zonePoiAreas = await getStreetAreasFromZonePoi(streetName);
+      const zonePoiMatches = await getStreetMatchesFromZonePoi(streetName);
+      const zonePoiAreas = zonePoiMatches.map(m => m.area);
       const userNamedZoneArea = zonePoiAreas.some(a => originalInput.toLowerCase().includes(a.toLowerCase()));
 
-      if (zonePoiAreas.length > 1 && !userNamedZoneArea) {
-        console.log(`⚠️ zone_pois: "${streetName}" exists in ${zonePoiAreas.length} areas — forcing disambiguation`);
+      if (zonePoiMatches.length > 1 && !userNamedZoneArea) {
+        console.log(`⚠️ zone_pois: "${streetName}" exists in ${zonePoiMatches.length} areas — forcing disambiguation`);
         addr.is_ambiguous = true;
         parsed.status = "clarification_needed";
         addr.alternatives = zonePoiAreas.slice(0, 6).map(a => `${streetName}, ${a}`);
-        parsed.clarification_message = `There are several ${streetName}s in the area. Which area is it in? For example: ${zonePoiAreas.slice(0, 3).join(", or ")}?`;
+        parsed.clarification_message = `There are several ${streetName}s in the area. Which area is it in?`;
         continue;
-      } else if (zonePoiAreas.length === 1) {
-        console.log(`✅ zone_pois: "${streetName}" uniquely in ${zonePoiAreas[0]} — no disambiguation needed`);
-        parsed[side].resolved_area = zonePoiAreas[0];
+      } else if (zonePoiMatches.length === 1) {
+        console.log(`✅ zone_pois: "${streetName}" uniquely in ${zonePoiMatches[0].area} — no disambiguation needed`);
+        parsed[side].resolved_area = zonePoiMatches[0].area;
+        applyPoiCoords(addr, zonePoiMatches[0], side);
         continue;
       } else if (userNamedZoneArea) {
-        const matchedArea = zonePoiAreas.find(a => originalInput.toLowerCase().includes(a.toLowerCase()))!;
-        console.log(`✅ zone_pois: user named area "${matchedArea}" for "${streetName}" — no disambiguation needed`);
-        parsed[side].resolved_area = matchedArea;
+        const matchedPoi = zonePoiMatches.find(m => originalInput.toLowerCase().includes(m.area.toLowerCase()))!;
+        console.log(`✅ zone_pois: user named area "${matchedPoi.area}" for "${streetName}" — no disambiguation needed`);
+        parsed[side].resolved_area = matchedPoi.area;
+        applyPoiCoords(addr, matchedPoi, side);
         if (addr.is_ambiguous) {
           addr.is_ambiguous = false;
           addr.alternatives = [];
