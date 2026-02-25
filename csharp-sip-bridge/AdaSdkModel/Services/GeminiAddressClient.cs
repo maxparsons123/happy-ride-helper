@@ -46,7 +46,9 @@ public sealed class GeminiAddressClient
         string? phone,
         string? pickupTime = null,
         string? spokenPickupNumber = null,
-        string? spokenDestNumber = null)
+        string? spokenDestNumber = null,
+        string? spokenPickupPostcode = null,
+        string? spokenDestPostcode = null)
     {
         if (string.IsNullOrWhiteSpace(_settings.ApiKey))
         {
@@ -71,7 +73,14 @@ public sealed class GeminiAddressClient
             if (!string.IsNullOrWhiteSpace(spokenDestNumber))
                 houseNumberHints += $"\nDESTINATION HOUSE NUMBER (extracted from caller's speech): \"{spokenDestNumber}\" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number {spokenDestNumber}. Set street_number to exactly \"{spokenDestNumber}\". If the street has no such number, flag is_ambiguous=true.";
 
-            var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{timePart}{houseNumberHints}{callerHistory}";
+            // Pass spoken postcodes — Gemini will recognise these as UK postcodes and resolve accordingly
+            var postcodeHints = "";
+            if (!string.IsNullOrWhiteSpace(spokenPickupPostcode))
+                postcodeHints += $"\nCaller's spoken pickup postcode: {spokenPickupPostcode}";
+            if (!string.IsNullOrWhiteSpace(spokenDestPostcode))
+                postcodeHints += $"\nCaller's spoken destination postcode: {spokenDestPostcode}";
+
+            var userMessage = $"User Message: Pickup from \"{pickup ?? "not provided"}\" going to \"{destination ?? "not provided"}\"\nUser Phone: {phone ?? "not provided"}{timePart}{houseNumberHints}{postcodeHints}{callerHistory}";
 
             var geminiUrl = $"https://generativelanguage.googleapis.com/v1beta/models/{_settings.Model}:generateContent?key={_settings.ApiKey}";
 
