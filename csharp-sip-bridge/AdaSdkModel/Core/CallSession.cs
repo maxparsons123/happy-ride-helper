@@ -12,6 +12,10 @@ namespace AdaSdkModel.Core;
 /// </summary>
 public sealed class CallSession : ICallSession
 {
+    // Shared HttpClient for Supabase REST calls — avoids socket exhaustion under concurrent calls.
+    // Headers are set per-request on HttpRequestMessage, so sharing the instance is safe.
+    private static readonly HttpClient _supabaseHttp = new() { Timeout = TimeSpan.FromSeconds(8) };
+
     private readonly ILogger<CallSession> _logger;
     private readonly AppSettings _settings;
     private readonly IOpenAiClient _aiClient;
@@ -173,20 +177,23 @@ public sealed class CallSession : ICallSession
             var capturedTranscript = _lastUserTranscript;
             var capturedStage = _currentStage;
 
+            // Capture GetQueuedFrames once before the closure — DisconnectAsync can null it out
+            // between the null-check and invocation on another thread.
+            var capturedQueueGetter = _aiClient.GetQueuedFrames;
+
             _ = Task.Run(async () =>
             {
                 try
                 {
                     // Wait for playout to drain before evaluating intent
-                    if (_aiClient.GetQueuedFrames != null)
+                    if (capturedQueueGetter != null)
                     {
-                        var start = DateTime.UtcNow;
-                        while ((DateTime.UtcNow - start).TotalMilliseconds < 30_000)
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                        while (sw.ElapsedMilliseconds < 30_000)
                         {
                             try
                             {
-                                var queuedFrames = _aiClient?.GetQueuedFrames;
-                                if (queuedFrames == null || queuedFrames() <= 0) break;
+                                if (capturedQueueGetter() <= 0) break;
                             }
                             catch { break; }
                             await Task.Delay(50);
@@ -470,7 +477,7 @@ public sealed class CallSession : ICallSession
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var http = _supabaseHttp;
             var normalized = phone.Trim().Replace(" ", "");
             var phoneVariants = new[] { phone, normalized, $"+{normalized}" };
             var orFilter = string.Join(",", phoneVariants.Select(p => $"phone_number.eq.{Uri.EscapeDataString(p)}"));
@@ -556,7 +563,7 @@ public sealed class CallSession : ICallSession
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var http = _supabaseHttp;
             var normalized = phone.Trim().Replace(" ", "");
             var phoneVariants = new[] { phone, normalized, $"+{normalized}" };
             var orFilter = string.Join(",", phoneVariants.Select(p => $"caller_phone.eq.{Uri.EscapeDataString(p)}"));
@@ -1497,6 +1504,7 @@ public sealed class CallSession : ICallSession
                     }
 
                     // ADDRESS DISCREPANCY CHECK: Verify geocoded result matches raw input
+                    bool discrepancyAccepted = false;
                     var discrepancy = DetectAddressDiscrepancy(result);
                     if (discrepancy != null)
                     {
@@ -1513,8 +1521,7 @@ public sealed class CallSession : ICallSession
                                     sessionId, _booking.Destination, result.DestStreet);
                                 _lastDiscrepancyKey = null;
                                 _discrepancyConfirmCount = 0;
-                                // Fall through to fare presentation below
-                                goto discrepancyAccepted;
+                                discrepancyAccepted = true;
                             }
                         }
                         else
@@ -1523,18 +1530,20 @@ public sealed class CallSession : ICallSession
                             _discrepancyConfirmCount = 0;
                         }
 
-                        _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
-                        Interlocked.Exchange(ref _fareAutoTriggered, 0);
-                        _pendingAddressCorrection = true;  // Allow pickup/dest correction through stage lock
-                        _currentStage = BookingStage.CollectingDestination;  // Unlock stage for corrections
+                        if (!discrepancyAccepted)
+                        {
+                            _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
+                            Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                            _pendingAddressCorrection = true;  // Allow pickup/dest correction through stage lock
+                            _currentStage = BookingStage.CollectingDestination;  // Unlock stage for corrections
 
-                        await _aiClient.InjectMessageAndRespondAsync(
-                            $"[ADDRESS DISCREPANCY] {discrepancy} " +
-                            "Ask the caller to confirm or repeat their address. " +
-                            "When they respond, call sync_booking_data with the corrected address.");
-                        return;
+                            await _aiClient.InjectMessageAndRespondAsync(
+                                $"[ADDRESS DISCREPANCY] {discrepancy} " +
+                                "Ask the caller to confirm or repeat their address. " +
+                                "When they respond, call sync_booking_data with the corrected address.");
+                            return;
+                        }
                     }
-                    discrepancyAccepted:
 
                     // Enrich structured fields if edge function failed internally and returned Nominatim-only result
                     if (string.IsNullOrWhiteSpace(result.PickupStreet) || string.IsNullOrWhiteSpace(result.DestStreet))
@@ -2582,6 +2591,8 @@ public sealed class CallSession : ICallSession
                             {
                                 _logger.LogInformation("[{SessionId}] ✅ iCabbi booking confirmed — JourneyId: {JourneyId}, Tracking: {TrackingUrl}",
                                     sessionId, icabbiResult.JourneyId, icabbiResult.TrackingUrl);
+                                // Write to snapshot first (used by downstream dispatch), then sync to live object
+                                bookingSnapshot.IcabbiJourneyId = icabbiResult.JourneyId;
                                 _booking.IcabbiJourneyId = icabbiResult.JourneyId;
                                 _ = SaveIcabbiJourneyIdAsync(bookingSnapshot.BookingRef, icabbiResult.JourneyId);
                             }
@@ -3234,6 +3245,9 @@ public sealed class CallSession : ICallSession
             _logger.LogInformation("[{SessionId}] ✅ END_CALL allowed — user rejected fare, no booking forced", SessionId);
         }
 
+        // Capture GetQueuedFrames before the closure — DisconnectAsync can null it on another thread
+        var endCallQueueGetter = _aiClient.GetQueuedFrames;
+
         _ = Task.Run(async () =>
         {
             // Wait for AI to finish generating the goodbye speech
@@ -3243,14 +3257,14 @@ public sealed class CallSession : ICallSession
 
             // Wait for audio frames to start being queued
             var enqueueStart = Environment.TickCount64;
-            while ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0 && Environment.TickCount64 - enqueueStart < 3000)
+            while ((endCallQueueGetter?.Invoke() ?? 0) == 0 && Environment.TickCount64 - enqueueStart < 3000)
                 await Task.Delay(100);
 
             // Drain the playout buffer (let goodbye finish playing)
             var drainStart = Environment.TickCount64;
             while (Environment.TickCount64 - drainStart < 12000)
             {
-                if ((_aiClient.GetQueuedFrames?.Invoke() ?? 0) == 0) break;
+                if ((endCallQueueGetter?.Invoke() ?? 0) == 0) break;
                 await Task.Delay(100);
             }
 
@@ -4381,31 +4395,39 @@ public sealed class CallSession : ICallSession
         if (Interlocked.CompareExchange(ref _transcriptPushPending, 1, 0) == 1)
             return; // Already scheduled
 
-        await Task.Delay(500); // Debounce
-        Interlocked.Exchange(ref _transcriptPushPending, 0);
-
-        List<object> snapshot;
-        lock (_transcriptLog) { snapshot = new List<object>(_transcriptLog); }
-
-        if (snapshot.Count == 0 || string.IsNullOrWhiteSpace(_settings.Supabase.ServiceRoleKey))
-            return;
-
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            var url = $"{_settings.Supabase.Url}/rest/v1/live_calls?call_id=eq.{Uri.EscapeDataString(SessionId)}";
-            var patch = new StringContent(
-                System.Text.Json.JsonSerializer.Serialize(new { transcripts = snapshot }),
-                System.Text.Encoding.UTF8, "application/json");
-            patch.Headers.Add("Prefer", "return=minimal");
-            var req = new HttpRequestMessage(HttpMethod.Patch, url) { Content = patch };
-            req.Headers.Add("apikey", _settings.Supabase.AnonKey);
-            req.Headers.Add("Authorization", $"Bearer {_settings.Supabase.ServiceRoleKey}");
-            await http.SendAsync(req);
+            await Task.Delay(500); // Debounce
+
+            // CRITICAL: Snapshot AFTER the delay so entries added during the 500ms window are captured.
+            // Previously the snapshot was taken before the delay, causing those entries to be silently dropped.
+            List<object> snapshot;
+            lock (_transcriptLog) { snapshot = new List<object>(_transcriptLog); }
+
+            if (snapshot.Count == 0 || string.IsNullOrWhiteSpace(_settings.Supabase.ServiceRoleKey))
+                return;
+
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                var url = $"{_settings.Supabase.Url}/rest/v1/live_calls?call_id=eq.{Uri.EscapeDataString(SessionId)}";
+                var patch = new StringContent(
+                    System.Text.Json.JsonSerializer.Serialize(new { transcripts = snapshot }),
+                    System.Text.Encoding.UTF8, "application/json");
+                patch.Headers.Add("Prefer", "return=minimal");
+                var req = new HttpRequestMessage(HttpMethod.Patch, url) { Content = patch };
+                req.Headers.Add("apikey", _settings.Supabase.AnonKey);
+                req.Headers.Add("Authorization", $"Bearer {_settings.Supabase.ServiceRoleKey}");
+                await http.SendAsync(req);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "[{SessionId}] Transcript push failed (non-fatal)", SessionId);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogDebug(ex, "[{SessionId}] Transcript push failed (non-fatal)", SessionId);
+            Interlocked.Exchange(ref _transcriptPushPending, 0);
         }
     }
 }
