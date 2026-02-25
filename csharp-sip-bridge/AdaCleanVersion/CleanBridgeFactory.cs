@@ -1,3 +1,4 @@
+using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
 using AdaCleanVersion.Realtime;
 using AdaCleanVersion.Services;
@@ -56,6 +57,8 @@ public static class CleanBridgeFactory
         ILogger logger,
         CleanSipBridge bridge)
     {
+        var codec = G711Codec.Parse(settings.Audio.PreferredCodec);
+
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,
             model: settings.OpenAi.Model,
@@ -63,7 +66,8 @@ public static class CleanBridgeFactory
             callId: callId,
             rtpSession: rtpSession,
             session: session,
-            logger: logger);
+            logger: logger,
+            codec: codec);
 
         client.OnLog += msg => logger.LogInformation(msg);
 

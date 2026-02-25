@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
 using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
@@ -47,7 +48,7 @@ public class CleanSipBridge : IDisposable
     /// </summary>
     public event Action<string, RTPSession, CleanCallSession>? OnCallConnected;
 
-    /// <summary>Fires with µ-law audio frames from the AI output (for Simli avatar feeding).</summary>
+    /// <summary>Fires with G.711 audio frames from the AI output (for Simli avatar feeding).</summary>
     public event Action<byte[]>? OnAudioOut;
 
     /// <summary>Fires on barge-in (caller speech started).</summary>
@@ -72,7 +73,7 @@ public class CleanSipBridge : IDisposable
     }
 
     /// <summary>Internal: called by factory to proxy audio events from OpenAiRealtimeClient.</summary>
-    internal void RaiseAudioOut(byte[] mulawFrame) => OnAudioOut?.Invoke(mulawFrame);
+    internal void RaiseAudioOut(byte[] g711Frame) => OnAudioOut?.Invoke(g711Frame);
 
     /// <summary>Internal: called by factory to proxy barge-in events from OpenAiRealtimeClient.</summary>
     internal void RaiseBargeIn() => OnBargeIn?.Invoke();
@@ -184,10 +185,13 @@ public class CleanSipBridge : IDisposable
         // Create SIPSorcery user agent for this call
         var uas = new SIPServerUserAgent(_sipTransport, null, inviteRequest, null, null);
 
-        // Create RTP session with G.711 µ-law (PCMU)
+        // Create RTP session with configured G.711 codec
+        var codec = G711Codec.Parse(_settings.Audio.PreferredCodec);
         var rtpSession = new RTPSession(false, false, false);
+        var audioCodecEnum = codec == G711CodecType.PCMA ? AudioCodecsEnum.PCMA : AudioCodecsEnum.PCMU;
+        var payloadId = G711Codec.PayloadType(codec);
         var audioFormat = new SDPAudioVideoMediaFormat(
-            new AudioFormat(AudioCodecsEnum.PCMU, 0, 8000));
+            new AudioFormat(audioCodecEnum, payloadId, 8000));
         var audioTrack = new MediaStreamTrack(audioFormat.ToSdpFormat());
         rtpSession.addTrack(audioTrack);
 
@@ -243,7 +247,8 @@ public class CleanSipBridge : IDisposable
             CallerId = callerId,
             StartTime = DateTime.UtcNow,
             UserAgent = uas,
-            RtpSession = rtpSession
+            RtpSession = rtpSession,
+            Codec = codec
         };
         _activeCalls[callId] = activeCall;
 
@@ -326,7 +331,7 @@ public class CleanSipBridge : IDisposable
     /// <summary>
     /// Send RTP audio to a specific call (for OpenAI TTS output).
     /// </summary>
-    public void SendAudio(string callId, byte[] pcmuPayload, uint duration)
+    public void SendAudio(string callId, byte[] g711Payload, uint duration)
     {
         if (!_activeCalls.TryGetValue(callId, out var call) || call.RtpSession == null)
             return;
@@ -334,9 +339,9 @@ public class CleanSipBridge : IDisposable
         try
         {
             call.RtpSession.SendAudioFrame(
-                (uint)(duration * 8), // timestamp increment for 8kHz PCMU
-                (int)SDPWellKnownMediaFormatsEnum.PCMU,
-                pcmuPayload);
+                (uint)(duration * 8), // timestamp increment for 8kHz G.711
+                call.PayloadType,
+                g711Payload);
 
             // Reset on success
             call.ConsecutiveRtpFailures = 0;
@@ -384,6 +389,8 @@ internal class ActiveCall
     public DateTime StartTime { get; init; }
     public SIPServerUserAgent? UserAgent { get; init; }
     public RTPSession? RtpSession { get; init; }
+    public G711CodecType Codec { get; init; } = G711CodecType.PCMU;
+    public int PayloadType => G711Codec.PayloadType(Codec);
 
     /// <summary>Tracks consecutive RTP send failures for circuit breaker logic.</summary>
     public int ConsecutiveRtpFailures;

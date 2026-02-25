@@ -10,7 +10,8 @@ using SIPSorcery.Net;
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via MuLawRtpPlayout.
+/// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via G711RtpPlayout.
+/// Supports both PCMU (µ-law) and PCMA (A-law) codecs.
 ///
 /// Mic Gate v3.1 — Dual-Latch with Echo Guard:
 ///   Latch 1: _responseCompleted  — set when OpenAI sends response.audio.done
@@ -37,6 +38,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private readonly RTPSession _rtpSession;
     private readonly CleanCallSession _session;
     private readonly ILogger _logger;
+    private readonly G711CodecType _codec;
     private readonly CancellationTokenSource _cts = new();
 
     private ClientWebSocket? _ws;
@@ -45,7 +47,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>
     /// Jitter-buffered playout engine — all outbound audio is routed through this.
     /// </summary>
-    private readonly MuLawRtpPlayout _playout;
+    private readonly G711RtpPlayout _playout;
 
     // ─── Dual-Latch Mic Gate (v3.1) ─────────────────────────
     // The mic is gated (blocked) while AI audio is playing.
@@ -73,7 +75,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     public event Action<string>? OnLog;
 
-    /// <summary>Fires with each µ-law audio frame sent to playout (for Simli avatar feeding).</summary>
+    /// <summary>Fires with each G.711 audio frame sent to playout (for Simli avatar feeding).</summary>
     public event Action<byte[]>? OnAudioOut;
 
     /// <summary>Fires when barge-in (speech_started) occurs.</summary>
@@ -86,7 +88,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         string callId,
         RTPSession rtpSession,
         CleanCallSession session,
-        ILogger logger)
+        ILogger logger,
+        G711CodecType codec = G711CodecType.PCMU)
     {
         _apiKey = apiKey;
         _model = model;
@@ -95,8 +98,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _rtpSession = rtpSession;
         _session = session;
         _logger = logger;
+        _codec = codec;
 
-        _playout = new MuLawRtpPlayout(rtpSession);
+        _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
         _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
@@ -294,15 +298,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         ForwardToOpenAi(payload);
     }
 
-    private void ForwardToOpenAi(byte[] mulawPayload)
+    private void ForwardToOpenAi(byte[] g711Payload)
     {
         try
         {
-            // Decode G.711 µ-law → PCM16
-            var pcm16 = new byte[mulawPayload.Length * 2];
-            for (int i = 0; i < mulawPayload.Length; i++)
+            // Decode G.711 → PCM16
+            var pcm16 = new byte[g711Payload.Length * 2];
+            for (int i = 0; i < g711Payload.Length; i++)
             {
-                var sample = MuLawDecode(mulawPayload[i]);
+                var sample = G711Codec.Decode(g711Payload[i], _codec);
                 pcm16[i * 2] = (byte)(sample & 0xFF);
                 pcm16[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
             }
@@ -439,19 +443,19 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         var pcm16 = Convert.FromBase64String(b64);
 
-        // Encode PCM16 → G.711 µ-law
-        var mulaw = new byte[pcm16.Length / 2];
-        for (int i = 0; i < mulaw.Length; i++)
+        // Encode PCM16 → G.711 (codec-aware)
+        var g711 = new byte[pcm16.Length / 2];
+        for (int i = 0; i < g711.Length; i++)
         {
             var sample = (short)(pcm16[i * 2] | (pcm16[i * 2 + 1] << 8));
-            mulaw[i] = MuLawEncode(sample);
+            g711[i] = G711Codec.Encode(sample, _codec);
         }
 
         // Buffer through playout engine (not sent directly!)
-        _playout.BufferMuLaw(mulaw);
+        _playout.BufferG711(g711);
 
         // Fire audio out event for avatar feeding
-        OnAudioOut?.Invoke(mulaw);
+        OnAudioOut?.Invoke(g711);
     }
 
     private async Task HandleCallerTranscript(JsonElement root)
@@ -514,46 +518,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         }
     }
 
-    // ─── G.711 µ-law Codec ──────────────────────────────────
-
-    private static readonly short[] MuLawDecompressTable = BuildMuLawDecompressTable();
-
-    private static short MuLawDecode(byte mulaw) => MuLawDecompressTable[mulaw];
-
-    private static byte MuLawEncode(short sample)
-    {
-        const int BIAS = 0x84;
-        const int MAX = 32635;
-
-        var sign = (sample >> 8) & 0x80;
-        if (sign != 0) sample = (short)-sample;
-        if (sample > MAX) sample = MAX;
-
-        sample = (short)(sample + BIAS);
-
-        var exponent = 7;
-        for (var expMask = 0x4000; (sample & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
-
-        var mantissa = (sample >> (exponent + 3)) & 0x0F;
-        return (byte)(~(sign | (exponent << 4) | mantissa));
-    }
-
-    private static short[] BuildMuLawDecompressTable()
-    {
-        var table = new short[256];
-        for (int i = 0; i < 256; i++)
-        {
-            var mulaw = (byte)~i;
-            var sign = (mulaw & 0x80) != 0;
-            var exponent = (mulaw >> 4) & 0x07;
-            var mantissa = mulaw & 0x0F;
-            var sample = (mantissa << 3) + 0x84;
-            sample <<= exponent;
-            sample -= 0x84;
-            table[i] = (short)(sign ? -sample : sample);
-        }
-        return table;
-    }
+    // G.711 codec logic moved to shared G711Codec class
 
     private void Log(string msg)
     {
