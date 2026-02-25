@@ -1011,13 +1011,18 @@ public sealed class CallSession : ICallSession
 
         OnBookingUpdated?.Invoke(_booking.Clone());
 
-        // ── SPLIT-BRAIN ENGINE: Track collection progress ──
-        _engine?.UpdateCollectionState(
-            hasName: !string.IsNullOrWhiteSpace(_booking.Name),
-            hasPickup: !string.IsNullOrWhiteSpace(_booking.Pickup),
-            hasDestination: !string.IsNullOrWhiteSpace(_booking.Destination),
-            hasPassengers: _booking.Passengers.HasValue && _booking.Passengers > 0,
-            hasTime: !string.IsNullOrWhiteSpace(_booking.PickupTime));
+        // ── SPLIT-BRAIN ENGINE: Process extraction + advance state deterministically ──
+        if (_engine != null)
+        {
+            var extraction = ExtractionResult.FromSyncArgs(args);
+            var snapshot = BuildSnapshot();
+            var engineAction = _engine.HandleInput(extraction, snapshot);
+
+            // Log engine decision (prompt instruction indicates what the engine wants Ada to do next)
+            if (engineAction.PromptInstruction != null)
+                _logger.LogInformation("[{SessionId}] 🧠 Engine instruction: {Instruction} (state={State})",
+                    SessionId, engineAction.PromptInstruction, engineAction.NewState);
+        }
 
         // ── BOOKING STATE INJECTION ──
         // Inject current booking state into conversation so Ada always has ground truth.
@@ -4498,4 +4503,19 @@ public sealed class CallSession : ICallSession
             Interlocked.Exchange(ref _transcriptPushPending, 0);
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // BOOKING SNAPSHOT — Immutable view of current booking for engine decisions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Build an immutable BookingSnapshot from the current BookingState.
+    /// Used by the Split-Brain engine for deterministic next-state resolution.
+    /// </summary>
+    private BookingSnapshot BuildSnapshot() => BookingSnapshot.From(
+        _booking.Name,
+        _booking.Pickup,
+        _booking.Destination,
+        _booking.Passengers,
+        _booking.PickupTime);
 }
