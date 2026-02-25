@@ -898,6 +898,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             properties = new
             {
                 caller_name = new { type = "string", description = "Caller's name" },
+                caller_area = new { type = "string", description = "Caller's self-reported area/district (e.g. 'Earlsdon', 'Tile Hill', 'Binley'). Used as a location bias for address resolution. Only set when the caller explicitly states their area." },
                 pickup = new { type = "string", description = "Pickup address ONLY — extract the address/place name from the caller's speech. Strip out unrelated info like passenger counts, times, or other details." },
                 destination = new { type = "string", description = "Destination address ONLY — extract the address/place name from the caller's speech. Strip out unrelated info like passenger counts, times, or other details. E.g. if caller says '7 Russell Street and 3 passengers', destination='7 Russell Street'." },
                 passengers = new { type = "integer", description = "Number of passengers" },
@@ -1063,10 +1064,15 @@ Follow this order exactly:
 
 Greet  
 → NAME  
+→ AREA (ask 'What area are you calling from?' or 'Whereabouts are you?' — for NEW callers only. Skip if returning caller with history.)  
 → PICKUP  
 → DESTINATION  
 → PASSENGERS  
 → TIME  
+
+When the caller gives their area (e.g. 'Earlsdon', 'Tile Hill', 'Binley'), call sync_booking_data(caller_area=WHAT_THEY_SAID) BEFORE asking for pickup.
+This area is used to bias address resolution — so 'Church Road' from an Earlsdon caller resolves to Church Road, Earlsdon.
+If the caller gives their area AND pickup in the same sentence (e.g. 'I'm in Earlsdon, pick me up from Church Road'), extract BOTH and call sync_booking_data with caller_area AND pickup in ONE call.
 
 ⚠️⚠️⚠️ CRITICAL TOOL CALL RULE ⚠️⚠️⚠️
 After the user answers EACH question, you MUST call sync_booking_data BEFORE speaking your next question.

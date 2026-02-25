@@ -404,9 +404,14 @@ public sealed class CallSession : ICallSession
             _booking.PickupTime = pt?.ToString();
         if (args.TryGetValue("vehicle_type", out var vt) && !string.IsNullOrWhiteSpace(vt?.ToString()))
             _booking.VehicleType = vt.ToString()!;
+        if (args.TryGetValue("caller_area", out var ca) && !string.IsNullOrWhiteSpace(ca?.ToString()))
+        {
+            _booking.CallerArea = ca.ToString()!.Trim();
+            _logger.LogInformation("[{SessionId}] 📍 Caller area set: '{Area}'", SessionId, _booking.CallerArea);
+        }
 
-        _logger.LogInformation("[{SessionId}] ⚡ Sync: Name={Name}, Pickup={Pickup}, Dest={Dest}, Pax={Pax}, Vehicle={Vehicle}",
-            SessionId, _booking.Name ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?", _booking.Passengers, _booking.VehicleType);
+        _logger.LogInformation("[{SessionId}] ⚡ Sync: Name={Name}, Area={Area}, Pickup={Pickup}, Dest={Dest}, Pax={Pax}, Vehicle={Vehicle}",
+            SessionId, _booking.Name ?? "?", _booking.CallerArea ?? "?", _booking.Pickup ?? "?", _booking.Destination ?? "?", _booking.Passengers, _booking.VehicleType);
 
         OnBookingUpdated?.Invoke(_booking.Clone());
 
@@ -440,9 +445,11 @@ public sealed class CallSession : ICallSession
             {
                 try
                 {
+                    var callerArea = _booking.CallerArea;
                     var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId,
                         spokenPickupNumber: GetSpokenHouseNumber(pickup),
-                        spokenDestNumber: GetSpokenHouseNumber(destination));
+                        spokenDestNumber: GetSpokenHouseNumber(destination),
+                        callerArea: callerArea);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -860,7 +867,8 @@ public sealed class CallSession : ICallSession
             _logger.LogInformation("[{SessionId}] 🔄 Fare re-calculation after Address Lock resolution", sessionId);
             var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId,
                 spokenPickupNumber: GetSpokenHouseNumber(pickup),
-                spokenDestNumber: GetSpokenHouseNumber(destination));
+                spokenDestNumber: GetSpokenHouseNumber(destination),
+                callerArea: _booking.CallerArea);
 
             // Check if re-disambiguation is needed (e.g. clarified address still ambiguous in a different way)
             if (result.NeedsClarification)
@@ -991,7 +999,8 @@ public sealed class CallSession : ICallSession
 
                     var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(pickup, destination, callerId,
                         spokenPickupNumber: GetSpokenHouseNumber(pickup),
-                        spokenDestNumber: GetSpokenHouseNumber(destination));
+                        spokenDestNumber: GetSpokenHouseNumber(destination),
+                        callerArea: _booking.CallerArea);
                     var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
                     FareResult result;
@@ -1166,7 +1175,8 @@ public sealed class CallSession : ICallSession
                 {
                     var result = await _fareCalculator.ExtractAndCalculateWithAiAsync(_booking.Pickup, _booking.Destination, CallerId,
                         spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
-                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
+                        spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                        callerArea: _booking.CallerArea);
                     ApplyFareResultNullSafe(result);
                 }
                 catch (Exception ex)
@@ -1244,6 +1254,8 @@ public sealed class CallSession : ICallSession
             var aiTask = _fareCalculator.ExtractAndCalculateWithAiAsync(
                 _booking.Pickup, _booking.Destination ?? _booking.Pickup, CallerId,
                 spokenPickupNumber: GetSpokenHouseNumber(_booking.Pickup),
+                spokenDestNumber: GetSpokenHouseNumber(_booking.Destination),
+                callerArea: _booking.CallerArea);
                 spokenDestNumber: GetSpokenHouseNumber(_booking.Destination));
             var completed = await Task.WhenAny(aiTask, Task.Delay(10000));
 
