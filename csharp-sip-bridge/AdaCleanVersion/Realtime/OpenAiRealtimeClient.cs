@@ -72,6 +72,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     public event Action<string>? OnLog;
 
+    /// <summary>Fires with each µ-law audio frame sent to playout (for Simli avatar feeding).</summary>
+    public event Action<byte[]>? OnAudioOut;
+
+    /// <summary>Fires when barge-in (speech_started) occurs.</summary>
+    public event Action? OnBargeIn;
+
     public OpenAiRealtimeClient(
         string apiKey,
         string model,
@@ -406,6 +412,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 _playout.Clear();
                 lock (_micGateLock) _micGateBuffer.Clear();
                 Log("🎤 Barge-in — playout cleared, mic ungated immediately");
+                OnBargeIn?.Invoke();
                 break;
 
             case "error":
@@ -441,6 +448,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         // Buffer through playout engine (not sent directly!)
         _playout.BufferMuLaw(mulaw);
+
+        // Fire audio out event for avatar feeding
+        OnAudioOut?.Invoke(mulaw);
     }
 
     private async Task HandleCallerTranscript(JsonElement root)

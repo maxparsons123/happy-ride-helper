@@ -1,8 +1,8 @@
 using System.Text.Json;
+using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
 using AdaCleanVersion.Session;
 using AdaCleanVersion.Sip;
-using AdaSdkModel.Audio;
 using AdaSdkModel.Avatar;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
@@ -256,6 +256,19 @@ public partial class MainForm : Form
             _bridge = CleanBridgeFactory.Create(_settings, logger);
 
             _bridge.OnLog += msg => SafeInvoke(() => Log(msg));
+
+            // Wire audio out → Simli feeder channel (non-blocking enqueue)
+            _bridge.OnAudioOut += mulawFrame =>
+            {
+                if (_simliAvatar?.IsConnected == true)
+                    _simliChannel?.Writer.TryWrite(mulawFrame);
+            };
+
+            // Wire barge-in → clear Simli buffer
+            _bridge.OnBargeIn += () =>
+            {
+                try { ClearSimliBuffer(); } catch { }
+            };
 
             _bridge.OnCallConnected += (callId, rtpSession, session) => SafeInvoke(() =>
             {
@@ -572,7 +585,7 @@ public partial class MainForm : Form
                     if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
                         continue;
 
-                    var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
+                    var pcm16at16k = MuLawToSimliResampler.Convert(alawFrame);
                     await _simliAvatar.SendAudioAsync(pcm16at16k);
                 }
             }

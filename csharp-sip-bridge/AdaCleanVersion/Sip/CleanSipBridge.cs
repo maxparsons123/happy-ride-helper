@@ -46,6 +46,12 @@ public class CleanSipBridge : IDisposable
     /// </summary>
     public event Action<string, RTPSession, CleanCallSession>? OnCallConnected;
 
+    /// <summary>Fires with µ-law audio frames from the AI output (for Simli avatar feeding).</summary>
+    public event Action<byte[]>? OnAudioOut;
+
+    /// <summary>Fires on barge-in (caller speech started).</summary>
+    public event Action? OnBargeIn;
+
     public CleanSipBridge(
         ILogger logger,
         CleanAppSettings settings,
@@ -59,6 +65,12 @@ public class CleanSipBridge : IDisposable
         _fareService = fareService;
         _callerLookup = callerLookup;
     }
+
+    /// <summary>Internal: called by factory to proxy audio events from OpenAiRealtimeClient.</summary>
+    internal void RaiseAudioOut(byte[] mulawFrame) => OnAudioOut?.Invoke(mulawFrame);
+
+    /// <summary>Internal: called by factory to proxy barge-in events from OpenAiRealtimeClient.</summary>
+    internal void RaiseBargeIn() => OnBargeIn?.Invoke();
 
     // ─── Lifecycle ──────────────────────────────────────────
 
