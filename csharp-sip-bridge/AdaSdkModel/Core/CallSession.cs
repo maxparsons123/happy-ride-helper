@@ -623,7 +623,7 @@ public sealed class CallSession : ICallSession
                 sb.AppendLine($"  Scheduled for: {sf.GetString()}");
             sb.AppendLine();
             sb.AppendLine("ACTIONS AVAILABLE:");
-            sb.AppendLine("  - CANCEL: TWO-STEP process — first call cancel_booking(confirmed=false) to start confirmation, then after caller confirms, call cancel_booking(confirmed=true)");
+            sb.AppendLine("  - CANCEL: Ask the caller to confirm verbally, then call cancel_booking(confirmed=true, reason='caller_request')");
             sb.AppendLine("  - AMEND: modify fields using sync_booking_data, fare will auto-recalculate");
             sb.AppendLine("  - STATUS: call check_booking_status()");
             sb.AppendLine("  - NEW BOOKING: reset and proceed with normal flow");
@@ -637,8 +637,7 @@ public sealed class CallSession : ICallSession
             sb.AppendLine("  6. If the caller's response is UNCLEAR, GARBLED, or sounds like an ECHO of your own greeting, DO NOT assume any intent.");
             sb.AppendLine("     Instead say: 'Sorry, I didn't quite catch that. Would you like to cancel, make changes, or check on your driver?'");
             sb.AppendLine("  7. NEVER interpret background noise, echoes, or partial sentences as a cancellation request.");
-            sb.AppendLine("  8. For CANCEL: call cancel_booking(confirmed=false) FIRST to begin confirmation. The system will tell you to ask the caller.");
-            sb.AppendLine("     After the caller says yes, call cancel_booking(confirmed=true). NEVER skip the confirmed=false step.");
+            sb.AppendLine("  8. For CANCEL: ask the caller to confirm first, then call cancel_booking(confirmed=true). The system handles the rest.");
 
             _logger.LogInformation("[{SessionId}] 📋 Active booking loaded: {Id} ({Pickup} → {Dest})",
                 SessionId, _booking.ExistingBookingId, _booking.Pickup, _booking.Destination);
@@ -2915,7 +2914,15 @@ public sealed class CallSession : ICallSession
         }
 
         // ── Step 2: Confirmed → validate via state machine ──
-        if (!_destructiveGuard!.TryValidate(DestructiveActionType.CancelBooking, out var blockError))
+        // If Ada asked verbally and then called confirmed=true directly (skipping confirmed=false),
+        // auto-begin the confirmation so TryValidate succeeds.
+        if (!_destructiveGuard!.HasPending)
+        {
+            _logger.LogInformation("[{SessionId}] 🔄 cancel_booking: auto-beginning confirmation (Ada asked verbally, skipped confirmed=false step)", SessionId);
+            _destructiveGuard.BeginConfirmation(DestructiveActionType.CancelBooking);
+        }
+
+        if (!_destructiveGuard.TryValidate(DestructiveActionType.CancelBooking, out var blockError))
         {
             return new { success = false, error = blockError };
         }
