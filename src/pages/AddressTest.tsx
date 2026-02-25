@@ -21,6 +21,7 @@ interface AddressResult {
   alternatives?: string[];
   resolved_area?: string;
   matched_from_history?: boolean;
+  match_type?: "poi" | "residential";
 }
 
 interface DispatchResponse {
@@ -261,7 +262,15 @@ function AddressCard({ title, icon, address, color }: { title: string; icon: str
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between">
           <CardTitle className="text-sm">{icon} {title}</CardTitle>
-          <div className="flex gap-1">
+          <div className="flex gap-1 flex-wrap">
+            {address.match_type && (
+              <Badge
+                variant={address.match_type === "poi" ? "default" : "outline"}
+                className={`text-xs ${address.match_type === "poi" ? "bg-purple-600" : ""}`}
+              >
+                {address.match_type === "poi" ? "🏢 POI" : "🏠 Residential"}
+              </Badge>
+            )}
             {address.is_ambiguous && <Badge variant="destructive" className="text-xs">Ambiguous</Badge>}
             {address.resolved_area && <Badge variant="secondary" className="text-xs">📍 {address.resolved_area}</Badge>}
             {address.matched_from_history && <Badge variant="outline" className="text-xs">📖 History</Badge>}
@@ -283,21 +292,37 @@ function AddressCard({ title, icon, address, color }: { title: string; icon: str
         <Separator />
 
         <div className="text-xs space-y-1">
-          <div className="flex items-center gap-2">
-            <span className="text-muted-foreground w-20">Coords:</span>
-            <span className="font-mono">
-              {address.lat != null ? `${address.lat.toFixed(5)}, ${address.lon?.toFixed(5)}` : "—"}
-            </span>
-            <Badge variant="outline" className="text-[10px]">Gemini</Badge>
-          </div>
-          {hasPoiCoords && (
-            <div className="flex items-center gap-2">
-              <span className="text-muted-foreground w-20">POI Coords:</span>
-              <span className="font-mono text-green-600 dark:text-green-400">
-                {address.poi_lat!.toFixed(5)}, {address.poi_lng!.toFixed(5)}
-              </span>
-              <Badge variant="outline" className="text-[10px] border-green-500 text-green-600">zone_pois</Badge>
-            </div>
+          {address.match_type === "poi" ? (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground w-20">Final Coords:</span>
+                <span className="font-mono font-bold text-green-600 dark:text-green-400">
+                  {address.lat != null ? `${address.lat.toFixed(5)}, ${address.lon?.toFixed(5)}` : "—"}
+                </span>
+                <Badge className="text-[10px] bg-green-600">zone_pois ✓</Badge>
+              </div>
+              <p className="text-muted-foreground italic">POI branch — coords from zone_pois used as final (no Nominatim needed)</p>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground w-20">Coords:</span>
+                <span className="font-mono">
+                  {address.lat != null ? `${address.lat.toFixed(5)}, ${address.lon?.toFixed(5)}` : "—"}
+                </span>
+                <Badge variant="outline" className="text-[10px]">Gemini</Badge>
+              </div>
+              {hasPoiCoords && (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground w-20">POI Seed:</span>
+                  <span className="font-mono text-muted-foreground">
+                    {address.poi_lat!.toFixed(5)}, {address.poi_lng!.toFixed(5)}
+                  </span>
+                  <Badge variant="outline" className="text-[10px]">zone_pois</Badge>
+                </div>
+              )}
+              <p className="text-muted-foreground italic">Residential branch — needs Nominatim for house-level precision</p>
+            </>
           )}
         </div>
 

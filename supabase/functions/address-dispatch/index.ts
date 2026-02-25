@@ -737,20 +737,35 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       return [];
     }
 
-    // Helper: apply POI coords as initial/fallback coordinates on an address
+    // Helper: apply POI coords and determine match_type based on house number presence
     function applyPoiCoords(addr: any, match: ZonePoiAreaMatch, side: string) {
-      if (match.lat != null && match.lng != null) {
-        // Only use POI coords if Gemini didn't provide any, or as a zone-level seed
-        const hasGeminiCoords = addr.lat != null && addr.lon != null && addr.lat !== 0 && addr.lon !== 0;
-        if (!hasGeminiCoords) {
-          addr.lat = match.lat;
-          addr.lon = match.lng;
-          console.log(`📌 ${side}: applied POI coords (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — Gemini had no coords`);
-        } else {
-          // Store as fallback for downstream verification
+      const hasHouseNumber = !!(addr.street_number && addr.street_number.trim().match(/\d/));
+
+      if (hasHouseNumber) {
+        // Residential address — needs Nominatim for house-level precision
+        addr.match_type = "residential";
+        if (match.lat != null && match.lng != null) {
+          const hasGeminiCoords = addr.lat != null && addr.lon != null && addr.lat !== 0 && addr.lon !== 0;
+          if (!hasGeminiCoords) {
+            addr.lat = match.lat;
+            addr.lon = match.lng;
+            console.log(`📌 ${side}: [residential] applied POI coords as fallback (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) — Gemini had no coords`);
+          } else {
+            addr.poi_lat = match.lat;
+            addr.poi_lng = match.lng;
+            console.log(`📌 ${side}: [residential] POI coords stored as seed — Gemini coords preserved for house-level refinement`);
+          }
+        }
+      } else {
+        // POI / landmark — no house number means POI coords ARE the ground truth
+        addr.match_type = "poi";
+        if (match.lat != null && match.lng != null) {
           addr.poi_lat = match.lat;
           addr.poi_lng = match.lng;
-          console.log(`📌 ${side}: POI coords (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) stored as seed — Gemini coords preserved`);
+          // Override Gemini coords with POI coords — POI data is more authoritative for landmarks
+          addr.lat = match.lat;
+          addr.lon = match.lng;
+          console.log(`📌 ${side}: [poi] using POI coords as final (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — no house number, skipping Nominatim`);
         }
       }
     }
