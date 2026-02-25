@@ -160,6 +160,8 @@ public sealed class FareCalculator : IFareCalculator
             if (pickupEl.TryGetProperty("street_number", out var num)) pickupNumber = num.GetString();
             if (pickupEl.TryGetProperty("postal_code", out var pc)) pickupPostal = pc.GetString();
             if (pickupEl.TryGetProperty("city", out var city)) pickupCity = city.GetString();
+            if (pickupEl.TryGetProperty("resolved_area", out var pArea) && pArea.ValueKind == JsonValueKind.String)
+                result.PickupArea = pArea.GetString();
             if (pickupEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
             {
                 result.NeedsClarification = true;
@@ -182,6 +184,8 @@ public sealed class FareCalculator : IFareCalculator
             if (dropoffEl.TryGetProperty("street_number", out var num)) destNumber = num.GetString();
             if (dropoffEl.TryGetProperty("postal_code", out var pc)) destPostal = pc.GetString();
             if (dropoffEl.TryGetProperty("city", out var city)) destCity = city.GetString();
+            if (dropoffEl.TryGetProperty("resolved_area", out var dArea) && dArea.ValueKind == JsonValueKind.String)
+                result.DestArea = dArea.GetString();
             if (dropoffEl.TryGetProperty("is_ambiguous", out var ambig) && ambig.GetBoolean())
             {
                 result.NeedsClarification = true;

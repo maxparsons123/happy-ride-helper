@@ -748,6 +748,7 @@ public sealed class GeminiAddressClient
             {
                 // Exactly one match in zone_pois — resolve definitively, no disambiguation needed
                 _logger.LogDebug("✅ zone_pois: \"{Street}\" uniquely in {Area} — no disambiguation needed", streetName, zonePoiAreas[0]);
+                addr["resolved_area"] = zonePoiAreas[0];
                 continue;
             }
             else if (userNamedZoneArea)
