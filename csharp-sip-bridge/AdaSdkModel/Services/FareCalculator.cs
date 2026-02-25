@@ -81,7 +81,7 @@ public sealed class FareCalculator : IFareCalculator
         {
             try
             {
-                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber, pickupTime, spokenPickupNumber, spokenDestNumber);
+                var geminiResult = await _geminiClient.ResolveAsync(pickup, destination, phoneNumber, pickupTime, spokenPickupNumber, spokenDestNumber, spokenPickupPostcode, spokenDestPostcode);
                 if (geminiResult.HasValue)
                 {
                     _logger.LogDebug("✅ Using local Gemini for address dispatch");
