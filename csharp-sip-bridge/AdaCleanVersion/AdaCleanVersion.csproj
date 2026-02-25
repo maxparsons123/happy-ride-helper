@@ -5,10 +5,24 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <OutputType>Library</OutputType>
+    <RootNamespace>AdaCleanVersion</RootNamespace>
+    <AssemblyName>AdaCleanVersion</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Logging abstractions (ILogger, NullLogger, etc.) -->
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
+
+    <!-- HttpClient factory + JSON extensions (HttpClient.PostAsJsonAsync, ReadFromJsonAsync) -->
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+
+    <!-- System.Text.Json is included in net8.0, but explicit for clarity -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+
+    <!-- System.Net.Http.Json extensions (GetFromJsonAsync, PostAsJsonAsync, ReadFromJsonAsync) -->
+    <PackageReference Include="System.Net.Http.Json" Version="8.0.1" />
   </ItemGroup>
+
+  <!-- All .cs files under Config/, Engine/, Models/, Services/, Session/, Sip/ are auto-included by SDK-style project -->
 
 </Project>
