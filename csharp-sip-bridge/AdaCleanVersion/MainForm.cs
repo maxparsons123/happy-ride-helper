@@ -22,7 +22,6 @@ public partial class MainForm : Form
     // Audio monitor (hear raw SIP audio locally)
     private WaveOutEvent? _monitorOut;
     private BufferedWaveProvider? _monitorBuffer;
-    private readonly object _monitorLock = new();
 
     // Simli avatar + dedicated background feeder
     private SimliAvatar? _simliAvatar;
@@ -354,11 +353,25 @@ public partial class MainForm : Form
 
     private void btnHangUp_Click(object? sender, EventArgs e)
     {
-        Log("📴 Hanging up all calls.");
-        // CleanSipBridge doesn't expose HangupAll yet — just stop/restart
-        try { _bridge?.Stop(); }
-        catch (Exception ex) { Log($"⚠ Hangup error: {ex.Message}"); }
+        Log("📴 Hanging up active calls.");
+        if (_bridge != null)
+        {
+            // Hang up each active call individually (preserves SIP registration)
+            foreach (var callId in GetActiveCallIds())
+                _bridge.HangupCall(callId);
+        }
         SetInCall(false);
+    }
+
+    /// <summary>Returns current active call IDs from the status bar.</summary>
+    private IEnumerable<string> GetActiveCallIds()
+    {
+        // Extract callId from status text format "callerId [callId]"
+        var text = statusCallId.Text;
+        var open = text.LastIndexOf('[');
+        var close = text.LastIndexOf(']');
+        if (open >= 0 && close > open)
+            yield return text[(open + 1)..close];
     }
 
     private void btnMute_Click(object? sender, EventArgs e)

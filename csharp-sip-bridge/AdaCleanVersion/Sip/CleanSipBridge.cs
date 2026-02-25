@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
 using AdaCleanVersion.Config;
-using AdaCleanVersion.Models;
 using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
 using Microsoft.Extensions.Logging;
@@ -295,7 +294,6 @@ public class CleanSipBridge : IDisposable
             return;
 
         var domain = _settings.Sip.Domain ?? _settings.Sip.Server;
-        var regUri = SIPURI.ParseSIPURI($"sip:{_settings.Sip.Username}@{domain}");
 
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,

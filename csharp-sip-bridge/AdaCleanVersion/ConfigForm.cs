@@ -32,8 +32,8 @@ public sealed class ConfigForm : Form
     private void BuildUi()
     {
         Text = "⚙ Settings";
-        Size = new Size(500, 420);
-        MinimumSize = new Size(460, 380);
+        Size = new Size(500, 460);
+        MinimumSize = new Size(460, 420);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
