@@ -27,6 +27,8 @@ namespace AdaCleanVersion.Sip;
 /// </summary>
 public class CleanSipBridge : IDisposable
 {
+    private const int CircuitBreakerThreshold = 10;
+
     private readonly ILogger _logger;
     private readonly CleanAppSettings _settings;
     private readonly IExtractionService _extractionService;
@@ -327,12 +329,36 @@ public class CleanSipBridge : IDisposable
     /// </summary>
     public void SendAudio(string callId, byte[] pcmuPayload, uint duration)
     {
-        if (_activeCalls.TryGetValue(callId, out var call) && call.RtpSession != null)
+        if (!_activeCalls.TryGetValue(callId, out var call) || call.RtpSession == null)
+            return;
+
+        try
         {
             call.RtpSession.SendAudioFrame(
                 (uint)(duration * 8), // timestamp increment for 8kHz PCMU
                 (int)SDPWellKnownMediaFormatsEnum.PCMU,
                 pcmuPayload);
+
+            // Reset on success
+            call.ConsecutiveRtpFailures = 0;
+        }
+        catch (Exception ex)
+        {
+            var failures = Interlocked.Increment(ref call.ConsecutiveRtpFailures);
+            if (failures == 1 || failures % 5 == 0)
+                Log($"⚠ RTP send failure #{failures} for {callId}: {ex.Message}");
+
+            if (failures >= CircuitBreakerThreshold)
+            {
+                Log($"🔌 RTP circuit breaker tripped for {callId} after {failures} consecutive failures — ending call");
+                if (_activeCalls.TryRemove(callId, out var tripped))
+                {
+                    tripped.Session.EndCall();
+                    tripped.RtpSession?.Close(null);
+                    OnCallEnded?.Invoke(callId);
+                }
+                try { call.UserAgent?.Hangup(); } catch { }
+            }
         }
     }
 
@@ -359,4 +385,7 @@ internal class ActiveCall
     public DateTime StartTime { get; init; }
     public SIPServerUserAgent? UserAgent { get; init; }
     public RTPSession? RtpSession { get; init; }
+
+    /// <summary>Tracks consecutive RTP send failures for circuit breaker logic.</summary>
+    public int ConsecutiveRtpFailures;
 }
