@@ -46,6 +46,7 @@ public sealed class CallSession : ICallSession
     // ── STAGE-AWARE INTENT GUARD ──
     private volatile BookingStage _currentStage = BookingStage.Greeting;
     private string? _lastUserTranscript;
+    private string? _lastAdaTranscript; // Tracks Ada's last speech for watchdog stage inference
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private string? _lastToolIntent; // Tracks the last tool the AI called (e.g. "check_booking_status", "cancel_booking")
     private string? _previousToolIntent; // The tool intent before _lastToolIntent (for confirmation-after-block flows)
@@ -138,6 +139,7 @@ public sealed class CallSession : ICallSession
             }
             else if (role.Equals("Ada", StringComparison.OrdinalIgnoreCase) || role.Equals("assistant", StringComparison.OrdinalIgnoreCase))
             {
+                _lastAdaTranscript = text; // Track for watchdog stage inference
                 var entry = new Dictionary<string, object?>
                 {
                     ["role"] = "assistant",
@@ -154,7 +156,47 @@ public sealed class CallSession : ICallSession
         // ── STAGE-AWARE WATCHDOG: Provide contextual re-prompts instead of generic "[SILENCE]" ──
         _aiClient.NoReplyContextProvider = () =>
         {
-            return _currentStage switch
+            // ── SAFETY NET: If the model failed to call sync_booking_data but the conversation
+            // clearly progressed (Ada already spoke about checking addresses / fares), do NOT
+            // fall back to the greeting stage. Detect this via _currentStage being stale
+            // while the engine or Ada's last speech indicates mid-booking progress.
+            var effectiveStage = _currentStage;
+
+            // If stage is still early (Greeting/CollectingPickup) but the engine state is more advanced,
+            // trust the engine state — the model skipped sync calls
+            if (_engine != null && effectiveStage <= BookingStage.CollectingPickup)
+            {
+                var engineState = _engine.State;
+                if (engineState == CallState.FareCalculating)
+                    effectiveStage = BookingStage.FareCalculating;
+                else if (engineState == CallState.AwaitingPaymentChoice || engineState == CallState.AwaitingBookingConfirmation)
+                    effectiveStage = BookingStage.FarePresented;
+                else if (engineState == CallState.CollectingDestination)
+                    effectiveStage = BookingStage.CollectingDestination;
+                else if (engineState == CallState.CollectingPassengers)
+                    effectiveStage = BookingStage.CollectingPassengers;
+                else if (engineState == CallState.CollectingTime)
+                    effectiveStage = BookingStage.CollectingTime;
+            }
+
+            // Additional safety: if Ada already spoke about checking/fare but stage didn't advance,
+            // infer from the last Ada transcript
+            if (effectiveStage <= BookingStage.CollectingPickup && !string.IsNullOrWhiteSpace(_lastAdaTranscript))
+            {
+                var lastAda = _lastAdaTranscript.ToLowerInvariant();
+                if (lastAda.Contains("check") && (lastAda.Contains("address") || lastAda.Contains("fare") || lastAda.Contains("price")))
+                    effectiveStage = BookingStage.FareCalculating;
+                else if (lastAda.Contains("how many passengers"))
+                    effectiveStage = BookingStage.CollectingPassengers;
+                else if (lastAda.Contains("what time") || lastAda.Contains("when would"))
+                    effectiveStage = BookingStage.CollectingTime;
+                else if (lastAda.Contains("where") && lastAda.Contains("heading"))
+                    effectiveStage = BookingStage.CollectingDestination;
+                else if (lastAda.Contains("picked up"))
+                    effectiveStage = BookingStage.CollectingPickup;
+            }
+
+            return effectiveStage switch
             {
                 BookingStage.Greeting => string.IsNullOrWhiteSpace(_booking.Name)
                     ? "The caller has not provided their name yet. Ask again: What is your name?"
