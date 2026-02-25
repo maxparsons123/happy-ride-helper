@@ -325,10 +325,73 @@ public sealed class GeminiAddressClient
     // districts_found field in BuildAddressSchema(). No hardcoded street lists needed.
 
     // ── In-memory cache: city → list of district/suburb names fetched from uk_locations ──
-    // Areas are stored in the database (uk_locations, type='district'/'suburb') and can be
-    // updated there without recompiling. Cache TTL = 60 min.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string[] Areas, DateTime ExpiresAt)> _cityAreaCache = new();
     private static readonly TimeSpan _cityAreaCacheTtl = TimeSpan.FromMinutes(60);
+
+    // ── In-memory cache: street name → list of areas from zone_pois ──
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string[] Areas, DateTime ExpiresAt)> _streetAreaCache = new();
+    private static readonly TimeSpan _streetAreaCacheTtl = TimeSpan.FromMinutes(60);
+
+    /// <summary>
+    /// Query zone_pois to find which areas a street name appears in.
+    /// Uses word_fuzzy_match_zone_poi for fuzzy matching. Returns distinct area names.
+    /// This is the DEFINITIVE source — it uses the actual POI data from the zone editor.
+    /// </summary>
+    private async Task<string[]> GetStreetAreasFromZonePoiAsync(string streetName)
+    {
+        if (string.IsNullOrWhiteSpace(streetName)) return Array.Empty<string>();
+        var key = streetName.Trim().ToLowerInvariant();
+        if (_streetAreaCache.TryGetValue(key, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
+            return cached.Areas;
+
+        try
+        {
+            // Use the word_fuzzy_match_zone_poi RPC for fuzzy street matching
+            var encoded = Uri.EscapeDataString(streetName.Trim());
+            var url = $"{_supabase.Url}/rest/v1/rpc/word_fuzzy_match_zone_poi";
+            var req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Headers.Add("apikey", _supabase.AnonKey);
+            req.Headers.Add("Authorization", $"Bearer {_supabase.AnonKey}");
+            req.Content = new StringContent(
+                JsonSerializer.Serialize(new { p_address = streetName.Trim(), p_min_similarity = 0.6, p_limit = 50 }),
+                System.Text.Encoding.UTF8, "application/json");
+
+            var resp = await _http.SendAsync(req);
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var arr = doc.RootElement;
+                if (arr.ValueKind == JsonValueKind.Array && arr.GetArrayLength() > 0)
+                {
+                    // Only keep results where the POI name closely matches the street name
+                    var areas = arr.EnumerateArray()
+                        .Where(e => {
+                            var poiName = e.GetProperty("poi_name").GetString() ?? "";
+                            var score = e.GetProperty("similarity_score").GetDouble();
+                            // High similarity threshold — we want exact or near-exact street name matches
+                            return score >= 0.6 && poiName.Contains(streetName.Trim(), StringComparison.OrdinalIgnoreCase);
+                        })
+                        .Select(e => e.GetProperty("area").GetString() ?? "")
+                        .Where(a => !string.IsNullOrWhiteSpace(a))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+
+                    _streetAreaCache[key] = (areas, DateTime.UtcNow.Add(_streetAreaCacheTtl));
+                    if (areas.Length > 1)
+                        _logger.LogInformation("🗺️ zone_pois: \"{Street}\" found in {Count} areas: {Areas}", streetName, areas.Length, string.Join(", ", areas));
+                    return areas;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "GetStreetAreasFromZonePoiAsync failed for \"{Street}\" (non-fatal)", streetName);
+        }
+
+        _streetAreaCache[key] = (Array.Empty<string>(), DateTime.UtcNow.Add(_streetAreaCacheTtl));
+        return Array.Empty<string>();
+    }
 
     /// <summary>
     /// Fetch distinct area/district names for a city from uk_locations.
@@ -634,9 +697,8 @@ public sealed class GeminiAddressClient
         }
 
         // ── Enforce disambiguation for multi-district streets ──
-        // Gemini detects these dynamically via its world knowledge and populates districts_found.
-        // We trust Gemini's detection; our job here is to ensure state is consistent and
-        // fall back to uk_locations if Gemini didn't provide district names.
+        // PRIMARY source: zone_pois from the zone editor (definitive list of streets per area).
+        // FALLBACK: Gemini's districts_found, then uk_locations.
         // Track force-flagged sides so the DB auto-correct step cannot clear them.
         var forceAmbiguousSides = new HashSet<string>();
         foreach (var side in new[] { "pickup", "dropoff" })
@@ -646,53 +708,87 @@ public sealed class GeminiAddressClient
             if (addr["matched_from_history"]?.GetValue<bool>() == true) continue;
 
             var isAmbiguous = addr["is_ambiguous"]?.GetValue<bool>() ?? false;
+            var streetName = addr["street_name"]?.GetValue<string>() ?? "";
+            var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
+            var originalInput = side == "pickup" ? (pickup ?? "") : (destination ?? "");
+            var hasPostcode = System.Text.RegularExpressions.Regex.IsMatch(originalInput, @"\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-            // Read districts_found from Gemini's response
+            // High house numbers discriminate (e.g. 1214A Warwick Road)
+            var streetNum = addr["street_number"]?.GetValue<string>() ?? "";
+            var numMatch = System.Text.RegularExpressions.Regex.Match(streetNum, @"^(\d+)");
+            var houseNumber = numMatch.Success ? int.Parse(numMatch.Groups[1].Value) : 0;
+
+            // Skip disambiguation if postcode, high house number, or caller named a district
+            if (hasPostcode || houseNumber >= 500) continue;
+
+            // ── PRIMARY: Query zone_pois for this street name ──
+            var zonePoiAreas = !string.IsNullOrWhiteSpace(streetName)
+                ? await GetStreetAreasFromZonePoiAsync(streetName)
+                : Array.Empty<string>();
+
+            // Check if user already named one of the areas
+            var userNamedZoneArea = zonePoiAreas.Any(a => originalInput.Contains(a, StringComparison.OrdinalIgnoreCase));
+
+            if (zonePoiAreas.Length > 1 && !userNamedZoneArea)
+            {
+                _logger.LogInformation("⚠️ zone_pois: \"{Street}\" exists in {Count} areas: {Areas} — forcing disambiguation",
+                    streetName, zonePoiAreas.Length, string.Join(", ", zonePoiAreas.Take(6)));
+                addr["is_ambiguous"] = true;
+                work["status"] = "clarification_needed";
+                forceAmbiguousSides.Add(side);
+
+                var altsArr = new System.Text.Json.Nodes.JsonArray();
+                foreach (var area in zonePoiAreas.Take(6))
+                    altsArr.Add($"{streetName}, {area}");
+                addr["alternatives"] = altsArr;
+                work["clarification_message"] = $"There are several {streetName}s in the area. Which area is it in? For example: {string.Join(", or ", zonePoiAreas.Take(3))}.";
+                continue;
+            }
+            else if (zonePoiAreas.Length == 1 && !isAmbiguous)
+            {
+                // Exactly one match in zone_pois — resolve definitively, no disambiguation needed
+                _logger.LogDebug("✅ zone_pois: \"{Street}\" uniquely in {Area} — no disambiguation needed", streetName, zonePoiAreas[0]);
+                continue;
+            }
+            else if (userNamedZoneArea)
+            {
+                _logger.LogDebug("✅ zone_pois: user named a matching area for \"{Street}\" — no disambiguation needed", streetName);
+                if (isAmbiguous)
+                {
+                    addr["is_ambiguous"] = false;
+                    addr["alternatives"] = new System.Text.Json.Nodes.JsonArray();
+                    var otherSide = side == "pickup" ? "dropoff" : "pickup";
+                    var otherAmbig = work[otherSide]?["is_ambiguous"]?.GetValue<bool>() ?? false;
+                    if (!otherAmbig) { work["status"] = "ready"; work["clarification_message"] = null; }
+                }
+                continue;
+            }
+
+            // ── FALLBACK: Gemini's districts_found ──
             var districtsNode = addr["districts_found"];
             var districts = districtsNode?.AsArray()
                 .Select(d => d?.GetValue<string>() ?? "")
                 .Where(d => !string.IsNullOrWhiteSpace(d))
                 .ToArray() ?? Array.Empty<string>();
 
-            // If Gemini flagged multiple districts → enforce clarification
-            if (districts.Length > 1 && !isAmbiguous)
+            var userNamedDistrict = districts.Any(d => originalInput.Contains(d, StringComparison.OrdinalIgnoreCase));
+
+            if (districts.Length > 1 && !isAmbiguous && !userNamedDistrict)
             {
-                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
-                var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
-                var originalInput = side == "pickup" ? (pickup ?? "") : (destination ?? "");
-                var hasPostcode = System.Text.RegularExpressions.Regex.IsMatch(originalInput, @"\b[A-Z]{1,2}\d{1,2}\s?\d[A-Z]{2}\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                _logger.LogInformation("⚠️ Gemini detected \"{Street}\" in {City} across {Count} districts: {Districts} — forcing clarification",
+                    streetName, city, districts.Length, string.Join(", ", districts));
+                addr["is_ambiguous"] = true;
+                work["status"] = "clarification_needed";
+                forceAmbiguousSides.Add(side);
 
-                // High house numbers discriminate (e.g. 1214A Warwick Road)
-                var streetNum = addr["street_number"]?.GetValue<string>() ?? "";
-                var numMatch = System.Text.RegularExpressions.Regex.Match(streetNum, @"^(\d+)");
-                var houseNumber = numMatch.Success ? int.Parse(numMatch.Groups[1].Value) : 0;
-                var userNamedDistrict = districts.Any(d => originalInput.Contains(d, StringComparison.OrdinalIgnoreCase));
-
-                if (!hasPostcode && !userNamedDistrict && houseNumber < 500)
-                {
-                    _logger.LogInformation("⚠️ Gemini detected \"{Street}\" in {City} across {Count} districts: {Districts} — forcing clarification",
-                        streetName, city, districts.Length, string.Join(", ", districts));
-                    addr["is_ambiguous"] = true;
-                    work["status"] = "clarification_needed";
-                    forceAmbiguousSides.Add(side);
-
-                    // Build alternatives from Gemini's districts_found
-                    var altsArr = new System.Text.Json.Nodes.JsonArray();
-                    foreach (var d in districts.Take(6))
-                        altsArr.Add($"{streetName}, {d}, {city}");
-                    addr["alternatives"] = altsArr;
-                    work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", districts.Take(3))}.";
-                }
-                else if (userNamedDistrict || hasPostcode || houseNumber >= 500)
-                {
-                    _logger.LogDebug("✅ District/postcode/high house number discriminates \"{Street}\" in {City} — no clarification needed", streetName, city);
-                }
+                var altsArr = new System.Text.Json.Nodes.JsonArray();
+                foreach (var d in districts.Take(6))
+                    altsArr.Add($"{streetName}, {d}, {city}");
+                addr["alternatives"] = altsArr;
+                work["clarification_message"] = $"There are several {streetName}s in {city}. Which area is it in? For example: {string.Join(", or ", districts.Take(3))}.";
             }
             else if (isAmbiguous && districts.Length > 0)
             {
-                // Gemini already set is_ambiguous=true AND provided districts — ensure clarification message uses them
-                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
-                var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
                 forceAmbiguousSides.Add(side);
                 work["status"] = "clarification_needed";
                 var existingMsg = work["clarification_message"]?.GetValue<string>() ?? "";
@@ -702,8 +798,6 @@ public sealed class GeminiAddressClient
             else if (isAmbiguous)
             {
                 // Gemini flagged ambiguous but gave no districts — fall back to uk_locations
-                var streetName = addr["street_name"]?.GetValue<string>() ?? "";
-                var city = addr["city"]?.GetValue<string>() ?? work["detected_area"]?.GetValue<string>() ?? "";
                 forceAmbiguousSides.Add(side);
                 work["status"] = "clarification_needed";
                 var dbAreas = await GetCityAreasAsync(city);
