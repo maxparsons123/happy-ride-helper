@@ -693,7 +693,11 @@ public sealed class CallSession : ICallSession
         sb.AppendLine("[BOOKING STATE]");
         sb.AppendLine($"  Name: {(_booking.Name != null ? $"{_booking.Name} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Pickup: {(_booking.Pickup != null ? $"{_booking.Pickup} ✓" : "(not yet collected)")}");
+        if (!string.IsNullOrWhiteSpace(_booking.PickupArea))
+            sb.AppendLine($"  Pickup Area: {_booking.PickupArea}");
         sb.AppendLine($"  Destination: {(_booking.Destination != null ? $"{_booking.Destination} ✓" : "(not yet collected)")}");
+        if (!string.IsNullOrWhiteSpace(_booking.DestArea))
+            sb.AppendLine($"  Destination Area: {_booking.DestArea}");
         sb.AppendLine($"  Passengers: {(_booking.Passengers.HasValue ? $"{_booking.Passengers} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Time: {(_booking.PickupTime != null ? $"{_booking.PickupTime} ✓" : "(not yet collected)")}");
         sb.AppendLine($"  Vehicle: {_booking.VehicleType}");

@@ -753,7 +753,10 @@ public sealed class GeminiAddressClient
             }
             else if (userNamedZoneArea)
             {
-                _logger.LogDebug("✅ zone_pois: user named a matching area for \"{Street}\" — no disambiguation needed", streetName);
+                // User already named the area — resolve it and clear ambiguity
+                var matchedArea = zonePoiAreas.First(a => originalInput.Contains(a, StringComparison.OrdinalIgnoreCase));
+                _logger.LogDebug("✅ zone_pois: user named area \"{Area}\" for \"{Street}\" — no disambiguation needed", matchedArea, streetName);
+                addr["resolved_area"] = matchedArea;
                 if (isAmbiguous)
                 {
                     addr["is_ambiguous"] = false;
