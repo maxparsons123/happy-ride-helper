@@ -583,6 +583,61 @@ public sealed class CallStateEngine
         State = CallState.AirportIntercept;
     }
 
+    /// <summary>Called when fare calculation begins (all fields filled).</summary>
+    public void NotifyFareCalculating()
+    {
+        State = CallState.FareCalculating;
+        _logger.LogInformation("[{SessionId}] 🔄 Engine: fare calculating started", _sessionId);
+    }
+
+    /// <summary>Called when booking is confirmed and dispatched via external path (safety net, intent guard).</summary>
+    public void NotifyBookingDispatched()
+    {
+        BookingDispatched = true;
+        State = CallState.BookingConfirmed;
+        _logger.LogInformation("[{SessionId}] ✅ Engine: booking dispatched (external)", _sessionId);
+    }
+
+    /// <summary>Called when the booking enters the AnythingElse stage (post-booking).</summary>
+    public void NotifyAnythingElse()
+    {
+        State = CallState.AnythingElse;
+    }
+
+    /// <summary>Called when a new booking intent is detected (resets for fresh collection).</summary>
+    public void NotifyNewBooking()
+    {
+        Reset(preserveCallerIdentity: true);
+        HasActiveBooking = false;
+        State = CallState.CollectingPickup;
+        _logger.LogInformation("[{SessionId}] 🔄 Engine: new booking started", _sessionId);
+    }
+
+    /// <summary>Called when the fare is rejected by the caller.</summary>
+    public void NotifyFareRejected()
+    {
+        FareRejected = true;
+        FareAvailable = false;
+        State = CallState.CollectingPickup;
+        _logger.LogInformation("[{SessionId}] ❌ Engine: fare rejected", _sessionId);
+    }
+
+    /// <summary>Tracks field collection progress. Call after applying extraction to BookingState.</summary>
+    public void UpdateCollectionState(bool hasName, bool hasPickup, bool hasDestination, bool hasPassengers, bool hasTime)
+    {
+        // Only advance if we're in a collection state
+        if (State is not (CallState.Greeting or CallState.CollectingName or CallState.CollectingPickup
+            or CallState.CollectingDestination or CallState.CollectingPassengers or CallState.CollectingTime))
+            return;
+
+        var nextState = DetermineNextCollectionState(hasName, hasPickup, hasDestination, hasPassengers, hasTime);
+        if (nextState != State)
+        {
+            _logger.LogInformation("[{SessionId}] 📊 Engine collection: {From} → {To}", _sessionId, State, nextState);
+            State = nextState;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // HELPERS
     // ═══════════════════════════════════════════════════════════════════════

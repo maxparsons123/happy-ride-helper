@@ -269,6 +269,7 @@ public sealed class CallSession : ICallSession
         _booking.Confirmed = true;
         _booking.BookingRef = $"TAXI-{DateTime.UtcNow:yyyyMMddHHmmss}";
         _aiClient.SetAwaitingConfirmation(false);
+        _engine?.NotifyBookingDispatched();
         OnBookingUpdated?.Invoke(_booking.Clone());
 
         _logger.LogInformation("[{SessionId}] ✅ SAFETY NET booked: {Ref} ({Pickup} → {Dest})",
@@ -349,6 +350,7 @@ public sealed class CallSession : ICallSession
                         if (_booking.BookingRef != null)
                         {
                             _currentStage = BookingStage.AnythingElse;
+                            _engine?.NotifyAnythingElse();
                             _lastUserTranscript = null; // Clear stale transcript so IntentGuard doesn't re-evaluate
                             _aiClient.SetAwaitingConfirmation(true);
                         await _aiClient.InjectMessageAndRespondAsync(
@@ -364,6 +366,7 @@ public sealed class CallSession : ICallSession
                 case IntentGuard.ResolvedIntent.RejectFare:
                     _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User rejected fare — allowing end_call without booking", SessionId);
                     Interlocked.Exchange(ref _fareRejected, 1);
+                    _engine?.NotifyFareRejected();
                     // AI should handle this naturally — prompt instructs Ada to offer edit/cancel path
                     break;
 
@@ -379,6 +382,7 @@ public sealed class CallSession : ICallSession
 
                 case IntentGuard.ResolvedIntent.NewBooking:
                     _logger.LogInformation("[{SessionId}] 🛡️ INTENT GUARD: User wants another booking", SessionId);
+                    _engine?.NotifyNewBooking();
                     _currentStage = BookingStage.CollectingPickup;
                     // Reset for new booking — preserve only caller identity
                     var prevName = _booking.Name;
@@ -737,6 +741,10 @@ public sealed class CallSession : ICallSession
         else
             sb.AppendLine("  ✅ All fields collected — fare calculation will trigger automatically.");
 
+        // ── SPLIT-BRAIN ENGINE STATE ──
+        if (_engine != null)
+            sb.AppendLine($"  Engine state: {_engine.State}");
+
         sb.AppendLine("IMPORTANT: If the caller corrects ANY field, update it immediately via sync_booking_data. The LATEST value is always the truth.");
 
         try
@@ -1003,6 +1011,14 @@ public sealed class CallSession : ICallSession
 
         OnBookingUpdated?.Invoke(_booking.Clone());
 
+        // ── SPLIT-BRAIN ENGINE: Track collection progress ──
+        _engine?.UpdateCollectionState(
+            hasName: !string.IsNullOrWhiteSpace(_booking.Name),
+            hasPickup: !string.IsNullOrWhiteSpace(_booking.Pickup),
+            hasDestination: !string.IsNullOrWhiteSpace(_booking.Destination),
+            hasPassengers: _booking.Passengers.HasValue && _booking.Passengers > 0,
+            hasTime: !string.IsNullOrWhiteSpace(_booking.PickupTime));
+
         // ── BOOKING STATE INJECTION ──
         // Inject current booking state into conversation so Ada always has ground truth.
         _ = InjectBookingStateAsync(interpretation);
@@ -1050,6 +1066,7 @@ public sealed class CallSession : ICallSession
                 && !HasProximityPrefix(_booking.Pickup))
             {
                 _logger.LogWarning("[{SessionId}] 🏠 PICKUP missing house number: '{Pickup}'", SessionId, _booking.Pickup);
+                _engine?.NotifyHouseNumberMissing(isPickup: true);
                 return new
                 {
                     success = false,
@@ -1067,6 +1084,7 @@ public sealed class CallSession : ICallSession
                     && !HasProximityPrefix(_booking.Destination))
                 {
                     _logger.LogWarning("[{SessionId}] 🏠 DESTINATION missing house number: '{Dest}'", SessionId, _booking.Destination);
+                    _engine?.NotifyHouseNumberMissing(isPickup: false);
                     return new
                     {
                         success = false,
@@ -1203,6 +1221,7 @@ public sealed class CallSession : ICallSession
                 else
                 {
                     _logger.LogWarning("[{SessionId}] 🏙️ Destination '{Dest}' has no house number, no city, and no history match — asking for city", SessionId, destRaw);
+                    _engine?.NotifyDestCityMissing();
                     return new
                     {
                         success = false,
@@ -1218,6 +1237,7 @@ public sealed class CallSession : ICallSession
         if (allFieldsFilled && Interlocked.CompareExchange(ref _fareAutoTriggered, 1, 0) == 0)
         {
             _currentStage = BookingStage.FareCalculating;
+            _engine?.NotifyFareCalculating();
             _logger.LogInformation("[{SessionId}] 🚀 All fields filled — auto-triggering fare calculation (stage→FareCalculating)", SessionId);
 
             var (pickup, destination) = GetEnrichedAddresses();
@@ -1262,6 +1282,7 @@ public sealed class CallSession : ICallSession
 
                                 _pickupDisambiguated = false;
                                 _activePickupAlternatives = pickupAlts;
+                                _engine?.NotifyDisambiguationNeeded(isPickup: true);
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: PICKUP disambiguation needed: {Alts}", sessionId, string.Join("|", pickupAlts));
                                 _currentStage = BookingStage.Disambiguation;
                                 // Switch to semantic VAD for disambiguation (caller choosing from options)
@@ -1280,6 +1301,7 @@ public sealed class CallSession : ICallSession
                             {
                                 _destDisambiguated = false;
                                 _activeDestAlternatives = destAlts;
+                                _engine?.NotifyDisambiguationNeeded(isPickup: false);
                                 _logger.LogInformation("[{SessionId}] 🔒 Address Lock: DESTINATION disambiguation needed: {Alts}", sessionId, string.Join("|", destAlts));
 
                                 await _aiClient.InjectMessageAndRespondAsync(
@@ -1558,6 +1580,7 @@ public sealed class CallSession : ICallSession
                         if (!discrepancyAccepted)
                         {
                             _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy detected: {Msg}", sessionId, discrepancy);
+                            _engine?.NotifyAddressDiscrepancy();
                             Interlocked.Exchange(ref _fareAutoTriggered, 0);
                             _pendingAddressCorrection = true;  // Allow pickup/dest correction through stage lock
                             _currentStage = BookingStage.CollectingDestination;  // Unlock stage for corrections
@@ -2041,6 +2064,7 @@ public sealed class CallSession : ICallSession
             {
                 _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED after clarification — asking user to verify destination", sessionId);
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                _engine?.NotifyFareSanityFailed();
 
                 await _aiClient.InjectMessageAndRespondAsync(
                         "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard or the city could not be determined. " +
@@ -2068,6 +2092,7 @@ public sealed class CallSession : ICallSession
 
                 _logger.LogWarning("[{SessionId}] 🚨 Address discrepancy after clarification: {Msg}", sessionId, discrepancy2);
                 Interlocked.Exchange(ref _fareAutoTriggered, 0);
+                _engine?.NotifyAddressDiscrepancy();
                 await _aiClient.InjectMessageAndRespondAsync(
                     $"[ADDRESS DISCREPANCY] {discrepancy2} " +
                     "Ask the caller to confirm or repeat their address. " +
@@ -2293,6 +2318,7 @@ public sealed class CallSession : ICallSession
                     if (!IsFareSane(result))
                     {
                         _logger.LogWarning("[{SessionId}] 🚨 Fare sanity check FAILED (book_taxi path) — asking user to verify destination", sessionId);
+                        _engine?.NotifyFareSanityFailed();
 
                         await _aiClient.InjectMessageAndRespondAsync(
                                 "[FARE SANITY ALERT] The calculated fare seems unusually high, which suggests the destination may have been misheard or the city could not be determined. " +
@@ -2499,6 +2525,7 @@ public sealed class CallSession : ICallSession
             }
 
             _aiClient.SetAwaitingConfirmation(false);
+            _engine?.NotifyBookingDispatched();
 
             OnBookingUpdated?.Invoke(_booking.Clone());
             _logger.LogInformation("[{SessionId}] ✅ {Action}: {Ref}", SessionId, isAmendment ? "Amended" : "Booked", _booking.BookingRef);
@@ -4449,7 +4476,11 @@ public sealed class CallSession : ICallSession
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
                 var url = $"{_settings.Supabase.Url}/rest/v1/live_calls?call_id=eq.{Uri.EscapeDataString(SessionId)}";
                 var patch = new StringContent(
-                    System.Text.Json.JsonSerializer.Serialize(new { transcripts = snapshot }),
+                    System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        transcripts = snapshot,
+                        booking_step = _engine?.State.ToString() ?? _currentStage.ToString()
+                    }),
                     System.Text.Encoding.UTF8, "application/json");
                 patch.Headers.Add("Prefer", "return=minimal");
                 var req = new HttpRequestMessage(HttpMethod.Patch, url) { Content = patch };
