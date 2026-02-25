@@ -25,15 +25,18 @@ public class CleanSipBridge : cVaxServerCOM
     private readonly ILogger _logger;
     private readonly CleanAppSettings _settings;
     private readonly IExtractionService _extractionService;
+    private readonly CallerLookupService _callerLookup;
     private readonly ConcurrentDictionary<ulong, ActiveCall> _activeCalls = new();
 
     public event Action<string>? OnLog;
 
-    public CleanSipBridge(ILogger logger, CleanAppSettings settings, IExtractionService extractionService)
+    public CleanSipBridge(ILogger logger, CleanAppSettings settings,
+        IExtractionService extractionService, CallerLookupService callerLookup)
     {
         _logger = logger;
         _settings = settings;
         _extractionService = extractionService;
+        _callerLookup = callerLookup;
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
@@ -109,22 +112,47 @@ public class CleanSipBridge : cVaxServerCOM
     {
         Log($"📞 Incoming: {sCallerId} ({sCallerName}) → {sDialNo}");
 
-        // Create clean session — NO tools registered with OpenAI
+        // Fire async caller lookup, then create session
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await SetupCallWithLookupAsync(nSessionId, sCallerId, sCallerName);
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠ Call setup failed: {ex.Message}");
+            }
+        });
+    }
+
+    private async Task SetupCallWithLookupAsync(ulong nSessionId, string callerId, string callerName)
+    {
+        // Look up returning caller from callers table
+        var context = await _callerLookup.LookupAsync(callerId);
+
+        if (context.IsReturningCaller)
+        {
+            Log($"👤 Returning caller: {context.CallerName} ({context.TotalBookings} bookings, " +
+                $"last pickup: {context.LastPickup ?? "none"}, " +
+                $"aliases: {(context.AddressAliases != null ? string.Join(", ", context.AddressAliases.Keys) : "none")})");
+        }
+        else
+        {
+            Log($"👤 New caller: {callerId}");
+        }
+
+        // Create clean session with enriched context
         var session = new CleanCallSession(
             sessionId: nSessionId.ToString(),
-            callerId: sCallerId,
+            callerId: callerId,
             companyName: _settings.Taxi.CompanyName,
             extractionService: _extractionService,
-            callerContext: new CallerContext
-            {
-                CallerPhone = sCallerId,
-                IsReturningCaller = false // TODO: look up from callers table
-            }
+            callerContext: context
         );
 
         session.OnLog += msg => Log(msg);
 
-        // When engine emits instruction → inject as system message to OpenAI Realtime
         session.OnAiInstruction += instruction =>
         {
             Log($"📋 Instruction: {instruction}");
@@ -140,7 +168,7 @@ public class CleanSipBridge : cVaxServerCOM
         {
             VaxSessionId = nSessionId,
             Session = session,
-            CallerId = sCallerId,
+            CallerId = callerId,
             StartTime = DateTime.UtcNow
         };
         _activeCalls[nSessionId] = activeCall;

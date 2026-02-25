@@ -26,6 +26,12 @@ public sealed class CallerContext
 {
     public string? CallerPhone { get; init; }
     public bool IsReturningCaller { get; init; }
+    public string? CallerName { get; init; }
     public string? PreferredLanguage { get; init; }
     public string? ServiceArea { get; init; }
+    public string? LastPickup { get; init; }
+    public string? LastDestination { get; init; }
+    public int TotalBookings { get; init; }
+    public DateTime? LastBookingAt { get; init; }
+    public Dictionary<string, string>? AddressAliases { get; init; }
 }
