@@ -258,6 +258,18 @@ public sealed class SipServer : IAsyncDisposable
         var caller = CallerIdExtractor.Extract(req);
         Log($"📞 Incoming call from {caller} (active: {_activeCalls.Count})");
 
+        // ── Auto-terminate existing sessions for the same caller ──
+        var existingForCaller = _activeCalls.Values
+            .Where(c => c.Session != null && 
+                   string.Equals(c.Session.CallerId, caller, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var existing in existingForCaller)
+        {
+            Log($"⚠️ Terminating stale session {existing.SessionId} for {caller} (replaced by new INVITE)");
+            await RemoveAndCleanupAsync(existing.SessionId, "replaced_by_new_call");
+        }
+
         var ringing = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ringing, null);
         await _transport!.SendResponseAsync(ringing);
 

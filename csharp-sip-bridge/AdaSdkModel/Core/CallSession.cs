@@ -2833,9 +2833,22 @@ public sealed class CallSession : ICallSession
         var isConfirmationAfterPreviousAttempt = _previousToolIntent == "cancel_booking" &&
             recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
 
+        // Also allow if Ada's last response offered cancellation as an option (e.g. "Would you like to cancel it, 
+        // make changes, or check status?") and user confirmed — even without prior cancel_booking tool call.
+        // This handles: returning caller → Ada offers cancel/change/status → user says "cancel" but STT garbles it → 
+        // Ada re-asks → user says "yes" but _previousToolIntent is null (no prior tool call).
+        var isConfirmationAfterAdaOfferedCancel = _previousToolIntent == null &&
+            _lastToolIntent == null &&
+            recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
+
         if (isConfirmationAfterPreviousAttempt)
         {
             _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — confirmation after previous blocked attempt. Transcripts: [{Transcripts}]",
+                SessionId, string.Join(" | ", recentUserMessages));
+        }
+        else if (isConfirmationAfterAdaOfferedCancel)
+        {
+            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — confirmation with no prior tool calls (Ada likely offered cancel option). Transcripts: [{Transcripts}]",
                 SessionId, string.Join(" | ", recentUserMessages));
         }
         else if (!hasCancelIntent)
