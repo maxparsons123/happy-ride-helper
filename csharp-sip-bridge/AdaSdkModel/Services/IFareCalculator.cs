@@ -45,11 +45,15 @@ public interface IFareCalculator
 
     /// <param name="spokenPickupNumber">House number extracted from the caller's speech — used as a guard against geocoder substitution.</param>
     /// <param name="spokenDestNumber">House number extracted from the caller's speech — used as a guard against geocoder substitution.</param>
+    /// <param name="spokenPickupPostcode">Full UK postcode spoken by the caller — used as the authoritative geocoding anchor.</param>
+    /// <param name="spokenDestPostcode">Full UK postcode spoken by the caller — used as the authoritative geocoding anchor.</param>
     Task<FareResult> ExtractAndCalculateWithAiAsync(
         string? pickup,
         string? destination,
         string? phoneNumber,
         string? pickupTime = null,
         string? spokenPickupNumber = null,
-        string? spokenDestNumber = null);
+        string? spokenDestNumber = null,
+        string? spokenPickupPostcode = null,
+        string? spokenDestPostcode = null);
 }

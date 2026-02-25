@@ -363,14 +363,14 @@ serve(async (req) => {
       return new Response(JSON.stringify({ status: "warm" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
     
-    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number } = body;
+    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode } = body;
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}"`);
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}"`);
 
     // Look up caller history from database
     let callerHistory = "";
@@ -426,8 +426,18 @@ serve(async (req) => {
       houseNumberHints += `\nDESTINATION HOUSE NUMBER (extracted from caller's speech): "${destination_house_number}" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number ${destination_house_number}. Set street_number to exactly "${destination_house_number}". If no such number exists on that street, flag is_ambiguous=true.`;
     }
 
+    // Postcodes spoken by the caller — HIGHEST PRIORITY geocoding anchor.
+    // If the caller provided a full UK postcode, the resolved address MUST be within that postcode area.
+    let postcodeHints = '';
+    if (pickup_postcode) {
+      postcodeHints += `\nPICKUP POSTCODE ANCHOR (spoken by caller): "${pickup_postcode}" — this is the HIGHEST PRIORITY geocoding signal. The resolved pickup address MUST be within the ${pickup_postcode} postcode area. Set postal_code to "${pickup_postcode}". If the street does not exist in this postcode, set address_modified=true and explain the discrepancy. NEVER override the caller's postcode with a different one.`;
+    }
+    if (destination_postcode) {
+      postcodeHints += `\nDESTINATION POSTCODE ANCHOR (spoken by caller): "${destination_postcode}" — this is the HIGHEST PRIORITY geocoding signal. The resolved destination address MUST be within the ${destination_postcode} postcode area. Set postal_code to "${destination_postcode}". If the street does not exist in this postcode, set address_modified=true and explain the discrepancy. NEVER override the caller's postcode with a different one.`;
+    }
+
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${callerHistory}`;
+User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",

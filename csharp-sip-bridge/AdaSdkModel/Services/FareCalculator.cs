@@ -67,7 +67,9 @@ public sealed class FareCalculator : IFareCalculator
         string? phoneNumber,
         string? pickupTime = null,
         string? spokenPickupNumber = null,
-        string? spokenDestNumber = null)
+        string? spokenDestNumber = null,
+        string? spokenPickupPostcode = null,
+        string? spokenDestPostcode = null)
     {
         if (string.IsNullOrWhiteSpace(pickup) && string.IsNullOrWhiteSpace(destination))
             return new FareResult { Fare = "£4.00", Eta = "5 minutes" };
@@ -94,7 +96,7 @@ public sealed class FareCalculator : IFareCalculator
         }
         */
 
-        // ── Fall back to edge function (passes spoken house numbers as extra guard) ──
+        // ── Fall back to edge function (passes spoken house numbers + postcodes as extra guards) ──
         try
         {
             var requestBody = JsonSerializer.Serialize(new
@@ -104,7 +106,9 @@ public sealed class FareCalculator : IFareCalculator
                 phone = phoneNumber ?? "",
                 pickup_time = pickupTime ?? "",
                 pickup_house_number = spokenPickupNumber ?? "",
-                destination_house_number = spokenDestNumber ?? ""
+                destination_house_number = spokenDestNumber ?? "",
+                pickup_postcode = spokenPickupPostcode ?? "",
+                destination_postcode = spokenDestPostcode ?? ""
             });
             var request = new HttpRequestMessage(HttpMethod.Post, EdgeFunctionUrl)
             {
