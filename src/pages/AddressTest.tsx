@@ -21,7 +21,7 @@ interface AddressResult {
   alternatives?: string[];
   resolved_area?: string;
   matched_from_history?: boolean;
-  match_type?: "poi" | "residential";
+  match_type?: "poi" | "street" | "residential";
 }
 
 interface DispatchResponse {
@@ -266,9 +266,9 @@ function AddressCard({ title, icon, address, color }: { title: string; icon: str
             {address.match_type && (
               <Badge
                 variant={address.match_type === "poi" ? "default" : "outline"}
-                className={`text-xs ${address.match_type === "poi" ? "bg-purple-600" : ""}`}
+                className={`text-xs ${address.match_type === "poi" ? "bg-purple-600" : address.match_type === "street" ? "border-blue-500 text-blue-600" : ""}`}
               >
-                {address.match_type === "poi" ? "🏢 POI" : "🏠 Residential"}
+                {address.match_type === "poi" ? "🏢 POI" : address.match_type === "street" ? "🛣️ Street" : "🏠 Residential"}
               </Badge>
             )}
             {address.is_ambiguous && <Badge variant="destructive" className="text-xs">Ambiguous</Badge>}
@@ -321,7 +321,11 @@ function AddressCard({ title, icon, address, color }: { title: string; icon: str
                   <Badge variant="outline" className="text-[10px]">zone_pois</Badge>
                 </div>
               )}
-              <p className="text-muted-foreground italic">Residential branch — needs Nominatim for house-level precision</p>
+              <p className="text-muted-foreground italic">
+                {address.match_type === "street" 
+                  ? "Street branch — road suffix detected, POI coords as seed (needs house number for precision)"
+                  : "Residential branch — has house number, needs Nominatim for house-level precision"}
+              </p>
             </>
           )}
         </div>
