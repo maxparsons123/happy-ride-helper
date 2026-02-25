@@ -187,6 +187,24 @@ public sealed class CallSession : ICallSession
                 effectiveStage = _lastAdaStageHint;
             }
 
+            // Layer 4: Transcript-based safety net — if ALL other layers failed (model skipped
+            // sync_booking_data entirely), infer stage from Ada's own speech as last resort.
+            // Uses keyword clusters (not exact phrases) for robustness across prompt changes.
+            if (effectiveStage <= BookingStage.Greeting && !string.IsNullOrWhiteSpace(_lastAdaTranscript))
+            {
+                var ada = _lastAdaTranscript.ToLowerInvariant();
+                if (ada.Contains("check") && (ada.Contains("price") || ada.Contains("fare") || ada.Contains("address")))
+                    effectiveStage = BookingStage.FareCalculating;
+                else if (ada.Contains("how many") && ada.Contains("passenger"))
+                    effectiveStage = BookingStage.CollectingPassengers;
+                else if (ada.Contains("time") && (ada.Contains("pick") || ada.Contains("when")))
+                    effectiveStage = BookingStage.CollectingTime;
+                else if (ada.Contains("heading") || ada.Contains("where") && ada.Contains("go"))
+                    effectiveStage = BookingStage.CollectingDestination;
+                else if (ada.Contains("picked up") || ada.Contains("pick up") || ada.Contains("pickup"))
+                    effectiveStage = BookingStage.CollectingPickup;
+            }
+
             return effectiveStage switch
             {
                 BookingStage.Greeting => string.IsNullOrWhiteSpace(_booking.Name)
