@@ -2910,63 +2910,13 @@ public sealed class CallSession : ICallSession
             };
         }
 
-        // ── Transcript validation: ensure recent user messages actually contain cancellation intent ──
-        var cancelKeywords = new[] { "cancel", "don't need", "dont need", "get rid", "remove", "delete", "stop it", "no longer", "don't want", "dont want" };
-        var confirmKeywords = new[] { "yes", "yeah", "yep", "correct", "that's right", "thats right", "sure", "go ahead", "please do", "ok", "okay" };
-        List<string> recentUserMessages;
-        lock (_userTranscriptHistory)
-        {
-            recentUserMessages = _userTranscriptHistory
-                .TakeLast(3)
-                .Select(t => t.ToLowerInvariant())
-                .ToList();
-        }
-
-        // Also include _lastUserTranscript to handle race condition where
-        // the AI calls cancel_booking before the transcript is added to history
-        var lastTranscript = _lastUserTranscript?.ToLowerInvariant();
-        if (!string.IsNullOrWhiteSpace(lastTranscript) && !recentUserMessages.Contains(lastTranscript))
-        {
-            recentUserMessages.Add(lastTranscript);
-        }
-
-        var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
-
-        // If cancel_booking has been blocked before in this session, allow through on retry.
-        // This handles: user says garbled "cancel" → blocked → Ada asks "are you sure?" → user confirms
-        // We use a dedicated counter because _previousToolIntent can be unreliable with race conditions.
-        var isRetryAfterPreviousBlock = _cancelBlockedCount > 0;
-
-        // Also allow if Ada's last response offered cancellation as an option (e.g. "Would you like to cancel it, 
-        // make changes, or check status?") and user confirmed — even without prior cancel_booking tool call.
-        var isConfirmationWithNoToolHistory = _previousToolIntent == null &&
-            recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
-
-        if (isRetryAfterPreviousBlock)
-        {
-            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — retry after {BlockCount} previous blocked attempt(s). Transcripts: [{Transcripts}]",
-                SessionId, _cancelBlockedCount, string.Join(" | ", recentUserMessages));
-            _cancelBlockedCount = 0; // Reset after allowing
-        }
-        else if (isConfirmationWithNoToolHistory)
-        {
-            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — confirmation with no prior tool calls (Ada likely offered cancel option). Transcripts: [{Transcripts}]",
-                SessionId, string.Join(" | ", recentUserMessages));
-        }
-        else if (!hasCancelIntent)
-        {
-            _cancelBlockedCount++;
-            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED (attempt {Count}) — no cancellation keywords found in recent transcripts: [{Transcripts}]",
-                SessionId, _cancelBlockedCount, string.Join(" | ", recentUserMessages));
-            return new
-            {
-                success = false,
-                error = "BLOCKED: The caller's recent messages do not contain any clear cancellation intent (e.g. 'cancel', 'don't want', 'remove'). " +
-                        "A bare 'yes' or 'yeah' is NOT enough — the caller must have explicitly requested cancellation. " +
-                        "You may have misinterpreted background noise or echoed audio. " +
-                        "Ask the caller clearly: 'I'm sorry, I didn't quite catch that. Would you like to cancel your booking, make changes, or check on your driver?'"
-            };
-        }
+        // ── Ada's interpretation is the source of truth ──
+        // If Ada called cancel_booking(confirmed=true), she understood the caller's intent.
+        // Raw STT transcripts are less accurate than Ada's semantic interpretation,
+        // so we trust her judgment rather than keyword-matching against garbled transcripts.
+        _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — trusting Ada's interpretation (confirmed=true, double-confirmation passed)",
+            SessionId);
+        _cancelBlockedCount = 0; // Reset any previous block count
 
         var reason = args.TryGetValue("reason", out var r) ? r?.ToString() ?? "caller_request" : "caller_request";
         var bookingId = _booking.ExistingBookingId;
