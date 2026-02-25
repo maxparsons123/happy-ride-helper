@@ -158,8 +158,6 @@ public sealed class FareCalculator : IFareCalculator
                 result.DestFormatted = resolvedDest;
             }
             return result;
-
-            return await CalculateAsync(pickup, destination, phoneNumber);
         }
         catch (Exception ex)
         {

@@ -123,20 +123,20 @@ public sealed class FareCalculator : IFareCalculator
             var responseJson = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
-                return await CalculateAsync(pickup, destination, phoneNumber);
+                return await CalculateAsync(pickup, destination, phoneNumber, localeCity: callerArea);
 
             using var doc = JsonDocument.Parse(responseJson);
             var root = doc.RootElement;
 
             if (root.TryGetProperty("error", out _))
-                return await CalculateAsync(pickup, destination, phoneNumber);
+                return await CalculateAsync(pickup, destination, phoneNumber, localeCity: callerArea);
 
             return ParseEdgeResponse(root, pickup, destination, phoneNumber);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Edge function error, falling back");
-            return await CalculateAsync(pickup, destination, phoneNumber);
+            return await CalculateAsync(pickup, destination, phoneNumber, localeCity: callerArea);
         }
     }
 
