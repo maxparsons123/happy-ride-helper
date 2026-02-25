@@ -426,14 +426,13 @@ serve(async (req) => {
       houseNumberHints += `\nDESTINATION HOUSE NUMBER (extracted from caller's speech): "${destination_house_number}" — use this as a GEOCODING FILTER. Only resolve to addresses on that street that actually contain house number ${destination_house_number}. Set street_number to exactly "${destination_house_number}". If no such number exists on that street, flag is_ambiguous=true.`;
     }
 
-    // Postcodes spoken by the caller — HIGHEST PRIORITY geocoding anchor.
-    // If the caller provided a full UK postcode, the resolved address MUST be within that postcode area.
+    // Pass spoken postcodes — Gemini will recognise UK postcodes and resolve accordingly
     let postcodeHints = '';
     if (pickup_postcode) {
-      postcodeHints += `\nPICKUP POSTCODE ANCHOR (spoken by caller): "${pickup_postcode}" — this is the HIGHEST PRIORITY geocoding signal. The resolved pickup address MUST be within the ${pickup_postcode} postcode area. Set postal_code to "${pickup_postcode}". If the street does not exist in this postcode, set address_modified=true and explain the discrepancy. NEVER override the caller's postcode with a different one.`;
+      postcodeHints += `\nCaller's spoken pickup postcode: ${pickup_postcode}`;
     }
     if (destination_postcode) {
-      postcodeHints += `\nDESTINATION POSTCODE ANCHOR (spoken by caller): "${destination_postcode}" — this is the HIGHEST PRIORITY geocoding signal. The resolved destination address MUST be within the ${destination_postcode} postcode area. Set postal_code to "${destination_postcode}". If the street does not exist in this postcode, set address_modified=true and explain the discrepancy. NEVER override the caller's postcode with a different one.`;
+      postcodeHints += `\nCaller's spoken destination postcode: ${destination_postcode}`;
     }
 
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
@@ -1168,7 +1167,22 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       }
     }
     
-    const needsSanityCheck = !bothMatchedFromHistory && !dropoffIsCityLevel && (
+    // Skip sanity guard if BOTH sides have explicit postcodes — postcodes are authoritative,
+    // distance doesn't matter (e.g. CV1 2BW → M18 7RH is a valid long-distance trip)
+    const bothHaveExplicitPostcodes = !!pickup_postcode && !!destination_postcode;
+    if (bothHaveExplicitPostcodes && parsed.status !== "clarification_needed") {
+      console.log(`✅ Both sides have explicit postcodes (${pickup_postcode} → ${destination_postcode}) — skipping sanity guard`);
+      if (parsed.pickup) { parsed.pickup.is_ambiguous = false; parsed.pickup.alternatives = []; }
+      if (parsed.dropoff) { parsed.dropoff.is_ambiguous = false; parsed.dropoff.alternatives = []; }
+      parsed.status = "ready";
+      parsed.clarification_message = undefined;
+      if (!parsed.fare && distMilesPost !== null && distMilesPost < 300) {
+        parsed.fare = calculateFare(distMilesPost, detectedCountry);
+        console.log(`💰 Fare calculated (postcode-trusted): ${parsed.fare.fare}`);
+      }
+    }
+    
+    const needsSanityCheck = !bothMatchedFromHistory && !bothHaveExplicitPostcodes && !dropoffIsCityLevel && (
       (parsed.status === "clarification_needed" && 
       (!parsed.pickup?.alternatives?.length && !parsed.dropoff?.alternatives?.length))
       || (distMilesPost !== null && distMilesPost > 50)
@@ -1180,12 +1194,15 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       
       try {
         const contextCity = parsed.detected_area || parsed.pickup?.city || "";
+        const postcodeContext = (pickup_postcode || destination_postcode) 
+          ? `\nExplicit postcodes provided: pickup=${pickup_postcode || 'none'}, destination=${destination_postcode || 'none'}. If a side has an explicit postcode, the city for that postcode is AUTHORITATIVE — do NOT flag it as a mismatch based on distance from context city.`
+          : '';
         const sanityUserMsg = `Context City: ${contextCity}
 Pickup STT Input: "${pickup || ''}"
 Pickup Geocoder Result: "${parsed.pickup?.address || ''}" (street: "${parsed.pickup?.street_name || ''}", city: ${parsed.pickup?.city || 'unknown'})
 Dropoff STT Input: "${destination || ''}"  
 Dropoff Geocoder Result: "${parsed.dropoff?.address || ''}" (street: "${parsed.dropoff?.street_name || ''}", city: ${parsed.dropoff?.city || 'unknown'})
-Distance: ${distMilesPost?.toFixed(1) || 'unknown'} miles
+Distance: ${distMilesPost?.toFixed(1) || 'unknown'} miles${postcodeContext}
 Key question: Does the dropoff street name "${parsed.dropoff?.street_name || ''}" match what the user said "${destination || ''}"? Are they the SAME street or DIFFERENT streets?`;
 
         const sanityResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
