@@ -2323,11 +2323,31 @@ public sealed class CallSession : ICallSession
         }
         // Capture payment preference (card = fixed price via SumUp, meter = pay on the day)
         // Normalize: AI may say "card", "fixed", "link", "payment_link" etc. — all map to "card"
+        // GUARD: Validate payment preference against STT transcript to prevent hallucinated bookings
+        // (e.g. user says "bye-bye" but model hallucinates payment_preference='meter')
         if (args.TryGetValue("payment_preference", out var pref) && !string.IsNullOrWhiteSpace(pref?.ToString()))
         {
             var rawPref = pref.ToString()!.Trim().ToLowerInvariant();
             var normalizedPref = (rawPref.Contains("card") || rawPref.Contains("fixed") || rawPref.Contains("link") || rawPref.Contains("sumup"))
                 ? "card" : "meter";
+
+            // STT validation: if payment preference wasn't already set, verify the user actually said a payment keyword
+            if (string.IsNullOrEmpty(_booking.PaymentPreference))
+            {
+                var stt = _aiClient.LastUserTranscript ?? _lastUserTranscript ?? "";
+                var hasPaymentKeyword = System.Text.RegularExpressions.Regex.IsMatch(stt,
+                    @"\b(card|meter|cash|fixed|link|pay\s*(by|with|now)|on\s*the\s*day|payment)\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+                if (!hasPaymentKeyword)
+                {
+                    _logger.LogWarning("[{SessionId}] ⛔ Payment preference '{Pref}' REJECTED — STT transcript '{STT}' contains no payment keyword. Model hallucinated payment choice.",
+                        SessionId, normalizedPref, stt);
+                    return new { success = false, error = "Cannot confirm — the caller has not yet chosen a payment method. " +
+                        "You MUST ask: 'Would you like to pay by card with a fixed price, or by meter on the day?' and WAIT for their answer before calling book_taxi." };
+                }
+            }
+
             _booking.PaymentPreference = normalizedPref;
             _engine?.NotifyPaymentPreferenceSelected(normalizedPref);
             _logger.LogInformation("[{SessionId}] 💳 payment_preference raw='{Raw}' → normalized='{Normalized}'", SessionId, rawPref, normalizedPref);
