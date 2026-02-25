@@ -304,6 +304,15 @@ public partial class MainForm : Form
                     _ = ConnectSimliAsync();
             });
 
+            // Reconnect Simli when call ends so avatar is warm for the next call
+            _bridge.OnCallEnded += callId => SafeInvoke(() =>
+            {
+                Log($"📴 Call ended [{callId}] — reconnecting Simli avatar…");
+                SetInCall(false);
+                StopAudioMonitor();
+                _ = ReconnectSimliAsync();
+            });
+
             var started = _bridge.Start();
             if (started)
             {
