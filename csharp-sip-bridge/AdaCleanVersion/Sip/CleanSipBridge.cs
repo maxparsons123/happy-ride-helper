@@ -25,17 +25,20 @@ public class CleanSipBridge : cVaxServerCOM
     private readonly ILogger _logger;
     private readonly CleanAppSettings _settings;
     private readonly IExtractionService _extractionService;
+    private readonly FareGeocodingService _fareService;
     private readonly CallerLookupService _callerLookup;
     private readonly ConcurrentDictionary<ulong, ActiveCall> _activeCalls = new();
 
     public event Action<string>? OnLog;
 
     public CleanSipBridge(ILogger logger, CleanAppSettings settings,
-        IExtractionService extractionService, CallerLookupService callerLookup)
+        IExtractionService extractionService, FareGeocodingService fareService,
+        CallerLookupService callerLookup)
     {
         _logger = logger;
         _settings = settings;
         _extractionService = extractionService;
+        _fareService = fareService;
         _callerLookup = callerLookup;
     }
 
@@ -148,6 +151,7 @@ public class CleanSipBridge : cVaxServerCOM
             callerId: callerId,
             companyName: _settings.Taxi.CompanyName,
             extractionService: _extractionService,
+            fareService: _fareService,
             callerContext: context
         );
 
@@ -162,6 +166,11 @@ public class CleanSipBridge : cVaxServerCOM
         session.OnBookingReady += booking =>
         {
             Log($"🚕 BOOKING READY: {booking.CallerName} | {booking.Pickup.DisplayName} → {booking.Destination.DisplayName} | {booking.Passengers} pax | {booking.PickupTime}");
+        };
+
+        session.OnFareReady += fare =>
+        {
+            Log($"💰 FARE READY: {fare.Fare} ({fare.DistanceMiles:F1}mi) | ETA: {fare.DriverEta} | Zone: {fare.ZoneName ?? "none"} | Busy: {fare.BusyLevel}");
         };
 
         var activeCall = new ActiveCall

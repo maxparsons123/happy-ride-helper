@@ -30,7 +30,10 @@ public enum CollectionState
     /// <summary>AI extraction in progress.</summary>
     Extracting,
 
-    /// <summary>Extraction complete — presenting fare / summary to caller.</summary>
+    /// <summary>Geocoding addresses and calculating fare.</summary>
+    Geocoding,
+
+    /// <summary>Extraction + geocoding complete — presenting fare / summary to caller.</summary>
     PresentingFare,
 
     /// <summary>Waiting for payment choice (card/meter).</summary>

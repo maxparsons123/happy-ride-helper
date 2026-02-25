@@ -18,6 +18,7 @@ public class CleanCallSession
 {
     private readonly CallStateEngine _engine = new();
     private readonly IExtractionService _extractionService;
+    private readonly FareGeocodingService? _fareService;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
     private readonly HashSet<string> _changedSlots = new();
@@ -28,20 +29,23 @@ public class CleanCallSession
     public CallStateEngine Engine => _engine;
 
     public event Action<string>? OnLog;
-    public event Action<string>? OnAiInstruction;  // Instruction to send to AI
+    public event Action<string>? OnAiInstruction;
     public event Action<StructuredBooking>? OnBookingReady;
+    public event Action<FareResult>? OnFareReady;
 
     public CleanCallSession(
         string sessionId,
         string callerId,
         string companyName,
         IExtractionService extractionService,
+        FareGeocodingService? fareService = null,
         CallerContext? callerContext = null)
     {
         SessionId = sessionId;
         CallerId = callerId;
         _companyName = companyName;
         _extractionService = extractionService;
+        _fareService = fareService;
         _callerContext = callerContext;
 
         _engine.OnLog += msg => OnLog?.Invoke(msg);
@@ -195,7 +199,9 @@ public class CleanCallSession
             {
                 _engine.CompleteExtraction(result.Booking);
                 OnBookingReady?.Invoke(result.Booking);
-                EmitCurrentInstruction();
+
+                // Chain into fare/geocoding pipeline
+                await RunFarePipelineAsync(result.Booking, ct);
             }
             else
             {
@@ -231,7 +237,9 @@ public class CleanCallSession
             {
                 _engine.CompleteExtraction(result.Booking);
                 OnBookingReady?.Invoke(result.Booking);
-                EmitCurrentInstruction();
+
+                // Chain into fare/geocoding pipeline
+                await RunFarePipelineAsync(result.Booking, ct);
             }
             else
             {
@@ -243,6 +251,64 @@ public class CleanCallSession
         {
             Log($"Update extraction error: {ex.Message}");
             _engine.ExtractionFailed(ex.Message);
+            EmitCurrentInstruction();
+        }
+    }
+
+    /// <summary>
+    /// Run geocoding + fare calculation after extraction.
+    /// State flow: Extracting → Geocoding → PresentingFare
+    /// </summary>
+    private async Task RunFarePipelineAsync(StructuredBooking booking, CancellationToken ct)
+    {
+        if (_fareService == null)
+        {
+            // No fare service configured — skip to fare presentation without fare data
+            Log("No fare service configured — skipping geocoding");
+            _engine.GeocodingFailed("No fare service");
+            EmitCurrentInstruction();
+            return;
+        }
+
+        _engine.BeginGeocoding();
+        EmitCurrentInstruction(); // Silent instruction during geocoding
+
+        try
+        {
+            Log($"Geocoding: pickup=\"{booking.Pickup.DisplayName}\", dest=\"{booking.Destination.DisplayName}\"");
+
+            var fareResult = await _fareService.CalculateAsync(
+                booking, CallerId, ct);
+
+            if (fareResult == null)
+            {
+                Log("Fare pipeline returned null");
+                _engine.GeocodingFailed("Fare calculation failed");
+                EmitCurrentInstruction();
+                return;
+            }
+
+            if (fareResult.NeedsClarification)
+            {
+                Log($"Address clarification needed: {fareResult.ClarificationMessage}");
+                // TODO: Route clarification back to caller via AI instruction
+                _engine.GeocodingFailed(fareResult.ClarificationMessage ?? "Address ambiguous");
+                EmitCurrentInstruction();
+                return;
+            }
+
+            _engine.CompleteGeocoding(fareResult);
+            OnFareReady?.Invoke(fareResult);
+
+            Log($"🚕 Fare ready: {fareResult.Fare} ({fareResult.DistanceMiles:F1}mi), " +
+                $"ETA: {fareResult.DriverEta}, zone: {fareResult.ZoneName ?? "none"}");
+
+            EmitCurrentInstruction();
+        }
+        catch (Exception ex)
+        {
+            Log($"Fare pipeline error: {ex.Message}");
+            _engine.GeocodingFailed(ex.Message);
             EmitCurrentInstruction();
         }
     }
@@ -289,7 +355,9 @@ public class CleanCallSession
 
     private void EmitCurrentInstruction()
     {
-        var instruction = PromptBuilder.BuildInstruction(_engine.State, _engine.RawData, _callerContext);
+        var instruction = PromptBuilder.BuildInstruction(
+            _engine.State, _engine.RawData, _callerContext,
+            _engine.StructuredResult, _engine.FareResult);
         OnAiInstruction?.Invoke(instruction);
     }
 
