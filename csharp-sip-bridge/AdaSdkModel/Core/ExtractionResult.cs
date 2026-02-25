@@ -44,6 +44,12 @@ public sealed class ExtractionResult
     /// <summary>Reason for escalation (e.g. "complaint", "complex_request").</summary>
     public string? EscalationReason { get; set; }
 
+    /// <summary>True if any booking field (name, pickup, dest, passengers, time) was provided.</summary>
+    public bool HasAnyBookingData =>
+        !string.IsNullOrWhiteSpace(Name) || !string.IsNullOrWhiteSpace(Pickup) ||
+        !string.IsNullOrWhiteSpace(Destination) || Passengers.HasValue ||
+        !string.IsNullOrWhiteSpace(PickupTime);
+
     /// <summary>
     /// Create an ExtractionResult from sync_booking_data tool call arguments.
     /// This is the Phase 1 adapter — converts existing tool calls into the extraction format.

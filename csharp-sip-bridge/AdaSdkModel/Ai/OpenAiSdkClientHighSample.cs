@@ -463,8 +463,14 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
 
     public async Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f)
     {
+        var clampedEagerness = Math.Clamp(eagerness, 0.1f, 1.0f);
+        
+        // Skip redundant reconfiguration
+        if (_useSemanticVad == useSemantic && Math.Abs(_semanticEagerness - clampedEagerness) < 0.01f)
+            return;
+        
         _useSemanticVad = useSemantic;
-        _semanticEagerness = Math.Clamp(eagerness, 0.1f, 1.0f);
+        _semanticEagerness = clampedEagerness;
 
         if (!IsConnected || _session == null) return;
 
