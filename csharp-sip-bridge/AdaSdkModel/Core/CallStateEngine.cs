@@ -1,4 +1,5 @@
 // Last updated: 2026-02-25 (v1.0 — Split-Brain deterministic state machine)
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
 namespace AdaSdkModel.Core;
