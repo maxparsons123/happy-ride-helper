@@ -1,0 +1,58 @@
+namespace AdaCleanVersion.Models;
+
+/// <summary>
+/// Mutable raw slot storage. Holds verbatim caller phrases — no normalization.
+/// Corrections simply overwrite. This is NOT the authoritative booking.
+/// </summary>
+public class RawBookingData
+{
+    public string? NameRaw { get; set; }
+    public string? PickupRaw { get; set; }
+    public string? DestinationRaw { get; set; }
+    public string? PassengersRaw { get; set; }
+    public string? PickupTimeRaw { get; set; }
+
+    /// <summary>True when all required raw slots have a non-empty value.</summary>
+    public bool AllRequiredPresent =>
+        !string.IsNullOrWhiteSpace(NameRaw) &&
+        !string.IsNullOrWhiteSpace(PickupRaw) &&
+        !string.IsNullOrWhiteSpace(DestinationRaw) &&
+        !string.IsNullOrWhiteSpace(PassengersRaw) &&
+        !string.IsNullOrWhiteSpace(PickupTimeRaw);
+
+    /// <summary>Which slot is missing next, in collection order.</summary>
+    public string? NextMissingSlot()
+    {
+        if (string.IsNullOrWhiteSpace(NameRaw)) return "name";
+        if (string.IsNullOrWhiteSpace(PickupRaw)) return "pickup";
+        if (string.IsNullOrWhiteSpace(DestinationRaw)) return "destination";
+        if (string.IsNullOrWhiteSpace(PassengersRaw)) return "passengers";
+        if (string.IsNullOrWhiteSpace(PickupTimeRaw)) return "pickup_time";
+        return null;
+    }
+
+    /// <summary>Set a slot by name. Returns true if slot was recognized.</summary>
+    public bool SetSlot(string slotName, string value)
+    {
+        switch (slotName.ToLowerInvariant())
+        {
+            case "name": NameRaw = value; return true;
+            case "pickup": PickupRaw = value; return true;
+            case "destination": DestinationRaw = value; return true;
+            case "passengers": PassengersRaw = value; return true;
+            case "pickup_time": PickupTimeRaw = value; return true;
+            default: return false;
+        }
+    }
+
+    /// <summary>Get current slot value by name.</summary>
+    public string? GetSlot(string slotName) => slotName.ToLowerInvariant() switch
+    {
+        "name" => NameRaw,
+        "pickup" => PickupRaw,
+        "destination" => DestinationRaw,
+        "passengers" => PassengersRaw,
+        "pickup_time" => PickupTimeRaw,
+        _ => null
+    };
+}
