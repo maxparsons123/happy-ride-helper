@@ -11,18 +11,23 @@ namespace AdaCleanVersion.Realtime;
 /// <summary>
 /// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via MuLawRtpPlayout.
 ///
-/// Audio flow:
-///   Caller → RTP (G.711 µ-law) → decode to PCM16 → base64 → OpenAI input_audio_buffer.append
-///   OpenAI response.audio.delta → base64 → PCM16 → encode to µ-law → MuLawRtpPlayout → RTP
-///
-/// The playout engine runs on a dedicated high-priority thread with a WaitableTimer-based
-/// 20ms tick, providing jitter-free outbound audio instead of sending directly from the
-/// WebSocket receive thread.
+/// Mic Gate v3.1 — Dual-Latch with Echo Guard:
+///   Latch 1: _responseCompleted  — set when OpenAI sends response.audio.done
+///   Latch 2: OnQueueEmpty        — set when playout queue fully drains
+///   Both latches + echo guard timer must pass before mic ungates.
+///   _drainGateTaskId ensures only the latest drain task can ungate ("latest task wins").
+///   Barge-in (speech_started) immediately cuts both latches and ungates.
 /// </summary>
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
 {
     private const string RealtimeUrl = "wss://api.openai.com/v1/realtime";
     private const int ReceiveBufferSize = 16384;
+
+    /// <summary>Configurable echo guard delay (ms) after both latches before ungating mic.</summary>
+    private const int EchoGuardMs = 200;
+
+    /// <summary>Debounce window — ignore OnQueueEmpty signals within this period (ms).</summary>
+    private const int DrainDebounceMs = 200;
 
     private readonly string _apiKey;
     private readonly string _model;
@@ -37,13 +42,29 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private Task? _receiveTask;
 
     /// <summary>
-    /// Jitter-buffered playout engine — all outbound audio is routed through this
-    /// instead of calling rtpSession.SendAudioFrame directly.
+    /// Jitter-buffered playout engine — all outbound audio is routed through this.
     /// </summary>
     private readonly MuLawRtpPlayout _playout;
 
-    // Mic gate: suppress caller audio while AI is speaking
+    // ─── Dual-Latch Mic Gate (v3.1) ─────────────────────────
+    // The mic is gated (blocked) while AI audio is playing.
+    // It only ungates when BOTH latches are set AND the echo guard timer expires.
+
+    /// <summary>True = mic is blocked. Only ungated by the dual-latch mechanism or barge-in.</summary>
     private volatile bool _micGated;
+
+    /// <summary>Latch 1: OpenAI finished sending audio deltas (response.audio.done received).</summary>
+    private volatile bool _responseCompleted;
+
+    /// <summary>Latch 2: Playout queue has fully drained (all audio sent to caller).</summary>
+    private volatile bool _playoutDrained;
+
+    /// <summary>
+    /// Monotonically increasing ID for drain-gate tasks.
+    /// "Latest task wins" — only the task whose ID matches _drainGateTaskId can ungate.
+    /// Prevents stale drain tasks from ungating after a new response starts.
+    /// </summary>
+    private volatile int _drainGateTaskId;
 
     // Echo-tail buffer: stores audio received while mic is gated
     private readonly List<byte[]> _micGateBuffer = new();
@@ -70,15 +91,78 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         _playout = new MuLawRtpPlayout(rtpSession);
         _playout.OnLog += msg => Log(msg);
-        _playout.OnQueueEmpty += () =>
+        _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
+    }
+
+    // ─── Dual-Latch Logic ───────────────────────────────────
+
+    /// <summary>
+    /// Called when playout queue drains. Sets latch 2 and checks if both latches are set.
+    /// </summary>
+    private void OnPlayoutQueueEmpty()
+    {
+        _playoutDrained = true;
+        TryUngateMic();
+    }
+
+    /// <summary>
+    /// Called when response.audio.done arrives. Sets latch 1 and checks if both latches are set.
+    /// </summary>
+    private void OnResponseAudioDone()
+    {
+        _responseCompleted = true;
+        _playout.Flush(); // flush any partial frame in the accumulator
+        TryUngateMic();
+    }
+
+    /// <summary>
+    /// Check both latches. If both are set, start the echo guard timer.
+    /// Only the "latest task wins" — stale drain tasks are discarded.
+    /// </summary>
+    private void TryUngateMic()
+    {
+        if (!_micGated) return;
+        if (!_responseCompleted || !_playoutDrained) return;
+
+        // Both latches set — start echo guard timer
+        var taskId = Interlocked.Increment(ref _drainGateTaskId);
+        _ = RunEchoGuardAsync(taskId);
+    }
+
+    /// <summary>
+    /// Wait for the echo guard period, then ungate if this task is still the latest.
+    /// </summary>
+    private async Task RunEchoGuardAsync(int taskId)
+    {
+        try
         {
-            // Playout drained — ungate mic (playout-aware ungating)
-            if (_micGated)
-            {
-                _micGated = false;
-                FlushMicGateBuffer();
-            }
-        };
+            await Task.Delay(EchoGuardMs, _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        // "Latest task wins" — if a new response started during the guard period,
+        // _drainGateTaskId will have been incremented and this task is stale.
+        if (Volatile.Read(ref _drainGateTaskId) != taskId) return;
+
+        // Still the latest — ungate
+        _micGated = false;
+        Log("🔓 Mic ungated (dual-latch + echo guard)");
+        FlushMicGateBuffer();
+    }
+
+    /// <summary>
+    /// Reset both latches when a new AI response starts.
+    /// </summary>
+    private void ArmMicGate()
+    {
+        _micGated = true;
+        _responseCompleted = false;
+        _playoutDrained = false;
+        // Increment drain gate task ID to invalidate any pending echo guard timer
+        Interlocked.Increment(ref _drainGateTaskId);
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
@@ -108,7 +192,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Start receive loop
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
-        Log("✅ Bidirectional audio bridge active (playout-buffered)");
+        Log("✅ Bidirectional audio bridge active (dual-latch mic gate v3.1)");
     }
 
     public async ValueTask DisposeAsync()
@@ -228,6 +312,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     /// <summary>
     /// Flush echo-tail buffer: sends any audio captured while mic was gated.
+    /// Preserves initial syllables that would otherwise be clipped.
     /// </summary>
     private void FlushMicGateBuffer()
     {
@@ -239,6 +324,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             _micGateBuffer.Clear();
         }
 
+        Log($"🎤 Flushing {buffered.Count} echo-tail frames");
         foreach (var chunk in buffered)
             ForwardToOpenAi(chunk);
     }
@@ -291,16 +377,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 HandleAudioDelta(doc.RootElement);
                 break;
 
+            // ── AI response starting → arm the dual-latch mic gate ──
             case "response.audio.started":
             case "response.created":
-                _micGated = true;
+                ArmMicGate();
                 break;
 
-            // NOTE: mic ungate is now driven by playout drain (OnQueueEmpty),
-            // not by response.audio.done — this prevents echo from early ungate.
+            // ── Latch 1: OpenAI finished sending audio ──
             case "response.audio.done":
-                // Flush any remaining partial frame in the accumulator
-                _playout.Flush();
+                OnResponseAudioDone();
                 break;
 
             case "conversation.item.input_audio_transcription.completed":
@@ -312,12 +397,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 Log($"🤖 AI: {aiText}");
                 break;
 
+            // ── Barge-in: immediately cut everything and ungate ──
             case "input_audio_buffer.speech_started":
-                // Barge-in: hard-cut the playout and ungate mic
+                _responseCompleted = false;
+                _playoutDrained = false;
+                Interlocked.Increment(ref _drainGateTaskId); // kill pending echo guard
                 _micGated = false;
                 _playout.Clear();
                 lock (_micGateLock) _micGateBuffer.Clear();
-                Log("🎤 Barge-in detected — playout cleared");
+                Log("🎤 Barge-in — playout cleared, mic ungated immediately");
                 break;
 
             case "error":
