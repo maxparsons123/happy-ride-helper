@@ -119,18 +119,15 @@ public sealed class CallStateEngine
     private EngineAction HandleGreeting(ExtractionResult input)
     {
         if (!string.IsNullOrWhiteSpace(input.Name))
-            return EngineAction.Speak(CallState.CollectingPickup, "Greet the caller by name and ask for pickup address.")
-                with { UseSemanticVad = true, VadEagerness = 0.2f };
+            return new EngineAction { NewState = CallState.CollectingPickup, PromptInstruction = "Greet the caller by name and ask for pickup address.", UseSemanticVad = true, VadEagerness = 0.2f };
         
-        return EngineAction.Speak(CallState.CollectingName, "Ask for the caller's name.")
-            with { UseSemanticVad = false };
+        return new EngineAction { NewState = CallState.CollectingName, PromptInstruction = "Ask for the caller's name.", UseSemanticVad = false };
     }
 
     private EngineAction HandleCollectingName(ExtractionResult input)
     {
         if (!string.IsNullOrWhiteSpace(input.Name))
-            return EngineAction.Speak(CallState.CollectingPickup, "Ask for pickup address.")
-                with { UseSemanticVad = true, VadEagerness = 0.2f };
+            return new EngineAction { NewState = CallState.CollectingPickup, PromptInstruction = "Ask for pickup address.", UseSemanticVad = true, VadEagerness = 0.2f };
         
         return EngineAction.Speak(CallState.CollectingName, "Ask for their name again.");
     }
@@ -290,9 +287,7 @@ public sealed class CallStateEngine
         {
             case ExtractedIntent.CancelBooking:
                 _cancelConfirmationRequestedAt = DateTime.UtcNow;
-                return EngineAction.Speak(CallState.AwaitingCancelConfirmation,
-                    "Ask the caller to confirm they want to cancel their booking.")
-                    with { UseSemanticVad = false };
+                return new EngineAction { NewState = CallState.AwaitingCancelConfirmation, PromptInstruction = "Ask the caller to confirm they want to cancel their booking.", UseSemanticVad = false };
             
             case ExtractedIntent.AmendBooking:
                 return EngineAction.Speak(CallState.AwaitingAmendmentField,
@@ -309,9 +304,7 @@ public sealed class CallStateEngine
             case ExtractedIntent.NewBooking:
                 Reset(preserveCallerIdentity: true);
                 HasActiveBooking = false;
-                return EngineAction.Speak(CallState.CollectingPickup,
-                    "Start a fresh booking. Ask for pickup address.")
-                    with { UseSemanticVad = true, VadEagerness = 0.2f };
+                return new EngineAction { NewState = CallState.CollectingPickup, PromptInstruction = "Start a fresh booking. Ask for pickup address.", UseSemanticVad = true, VadEagerness = 0.2f };
             
             default:
                 return EngineAction.Speak(CallState.ManagingExistingBooking,
