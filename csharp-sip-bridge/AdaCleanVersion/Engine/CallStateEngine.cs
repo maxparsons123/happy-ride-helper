@@ -14,6 +14,7 @@ public class CallStateEngine
     public CollectionState State { get; private set; } = CollectionState.Greeting;
     public RawBookingData RawData { get; } = new();
     public StructuredBooking? StructuredResult { get; private set; }
+    public FareResult? FareResult { get; private set; }
 
     public event Action<CollectionState, CollectionState>? OnStateChanged;
     public event Action<string>? OnLog;
@@ -93,6 +94,40 @@ public class CallStateEngine
     public void CompleteExtraction(StructuredBooking booking)
     {
         StructuredResult = booking;
+        TransitionTo(CollectionState.Geocoding);
+    }
+
+    /// <summary>
+    /// Begin geocoding/fare calculation phase.
+    /// </summary>
+    public void BeginGeocoding()
+    {
+        if (State != CollectionState.Geocoding)
+        {
+            Log($"Cannot geocode in state {State}");
+            return;
+        }
+        // State already Geocoding — just log
+        Log("Geocoding started");
+    }
+
+    /// <summary>
+    /// Store the fare result and advance to fare presentation.
+    /// </summary>
+    public void CompleteGeocoding(FareResult fareResult)
+    {
+        FareResult = fareResult;
+        TransitionTo(CollectionState.PresentingFare);
+    }
+
+    /// <summary>
+    /// Geocoding/fare calculation failed — present what we have or retry.
+    /// </summary>
+    public void GeocodingFailed(string error)
+    {
+        Log($"Geocoding failed: {error}");
+        // Fall through to PresentingFare without fare data —
+        // session can still present booking and ask for confirmation
         TransitionTo(CollectionState.PresentingFare);
     }
 

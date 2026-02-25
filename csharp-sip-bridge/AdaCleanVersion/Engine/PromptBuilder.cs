@@ -55,7 +55,11 @@ public static class PromptBuilder
     /// Build instruction for the current collection state.
     /// Sent as a system message to guide AI's next response.
     /// </summary>
-    public static string BuildInstruction(CollectionState state, RawBookingData rawData, CallerContext? context = null)
+    public static string BuildInstruction(
+        CollectionState state, RawBookingData rawData,
+        CallerContext? context = null,
+        StructuredBooking? booking = null,
+        FareResult? fareResult = null)
     {
         return state switch
         {
@@ -98,17 +102,58 @@ public static class PromptBuilder
             CollectionState.ReadyForExtraction =>
                 "[INSTRUCTION] All details collected. Tell the caller you're just checking availability, one moment.",
 
+            CollectionState.Extracting =>
+                "[INSTRUCTION] Stay silent — processing in progress.",
+
+            CollectionState.Geocoding =>
+                "[INSTRUCTION] Stay silent — calculating fare.",
+
+            CollectionState.PresentingFare when fareResult != null && booking != null =>
+                $"[INSTRUCTION] Present the booking summary and fare to the caller:\n" +
+                $"- Name: {booking.CallerName}\n" +
+                $"- Pickup: {fareResult.Pickup.Address}\n" +
+                $"- Destination: {fareResult.Destination.Address}\n" +
+                $"- Passengers: {booking.Passengers}\n" +
+                $"- Time: {booking.PickupTime}\n" +
+                $"- Fare: {fareResult.FareSpoken}\n" +
+                $"- Driver ETA: {fareResult.BusyMessage}\n" +
+                "Read the fare naturally (e.g. \"that'll be around twelve pounds fifty\"). " +
+                "Ask if they'd like to proceed or change anything.",
+
+            CollectionState.PresentingFare when booking != null =>
+                $"[INSTRUCTION] Present the booking summary to the caller:\n" +
+                $"- Name: {booking.CallerName}\n" +
+                $"- Pickup: {booking.Pickup.DisplayName}\n" +
+                $"- Destination: {booking.Destination.DisplayName}\n" +
+                $"- Passengers: {booking.Passengers}\n" +
+                $"- Time: {booking.PickupTime}\n" +
+                "Fare is being calculated. Ask if they'd like to proceed.",
+
             CollectionState.PresentingFare =>
                 "[INSTRUCTION] Present the fare and booking summary to the caller. Ask if they'd like to proceed.",
 
             CollectionState.AwaitingPaymentChoice =>
                 "[INSTRUCTION] Ask the caller: would they like to pay by card or cash to the driver (meter)?",
 
+            CollectionState.AwaitingConfirmation when fareResult != null && booking != null =>
+                $"[INSTRUCTION] Read back the full booking for final confirmation:\n" +
+                $"- Name: {booking.CallerName}\n" +
+                $"- From: {fareResult.Pickup.Address}\n" +
+                $"- To: {fareResult.Destination.Address}\n" +
+                $"- Passengers: {booking.Passengers}\n" +
+                $"- Time: {booking.PickupTime}\n" +
+                $"- Fare: {fareResult.FareSpoken}\n" +
+                "Ask: \"Shall I confirm this booking?\"",
+
             CollectionState.AwaitingConfirmation =>
                 "[INSTRUCTION] Read back the full booking and ask for final confirmation.",
 
+            CollectionState.Dispatched when fareResult != null =>
+                $"[INSTRUCTION] Booking confirmed! Tell the caller their taxi is on the way. " +
+                $"{fareResult.BusyMessage} Say goodbye warmly.",
+
             CollectionState.Dispatched =>
-                "[INSTRUCTION] Booking confirmed! Tell the caller their taxi is on the way. Give ETA if available. Say goodbye warmly.",
+                "[INSTRUCTION] Booking confirmed! Tell the caller their taxi is on the way. Say goodbye warmly.",
 
             CollectionState.Ending =>
                 "[INSTRUCTION] Say goodbye warmly and end the conversation.",
