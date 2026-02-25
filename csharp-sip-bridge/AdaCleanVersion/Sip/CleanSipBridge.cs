@@ -52,6 +52,9 @@ public class CleanSipBridge : IDisposable
     /// <summary>Fires on barge-in (caller speech started).</summary>
     public event Action? OnBargeIn;
 
+    /// <summary>Fires when a call ends (BYE received or RTP timeout). Carries the callId.</summary>
+    public event Action<string>? OnCallEnded;
+
     public CleanSipBridge(
         ILogger logger,
         CleanAppSettings settings,
@@ -261,6 +264,7 @@ public class CleanSipBridge : IDisposable
                 Log($"📴 Call ended: {removed.CallerId} ({duration:F0}s)");
                 removed.Session.EndCall();
                 removed.RtpSession?.Close(null);
+                OnCallEnded?.Invoke(callId);
             }
         };
 
