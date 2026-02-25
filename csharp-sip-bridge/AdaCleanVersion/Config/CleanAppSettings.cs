@@ -51,6 +51,12 @@ public class RtpSettings
 {
     public int PortRangeStart { get; set; } = 10000;
     public int PortRangeEnd { get; set; } = 10100;
+
+    /// <summary>Consecutive RTP send failures before circuit breaker trips and ends the call.</summary>
+    public int CircuitBreakerThreshold { get; set; } = 10;
+
+    /// <summary>Maximum Simli reconnect attempts before giving up. 0 = unlimited.</summary>
+    public int MaxSimliReconnectAttempts { get; set; } = 5;
 }
 
 public class OpenAiSettings

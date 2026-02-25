@@ -555,6 +555,7 @@ public partial class MainForm : Form
         }
 
         SafeInvoke(() => UpdateSimliStatus("● Connected", Color.FromArgb(40, 167, 69)));
+        ResetSimliBackoff();
         StartSimliFeeder();
     }
 
@@ -568,6 +569,10 @@ public partial class MainForm : Form
     }
 
     private int _simliReconnectGuard;
+    private int _simliReconnectAttempts;
+
+    /// <summary>Resets reconnect backoff counter (call on successful manual connect or new call).</summary>
+    private void ResetSimliBackoff() => Interlocked.Exchange(ref _simliReconnectAttempts, 0);
 
     private async Task ReconnectSimliAsync()
     {
@@ -578,11 +583,30 @@ public partial class MainForm : Form
         }
         try
         {
-            SafeInvoke(() => UpdateSimliStatus("Reconnecting…", Color.FromArgb(255, 152, 0)));
+            var attempt = Interlocked.Increment(ref _simliReconnectAttempts);
+            var maxAttempts = _settings.Rtp.MaxSimliReconnectAttempts;
+
+            if (maxAttempts > 0 && attempt > maxAttempts)
+            {
+                Log($"🎭 Simli reconnect gave up after {maxAttempts} attempts");
+                SafeInvoke(() => UpdateSimliStatus("● Failed", Color.FromArgb(220, 53, 69)));
+                return;
+            }
+
+            // Exponential backoff: 800ms, 1.6s, 3.2s, 6.4s, capped at 15s
+            var delayMs = Math.Min(800 * (1 << (attempt - 1)), 15_000);
+            SafeInvoke(() => UpdateSimliStatus($"Reconnecting ({attempt})…", Color.FromArgb(255, 152, 0)));
+            Log($"🎭 Simli reconnect attempt {attempt}/{(maxAttempts > 0 ? maxAttempts.ToString() : "∞")} — backoff {delayMs}ms");
+
             await DisconnectSimliAsync();
-            await Task.Delay(800);
+            await Task.Delay(delayMs);
             await ConnectSimliAsync();
-            Log("🎭 Simli reconnected — ready for next call");
+
+            if (_simliAvatar?.IsConnected == true)
+            {
+                ResetSimliBackoff();
+                Log("🎭 Simli reconnected — ready for next call");
+            }
         }
         catch (Exception ex) { Log($"🎭 Simli reconnect error: {ex.Message}"); }
         finally { Interlocked.Exchange(ref _simliReconnectGuard, 0); }
