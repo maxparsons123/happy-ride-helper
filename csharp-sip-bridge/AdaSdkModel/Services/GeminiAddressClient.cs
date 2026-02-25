@@ -549,7 +549,67 @@ public sealed class GeminiAddressClient
         if (work["phone_analysis"]?["detected_country"] != null)
             detectedCountry = work["phone_analysis"]!["detected_country"]!.GetValue<string>();
 
-        // ── Calculate fare from coordinates ──
+        // ── NOMINATIM RE-GEOCODE: verify/correct Gemini's lat/lon ──
+        // Gemini's coordinates are NOT reliable — use the resolved address text to geocode independently.
+        var countryCode = detectedCountry switch
+        {
+            "NL" => "NL", "BE" => "BE", "FR" => "FR", "DE" => "DE", "ES" => "ES",
+            "IT" => "IT", "IE" => "IE", "AT" => "AT", "PT" => "PT", "US" => "US", "CA" => "CA",
+            _ => "GB"
+        };
+
+        foreach (var side in new[] { "pickup", "dropoff" })
+        {
+            var addr = work[side];
+            if (addr == null) continue;
+            var isAmbiguous = addr["is_ambiguous"]?.GetValue<bool>() ?? false;
+            if (isAmbiguous) continue; // don't re-geocode ambiguous addresses
+
+            var resolvedAddress = addr["address"]?.GetValue<string>();
+            var postalCode = addr["postal_code"]?.GetValue<string>();
+            var streetName = addr["street_name"]?.GetValue<string>();
+            var city = addr["city"]?.GetValue<string>();
+
+            if (string.IsNullOrWhiteSpace(resolvedAddress)) continue;
+
+            try
+            {
+                // Prefer postcode-based geocoding if available (most accurate)
+                var geocodeQuery = !string.IsNullOrWhiteSpace(postalCode)
+                    ? $"{addr["street_number"]?.GetValue<string>()} {streetName}, {postalCode}, {city}".Trim().TrimStart(',').Trim()
+                    : resolvedAddress;
+
+                var nominatimResult = await GeocodeNominatimAsync(geocodeQuery, countryCode);
+                if (nominatimResult != null)
+                {
+                    var geminiLat = GetDoubleNode(work, side, "lat") ?? 0;
+                    var geminiLon = GetDoubleNode(work, side, "lon") ?? 0;
+                    var drift = HaversineDistance(geminiLat, geminiLon, nominatimResult.Lat, nominatimResult.Lon);
+
+                    if (drift > 0.5) // more than 0.5 miles drift
+                    {
+                        _logger.LogInformation("📍 NOMINATIM CORRECTION ({Side}): Gemini lat/lon drifted {Drift:F1} miles — using Nominatim coords", side, drift);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("✅ NOMINATIM VERIFY ({Side}): Gemini coords within {Drift:F2} miles — OK", side, drift);
+                    }
+
+                    addr["lat"] = nominatimResult.Lat;
+                    addr["lon"] = nominatimResult.Lon;
+                }
+                else
+                {
+                    _logger.LogDebug("ℹ️ Nominatim returned no result for {Side} \"{Query}\" — keeping Gemini coords", side, geocodeQuery);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Nominatim re-geocode failed for {Side} (non-fatal, keeping Gemini coords)", side);
+            }
+        }
+
+        // ── Calculate fare from coordinates (now using verified coords) ──
         double? pLat = GetDoubleNode(work, "pickup", "lat");
         double? pLon = GetDoubleNode(work, "pickup", "lon");
         double? dLat = GetDoubleNode(work, "dropoff", "lat");
@@ -1113,6 +1173,31 @@ IMPORTANT: When in doubt, prefer Ada's geocoded version if the street exists in 
         public string? Reasoning { get; set; }
     }
 
+    // ── Nominatim geocoding for coordinate verification ──
+    private async Task<NominatimGeoPoint?> GeocodeNominatimAsync(string address, string countryCode)
+    {
+        try
+        {
+            var url = $"https://nominatim.openstreetmap.org/search?q={Uri.EscapeDataString(address)}&countrycodes={countryCode}&format=json&limit=1";
+            var resp = await _http.GetStringAsync(url);
+            using var doc = JsonDocument.Parse(resp);
+            if (doc.RootElement.GetArrayLength() == 0) return null;
+            var first = doc.RootElement[0];
+            return new NominatimGeoPoint
+            {
+                Lat = double.Parse(first.GetProperty("lat").GetString()!),
+                Lon = double.Parse(first.GetProperty("lon").GetString()!)
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Nominatim geocode failed for \"{Address}\"", address);
+            return null;
+        }
+    }
+
+    private sealed class NominatimGeoPoint { public double Lat { get; set; } public double Lon { get; set; } }
+
     // Country → currency mapping based on phone-detected country
     private static readonly Dictionary<string, (string Symbol, string CurrencyWord, string SubunitWord)> CountryCurrency = new()
     {
@@ -1249,6 +1334,18 @@ For chains with no city context from a mobile caller, set is_ambiguous=true with
 
 PLACE NAME / POI DETECTION (CRITICAL):
 When no house number, treat as potential business/landmark FIRST.
+When the input is a POI, business name, landmark, or place name:
+- You MUST resolve it to a FULL POSTAL STREET ADDRESS (e.g. ""Tesco Extra"" in Coventry → ""Phoenix Way, Coventry CV6 6GX"")
+- Set street_name to the actual street the POI is located on
+- Set postal_code to the real postcode of that location
+- The ""address"" field must contain the full postal address, not just the POI name
+
+POSTCODE-ONLY INPUT (CRITICAL):
+When the input is ONLY a postcode (e.g. ""CV6 6GX"" or ""B13 9NT""):
+- You MUST resolve it to the FULL POSTAL STREET ADDRESS for that postcode
+- Set street_name to the primary street for that postcode
+- Set city to the city/town for that postcode
+- The ""address"" field must be a full street address, not just the postcode
 
 ABBREVIATED / PARTIAL STREET NAME MATCHING (CRITICAL):
 Resolve partial names to real streets (e.g., ""Fargo"" → ""Fargosford Street"" in Coventry).
@@ -1279,9 +1376,10 @@ When a user provides a common street name WITHOUT a district, postcode, or high 
 HOUSE NUMBER DISAMBIGUATION: High house numbers (500+) strongly suggest long arterial roads.
 
 GEOCODING RULES:
-1. MUST provide lat/lon for EVERY resolved address
+1. MUST provide lat/lon for EVERY resolved address (best-effort — coordinates will be independently verified via geocoding services)
 2. Coordinates must be realistic (UK lat ~50-58, lon ~-6 to 2; NL lat ~51-53, lon ~3-7)
 3. Extract structured components: street_name, street_number, postal_code, city
+4. FOCUS on returning ACCURATE street names, postal codes, and city — these are MORE IMPORTANT than lat/lon as they are used for independent verification geocoding
 
 ""NEAREST X"" / RELATIVE POI RESOLUTION:
 Resolve to the ACTUAL NEAREST real-world instance relative to the caller's location.
