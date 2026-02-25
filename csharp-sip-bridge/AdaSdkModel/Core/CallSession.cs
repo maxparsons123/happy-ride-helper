@@ -636,7 +636,7 @@ public sealed class CallSession : ICallSession
                 sb.AppendLine($"  Scheduled for: {sf.GetString()}");
             sb.AppendLine();
             sb.AppendLine("ACTIONS AVAILABLE:");
-            sb.AppendLine("  - CANCEL: Ask the caller to confirm verbally, then call cancel_booking(confirmed=true, reason='caller_request')");
+            sb.AppendLine("  - CANCEL: STEP 1 call cancel_booking(confirmed=false) to trigger confirmation prompt, THEN after caller says yes call cancel_booking(confirmed=true, reason='caller_request')");
             sb.AppendLine("  - AMEND: modify fields using sync_booking_data, fare will auto-recalculate");
             sb.AppendLine("  - STATUS: call check_booking_status()");
             sb.AppendLine("  - NEW BOOKING: reset and proceed with normal flow");
@@ -650,7 +650,7 @@ public sealed class CallSession : ICallSession
             sb.AppendLine("  6. If the caller's response is UNCLEAR, GARBLED, or sounds like an ECHO of your own greeting, DO NOT assume any intent.");
             sb.AppendLine("     Instead say: 'Sorry, I didn't quite catch that. Would you like to cancel, make changes, or check on your driver?'");
             sb.AppendLine("  7. NEVER interpret background noise, echoes, or partial sentences as a cancellation request.");
-            sb.AppendLine("  8. For CANCEL: ask the caller to confirm first, then call cancel_booking(confirmed=true). The system handles the rest.");
+            sb.AppendLine("  8. For CANCEL: ALWAYS call cancel_booking(confirmed=false) first. After explicit caller confirmation ('yes'), call cancel_booking(confirmed=true).");
 
             _logger.LogInformation("[{SessionId}] 📋 Active booking loaded: {Id} ({Pickup} → {Dest})",
                 SessionId, _booking.ExistingBookingId, _booking.Pickup, _booking.Destination);
