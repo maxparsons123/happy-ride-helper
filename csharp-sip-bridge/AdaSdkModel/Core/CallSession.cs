@@ -2942,6 +2942,14 @@ public sealed class CallSession : ICallSession
     // =========================
     // CANCEL BOOKING
     // =========================
+    private static bool IsAffirmativeCancelConfirmation(string? transcript)
+    {
+        if (string.IsNullOrWhiteSpace(transcript)) return false;
+
+        var text = transcript.Trim().ToLowerInvariant().Trim('.', '!', '?', ',', ';', ':', '"', '\'');
+        return text is "yes" or "yeah" or "yep" or "yup" or "confirm" or "confirmed" or "do it" or "go ahead";
+    }
+
     private async Task<object> HandleCancelBookingAsync(Dictionary<string, object?> args)
     {
         // ── Parse confirmed flag (JsonSerializer sends JsonElement, not native bool) ──
@@ -2955,6 +2963,22 @@ public sealed class CallSession : ICallSession
                 string s when s.Equals("true", StringComparison.OrdinalIgnoreCase) => true,
                 _ => false
             };
+        }
+
+        // ── SINGLE-CONFIRM FAST-PATH ──
+        // If Ada already asked verbally and caller now says an explicit yes,
+        // allow confirmed=true in one shot by priming both guards once.
+        if (confirmed
+            && _engine != null
+            && !_destructiveGuard!.HasPending
+            && _engine.State != CallState.AwaitingCancelConfirmation
+            && IsAffirmativeCancelConfirmation(_lastUserTranscript))
+        {
+            _logger.LogInformation("[{SessionId}] ✅ cancel_booking single-confirm fast-path: priming guards from affirmative transcript '{Transcript}'",
+                SessionId, _lastUserTranscript);
+
+            _ = _engine.GateCancelBooking(confirmed: false); // transition to AwaitingCancelConfirmation
+            _destructiveGuard.BeginConfirmation(DestructiveActionType.CancelBooking);
         }
 
         // ── SPLIT-BRAIN ENGINE GATE (Phase 1) ──
