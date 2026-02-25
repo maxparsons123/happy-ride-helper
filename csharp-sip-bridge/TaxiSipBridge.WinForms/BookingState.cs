@@ -20,6 +20,12 @@ public sealed class BookingState
     public string? PaymentPreference { get; set; }
     public string? Luggage { get; set; }
     public string? SpecialInstructions { get; set; }
+
+    /// <summary>Resolved area/district within the city for pickup (e.g. "Foleshill", "Earlsdon").</summary>
+    public string? PickupArea { get; set; }
+
+    /// <summary>Resolved area/district within the city for destination.</summary>
+    public string? DestArea { get; set; }
     public int BiddingWindowSec { get; set; } = 45;
 
     /// <summary>
@@ -74,6 +80,7 @@ public sealed class BookingState
         Passengers = null;
         VehicleType = "Saloon";
         Luggage = SpecialInstructions = null;
+        PickupArea = DestArea = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;

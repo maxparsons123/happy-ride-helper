@@ -24,6 +24,12 @@ public sealed class BookingState
     public string VehicleType { get; set; } = "Saloon";
     public string? SpecialInstructions { get; set; }
 
+    /// <summary>Resolved area/district within the city for pickup (e.g. "Foleshill", "Earlsdon").</summary>
+    public string? PickupArea { get; set; }
+
+    /// <summary>Resolved area/district within the city for destination.</summary>
+    public string? DestArea { get; set; }
+
     /// <summary>Luggage info: "none", "small" (hand luggage), "medium" (1-2 suitcases), "heavy" (3+ suitcases or bulky items).</summary>
     public string? Luggage { get; set; }
 
@@ -158,6 +164,7 @@ public sealed class BookingState
         PaymentPreference = null;
         PaymentLink = null;
         SpecialInstructions = null;
+        PickupArea = DestArea = null;
         PickupLat = PickupLon = DestLat = DestLon = null;
         PickupStreet = PickupNumber = PickupPostalCode = PickupCity = PickupFormatted = null;
         DestStreet = DestNumber = DestPostalCode = DestCity = DestFormatted = null;
