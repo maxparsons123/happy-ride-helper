@@ -32,6 +32,9 @@ public sealed class SimliAvatar : UserControl
     /// <summary>Whether a connection attempt is in progress.</summary>
     public bool IsConnecting { get; private set; }
 
+    /// <summary>Fires when the avatar disconnects unexpectedly (WebRTC/WebSocket close).</summary>
+    public event Action? OnDisconnected;
+
     // Buffer audio while WebRTC connection is being established
     private readonly List<byte[]> _pendingAudio = new();
     private const int MAX_PENDING_CHUNKS = 100; // ~2s
@@ -241,6 +244,7 @@ public sealed class SimliAvatar : UserControl
                     _pendingAudio.Clear();
                     SafeInvoke(() => SetStatus("Disconnected", System.Drawing.Color.Gray));
                     _logger.LogInformation("🎭 Avatar disconnected");
+                    OnDisconnected?.Invoke();
                     break;
 
                 case "speaking":

@@ -503,6 +503,15 @@ public partial class MainForm : Form
             _simliAvatar.Dock = DockStyle.Fill;
             pnlAvatarHost.Controls.Clear();
             pnlAvatarHost.Controls.Add(_simliAvatar);
+
+            // Wire unexpected disconnect → update status + auto-reconnect
+            _simliAvatar.OnDisconnected += () => SafeInvoke(() =>
+            {
+                UpdateSimliStatus("● Disconnected", Color.FromArgb(220, 53, 69));
+                Log("🎭 Simli disconnected unexpectedly — attempting auto-reconnect…");
+                _ = ReconnectSimliAsync();
+            });
+
             lblAvatarStatus.Text = "Ready";
             Log("🎭 Simli avatar initialized successfully");
         }
