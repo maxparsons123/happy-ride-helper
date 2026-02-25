@@ -877,10 +877,10 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             if (!string.IsNullOrWhiteSpace(callerName))
             {
                 greeting = $"[SYSTEM] [LANG: {langName}] A returning caller named {callerName} has connected (ID: {_callerId}). " +
-                           $"Greet them BY NAME in {langName}. You MUST say EXACTLY: \"Welcome to 247 Radio Carz. Hello {callerName}, my name is Ada and I am here to help you with your booking today. Where would you like to be picked up from?\" " +
-                           $"⚠️ Do NOT say \"Where can I take you\" or any variation. ALWAYS ask for PICKUP LOCATION first. " +
-                           $"⚠️ CRITICAL: After this greeting, WAIT PATIENTLY for the caller to respond. Do NOT repeat the pickup question or re-prompt. " +
-                           $"If the caller says 'hello' or their name, simply acknowledge briefly and wait — do NOT ask for pickup again.";
+                           $"Greet them BY NAME in {langName}. You MUST say EXACTLY: \"Welcome to 247 Radio Carz. Hello {callerName}, my name is Ada and I am here to help you with your booking today. And whereabouts are you?\" " +
+                           $"⚠️ Ask for AREA first (whereabouts), then PICKUP after they answer. " +
+                           $"⚠️ CRITICAL: After this greeting, WAIT PATIENTLY for the caller to respond. Do NOT repeat the question or re-prompt. " +
+                           $"If the caller says 'hello' or their name, simply acknowledge briefly and wait — do NOT ask again.";
             }
             else
             {
@@ -1136,6 +1136,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             properties = new
             {
                 caller_name = new { type = "string", description = "Caller's name" },
+                caller_area = new { type = "string", description = "Caller's self-reported area/district (e.g. 'Earlsdon', 'Tile Hill', 'Binley', 'Foleshill'). Used as a location bias for address resolution so ambiguous places like 'Morrisons' resolve to the correct branch. Set when the caller states their area." },
                 pickup = new { type = "string", description = "Pickup address VERBATIM from caller's speech. MUST include house/flat numbers exactly as spoken (e.g. '52A David Road', '8 David Road', '1214A Warwick Road'). NEVER strip house numbers. Strip out unrelated info like passenger counts, times, or other details." },
                 destination = new { type = "string", description = "Destination address VERBATIM from caller's speech. MUST include house/flat numbers exactly as spoken (e.g. '7 Russell Street', '1214A Warwick Road'). NEVER strip house numbers. Strip out unrelated info like passenger counts or times. E.g. if caller says '7 Russell Street and 3 passengers', destination='7 Russell Street'." },
                 passengers = new { type = "integer", description = "Number of passengers" },
