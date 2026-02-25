@@ -53,6 +53,14 @@ public sealed class CallSession : ICallSession
     private string? _previousToolIntent; // The tool intent before _lastToolIntent (for confirmation-after-block flows)
     private int _intentGuardFiring; // prevents re-entrant guard execution
 
+    // ── ADA CONFIRMATION COMMIT LAYER ──
+    // When Ada verbally confirms a field (e.g. "Got it. 52A David Road."), we lock that
+    // value as authoritative. Later sync calls cannot overwrite it unless the user
+    // explicitly corrects it (e.g. "no, it's...", "change", "actually").
+    private string? _adaConfirmedPickup;
+    private string? _adaConfirmedDestination;
+    private int _intentGuardFiring; // prevents re-entrant guard execution
+
     // ── DESTRUCTIVE ACTION GUARD (replaces old _cancelBlockedCount + keyword scanning) ──
     private DestructiveActionGuard? _destructiveGuard;
 
@@ -141,6 +149,13 @@ public sealed class CallSession : ICallSession
             else if (role.Equals("Ada", StringComparison.OrdinalIgnoreCase) || role.Equals("assistant", StringComparison.OrdinalIgnoreCase))
             {
                 _lastAdaTranscript = text; // Track for watchdog stage inference
+
+                // ── ADA CONFIRMATION COMMIT ──
+                // If Ada verbally confirms an address, lock it as authoritative.
+                // Patterns: "Got it. 52A David Road", "Pickup from 52A David Road",
+                // "heading to 7 Russell Street", "destination is 7 Russell Street"
+                TryCommitAdaConfirmation(text);
+
                 var entry = new Dictionary<string, object?>
                 {
                     ["role"] = "assistant",
@@ -445,6 +460,8 @@ public sealed class CallSession : ICallSession
                     Interlocked.Exchange(ref _fareRejected, 0);
                     _pickupDisambiguated = true;
                     _destDisambiguated = true;
+                    _adaConfirmedPickup = null;
+                    _adaConfirmedDestination = null;
                     _pickupLockedByClarify = false;
                     _destLockedByClarify = false;
                     _lastGuardBlockedDest = null;
@@ -950,6 +967,35 @@ public sealed class CallSession : ICallSession
             CrossCheckHouseNumber(args, "destination", sttForCrossCheck);
         }
 
+
+        // ── ADA CONFIRMATION LOCK ──
+        // If Ada has verbally confirmed a pickup/destination, prevent re-extraction from
+        // overwriting it unless the user explicitly corrected the address in this turn.
+        var currentStt = _aiClient.LastUserTranscript?.Trim() ?? "";
+        if (_adaConfirmedPickup != null && args.TryGetValue("pickup", out var incomingPickup))
+        {
+            var incomingVal = incomingPickup?.ToString()?.Trim() ?? "";
+            if (!string.IsNullOrWhiteSpace(incomingVal) &&
+                !AddressesMatch(_adaConfirmedPickup, incomingVal) &&
+                !IsExplicitAddressCorrection(currentStt))
+            {
+                _logger.LogWarning("[{SessionId}] 🔒 PICKUP LOCKED: Ada confirmed '{Confirmed}' — ignoring sync overwrite to '{Incoming}' (STT: '{Stt}')",
+                    SessionId, _adaConfirmedPickup, incomingVal, currentStt);
+                args["pickup"] = _adaConfirmedPickup; // Force the confirmed value
+            }
+        }
+        if (_adaConfirmedDestination != null && args.TryGetValue("destination", out var incomingDest))
+        {
+            var incomingVal = incomingDest?.ToString()?.Trim() ?? "";
+            if (!string.IsNullOrWhiteSpace(incomingVal) &&
+                !AddressesMatch(_adaConfirmedDestination, incomingVal) &&
+                !IsExplicitAddressCorrection(currentStt))
+            {
+                _logger.LogWarning("[{SessionId}] 🔒 DEST LOCKED: Ada confirmed '{Confirmed}' — ignoring sync overwrite to '{Incoming}' (STT: '{Stt}')",
+                    SessionId, _adaConfirmedDestination, incomingVal, currentStt);
+                args["destination"] = _adaConfirmedDestination; // Force the confirmed value
+            }
+        }
 
         if (args.TryGetValue("pickup", out var p))
         {
@@ -3170,6 +3216,8 @@ public sealed class CallSession : ICallSession
             _destDisambiguated = true;
             _pickupLockedByClarify = false;
             _destLockedByClarify = false;
+            _adaConfirmedPickup = null;
+            _adaConfirmedDestination = null;
             _engine?.Reset(preserveCallerIdentity: true);
 
             // Inject clean state so the AI knows ALL fields are now empty
@@ -3871,8 +3919,103 @@ public sealed class CallSession : ICallSession
     }
 
 
+    // ══════════════════════════════════════
+    // ADA CONFIRMATION COMMIT LAYER
+    // ══════════════════════════════════════
+
     /// <summary>
-    /// Checks if the user's transcript contains at least one significant word from the address.
+    /// Regex to extract addresses from Ada's verbal confirmations.
+    /// Matches patterns like "52A David Road", "7 Russell Street", "14 High Street".
+    /// </summary>
+    private static readonly Regex AdaAddressExtractRegex = new(
+        @"(\d+[A-Za-z]?\s+\w+\s+(?:Road|Street|Lane|Avenue|Drive|Way|Close|Crescent|Place|Court|Gardens|Grove|Terrace|Hill|Rise|Row|Walk|Mews|Square|Park|Gate|View|Parade|Highway|Boulevard))",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Scans Ada's spoken text for confirmation patterns and locks the confirmed address.
+    /// Triggers on: "Got it. [address]", "pickup from [address]", "heading to [address]",
+    /// "destination is [address]", "[address]. Where are you heading"
+    /// </summary>
+    private void TryCommitAdaConfirmation(string adaText)
+    {
+        if (string.IsNullOrWhiteSpace(adaText)) return;
+        var lower = adaText.ToLowerInvariant();
+
+        // Detect pickup confirmations
+        if (lower.Contains("got it") || lower.Contains("pickup from") || lower.Contains("pickup is") ||
+            lower.Contains("picking you up from") || lower.Contains("where are you heading") ||
+            lower.Contains("where would you like to go"))
+        {
+            var match = AdaAddressExtractRegex.Match(adaText);
+            if (match.Success)
+            {
+                var confirmed = match.Groups[1].Value.Trim();
+                // Only lock as pickup if destination isn't already mentioned in the same sentence
+                if (!lower.Contains("heading to") && !lower.Contains("destination"))
+                {
+                    _adaConfirmedPickup = confirmed;
+                    _logger.LogInformation("[{SessionId}] 🔒 Pickup locked by Ada confirmation: '{Address}'", SessionId, confirmed);
+                }
+            }
+        }
+
+        // Detect destination confirmations
+        if (lower.Contains("heading to") || lower.Contains("destination is") || lower.Contains("going to") ||
+            lower.Contains("destination:"))
+        {
+            // Find the address AFTER the destination keyword
+            var destKeywords = new[] { "heading to ", "destination is ", "going to ", "destination: " };
+            foreach (var kw in destKeywords)
+            {
+                var idx = lower.IndexOf(kw, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) continue;
+                var afterKeyword = adaText[(idx + kw.Length)..];
+                var match = AdaAddressExtractRegex.Match(afterKeyword);
+                if (match.Success)
+                {
+                    _adaConfirmedDestination = match.Groups[1].Value.Trim();
+                    _logger.LogInformation("[{SessionId}] 🔒 Destination locked by Ada confirmation: '{Address}'", SessionId, _adaConfirmedDestination);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if two addresses refer to the same place (case-insensitive, ignoring punctuation).
+    /// </summary>
+    private static bool AddressesMatch(string a, string b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        var normalize = (string s) => Regex.Replace(s.ToLowerInvariant().Trim(), @"[^a-z0-9\s]", "").Trim();
+        var na = normalize(a);
+        var nb = normalize(b);
+        // Exact match or one contains the other (handles "52A David Road" vs "52A David Road, Coventry")
+        return na == nb || na.Contains(nb) || nb.Contains(na);
+    }
+
+    /// <summary>
+    /// Detects if the user's transcript indicates an explicit address correction.
+    /// Only these override Ada's confirmed value.
+    /// </summary>
+    private static bool IsExplicitAddressCorrection(string sttText)
+    {
+        if (string.IsNullOrWhiteSpace(sttText)) return false;
+        var lower = sttText.ToLowerInvariant();
+
+        // Explicit correction phrases
+        if (lower.Contains("change") || lower.Contains("no sorry") || lower.Contains("no, sorry") ||
+            lower.Contains("actually") || lower.Contains("not that") || lower.Contains("wrong") ||
+            lower.Contains("correct that") || lower.Contains("i meant") || lower.Contains("i mean") ||
+            lower.Contains("no it's") || lower.Contains("no its") || lower.Contains("no, it's"))
+            return true;
+
+        // If the transcript contains a NEW house number + street pattern, it's likely a correction
+        var hasNewAddress = AdaAddressExtractRegex.IsMatch(sttText);
+        return hasNewAddress;
+    }
+
+
     /// Used to detect when the model auto-fills an address from caller history rather than
     /// using what the user actually said. Requires at least one word (3+ chars) overlap.
     /// </summary>
