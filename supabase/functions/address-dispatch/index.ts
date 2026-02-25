@@ -737,35 +737,41 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
       return [];
     }
 
-    // Helper: apply POI coords and determine match_type based on house number presence
+    // Street suffix pattern — if name ends with these, it's a street not a POI
+    const STREET_SUFFIXES = /\b(road|street|avenue|lane|drive|crescent|close|way|place|court|grove|terrace|gardens|walk|rise|hill|green|park|row|square|mews|parade|bypass|highway|boulevard|circus|rd|st|ave|ln|dr|cres|cl)\s*$/i;
+
+    // Helper: apply POI coords and determine match_type based on house number + street suffix
     function applyPoiCoords(addr: any, match: ZonePoiAreaMatch, side: string) {
       const hasHouseNumber = !!(addr.street_number && addr.street_number.trim().match(/\d/));
+      const streetName = addr.street_name || addr.address || "";
+      const isStreetName = STREET_SUFFIXES.test(streetName.trim());
 
-      if (hasHouseNumber) {
-        // Residential address — needs Nominatim for house-level precision
-        addr.match_type = "residential";
+      // It's a street (residential) if it has a house number OR ends with a road suffix
+      const isResidential = hasHouseNumber || isStreetName;
+
+      if (isResidential) {
+        addr.match_type = "street";
         if (match.lat != null && match.lng != null) {
           const hasGeminiCoords = addr.lat != null && addr.lon != null && addr.lat !== 0 && addr.lon !== 0;
           if (!hasGeminiCoords) {
             addr.lat = match.lat;
             addr.lon = match.lng;
-            console.log(`📌 ${side}: [residential] applied POI coords as fallback (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) — Gemini had no coords`);
+            console.log(`📌 ${side}: [street] applied POI coords as fallback (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) — Gemini had no coords`);
           } else {
             addr.poi_lat = match.lat;
             addr.poi_lng = match.lng;
-            console.log(`📌 ${side}: [residential] POI coords stored as seed — Gemini coords preserved for house-level refinement`);
+            console.log(`📌 ${side}: [street] POI coords stored as seed — Gemini coords preserved${hasHouseNumber ? " for house-level refinement" : " (no house number yet)"}`);
           }
         }
       } else {
-        // POI / landmark — no house number means POI coords ARE the ground truth
+        // POI / landmark — no house number, no street suffix = POI coords ARE the ground truth
         addr.match_type = "poi";
         if (match.lat != null && match.lng != null) {
           addr.poi_lat = match.lat;
           addr.poi_lng = match.lng;
-          // Override Gemini coords with POI coords — POI data is more authoritative for landmarks
           addr.lat = match.lat;
           addr.lon = match.lng;
-          console.log(`📌 ${side}: [poi] using POI coords as final (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — no house number, skipping Nominatim`);
+          console.log(`📌 ${side}: [poi] using POI coords as final (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — landmark, skipping Nominatim`);
         }
       }
     }
