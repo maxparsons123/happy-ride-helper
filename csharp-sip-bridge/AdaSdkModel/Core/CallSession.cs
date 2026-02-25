@@ -940,7 +940,15 @@ public sealed class CallSession : ICallSession
             }
         }
 
-
+        // ── STT HOUSE-NUMBER CROSS-CHECK ──
+        // If STT transcript contains a longer/different house number for the same street,
+        // prefer the STT version (model often truncates e.g. "1214A" → "14A").
+        var sttForCrossCheck = _aiClient.LastUserTranscript?.Trim();
+        if (!string.IsNullOrWhiteSpace(sttForCrossCheck))
+        {
+            CrossCheckHouseNumber(args, "pickup", sttForCrossCheck);
+            CrossCheckHouseNumber(args, "destination", sttForCrossCheck);
+        }
 
 
         if (args.TryGetValue("pickup", out var p))
@@ -3811,6 +3819,55 @@ public sealed class CallSession : ICallSession
 
         // At least one significant word from the address must appear in the transcript
         return addressWords.Any(w => transcriptNorm.Contains(w));
+    }
+
+    /// <summary>
+    /// Regex to extract leading house number from an address string (e.g. "1214A" from "1214A Warwick Road").
+    /// </summary>
+    private static readonly Regex HouseNumberExtractRegex = new(
+        @"^(\d+[A-Za-z]?)\s+",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// Cross-checks Ada's extracted house number against the raw STT transcript.
+    /// If STT contains a longer house number for the same street name, replaces
+    /// Ada's extraction with the STT version (fixes model truncation like "1214A" → "14A").
+    /// </summary>
+    private void CrossCheckHouseNumber(Dictionary<string, object?> args, string field, string sttText)
+    {
+        if (!args.TryGetValue(field, out var val) || string.IsNullOrWhiteSpace(val?.ToString()))
+            return;
+
+        var adaAddr = val.ToString()!.Trim();
+        var adaMatch = HouseNumberExtractRegex.Match(adaAddr);
+        if (!adaMatch.Success) return;
+
+        var adaHouseNum = adaMatch.Groups[1].Value;
+        var adaStreet = adaAddr[adaMatch.Length..].Trim();
+
+        // Find the street name in STT text (case-insensitive)
+        if (string.IsNullOrWhiteSpace(adaStreet)) return;
+        var streetIdx = sttText.IndexOf(adaStreet, StringComparison.OrdinalIgnoreCase);
+        if (streetIdx <= 0) return;
+
+        // Extract what STT has before the street name
+        var sttPrefix = sttText[..streetIdx].Trim();
+        // Remove any non-address words that might precede (e.g. "it's", "from", "to")
+        var sttHouseMatch = Regex.Match(sttPrefix, @"(\d+[A-Za-z]?)\s*$");
+        if (!sttHouseMatch.Success) return;
+
+        var sttHouseNum = sttHouseMatch.Groups[1].Value;
+
+        // If STT house number is longer (more digits) and contains Ada's version as a suffix,
+        // this is a truncation error — use STT's version
+        if (sttHouseNum.Length > adaHouseNum.Length && sttHouseNum.EndsWith(adaHouseNum, StringComparison.OrdinalIgnoreCase))
+        {
+            var corrected = $"{sttHouseNum} {adaStreet}";
+            _logger.LogWarning(
+                "[{SessionId}] 🔧 STT CROSS-CHECK ({Field}): Ada extracted '{AdaNum}' but STT heard '{SttNum}' — correcting to '{Corrected}'",
+                SessionId, field, adaHouseNum, sttHouseNum, corrected);
+            args[field] = corrected;
+        }
     }
 
 
