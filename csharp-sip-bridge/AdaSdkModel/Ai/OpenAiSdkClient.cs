@@ -78,10 +78,12 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     // =========================
     // MIC GATE / ECHO CONTROL (v3.0)
     // =========================
-    private long _micGateUntilMs;                   // if NowMs() < this, ignore SendAudio()
+    private long _micGateUntilMs;                   // if NowMs() < this, buffer (not discard) SendAudio()
     private int _drainGateTaskId;                   // prevents overlapping drain tasks
     private int _suppressWatchdogUntilUserSpeech;   // set to 1 after greeting; cleared once user speaks
     private int _bargeInActive;                     // 1 = user barged in, reduce echo tail on next playout complete
+    private readonly List<byte[]> _micGateBuffer = new(); // Buffered audio during echo tail (prevents clipped syllables)
+    private readonly object _micGateBufferLock = new();
 
     // Tune these:
     private const int ECHO_TAIL_MS = 600;           // Reduced from 800ms for faster turn-taking
@@ -208,6 +210,30 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         Interlocked.Exchange(ref _drainGateTaskId, 0);
         Interlocked.Exchange(ref _suppressWatchdogUntilUserSpeech, 0);
         Interlocked.Exchange(ref _playoutCompleteHandled, 0);
+        lock (_micGateBufferLock) { _micGateBuffer.Clear(); }
+    }
+
+    /// <summary>Flush any audio buffered during echo tail and send to OpenAI.</summary>
+    private void FlushMicGateBuffer()
+    {
+        byte[][] buffered;
+        lock (_micGateBufferLock)
+        {
+            if (_micGateBuffer.Count == 0) return;
+            buffered = _micGateBuffer.ToArray();
+            _micGateBuffer.Clear();
+        }
+        
+        try
+        {
+            foreach (var frame in buffered)
+                _session!.SendInputAudio(new BinaryData(frame));
+            Log($"🎤 Flushed {buffered.Length} buffered echo-tail frames");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error flushing mic gate buffer");
+        }
     }
 
     // =========================
@@ -348,9 +374,19 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         // Suppress user audio while a critical tool is in flight
         if (Volatile.Read(ref _toolInFlight) == 1) return;
 
-        // v3.0: Strong mic gate — blocks while playout draining + tail
+        // v3.1: Echo tail BUFFER — instead of discarding, buffer audio so clipped syllables are preserved
         var gateUntil = Volatile.Read(ref _micGateUntilMs);
-        if (gateUntil > 0 && NowMs() < gateUntil) return;
+        if (gateUntil > 0 && NowMs() < gateUntil)
+        {
+            lock (_micGateBufferLock)
+            {
+                _micGateBuffer.Add(alawData);
+            }
+            return;
+        }
+
+        // Gate just opened — flush any buffered audio first
+        FlushMicGateBuffer();
 
         // Optional: if we can query playout queue, also block while it's non-empty
         if (GetQueuedFrames != null)
@@ -487,8 +523,14 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
     /// </summary>
     public async Task SetVadModeAsync(bool useSemantic, float eagerness = 0.5f)
     {
+        var clampedEagerness = Math.Clamp(eagerness, 0.1f, 1.0f);
+        
+        // Skip redundant reconfiguration — avoids SDK race / session jitter
+        if (_useSemanticVad == useSemantic && Math.Abs(_semanticEagerness - clampedEagerness) < 0.01f)
+            return;
+        
         _useSemanticVad = useSemantic;
-        _semanticEagerness = Math.Clamp(eagerness, 0.1f, 1.0f);
+        _semanticEagerness = clampedEagerness;
 
         if (!IsConnected || _session == null) return;
 

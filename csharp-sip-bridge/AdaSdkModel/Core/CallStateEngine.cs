@@ -90,8 +90,8 @@ public sealed class CallStateEngine
 
         return State switch
         {
-            CallState.Greeting => HandleGreeting(input),
-            CallState.CollectingName => HandleCollectingName(input),
+            CallState.Greeting => HandleGreeting(input, snapshot),
+            CallState.CollectingName => HandleCollectingName(input, snapshot),
             CallState.CollectingPickup => HandleCollectingPickup(input, snapshot),
             CallState.CollectingDestination => HandleCollectingDestination(input, snapshot),
             CallState.CollectingPassengers => HandleCollectingPassengers(input, snapshot),
@@ -116,16 +116,24 @@ public sealed class CallStateEngine
     // STATE HANDLERS
     // ═══════════════════════════════════════════════════════════════════════
 
-    private EngineAction HandleGreeting(ExtractionResult input)
+    private EngineAction HandleGreeting(ExtractionResult input, BookingSnapshot snapshot)
     {
+        // Field-driven: if any booking data provided, advance based on what's ACTUALLY missing
+        if (input.HasAnyBookingData)
+            return AdvanceToNextMissing(snapshot.WithMerged(input));
+        
         if (!string.IsNullOrWhiteSpace(input.Name))
             return new EngineAction { NewState = CallState.CollectingPickup, PromptInstruction = "Greet the caller by name and ask for pickup address.", UseSemanticVad = true, VadEagerness = 0.2f };
         
         return new EngineAction { NewState = CallState.CollectingName, PromptInstruction = "Ask for the caller's name.", UseSemanticVad = false };
     }
 
-    private EngineAction HandleCollectingName(ExtractionResult input)
+    private EngineAction HandleCollectingName(ExtractionResult input, BookingSnapshot snapshot)
     {
+        // Field-driven: if any booking data provided, advance based on what's ACTUALLY missing
+        if (input.HasAnyBookingData)
+            return AdvanceToNextMissing(snapshot.WithMerged(input));
+        
         if (!string.IsNullOrWhiteSpace(input.Name))
             return new EngineAction { NewState = CallState.CollectingPickup, PromptInstruction = "Ask for pickup address.", UseSemanticVad = true, VadEagerness = 0.2f };
         
