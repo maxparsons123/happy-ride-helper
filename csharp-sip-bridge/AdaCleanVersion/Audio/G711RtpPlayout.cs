@@ -8,7 +8,7 @@ using SIPSorcery.Net;
 namespace AdaCleanVersion.Audio;
 
 /// <summary>
-/// µ-law RTP playout engine v11.2 — WaitableTimer-based jitter buffer for PCMU (payload type 0).
+/// G.711 RTP playout engine v12.0 — codec-agnostic (supports PCMU and PCMA).
 ///
 /// Features:
 ///   - High-precision 20ms tick via Windows WaitableTimer (falls back to Thread.Sleep on Linux)
@@ -19,7 +19,7 @@ namespace AdaCleanVersion.Audio;
 ///   - Typing sound fill during buffering pauses
 ///   - Epoch guard: Clear() increments _clearEpoch; frames stamped with stale epoch are dropped
 /// </summary>
-public sealed class MuLawRtpPlayout : IDisposable
+public sealed class G711RtpPlayout : IDisposable
 {
     private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
@@ -35,8 +35,6 @@ public sealed class MuLawRtpPlayout : IDisposable
     private static extern bool CloseHandle(IntPtr hObj);
 
     private const int FrameSize = 160;          // 20ms @ 8kHz
-    private const int PayloadTypePcmu = 0;
-    private const byte MuLawSilence = 0xFF;     // µ-law silence (zero amplitude)
 
     private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start
     private const int ResumeThresholdFrames = 5;       // 100ms for mid-stream resume
@@ -47,8 +45,11 @@ public sealed class MuLawRtpPlayout : IDisposable
     private static readonly long TicksPerFrame = (long)(20_000_000.0 / NsPerTick);
 
     private readonly RTPSession _rtpSession;
-    private readonly ConcurrentQueue<(byte[] data, int epoch)> _q = new();
+    private readonly G711CodecType _codec;
+    private readonly int _payloadType;
+    private readonly byte _silenceByte;
 
+    private readonly ConcurrentQueue<(byte[] data, int epoch)> _q = new();
     private readonly ConcurrentQueue<byte[]> _framePool = new();
     private volatile int _poolCount;
 
@@ -71,7 +72,7 @@ public sealed class MuLawRtpPlayout : IDisposable
 
     private int _sendErrorCount;
 
-    private readonly TypingSoundGenerator _typingSound = new();
+    private readonly TypingSoundGenerator _typingSound;
     private volatile bool _typingSoundsEnabled = true;
 
     public event Action? OnQueueEmpty;
@@ -79,11 +80,16 @@ public sealed class MuLawRtpPlayout : IDisposable
 
     public int QueuedFrames => Volatile.Read(ref _queueCount);
     public bool TypingSoundsEnabled { get => _typingSoundsEnabled; set => _typingSoundsEnabled = value; }
+    public G711CodecType Codec => _codec;
 
-    public MuLawRtpPlayout(RTPSession rtpSession)
+    public G711RtpPlayout(RTPSession rtpSession, G711CodecType codec = G711CodecType.PCMU)
     {
         _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
-        Array.Fill(_silence, MuLawSilence);
+        _codec = codec;
+        _payloadType = G711Codec.PayloadType(codec);
+        _silenceByte = G711Codec.SilenceByte(codec);
+        _typingSound = new TypingSoundGenerator(codec);
+        Array.Fill(_silence, _silenceByte);
     }
 
     // ─── Public API ─────────────────────────────────────────
@@ -112,10 +118,10 @@ public sealed class MuLawRtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = "MuLawRtpPlayout-v11.2"
+            Name = $"G711RtpPlayout-v12-{_codec}"
         };
         _thread.Start();
-        SafeLog("[RTP] MuLawRtpPlayout v11.2 started");
+        SafeLog($"[RTP] G711RtpPlayout v12.0 started ({_codec}, PT={_payloadType})");
     }
 
     public void Stop()
@@ -158,7 +164,7 @@ public sealed class MuLawRtpPlayout : IDisposable
         {
             if (_accCount <= 0) return;
             var frame = RentFrame();
-            Array.Fill(frame, MuLawSilence);
+            Array.Fill(frame, _silenceByte);
             Buffer.BlockCopy(_acc, 0, frame, 0, _accCount);
             EnqueueFrame(frame);
             _accCount = 0;
@@ -166,25 +172,25 @@ public sealed class MuLawRtpPlayout : IDisposable
     }
 
     /// <summary>
-    /// Buffer µ-law encoded audio data. Automatically frames into 160-byte chunks.
+    /// Buffer G.711 encoded audio data. Automatically frames into 160-byte chunks.
     /// </summary>
-    public void BufferMuLaw(byte[] mulawData)
+    public void BufferG711(byte[] g711Data)
     {
-        if (mulawData == null || mulawData.Length == 0) return;
+        if (g711Data == null || g711Data.Length == 0) return;
 
         var epoch = Volatile.Read(ref _clearEpoch);
 
         lock (_accLock)
         {
-            int needed = _accCount + mulawData.Length;
+            int needed = _accCount + g711Data.Length;
             if (needed > _acc.Length)
             {
                 int newSize = Math.Min(Math.Max(_acc.Length * 2, needed), 65536);
                 Array.Resize(ref _acc, newSize);
             }
 
-            Buffer.BlockCopy(mulawData, 0, _acc, _accCount, mulawData.Length);
-            _accCount += mulawData.Length;
+            Buffer.BlockCopy(g711Data, 0, _acc, _accCount, g711Data.Length);
+            _accCount += g711Data.Length;
 
             while (_accCount >= FrameSize)
             {
@@ -198,6 +204,9 @@ public sealed class MuLawRtpPlayout : IDisposable
             }
         }
     }
+
+    /// <summary>Legacy compat alias.</summary>
+    public void BufferMuLaw(byte[] data) => BufferG711(data);
 
     // ─── Playout Loop ───────────────────────────────────────
 
@@ -236,7 +245,6 @@ public sealed class MuLawRtpPlayout : IDisposable
             TickOnce();
             nextTick += TicksPerFrame;
 
-            // Drift guard: snap forward if we're >100ms behind
             long after = Stopwatch.GetTimestamp();
             if ((after - nextTick) * NsPerTick > 100_000_000)
                 nextTick = after + TicksPerFrame;
@@ -267,11 +275,9 @@ public sealed class MuLawRtpPlayout : IDisposable
         {
             Interlocked.Decrement(ref _queueCount);
 
-            // Epoch guard: drop stale frames from before barge-in
             if (item.epoch != currentEpoch)
             {
                 ReturnFrame(item.data);
-                // Try next frame immediately
                 if (_q.TryDequeue(out var next))
                 {
                     Interlocked.Decrement(ref _queueCount);
@@ -320,7 +326,7 @@ public sealed class MuLawRtpPlayout : IDisposable
 
         try
         {
-            _rtpSession.SendAudioFrame(_ts, PayloadTypePcmu, payload160);
+            _rtpSession.SendAudioFrame(_ts, _payloadType, payload160);
             _ts += FrameSize;
             _sendErrorCount = 0;
         }

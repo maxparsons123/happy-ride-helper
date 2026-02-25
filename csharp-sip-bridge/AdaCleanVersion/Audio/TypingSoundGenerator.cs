@@ -3,8 +3,9 @@ using System;
 namespace AdaCleanVersion.Audio;
 
 /// <summary>
-/// Generates subtle, rhythmic keyboard clicking sounds in µ-law format.
+/// Generates subtle, rhythmic keyboard clicking sounds in G.711 format.
 /// Used during "thinking" pauses to give a discreet impression Ada is processing.
+/// Supports both µ-law (PCMU) and A-law (PCMA) encoding.
 /// </summary>
 public sealed class TypingSoundGenerator
 {
@@ -25,6 +26,7 @@ public sealed class TypingSoundGenerator
     private enum State { InBurst, BetweenClicks, Pausing }
 
     private readonly Random _rng = new();
+    private readonly G711CodecType _codec;
     private State _state;
     private int _framesRemaining;
     private int _clicksRemainingInBurst;
@@ -33,8 +35,9 @@ public sealed class TypingSoundGenerator
 
     private readonly byte[] _frame = new byte[FRAME_SIZE];
 
-    public TypingSoundGenerator()
+    public TypingSoundGenerator(G711CodecType codec = G711CodecType.PCMU)
     {
+        _codec = codec;
         _state = State.Pausing;
         _framesRemaining = _rng.Next(5, 12);
     }
@@ -58,9 +61,9 @@ public sealed class TypingSoundGenerator
             }
         }
 
-        // Encode PCM16 → µ-law
+        // Encode PCM16 → G.711
         for (int i = 0; i < FRAME_SIZE; i++)
-            _frame[i] = MuLawEncode(pcm[i]);
+            _frame[i] = G711Codec.Encode(pcm[i], _codec);
 
         var copy = new byte[FRAME_SIZE];
         Buffer.BlockCopy(_frame, 0, copy, 0, FRAME_SIZE);
@@ -119,23 +122,5 @@ public sealed class TypingSoundGenerator
         _tapSamplesRemaining = 0;
         _tapCurrentAmplitude = 0;
         _clicksRemainingInBurst = 0;
-    }
-
-    private static byte MuLawEncode(short sample)
-    {
-        const int BIAS = 0x84;
-        const int MAX = 32635;
-
-        var sign = (sample >> 8) & 0x80;
-        if (sign != 0) sample = (short)-sample;
-        if (sample > MAX) sample = MAX;
-
-        sample = (short)(sample + BIAS);
-
-        var exponent = 7;
-        for (var expMask = 0x4000; (sample & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
-
-        var mantissa = (sample >> (exponent + 3)) & 0x0F;
-        return (byte)(~(sign | (exponent << 4) | mantissa));
     }
 }

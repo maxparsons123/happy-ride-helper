@@ -654,11 +654,12 @@ public partial class MainForm : Form
 
                 while (!ct.IsCancellationRequested)
                 {
-                    var alawFrame = await _simliChannel.Reader.ReadAsync(ct);
+                    var g711Frame = await _simliChannel.Reader.ReadAsync(ct);
                     if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
                         continue;
 
-                    var pcm16at16k = MuLawToSimliResampler.Convert(alawFrame);
+                    var codec = G711Codec.Parse(_settings.Audio.PreferredCodec);
+                    var pcm16at16k = G711ToSimliResampler.Convert(g711Frame, codec);
                     await _simliAvatar.SendAudioAsync(pcm16at16k);
                 }
             }

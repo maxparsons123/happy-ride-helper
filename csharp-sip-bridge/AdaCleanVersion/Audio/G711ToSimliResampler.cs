@@ -1,24 +1,25 @@
 namespace AdaCleanVersion.Audio;
 
 /// <summary>
-/// Converts G.711 µ-law (8kHz) frames to PCM16 (16kHz) for Simli avatar lip-sync.
+/// Converts G.711 (8kHz) frames to PCM16 (16kHz) for Simli avatar lip-sync.
 /// Uses linear interpolation for the 2× upsample — simple, low-latency, no dependencies.
+/// Supports both µ-law (PCMU) and A-law (PCMA) input.
 /// </summary>
-public static class MuLawToSimliResampler
+public static class G711ToSimliResampler
 {
     /// <summary>
-    /// Decode µ-law bytes to PCM16 and upsample from 8kHz to 16kHz.
+    /// Decode G.711 bytes to PCM16 and upsample from 8kHz to 16kHz.
     /// Returns a byte[] containing 16-bit little-endian PCM at 16kHz.
     /// </summary>
-    public static byte[] Convert(byte[] mulawFrame)
+    public static byte[] Convert(byte[] g711Frame, G711CodecType codec)
     {
-        if (mulawFrame == null || mulawFrame.Length == 0)
+        if (g711Frame == null || g711Frame.Length == 0)
             return Array.Empty<byte>();
 
-        // Step 1: Decode µ-law → PCM16 at 8kHz
-        var samples8k = new short[mulawFrame.Length];
-        for (int i = 0; i < mulawFrame.Length; i++)
-            samples8k[i] = MuLawDecode(mulawFrame[i]);
+        // Step 1: Decode G.711 → PCM16 at 8kHz
+        var samples8k = new short[g711Frame.Length];
+        for (int i = 0; i < g711Frame.Length; i++)
+            samples8k[i] = G711Codec.Decode(g711Frame[i], codec);
 
         // Step 2: Upsample 8kHz → 16kHz (2× linear interpolation)
         var samples16k = new short[samples8k.Length * 2];
@@ -38,15 +39,6 @@ public static class MuLawToSimliResampler
         return result;
     }
 
-    /// <summary>ITU-T G.711 µ-law decode.</summary>
-    private static short MuLawDecode(byte mulaw)
-    {
-        mulaw = (byte)~mulaw;
-        int sign = (mulaw & 0x80) != 0 ? -1 : 1;
-        int exponent = (mulaw >> 4) & 0x07;
-        int mantissa = mulaw & 0x0F;
-        int magnitude = ((mantissa << 4) + 0x08) << exponent;
-        magnitude -= 0x84; // bias removal
-        return (short)(sign * magnitude);
-    }
+    /// <summary>Legacy compat: assumes PCMU.</summary>
+    public static byte[] Convert(byte[] mulawFrame) => Convert(mulawFrame, G711CodecType.PCMU);
 }
