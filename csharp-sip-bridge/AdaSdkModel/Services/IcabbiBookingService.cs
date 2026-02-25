@@ -325,7 +325,7 @@ public sealed class IcabbiBookingService : IDisposable
                 phone = phone,
                 extras = "WHATSAPP",
                 seats = seats,
-                instructions = booking.SpecialInstructions ?? "No special instructions",
+                instructions = BuildInstructions(booking),
                 address = new IcabbiAddressDto
                 {
                     lat = booking.PickupLat ?? 0,
@@ -423,6 +423,19 @@ public sealed class IcabbiBookingService : IDisposable
             Log($"💥 CreateAndDispatchAsync error: {ex.Message}");
             return IcabbiBookingResult.Fail(ex.Message);
         }
+    }
+
+    /// <summary>Build iCabbi instructions field including area context and special instructions.</summary>
+    private static string BuildInstructions(BookingState booking)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(booking.PickupArea))
+            parts.Add($"Pickup area: {booking.PickupArea}");
+        if (!string.IsNullOrWhiteSpace(booking.DestArea))
+            parts.Add($"Destination area: {booking.DestArea}");
+        if (!string.IsNullOrWhiteSpace(booking.SpecialInstructions))
+            parts.Add(booking.SpecialInstructions);
+        return parts.Count > 0 ? string.Join(" | ", parts) : "No special instructions";
     }
 
     // ═══════════════════════════════════════════

@@ -765,7 +765,9 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
         parsed[side].resolved_area = zonePoiAreas[0];
         continue;
       } else if (userNamedZoneArea) {
-        console.log(`✅ zone_pois: user named a matching area for "${streetName}" — no disambiguation needed`);
+        const matchedArea = zonePoiAreas.find(a => originalInput.toLowerCase().includes(a.toLowerCase()))!;
+        console.log(`✅ zone_pois: user named area "${matchedArea}" for "${streetName}" — no disambiguation needed`);
+        parsed[side].resolved_area = matchedArea;
         if (addr.is_ambiguous) {
           addr.is_ambiguous = false;
           addr.alternatives = [];
