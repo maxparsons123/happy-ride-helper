@@ -2,6 +2,8 @@ using System.Text.Json;
 using AdaCleanVersion.Config;
 using AdaCleanVersion.Session;
 using AdaCleanVersion.Sip;
+using AdaSdkModel.Audio;
+using AdaSdkModel.Avatar;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
 
@@ -22,11 +24,18 @@ public partial class MainForm : Form
     private BufferedWaveProvider? _monitorBuffer;
     private readonly object _monitorLock = new();
 
+    // Simli avatar + dedicated background feeder
+    private SimliAvatar? _simliAvatar;
+    private System.Threading.Channels.Channel<byte[]>? _simliChannel;
+    private CancellationTokenSource? _simliCts;
+    private Task? _simliFeederTask;
+
     public MainForm()
     {
         InitializeComponent();
         _settings = LoadSettings();
         ApplySettingsToUi();
+        InitSimliAvatar();
         Log("AdaCleanVersion v1.0 started. Configure SIP and click Connect.");
         Log($"📂 Settings loaded from: {SettingsPath}");
     }
@@ -276,6 +285,10 @@ public partial class MainForm : Form
 
                 UpdateEngineDisplay(session);
                 StartAudioMonitor();
+
+                // Connect Simli avatar on call start
+                if (_simliAvatar?.IsConnected != true && _simliAvatar?.IsConnecting != true)
+                    _ = ConnectSimliAsync();
             });
 
             var started = _bridge.Start();
@@ -445,6 +458,149 @@ public partial class MainForm : Form
     }
 
     // ══════════════════════════════════════
+    //  SIMLI AVATAR
+    // ══════════════════════════════════════
+
+    private void InitSimliAvatar()
+    {
+        try
+        {
+            var apiKey = _settings.Simli.ApiKey;
+            var faceId = _settings.Simli.FaceId;
+
+            if (string.IsNullOrWhiteSpace(apiKey))
+                apiKey = _settings.Simli.ApiKey = "vlw7tr7vxhhs52bi3rum7";
+            if (string.IsNullOrWhiteSpace(faceId))
+                faceId = _settings.Simli.FaceId = "5fc23ea5-8175-4a82-aaaf-cdd8c88543dc";
+
+            Log($"🎭 InitSimliAvatar: apiKey={apiKey[..Math.Min(6, apiKey.Length)]}..., faceId={faceId[..Math.Min(8, faceId.Length)]}...");
+
+            var factory = GetLoggerFactory();
+            _simliAvatar = new SimliAvatar(factory.CreateLogger<SimliAvatar>());
+            _simliAvatar.Configure(apiKey, faceId);
+            _simliAvatar.Dock = DockStyle.Fill;
+            pnlAvatarHost.Controls.Clear();
+            pnlAvatarHost.Controls.Add(_simliAvatar);
+            lblAvatarStatus.Text = "Ready";
+            Log("🎭 Simli avatar initialized successfully");
+        }
+        catch (Exception ex)
+        {
+            Log($"🎭 Simli init FAILED: {ex.Message}");
+            lblAvatarStatus.Text = $"Init failed: {ex.Message}";
+            _simliAvatar = null;
+        }
+    }
+
+    private async Task ConnectSimliAsync()
+    {
+        if (!_settings.Simli.Enabled)
+        {
+            Log("🎭 Simli disabled — skipping avatar connection");
+            return;
+        }
+
+        if (_simliAvatar == null)
+        {
+            Log("🎭 Simli was null at call start — retrying init...");
+            InitSimliAvatar();
+        }
+
+        if (_simliAvatar == null)
+        {
+            Log("🎭 Simli still null after retry — skipping avatar");
+            return;
+        }
+
+        try { await _simliAvatar.ConnectAsync(); }
+        catch (Exception ex) { Log($"🎭 Simli connect error: {ex.Message}"); }
+
+        StartSimliFeeder();
+    }
+
+    private async Task DisconnectSimliAsync()
+    {
+        StopSimliFeeder();
+        if (_simliAvatar == null) return;
+        try { await _simliAvatar.DisconnectAsync(); }
+        catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
+    }
+
+    private int _simliReconnectGuard;
+
+    private async Task ReconnectSimliAsync()
+    {
+        if (Interlocked.CompareExchange(ref _simliReconnectGuard, 1, 0) != 0)
+        {
+            Log("🎭 Simli reconnect skipped — already in progress");
+            return;
+        }
+        try
+        {
+            await DisconnectSimliAsync();
+            await Task.Delay(800);
+            await ConnectSimliAsync();
+            Log("🎭 Simli reconnected — ready for next call");
+        }
+        catch (Exception ex) { Log($"🎭 Simli reconnect error: {ex.Message}"); }
+        finally { Interlocked.Exchange(ref _simliReconnectGuard, 0); }
+    }
+
+    private void StartSimliFeeder()
+    {
+        StopSimliFeeder();
+        _simliChannel = System.Threading.Channels.Channel.CreateBounded<byte[]>(
+            new System.Threading.Channels.BoundedChannelOptions(120)
+            {
+                SingleWriter = false,
+                SingleReader = true,
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest
+            });
+        _simliCts = new CancellationTokenSource();
+        var ct = _simliCts.Token;
+
+        _simliFeederTask = Task.Factory.StartNew(async () =>
+        {
+            try
+            {
+                Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                Log("🎭 Simli feeder thread started (BelowNormal priority)");
+
+                while (!ct.IsCancellationRequested)
+                {
+                    var alawFrame = await _simliChannel.Reader.ReadAsync(ct);
+                    if (_simliAvatar == null || (!_simliAvatar.IsConnected && !_simliAvatar.IsConnecting))
+                        continue;
+
+                    var pcm16at16k = AlawToSimliResampler.Convert(alawFrame);
+                    await _simliAvatar.SendAudioAsync(pcm16at16k);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log($"🎭 Simli feeder error: {ex.Message}"); }
+            finally { Log("🎭 Simli feeder thread stopped"); }
+        }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+    }
+
+    private void StopSimliFeeder()
+    {
+        try { _simliCts?.Cancel(); } catch { }
+        try { _simliFeederTask?.Wait(500); } catch { }
+        _simliCts?.Dispose();
+        _simliCts = null;
+        _simliFeederTask = null;
+        _simliChannel = null;
+    }
+
+    private void ClearSimliBuffer()
+    {
+        if (_simliAvatar == null || !_simliAvatar.IsConnected) return;
+        if (_simliChannel != null)
+            while (_simliChannel.Reader.TryRead(out _)) { }
+        _ = _simliAvatar.ClearBufferAsync();
+    }
+
+    // ══════════════════════════════════════
     //  AUDIO MONITOR
     // ══════════════════════════════════════
 
@@ -531,6 +687,18 @@ public partial class MainForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         StopAudioMonitor();
+        StopSimliFeeder();
+        try
+        {
+            var avatar = _simliAvatar;
+            _simliAvatar = null;
+            if (avatar != null)
+            {
+                try { avatar.DisconnectAsync().Wait(3000); } catch { }
+                try { avatar.Dispose(); } catch { }
+            }
+        }
+        catch { }
         try { _bridge?.Dispose(); } catch { }
         _bridge = null;
         try { _loggerFactory?.Dispose(); } catch { }
