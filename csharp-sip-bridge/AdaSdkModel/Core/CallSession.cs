@@ -45,6 +45,7 @@ public sealed class CallSession : ICallSession
     private readonly List<string> _userTranscriptHistory = new(); // Rolling history for input validation
     private string? _lastToolIntent; // Tracks the last tool the AI called (e.g. "check_booking_status", "cancel_booking")
     private string? _previousToolIntent; // The tool intent before _lastToolIntent (for confirmation-after-block flows)
+    private int _cancelBlockedCount; // How many consecutive times cancel_booking was blocked — allows through on 2nd attempt
     private int _intentGuardFiring; // prevents re-entrant guard execution
 
     // ── DUAL-TRANSCRIPT AUDIT TRAIL ──
@@ -2827,24 +2828,21 @@ public sealed class CallSession : ICallSession
 
         var hasCancelIntent = recentUserMessages.Any(msg => cancelKeywords.Any(k => msg.Contains(k)));
 
-        // If the PREVIOUS tool call was also cancel_booking (i.e. Ada already asked for
-        // confirmation after a blocked attempt), allow through unconditionally.
+        // If cancel_booking has been blocked before in this session, allow through on retry.
         // This handles: user says garbled "cancel" → blocked → Ada asks "are you sure?" → user confirms
-        // We don't require specific confirm keywords because STT may garble those too.
-        var isRetryAfterPreviousBlock = _previousToolIntent == "cancel_booking";
+        // We use a dedicated counter because _previousToolIntent can be unreliable with race conditions.
+        var isRetryAfterPreviousBlock = _cancelBlockedCount > 0;
 
         // Also allow if Ada's last response offered cancellation as an option (e.g. "Would you like to cancel it, 
         // make changes, or check status?") and user confirmed — even without prior cancel_booking tool call.
-        // This handles: returning caller → Ada offers cancel/change/status → user says "cancel" but STT garbles it → 
-        // Ada re-asks → user confirms.
         var isConfirmationWithNoToolHistory = _previousToolIntent == null &&
-            _lastToolIntent == null &&
             recentUserMessages.Any(msg => confirmKeywords.Any(k => msg.Contains(k)));
 
         if (isRetryAfterPreviousBlock)
         {
-            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — retry after previous blocked attempt (previous_intent=cancel_booking). Transcripts: [{Transcripts}]",
-                SessionId, string.Join(" | ", recentUserMessages));
+            _logger.LogInformation("[{SessionId}] ✅ cancel_booking ALLOWED — retry after {BlockCount} previous blocked attempt(s). Transcripts: [{Transcripts}]",
+                SessionId, _cancelBlockedCount, string.Join(" | ", recentUserMessages));
+            _cancelBlockedCount = 0; // Reset after allowing
         }
         else if (isConfirmationWithNoToolHistory)
         {
@@ -2853,8 +2851,9 @@ public sealed class CallSession : ICallSession
         }
         else if (!hasCancelIntent)
         {
-            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED — no cancellation keywords found in recent transcripts: [{Transcripts}]",
-                SessionId, string.Join(" | ", recentUserMessages));
+            _cancelBlockedCount++;
+            _logger.LogWarning("[{SessionId}] 🛡️ cancel_booking BLOCKED (attempt {Count}) — no cancellation keywords found in recent transcripts: [{Transcripts}]",
+                SessionId, _cancelBlockedCount, string.Join(" | ", recentUserMessages));
             return new
             {
                 success = false,
