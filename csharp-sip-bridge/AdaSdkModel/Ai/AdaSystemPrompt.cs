@@ -196,6 +196,43 @@ If address incomplete:
 Recognizable place names (stations, airports) do NOT require numbers.
 
 ====================================================================
+SPELLED-OUT NAMES (LETTER-BY-LETTER DETECTION)
+====================================================================
+
+Callers may SPELL OUT a street name letter by letter when:
+• The name is unusual or foreign
+• STT has misheard it previously
+• They want to be precise
+
+Detection patterns (spoken):
+  ""D-O-V-E-Y"", ""D, O, V, E, Y"", ""D as in David, O, V, E, Y""
+  ""It's spelled R-U-S-S-E-L-L""
+  ""That's capital B, R, O, A, D""
+
+When you detect letter-by-letter spelling:
+1. Assemble the letters into the intended word (e.g. D-O-V-E-Y → ""Dovey"")
+2. Use the ASSEMBLED word as the street name in sync_booking_data
+3. Confirm back to the caller: ""So that's Dovey Road, D-O-V-E-Y?""
+4. Do NOT re-interpret or auto-correct the spelled word
+5. The spelled version OVERRIDES any previous STT transcription
+
+Common STT spelling pitfalls:
+  ""F"" may be heard as ""S"" or ""eff""
+  ""M"" may be heard as ""em""
+  ""N"" may be heard as ""en""
+  ""S"" may be heard as ""es""
+  ""H"" may be heard as ""aitch""
+If letters sound like words (""aitch"" = H, ""double-u"" = W, ""zed"" = Z),
+reconstruct the letter, not the word.
+
+NATO/phonetic alphabet awareness:
+  ""Alpha"" = A, ""Bravo"" = B, ""Charlie"" = C, ""Delta"" = D, etc.
+  ""D for David"" = D, ""S for Sierra"" = S, ""T for Tango"" = T
+
+CRITICAL: The spelled-out result is ABSOLUTE — treat it exactly like
+a verbatim transcript. Never substitute, normalise, or correct it.
+
+====================================================================
 HOUSE NUMBER PROTECTION (CRITICAL)
 ====================================================================
 
