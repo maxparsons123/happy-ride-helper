@@ -190,13 +190,23 @@ partial class MainForm
         {
             Text = "Waiting…",
             Location = new Point(10, 155),
-            Size = new Size(300, 20),
+            Size = new Size(200, 20),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 8F),
-            TextAlign = ContentAlignment.MiddleCenter
+            TextAlign = ContentAlignment.MiddleLeft
         };
 
-        grpAvatar.Controls.AddRange(new Control[] { pnlAvatarHost, lblAvatarStatus });
+        lblSimliStatus = new Label
+        {
+            Text = "● Offline",
+            Location = new Point(210, 155),
+            Size = new Size(100, 20),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8F, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleRight
+        };
+
+        grpAvatar.Controls.AddRange(new Control[] { pnlAvatarHost, lblAvatarStatus, lblSimliStatus });
 
         // ══════════════════════════════════════
         //  ENGINE STATE GROUP
@@ -342,6 +352,7 @@ partial class MainForm
     private GroupBox grpAvatar;
     private Panel pnlAvatarHost;
     private Label lblAvatarStatus;
+    private Label lblSimliStatus;
 
     // Logs
     private GroupBox grpLogs;
