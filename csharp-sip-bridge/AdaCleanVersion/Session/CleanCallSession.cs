@@ -92,8 +92,17 @@ public class CleanCallSession
             return;
         }
 
-        // Store raw value for current slot
-        var nextSlot = _engine.AcceptSlotValue(currentSlot, transcript);
+        // Resolve aliases ("home", "work", "the usual") for address slots
+        var resolved = AliasResolver.TryResolve(currentSlot, transcript, _callerContext);
+        var valueToStore = transcript;
+        if (resolved != null)
+        {
+            Log($"Alias resolved: \"{transcript}\" → \"{resolved.ResolvedAddress}\" (alias: {resolved.AliasName})");
+            valueToStore = resolved.ResolvedAddress;
+        }
+
+        // Store raw (or alias-resolved) value for current slot
+        var nextSlot = _engine.AcceptSlotValue(currentSlot, valueToStore);
 
         if (nextSlot == null && _engine.State == CollectionState.ReadyForExtraction)
         {
