@@ -63,6 +63,7 @@ public sealed class ALawRtpPlayout : IDisposable
     private volatile bool _running;
     private volatile int _queueCount;
     private volatile bool _clearRequested;
+    private int _clearEpoch;  // Fix: epoch guard for deterministic barge-in cut
     private uint _ts;
     private bool _buffering = true;
     private bool _hasPlayedAudio;  // Fix #3: tracks whether we've ever played real audio
@@ -135,8 +136,7 @@ public sealed class ALawRtpPlayout : IDisposable
 
     public void Clear()
     {
-        // Fix #5: signal clear — ExecuteClear runs synchronously at top of next loop tick
-        // so no stale frames can play after this returns
+        Interlocked.Increment(ref _clearEpoch);  // epoch guard: frames dequeued before this are stale
         Volatile.Write(ref _clearRequested, true);
         lock (_accLock) _accCount = 0;
     }
@@ -200,8 +200,9 @@ public sealed class ALawRtpPlayout : IDisposable
                 if (_useTimer && waitNs > 1_000_000)
                 {
                     long due = -(waitNs / 100);
+                    uint waitMs = (uint)Math.Clamp(waitNs / 1_000_000, 1, 50);
                     if (SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
-                        WaitForSingleObject(_timer, 100);
+                        WaitForSingleObject(_timer, waitMs);
                 }
                 else if (waitNs > 2_000_000)
                 {
@@ -226,11 +227,11 @@ public sealed class ALawRtpPlayout : IDisposable
 
     private void TickOnce()
     {
+        int epoch = Volatile.Read(ref _clearEpoch);
         int q = Volatile.Read(ref _queueCount);
 
         if (_buffering)
         {
-            // Fix #4: use deeper threshold on cold start, shallow on mid-stream resume
             int threshold = _hasPlayedAudio ? ResumeThresholdFrames : ColdStartThresholdFrames;
             if (q < threshold)
             {
@@ -244,13 +245,21 @@ public sealed class ALawRtpPlayout : IDisposable
         if (_q.TryDequeue(out var frame))
         {
             Interlocked.Decrement(ref _queueCount);
+
+            // Epoch guard: if Clear() fired since we entered this tick, drop the stale frame
+            if (epoch != Volatile.Read(ref _clearEpoch))
+            {
+                ReturnFrame(frame);
+                _buffering = true;
+                return;
+            }
+
             Send(frame);
             ReturnFrame(frame);
 
             if (Volatile.Read(ref _queueCount) == 0)
             {
                 _buffering = true;
-                // Fix #3: only fire OnQueueEmpty after real audio has played
                 try { OnQueueEmpty?.Invoke(); } catch { }
             }
         }
@@ -258,7 +267,6 @@ public sealed class ALawRtpPlayout : IDisposable
         {
             _buffering = true;
             Send(_silence);
-            // Fix #3: only fire if we've played real audio — prevents spam during startup fill
             if (_hasPlayedAudio)
             {
                 try { OnQueueEmpty?.Invoke(); } catch { }
