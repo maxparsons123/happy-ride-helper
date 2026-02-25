@@ -3547,6 +3547,7 @@ public sealed class CallSession : ICallSession
         _booking.PickupPostalCode = result.PickupPostalCode;
         _booking.PickupCity = result.PickupCity;
         _booking.PickupFormatted = result.PickupFormatted;
+        _booking.PickupArea = result.PickupArea;
         _booking.DestLat = result.DestLat;
         _booking.DestLon = result.DestLon;
         _booking.DestStreet = result.DestStreet;
@@ -3554,6 +3555,7 @@ public sealed class CallSession : ICallSession
         _booking.DestPostalCode = result.DestPostalCode;
         _booking.DestCity = result.DestCity;
         _booking.DestFormatted = result.DestFormatted;
+        _booking.DestArea = result.DestArea;
     }
 
     private void ApplyFareResultNullSafe(FareResult result)
@@ -3565,6 +3567,7 @@ public sealed class CallSession : ICallSession
         _booking.PickupPostalCode ??= result.PickupPostalCode;
         _booking.PickupCity ??= result.PickupCity;
         _booking.PickupFormatted ??= result.PickupFormatted;
+        _booking.PickupArea ??= result.PickupArea;
         _booking.DestLat ??= result.DestLat;
         _booking.DestLon ??= result.DestLon;
         _booking.DestStreet ??= result.DestStreet;
@@ -3572,6 +3575,7 @@ public sealed class CallSession : ICallSession
         _booking.DestPostalCode ??= result.DestPostalCode;
         _booking.DestCity ??= result.DestCity;
         _booking.DestFormatted ??= result.DestFormatted;
+        _booking.DestArea ??= result.DestArea;
         _booking.Fare ??= result.Fare;
         _booking.Eta ??= result.Eta;
 

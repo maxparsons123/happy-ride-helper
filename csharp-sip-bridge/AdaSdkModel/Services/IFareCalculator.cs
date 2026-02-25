@@ -25,6 +25,11 @@ public sealed class FareResult
     public string? DestCity { get; set; }
     public string? DestFormatted { get; set; }
 
+    /// <summary>Resolved area/district for pickup from zone_pois (e.g. "Foleshill").</summary>
+    public string? PickupArea { get; set; }
+    /// <summary>Resolved area/district for destination from zone_pois.</summary>
+    public string? DestArea { get; set; }
+
     public bool NeedsClarification { get; set; }
     public string[]? PickupAlternatives { get; set; }
     public string[]? DestAlternatives { get; set; }

@@ -762,6 +762,7 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
         continue;
       } else if (zonePoiAreas.length === 1) {
         console.log(`✅ zone_pois: "${streetName}" uniquely in ${zonePoiAreas[0]} — no disambiguation needed`);
+        parsed[side].resolved_area = zonePoiAreas[0];
         continue;
       } else if (userNamedZoneArea) {
         console.log(`✅ zone_pois: user named a matching area for "${streetName}" — no disambiguation needed`);
