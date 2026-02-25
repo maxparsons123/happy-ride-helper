@@ -701,7 +701,7 @@ public sealed class OpenAiSdkClientHighSample : IOpenAiClient, IAsyncDisposable
                 var result = await OnToolCall(toolName, args);
                 var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
 
-                Log($"✅ Tool result: {(resultJson.Length > 120 ? resultJson[..120] + "..." : resultJson)}");
+                Log($"✅ Tool result: {(resultJson.Length > 500 ? resultJson[..500] + "..." : resultJson)}");
 
                 if (toolName == "sync_booking_data")
                     Interlocked.Increment(ref _syncCallCount);
