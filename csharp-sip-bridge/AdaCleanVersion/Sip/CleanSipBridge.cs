@@ -27,7 +27,7 @@ namespace AdaCleanVersion.Sip;
 /// </summary>
 public class CleanSipBridge : IDisposable
 {
-    private const int CircuitBreakerThreshold = 10;
+    private readonly int _circuitBreakerThreshold;
 
     private readonly ILogger _logger;
     private readonly CleanAppSettings _settings;
@@ -69,6 +69,7 @@ public class CleanSipBridge : IDisposable
         _extractionService = extractionService;
         _fareService = fareService;
         _callerLookup = callerLookup;
+        _circuitBreakerThreshold = Math.Max(1, settings.Rtp.CircuitBreakerThreshold);
     }
 
     /// <summary>Internal: called by factory to proxy audio events from OpenAiRealtimeClient.</summary>
@@ -348,7 +349,7 @@ public class CleanSipBridge : IDisposable
             if (failures == 1 || failures % 5 == 0)
                 Log($"⚠ RTP send failure #{failures} for {callId}: {ex.Message}");
 
-            if (failures >= CircuitBreakerThreshold)
+            if (failures >= _circuitBreakerThreshold)
             {
                 Log($"🔌 RTP circuit breaker tripped for {callId} after {failures} consecutive failures — ending call");
                 if (_activeCalls.TryRemove(callId, out var tripped))
