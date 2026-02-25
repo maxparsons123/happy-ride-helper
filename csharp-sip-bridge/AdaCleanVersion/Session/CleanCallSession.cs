@@ -20,6 +20,7 @@ public class CleanCallSession
     private readonly IExtractionService _extractionService;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
+    private readonly HashSet<string> _changedSlots = new();
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -123,6 +124,9 @@ public class CleanCallSession
         var oldValue = _engine.RawData.GetSlot(slotName);
         _engine.CorrectSlot(slotName, newValue);
 
+        // Track which slot changed for update extraction
+        _changedSlots.Add(slotName);
+
         var instruction = PromptBuilder.BuildCorrectionInstruction(
             slotName, oldValue ?? "", newValue);
         OnAiInstruction?.Invoke(instruction);
@@ -131,7 +135,11 @@ public class CleanCallSession
         if (_engine.RawData.AllRequiredPresent &&
             _engine.State < CollectionState.ReadyForExtraction)
         {
-            await RunExtractionAsync(ct);
+            // If we already have a structured result, use update extraction
+            if (_engine.StructuredResult != null && _changedSlots.Count > 0)
+                await RunUpdateExtractionAsync(ct);
+            else
+                await RunExtractionAsync(ct);
         }
     }
 
@@ -198,6 +206,42 @@ public class CleanCallSession
         catch (Exception ex)
         {
             Log($"Extraction error: {ex.Message}");
+            _engine.ExtractionFailed(ex.Message);
+            EmitCurrentInstruction();
+        }
+    }
+
+    private async Task RunUpdateExtractionAsync(CancellationToken ct)
+    {
+        var previousBooking = _engine.StructuredResult!;
+        _engine.BeginExtraction();
+        EmitCurrentInstruction();
+
+        try
+        {
+            var request = _engine.BuildExtractionRequest(_callerContext);
+            Log($"Update extraction for changed slots: {string.Join(", ", _changedSlots)}");
+
+            var result = await _extractionService.ExtractUpdateAsync(
+                request, previousBooking, _changedSlots, ct);
+
+            _changedSlots.Clear();
+
+            if (result.Success && result.Booking != null)
+            {
+                _engine.CompleteExtraction(result.Booking);
+                OnBookingReady?.Invoke(result.Booking);
+                EmitCurrentInstruction();
+            }
+            else
+            {
+                _engine.ExtractionFailed(result.Error ?? "Unknown update extraction error");
+                EmitCurrentInstruction();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Update extraction error: {ex.Message}");
             _engine.ExtractionFailed(ex.Message);
             EmitCurrentInstruction();
         }

@@ -38,6 +38,17 @@ public class EdgeFunctionExtractionService : IExtractionService
         _httpClient = httpClient ?? new HttpClient();
     }
 
+    public async Task<ExtractionResult> ExtractUpdateAsync(
+        ExtractionRequest request,
+        StructuredBooking existingBooking,
+        IReadOnlySet<string> changedSlots,
+        CancellationToken ct = default)
+    {
+        // Fallback: re-run full extraction for the edge function implementation
+        _logger.LogInformation("[Extraction] Update fallback — running full re-extraction");
+        return await ExtractAsync(request, ct);
+    }
+
     public async Task<ExtractionResult> ExtractAsync(ExtractionRequest request, CancellationToken ct = default)
     {
         try
