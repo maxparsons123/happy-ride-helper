@@ -519,6 +519,7 @@ public partial class MainForm : Form
         if (!_settings.Simli.Enabled)
         {
             Log("🎭 Simli disabled — skipping avatar connection");
+            SafeInvoke(() => UpdateSimliStatus("Disabled", Color.Gray));
             return;
         }
 
@@ -531,18 +532,27 @@ public partial class MainForm : Form
         if (_simliAvatar == null)
         {
             Log("🎭 Simli still null after retry — skipping avatar");
+            SafeInvoke(() => UpdateSimliStatus("Init Failed", Color.FromArgb(220, 53, 69)));
             return;
         }
 
+        SafeInvoke(() => UpdateSimliStatus("Connecting…", Color.FromArgb(255, 152, 0)));
         try { await _simliAvatar.ConnectAsync(); }
-        catch (Exception ex) { Log($"🎭 Simli connect error: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log($"🎭 Simli connect error: {ex.Message}");
+            SafeInvoke(() => UpdateSimliStatus("Error", Color.FromArgb(220, 53, 69)));
+            return;
+        }
 
+        SafeInvoke(() => UpdateSimliStatus("● Connected", Color.FromArgb(40, 167, 69)));
         StartSimliFeeder();
     }
 
     private async Task DisconnectSimliAsync()
     {
         StopSimliFeeder();
+        SafeInvoke(() => UpdateSimliStatus("● Offline", Color.Gray));
         if (_simliAvatar == null) return;
         try { await _simliAvatar.DisconnectAsync(); }
         catch (Exception ex) { Log($"🎭 Simli disconnect error: {ex.Message}"); }
@@ -559,6 +569,7 @@ public partial class MainForm : Form
         }
         try
         {
+            SafeInvoke(() => UpdateSimliStatus("Reconnecting…", Color.FromArgb(255, 152, 0)));
             await DisconnectSimliAsync();
             await Task.Delay(800);
             await ConnectSimliAsync();
@@ -566,6 +577,13 @@ public partial class MainForm : Form
         }
         catch (Exception ex) { Log($"🎭 Simli reconnect error: {ex.Message}"); }
         finally { Interlocked.Exchange(ref _simliReconnectGuard, 0); }
+    }
+
+    private void UpdateSimliStatus(string text, Color color)
+    {
+        if (lblSimliStatus == null) return;
+        lblSimliStatus.Text = text;
+        lblSimliStatus.ForeColor = color;
     }
 
     private void StartSimliFeeder()
