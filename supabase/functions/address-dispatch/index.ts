@@ -764,14 +764,36 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
           }
         }
       } else {
-        // POI / landmark — no house number, no street suffix = POI coords ARE the ground truth
+        // POI / landmark — no house number, no street suffix
         addr.match_type = "poi";
         if (match.lat != null && match.lng != null) {
           addr.poi_lat = match.lat;
           addr.poi_lng = match.lng;
-          addr.lat = match.lat;
-          addr.lon = match.lng;
-          console.log(`📌 ${side}: [poi] using POI coords as final (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — landmark, skipping Nominatim`);
+          const hasGeminiCoords = addr.lat != null && addr.lon != null && addr.lat !== 0 && addr.lon !== 0;
+
+          if (hasGeminiCoords) {
+            // Validate Gemini coords against POI coords
+            const driftMiles = haversineDistanceMiles(addr.lat, addr.lon, match.lat, match.lng);
+            addr.poi_drift_miles = Math.round(driftMiles * 100) / 100;
+
+            if (driftMiles <= 0.5) {
+              // Close enough — trust Gemini's more precise coords
+              addr.coord_source = "gemini";
+              console.log(`📌 ${side}: [poi] Gemini coords trusted (drift ${driftMiles.toFixed(2)}mi from POI "${match.poi_name}") — within 0.5mi threshold`);
+            } else {
+              // Too far — Gemini likely resolved wrong location, use POI coords
+              addr.coord_source = "zone_pois";
+              console.log(`⚠️ ${side}: [poi] Gemini coords REJECTED (drift ${driftMiles.toFixed(2)}mi from POI "${match.poi_name}") — falling back to POI coords`);
+              addr.lat = match.lat;
+              addr.lon = match.lng;
+            }
+          } else {
+            // No Gemini coords — use POI coords as final
+            addr.coord_source = "zone_pois";
+            addr.lat = match.lat;
+            addr.lon = match.lng;
+            console.log(`📌 ${side}: [poi] using POI coords as final (${match.lat.toFixed(5)}, ${match.lng.toFixed(5)}) from "${match.poi_name}" — Gemini had no coords`);
+          }
         }
       }
     }

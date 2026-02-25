@@ -22,6 +22,8 @@ interface AddressResult {
   resolved_area?: string;
   matched_from_history?: boolean;
   match_type?: "poi" | "street" | "residential";
+  coord_source?: "gemini" | "zone_pois";
+  poi_drift_miles?: number;
 }
 
 interface DispatchResponse {
@@ -296,12 +298,33 @@ function AddressCard({ title, icon, address, color }: { title: string; icon: str
             <>
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground w-20">Final Coords:</span>
-                <span className="font-mono font-bold text-green-600 dark:text-green-400">
+                <span className={`font-mono font-bold ${address.coord_source === "gemini" ? "" : "text-green-600 dark:text-green-400"}`}>
                   {address.lat != null ? `${address.lat.toFixed(5)}, ${address.lon?.toFixed(5)}` : "—"}
                 </span>
-                <Badge className="text-[10px] bg-green-600">zone_pois ✓</Badge>
+                <Badge className={`text-[10px] ${address.coord_source === "gemini" ? "bg-blue-600" : "bg-green-600"}`}>
+                  {address.coord_source === "gemini" ? "Gemini ✓" : "zone_pois ✓"}
+                </Badge>
               </div>
-              <p className="text-muted-foreground italic">POI branch — coords from zone_pois used as final (no Nominatim needed)</p>
+              {hasPoiCoords && (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground w-20">POI Check:</span>
+                  <span className="font-mono text-muted-foreground">
+                    {address.poi_lat!.toFixed(5)}, {address.poi_lng!.toFixed(5)}
+                  </span>
+                  {address.poi_drift_miles != null && (
+                    <Badge variant="outline" className={`text-[10px] ${address.poi_drift_miles <= 0.5 ? "border-green-500 text-green-600" : "border-red-500 text-red-600"}`}>
+                      {address.poi_drift_miles <= 0.5 ? "✓" : "⚠️"} drift: {address.poi_drift_miles.toFixed(2)}mi
+                    </Badge>
+                  )}
+                </div>
+              )}
+              <p className="text-muted-foreground italic">
+                {address.coord_source === "gemini"
+                  ? `POI branch — Gemini coords trusted (${address.poi_drift_miles?.toFixed(2) ?? "?"}mi from POI, within threshold)`
+                  : address.poi_drift_miles != null
+                    ? `POI branch — Gemini coords rejected (${address.poi_drift_miles.toFixed(2)}mi drift), using zone_pois`
+                    : "POI branch — no Gemini coords, using zone_pois as final"}
+              </p>
             </>
           ) : (
             <>
