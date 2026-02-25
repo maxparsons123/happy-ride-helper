@@ -53,6 +53,14 @@ public class CleanCallSession
     public void Start()
     {
         Log($"Call started: {CallerId}");
+
+        // Auto-fill name for returning callers
+        if (_callerContext?.IsReturningCaller == true && !string.IsNullOrWhiteSpace(_callerContext.CallerName))
+        {
+            _engine.RawData.SetSlot("name", _callerContext.CallerName);
+            Log($"Auto-filled name from caller history: {_callerContext.CallerName}");
+        }
+
         _engine.BeginCollection();
         EmitCurrentInstruction();
     }
@@ -135,7 +143,7 @@ public class CleanCallSession
     /// <summary>
     /// Get the system prompt for the AI voice interface.
     /// </summary>
-    public string GetSystemPrompt() => PromptBuilder.BuildSystemPrompt(_companyName);
+    public string GetSystemPrompt() => PromptBuilder.BuildSystemPrompt(_companyName, _callerContext);
 
     // ─── Private ─────────────────────────────────────────────
 
@@ -209,7 +217,7 @@ public class CleanCallSession
 
     private void EmitCurrentInstruction()
     {
-        var instruction = PromptBuilder.BuildInstruction(_engine.State, _engine.RawData);
+        var instruction = PromptBuilder.BuildInstruction(_engine.State, _engine.RawData, _callerContext);
         OnAiInstruction?.Invoke(instruction);
     }
 
