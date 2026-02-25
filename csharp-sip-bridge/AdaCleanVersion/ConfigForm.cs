@@ -14,11 +14,12 @@ public sealed class ConfigForm : Form
     private TextBox txtOpenAiKey = null!, txtOpenAiModel = null!, txtOpenAiVoice = null!;
     private TextBox txtBsqdWebhook = null!, txtBsqdApiKey = null!, txtWhatsAppWebhook = null!;
     private ComboBox cmbCodec = null!;
-    private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!;
+    private NumericUpDown nudVolumeBoost = null!, nudEchoGuard = null!, nudCircuitBreaker = null!;
     private CheckBox chkDiagnostics = null!;
     private TextBox txtSupabaseUrl = null!, txtSupabaseKey = null!, txtSupabaseServiceKey = null!;
     private TextBox txtSimliApiKey = null!, txtSimliFaceId = null!;
     private CheckBox chkSimliEnabled = null!;
+    private NumericUpDown nudMaxSimliReconnect = null!;
     private TextBox txtCompanyName = null!;
 
     public ConfigForm(CleanAppSettings settings)
@@ -69,7 +70,12 @@ public sealed class ConfigForm : Form
         var lblEcho = new Label { Text = "Echo Guard (ms):", Location = new Point(15, 89), AutoSize = true };
         nudEchoGuard = new NumericUpDown { Location = new Point(120, 86), Size = new Size(80, 23), Minimum = 0, Maximum = 1000, Increment = 50, BackColor = bgInput, ForeColor = fgInput };
         chkDiagnostics = new CheckBox { Text = "Enable audio diagnostics logging", Location = new Point(15, 122), AutoSize = true, ForeColor = fgInput };
-        tabAudio.Controls.AddRange(new Control[] { lblCodec, cmbCodec, lblVol, nudVolumeBoost, lblEcho, nudEchoGuard, chkDiagnostics });
+
+        var lblCb = new Label { Text = "CB Threshold:", Location = new Point(15, 155), AutoSize = true };
+        nudCircuitBreaker = new NumericUpDown { Location = new Point(120, 152), Size = new Size(80, 23), Minimum = 1, Maximum = 100, Increment = 1, BackColor = bgInput, ForeColor = fgInput };
+        var lblCbHint = new Label { Text = "Consecutive RTP failures before call end", Location = new Point(210, 155), AutoSize = true, ForeColor = Color.FromArgb(150, 150, 150), Font = new Font("Segoe UI", 7.5F) };
+
+        tabAudio.Controls.AddRange(new Control[] { lblCodec, cmbCodec, lblVol, nudVolumeBoost, lblEcho, nudEchoGuard, chkDiagnostics, lblCb, nudCircuitBreaker, lblCbHint });
 
         // ── Backend Tab ──
         var tabBackend = new TabPage("☁ Backend") { BackColor = BackColor };
@@ -82,7 +88,12 @@ public sealed class ConfigForm : Form
         txtSimliApiKey = AddField(tabSimli, "API Key:", 20, bgInput, fgInput, masked: true);
         txtSimliFaceId = AddField(tabSimli, "Face ID:", 60, bgInput, fgInput);
         chkSimliEnabled = new CheckBox { Text = "Enable Simli avatar during calls", Location = new Point(15, 100), AutoSize = true, ForeColor = fgInput };
-        tabSimli.Controls.Add(chkSimliEnabled);
+
+        var lblMaxRecon = new Label { Text = "Max Reconnects:", Location = new Point(15, 133), AutoSize = true };
+        nudMaxSimliReconnect = new NumericUpDown { Location = new Point(120, 130), Size = new Size(80, 23), Minimum = 0, Maximum = 50, Increment = 1, BackColor = bgInput, ForeColor = fgInput };
+        var lblReconHint = new Label { Text = "0 = unlimited", Location = new Point(210, 133), AutoSize = true, ForeColor = Color.FromArgb(150, 150, 150), Font = new Font("Segoe UI", 7.5F) };
+
+        tabSimli.Controls.AddRange(new Control[] { chkSimliEnabled, lblMaxRecon, nudMaxSimliReconnect, lblReconHint });
 
         // ── Company Tab ──
         var tabCompany = new TabPage("🚕 Company") { BackColor = BackColor };
@@ -129,12 +140,14 @@ public sealed class ConfigForm : Form
         nudVolumeBoost.Value = (decimal)Settings.Audio.VolumeBoost;
         nudEchoGuard.Value = Settings.Audio.EchoGuardMs;
         chkDiagnostics.Checked = Settings.Audio.EnableDiagnostics;
+        nudCircuitBreaker.Value = Settings.Rtp.CircuitBreakerThreshold;
         txtSupabaseUrl.Text = Settings.Supabase.Url;
         txtSupabaseKey.Text = Settings.Supabase.AnonKey;
         txtSupabaseServiceKey.Text = Settings.Supabase.ServiceRoleKey;
         txtSimliApiKey.Text = Settings.Simli.ApiKey;
         txtSimliFaceId.Text = Settings.Simli.FaceId;
         chkSimliEnabled.Checked = Settings.Simli.Enabled;
+        nudMaxSimliReconnect.Value = Settings.Rtp.MaxSimliReconnectAttempts;
         txtCompanyName.Text = Settings.Taxi.CompanyName;
     }
 
@@ -150,12 +163,14 @@ public sealed class ConfigForm : Form
         Settings.Audio.VolumeBoost = (double)nudVolumeBoost.Value;
         Settings.Audio.EchoGuardMs = (int)nudEchoGuard.Value;
         Settings.Audio.EnableDiagnostics = chkDiagnostics.Checked;
+        Settings.Rtp.CircuitBreakerThreshold = (int)nudCircuitBreaker.Value;
         Settings.Supabase.Url = txtSupabaseUrl.Text.Trim();
         Settings.Supabase.AnonKey = txtSupabaseKey.Text.Trim();
         Settings.Supabase.ServiceRoleKey = txtSupabaseServiceKey.Text.Trim();
         Settings.Simli.ApiKey = txtSimliApiKey.Text.Trim();
         Settings.Simli.FaceId = txtSimliFaceId.Text.Trim();
         Settings.Simli.Enabled = chkSimliEnabled.Checked;
+        Settings.Rtp.MaxSimliReconnectAttempts = (int)nudMaxSimliReconnect.Value;
         Settings.Taxi.CompanyName = txtCompanyName.Text.Trim();
     }
 
