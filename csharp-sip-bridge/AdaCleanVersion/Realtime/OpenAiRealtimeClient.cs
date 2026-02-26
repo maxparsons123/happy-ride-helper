@@ -192,7 +192,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _micGatedAtTick = Environment.TickCount64;
 
         // Arm stuck-mic watchdog: if mic stays gated >5s with buffered audio, force-flush
-        _stuckMicTimer ??= new Timer(_ => OnStuckMicCheck(), null, Timeout.Infinite, Timeout.Infinite);
+        _stuckMicTimer ??= new System.Threading.Timer(_ => OnStuckMicCheck(), null, Timeout.Infinite, Timeout.Infinite);
         _stuckMicTimer.Change(3000, Timeout.Infinite); // single-shot 3s
     }
 
