@@ -419,6 +419,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             case "error":
                 var errMsg = doc.RootElement.GetProperty("error")
                     .GetProperty("message").GetString();
+                // "no active response found" is harmless — cancel was sent but response already finished
+                if (errMsg != null && errMsg.Contains("no active response found"))
+                    break;
                 Log($"⚠ OpenAI error: {errMsg}");
                 break;
 
