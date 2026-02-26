@@ -468,14 +468,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 OnBargeIn?.Invoke();
                 break;
 
-            // ── Speech ended: commit audio buffer for deterministic transcription ──
-            // Only commit if there's likely audio in the buffer (we were not mic-gated)
+            // ── Speech ended ──
+            // No manual commit needed — server_vad handles segmentation automatically.
+            // Manual commit was causing "buffer too small" errors and audio glitches.
             case "input_audio_buffer.speech_stopped":
-                if (!_micGated)
-                {
-                    try { await SendJsonAsync(new { type = "input_audio_buffer.commit" }); }
-                    catch { /* buffer may be empty — harmless */ }
-                }
                 break;
 
             // ── Cancel confirmed: now safe to send pending instruction ──
