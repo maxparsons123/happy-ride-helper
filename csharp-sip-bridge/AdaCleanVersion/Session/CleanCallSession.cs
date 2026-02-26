@@ -25,11 +25,8 @@ public class CleanCallSession
     private int _clarificationAttempts; // loop-breaker counter
 
     // ─── Ada Transcript Tracking (Source of Truth) ─────────────
-    // Ada's spoken responses are the authoritative interpretation of caller input.
-    // We track which slot was being collected when Ada responded, so we can
-    // refine the raw slot value with Ada's confirmed interpretation.
+    // Ada's spoken responses are accumulated for extraction context.
     private readonly List<string> _adaTranscripts = new();
-    private string? _lastSlotCollected;  // Which slot was just filled before Ada responded
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -105,7 +102,7 @@ public class CleanCallSession
         if (correction != null)
         {
             Log($"Correction detected: {correction.SlotName} → \"{correction.NewValue}\"");
-            _lastSlotCollected = correction.SlotName; // Track for Ada refinement
+            // Correction will be re-extracted by StructureOnlyEngine with Ada context
             await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
             return;
         }
@@ -114,7 +111,7 @@ public class CleanCallSession
         if (currentSlot == null)
         {
             // All slots filled — might be a correction or confirmation
-            _lastSlotCollected = null;
+            // All slots filled
             await HandlePostCollectionInput(transcript, ct);
             return;
         }
@@ -149,9 +146,6 @@ public class CleanCallSession
             valueToStore = resolved.ResolvedAddress;
         }
 
-        // Track which slot was just filled (Ada's next response will refine this)
-        _lastSlotCollected = currentSlot;
-
         // Store raw (or alias-resolved) value for current slot
         var nextSlot = _engine.AcceptSlotValue(currentSlot, valueToStore);
 
@@ -168,32 +162,26 @@ public class CleanCallSession
 
     /// <summary>
     /// Process Ada's spoken response transcript.
-    /// Ada's interpretation is the source of truth — her echo-back refines raw slot values.
+    /// Ada's interpretation is stored for extraction context only.
     /// Called from OpenAiRealtimeClient on response.audio_transcript.done.
+    /// 
+    /// NOTE: We no longer use AdaSlotRefiner to overwrite raw slot values.
+    /// The refiner was causing slot corruption because:
+    ///   1. Ada's response often mentions the caller's name ("Thank you, Max") which
+    ///      the NamePattern would extract and overwrite the CURRENT slot (e.g., pickup).
+    ///   2. Ada's response wraps addresses in context ("your destination as 7 Russell Street")
+    ///      which the AddressConfirmPattern would extract with the wrapper text.
+    ///   3. With Task.Run decoupling, timing of _lastSlotCollected is unpredictable.
+    /// 
+    /// Instead, Ada's transcripts are accumulated and fed to StructureOnlyEngine
+    /// as extraction context, which does the proper semantic parsing.
     /// </summary>
     public void ProcessAdaTranscript(string adaText)
     {
         if (string.IsNullOrWhiteSpace(adaText)) return;
 
-        // Store for extraction context
+        // Store for extraction context only — no slot overwriting
         _adaTranscripts.Add(adaText);
-
-        // If Ada just responded after a slot was filled, refine the slot value
-        // using Ada's interpretation (she's more reliable than raw Whisper STT)
-        if (_lastSlotCollected != null)
-        {
-            var refinedValue = AdaSlotRefiner.ExtractSlotValue(_lastSlotCollected, adaText);
-            if (refinedValue != null)
-            {
-                var oldValue = _engine.RawData.GetSlot(_lastSlotCollected);
-                if (oldValue != refinedValue)
-                {
-                    Log($"Ada refined slot '{_lastSlotCollected}': \"{oldValue}\" → \"{refinedValue}\"");
-                    _engine.RawData.SetSlot(_lastSlotCollected, refinedValue);
-                }
-            }
-            _lastSlotCollected = null;
-        }
     }
 
     /// <summary>
