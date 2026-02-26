@@ -130,11 +130,28 @@ public class CleanCallSession
         var validationError = SlotValidator.Validate(currentSlot, transcript);
         if (validationError != null)
         {
+            // For passengers, try Ada's interpretation as fallback before rejecting.
+            // STT often garbles numbers (e.g., "four passengers" → "poor passengers")
+            // but Ada's spoken response usually has the correct number.
+            if (currentSlot == "passengers" && validationError == "no_number_found")
+            {
+                var adaFallback = TryExtractPassengersFromAdaContext(transcript);
+                if (adaFallback != null)
+                {
+                    Log($"Passengers recovered from Ada interpretation: \"{transcript}\" → \"{adaFallback}\"");
+                    valueToStore = adaFallback;
+                    // Fall through to normal slot acceptance below
+                    goto acceptSlot;
+                }
+            }
+
             Log($"Slot '{currentSlot}' rejected: \"{transcript}\" (reason: {validationError})");
             // Emit a re-prompt instruction (different from the original ask)
             EmitRepromptInstruction(validationError);
             return;
         }
+
+        acceptSlot:
 
         var valueToStore = transcript;
 
@@ -701,4 +718,67 @@ public class CleanCallSession
     }
 
     private void Log(string msg) => OnLog?.Invoke($"[Session:{SessionId}] {msg}");
+
+    /// <summary>
+    /// Try to extract a passenger count from Ada's recent transcript context.
+    /// Ada's interpretation is authoritative — if she said "four passengers"
+    /// but STT heard "poor passengers", we trust Ada.
+    /// </summary>
+    private string? TryExtractPassengersFromAdaContext(string rawCallerStt)
+    {
+        // Check Ada's last few transcripts for a number
+        var recentAda = _adaTranscripts.TakeLast(3);
+
+        // Also check the raw STT phonetically — "poor" ≈ "four", "tree" ≈ "three", etc.
+        var phoneticMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "poor", "four" }, { "pour", "four" }, { "for", "four" },
+            { "tree", "three" }, { "free", "three" },
+            { "to", "two" }, { "too", "two" }, { "tue", "two" },
+            { "won", "one" }, { "wan", "one" },
+            { "sex", "six" }, { "sax", "six" },
+            { "ate", "eight" }, { "ape", "eight" },
+        };
+
+        var numberWords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "one", "1" }, { "two", "2" }, { "three", "3" }, { "four", "4" },
+            { "five", "5" }, { "six", "6" }, { "seven", "7" }, { "eight", "8" },
+        };
+
+        // First: try phonetic correction on the raw caller STT
+        var callerWords = rawCallerStt.ToLowerInvariant()
+            .TrimEnd('.', '!', '?', ',')
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var word in callerWords)
+        {
+            if (phoneticMap.TryGetValue(word, out var corrected) &&
+                numberWords.TryGetValue(corrected, out var digit))
+            {
+                return $"{corrected} passengers";
+            }
+        }
+
+        // Second: scan Ada's recent transcripts for number words
+        foreach (var adaLine in recentAda.Reverse())
+        {
+            var adaLower = adaLine.ToLowerInvariant();
+            foreach (var (word, digit) in numberWords)
+            {
+                if (adaLower.Contains(word) || adaLower.Contains(digit))
+                {
+                    return $"{word} passengers";
+                }
+            }
+            // Also check for digit patterns
+            var digitMatch = System.Text.RegularExpressions.Regex.Match(adaLower, @"\b(\d)\b");
+            if (digitMatch.Success)
+            {
+                return $"{digitMatch.Value} passengers";
+            }
+        }
+
+        return null;
+    }
 }
