@@ -431,8 +431,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 break;
 
             // ── Speech ended: commit audio buffer for deterministic transcription ──
+            // Only commit if there's likely audio in the buffer (we were not mic-gated)
             case "input_audio_buffer.speech_stopped":
-                await SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                if (!_micGated)
+                {
+                    try { await SendJsonAsync(new { type = "input_audio_buffer.commit" }); }
+                    catch { /* buffer may be empty — harmless */ }
+                }
                 break;
 
             // ── Cancel confirmed: now safe to send pending instruction ──
@@ -444,8 +449,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             case "error":
                 var errMsg = doc.RootElement.GetProperty("error")
                     .GetProperty("message").GetString();
-                // "no active response found" is harmless
-                if (errMsg != null && errMsg.Contains("no active response found"))
+                // Suppress harmless errors
+                if (errMsg != null && (
+                    errMsg.Contains("no active response found") ||
+                    errMsg.Contains("buffer too small")))
                     break;
                 Log($"⚠ OpenAI error: {errMsg}");
                 break;
@@ -482,13 +489,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
-        // CRITICAL: Cancel any auto-response OpenAI started (based on old instructions)
-        // and clear the playout buffer so the caller doesn't hear stale audio.
-        try
-        {
-            await SendJsonAsync(new { type = "response.cancel" });
-        }
-        catch { /* best effort */ }
+        // Cancel any auto-response and clear playout BEFORE processing.
+        // The instruction sequence will send its own cancel+response.create,
+        // so we DON'T fire a separate cancel here — just clear playout.
         _playout.Clear();
 
         try
