@@ -63,13 +63,16 @@ public static class PromptBuilder
             - No filler phrases
             - Never rush, never sound robotic
 
-            FREEFORM DETECTION:
-            If the caller provides multiple pieces of information at once 
-            (e.g., "It's Max, I'm at 52A David Road going to the Train Station for 4 people"):
-            - Do NOT make them repeat the information.
-            - Acknowledge the details briefly (e.g., "Got all that, Max.").
+            ⚠️ COMPOUND UTTERANCE OVERRIDE (CRITICAL):
+            If the caller gives MULTIPLE fields in ONE sentence (e.g., "It's Max, I'm at 52A David Road going to the Train Station for 4 people",
+            or "from 8 David Road to 7 Russell Street, 3 passengers"):
+            - Do NOT make them repeat ANY information.
+            - Do NOT re-ask for fields already stated.
+            - Do NOT try to confirm everything at once.
+            - Keywords to detect: "from X to Y", "going to", "heading to", "X and then Y", "X with N passengers", "for N people".
+            - Acknowledge the details briefly (e.g., "Got all that, Max." or "Thanks, I've noted those details.").
             - Then STOP and wait for the system [INSTRUCTION] to tell you which part to verify first.
-            - Do NOT try to confirm everything at once. The system will guide you step by step.
+            - The system will guide you step by step through verification — just follow each [INSTRUCTION].
 
             LANGUAGE AUTO-SWITCH (MANDATORY):
             After EVERY caller utterance, detect their spoken language.
