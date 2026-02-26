@@ -306,7 +306,7 @@ public class CleanSipBridge : IDisposable
             Log($"⏱ RTP timeout for {callId} (media={mediaType}) — treating as call end");
             if (_activeCalls.TryRemove(callId, out var timedOut))
             {
-                timedOut.Session.EndCall();
+                timedOut.Session.EndCall(force: true);
                 timedOut.RtpSession?.Close(null);
                 OnCallEnded?.Invoke(callId);
             }
@@ -319,7 +319,7 @@ public class CleanSipBridge : IDisposable
             {
                 var duration = (DateTime.UtcNow - removed.StartTime).TotalSeconds;
                 Log($"📴 Call ended: {removed.CallerId} ({duration:F0}s) — {reason}");
-                removed.Session.EndCall();
+                removed.Session.EndCall(force: true);
                 OnCallEnded?.Invoke(callId);
             }
         };
@@ -450,7 +450,7 @@ public class CleanSipBridge : IDisposable
                 Log($"🔌 RTP circuit breaker tripped for {callId} after {failures} consecutive failures — ending call");
                 if (_activeCalls.TryRemove(callId, out var tripped))
                 {
-                    tripped.Session.EndCall();
+                    tripped.Session.EndCall(force: true);
                     tripped.RtpSession?.Close(null);
                     OnCallEnded?.Invoke(callId);
                 }

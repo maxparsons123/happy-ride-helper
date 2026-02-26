@@ -407,11 +407,12 @@ public class CleanCallSession
     public IcabbiBookingResult? IcabbiResult => _icabbiResult;
 
     /// <summary>
-    /// End the call.
+    /// End the call. Only forces ending if the caller explicitly hangs up.
+    /// Otherwise, the engine will block if slots are still missing.
     /// </summary>
-    public void EndCall()
+    public void EndCall(bool force = false)
     {
-        _engine.EndCall();
+        _engine.EndCall(force: force);
         EmitCurrentInstruction();
     }
 
@@ -744,6 +745,18 @@ public class CleanCallSession
     {
         Log($"Post-collection input: \"{transcript}\" (state: {_engine.State})");
 
+        // ── CRITICAL GATE: If slots are still missing, redirect to collection ──
+        // This prevents Ada from drifting into farewell/assistance mode.
+        var missingSlot = _engine.RawData.NextMissingSlot();
+        if (missingSlot != null && _engine.State < CollectionState.ReadyForExtraction)
+        {
+            Log($"⛔ Post-collection BLOCKED — slot '{missingSlot}' still missing. Redirecting to collection.");
+            // Force the engine back to the correct collection state
+            _engine.AcceptSlotValue(missingSlot, ""); // No-op, but ensures state is correct
+            EmitCurrentInstruction();
+            return;
+        }
+
         // Check for correction intent first — even post-collection
         var correction = CorrectionDetector.Detect(
             transcript, null, _engine.RawData.FilledSlots);
@@ -793,7 +806,7 @@ public class CleanCallSession
                          lower.Contains("never mind"))
                 {
                     Log($"Fare rejected — ending call");
-                    EndCall();
+                    EndCall(force: true); // Explicit rejection = allow ending
                 }
                 else if (lower.Contains("change") || lower.Contains("wrong") || lower.Contains("actually") ||
                          lower.Contains("different"))
@@ -817,12 +830,18 @@ public class CleanCallSession
                 if (lower.Contains("yes") || lower.Contains("confirm") || lower.Contains("book"))
                     ConfirmBooking();
                 else if (lower.Contains("no") || lower.Contains("cancel"))
-                    EndCall();
+                    EndCall(force: true); // Explicit rejection = allow ending
                 else
                     EmitCurrentInstruction();
                 break;
 
             default:
+                // ── SAFETY NET: If we somehow got here with missing slots, redirect ──
+                if (!_engine.RawData.AllRequiredPresent)
+                {
+                    var next = _engine.RawData.NextMissingSlot();
+                    Log($"⛔ Default handler with missing slots — redirecting to '{next}'");
+                }
                 EmitCurrentInstruction();
                 break;
         }

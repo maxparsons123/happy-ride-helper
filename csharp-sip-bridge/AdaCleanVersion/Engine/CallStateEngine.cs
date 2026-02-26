@@ -39,6 +39,10 @@ public class CallStateEngine
     /// Store a raw slot value and advance state if appropriate.
     /// For pickup/destination, transitions to VerifyingPickup/VerifyingDestination
     /// so the session can geocode inline before asking the next question.
+    /// 
+    /// CRITICAL GATE: The engine will NEVER advance past collection states
+    /// (to ReadyForExtraction or beyond) unless ALL required slots are filled.
+    /// This mirrors AdaSdkModel's BookingSnapshot.IsComplete pattern.
     /// </summary>
     /// <returns>The next slot to collect, or null if all slots are filled.</returns>
     public string? AcceptSlotValue(string slotName, string rawValue)
@@ -288,12 +292,20 @@ public class CallStateEngine
 
     /// <summary>
     /// Caller confirmed booking. Dispatch.
+    /// CRITICAL GATE: Also verifies all slots are filled before dispatching.
     /// </summary>
     public void ConfirmBooking()
     {
         if (State != CollectionState.AwaitingConfirmation)
         {
             Log($"Confirmation ignored in state {State}");
+            return;
+        }
+        if (!RawData.AllRequiredPresent)
+        {
+            Log($"⛔ Confirmation BLOCKED — slots still missing. Next: {RawData.NextMissingSlot()}");
+            var next = RawData.NextMissingSlot()!;
+            TransitionTo(SlotToState(next));
             return;
         }
         TransitionTo(CollectionState.Dispatched);
@@ -310,9 +322,17 @@ public class CallStateEngine
 
     /// <summary>
     /// End the call gracefully.
+    /// CRITICAL GATE: Refuses to end the call if slots are still missing
+    /// (unless force=true for hangup/disconnect scenarios).
     /// </summary>
-    public void EndCall()
+    public void EndCall(bool force = false)
     {
+        if (!force && !RawData.AllRequiredPresent && State < CollectionState.ReadyForExtraction)
+        {
+            Log($"EndCall BLOCKED — slots still missing. Next: {RawData.NextMissingSlot()}");
+            // Stay in current collection state, don't transition to Ending
+            return;
+        }
         TransitionTo(CollectionState.Ending);
     }
 
