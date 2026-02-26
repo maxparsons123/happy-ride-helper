@@ -163,6 +163,21 @@ public class CleanCallSession
             Log($"Name cleaned: \"{transcript}\" → \"{valueToStore}\"");
         }
 
+        // Normalize pickup time: "tomorrow at 5pm" → "2026-02-27 17:00", "now" → "ASAP"
+        if (currentSlot == "pickup_time")
+        {
+            var normalized = TimeNormalizer.Normalize(valueToStore);
+            if (normalized != null)
+            {
+                Log($"Time normalized: \"{valueToStore}\" → \"{normalized}\"");
+                valueToStore = normalized;
+            }
+            else
+            {
+                Log($"Time could not be normalized: \"{valueToStore}\" — storing raw");
+            }
+        }
+
         // Resolve aliases ("home", "work", "the usual") for address slots
         var resolved = AliasResolver.TryResolve(currentSlot, valueToStore, _callerContext);
         if (resolved != null)
