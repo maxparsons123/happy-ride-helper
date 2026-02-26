@@ -355,6 +355,15 @@ public class CallStateEngine
         };
     }
 
+    /// <summary>
+    /// Force engine into a specific state — used for address correction re-verification.
+    /// </summary>
+    public void ForceState(CollectionState newState)
+    {
+        Log($"Force state: {State} → {newState}");
+        TransitionTo(newState);
+    }
+
     private void TransitionTo(CollectionState newState)
     {
         var old = State;

@@ -382,14 +382,38 @@ public class CleanCallSession
 
     /// <summary>
     /// Correct a specific slot by name.
+    /// For address slots (pickup/destination), routes through verification → inline geocoding.
     /// </summary>
     public async Task CorrectSlotAsync(string slotName, string newValue, CancellationToken ct = default)
     {
+        // Strip trailing politeness from correction values ("sweetspot, please?" → "sweetspot")
+        newValue = System.Text.RegularExpressions.Regex.Replace(
+            newValue,
+            @"[,.]?\s*(?:please|thanks|thank you|cheers|ta)[?.!]*$",
+            "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim().TrimEnd('.', ',', '?', '!');
+
         var oldValue = _engine.RawData.GetSlot(slotName);
         _engine.CorrectSlot(slotName, newValue);
 
         // Track which slot changed for update extraction
         _changedSlots.Add(slotName);
+
+        // For address corrections, route through verification to trigger inline geocoding
+        // (address-dispatch + Gemini reconciler) instead of skipping straight to extraction
+        if (slotName is "pickup" or "destination")
+        {
+            Log($"Address correction for {slotName}: \"{oldValue}\" → \"{newValue}\" — routing through verification");
+
+            // Transition engine to the appropriate verifying state
+            if (slotName == "pickup")
+                _engine.ForceState(CollectionState.VerifyingPickup);
+            else
+                _engine.ForceState(CollectionState.VerifyingDestination);
+
+            // Emit readback instruction (Ada will read back, then ProcessAdaTranscriptAsync triggers geocoding)
+            EmitCurrentInstruction();
+            return;
+        }
 
         var instruction = PromptBuilder.BuildCorrectionInstruction(
             slotName, oldValue ?? "", newValue);
