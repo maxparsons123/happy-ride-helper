@@ -54,12 +54,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
 
-    /// <summary>When the mic was last gated (UTC ticks). Used by stuck-mic watchdog.</summary>
-    private long _micGatedAtTick;
-
-    /// <summary>Stuck-mic watchdog timer — force-flushes if mic stays gated too long with buffered audio.</summary>
-    private System.Threading.Timer? _stuckMicTimer;
-
     /// <summary>Debounce guard for barge-in events (ms tick).</summary>
     private long _lastBargeInTick;
 
@@ -156,12 +150,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
 
-    // ─── Mic Gate Logic (v4.2 — buffer-all, flush-all) ─────
+    // ─── Mic Gate Logic (v4.4 — buffer-all, flush tail, reliable ungate) ─────
 
     /// <summary>Called when playout queue drains.</summary>
     private void OnPlayoutQueueEmpty()
     {
-        if (!_micGated || !_responseCompleted) return;
+        if (!_micGated || !_responseCompleted)
+        {
+            Log($"🔊 Playout empty (micGated={_micGated}, responseCompleted={_responseCompleted}) — not ungating yet");
+            return;
+        }
         UngateMic();
     }
 
@@ -170,18 +168,34 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         _responseCompleted = true;
         _playout.Flush();
-        // If playout already drained, ungate now
-        if (_playout.QueuedFrames == 0)
+        var queued = _playout.QueuedFrames;
+        Log($"🔊 response.audio.done — queued={queued}");
+
+        if (queued == 0)
+        {
             UngateMic();
+        }
         else
-            ArmStuckMicTimer(); // safety net: if playout never drains, force-ungate after 3s
+        {
+            // Playout should drain remaining frames within ~200ms.
+            // Schedule a 500ms fallback in case OnQueueEmpty doesn't fire.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(500);
+                if (_micGated && _responseCompleted)
+                {
+                    Log($"🔓 Fallback mic ungate (playout didn't fire OnQueueEmpty, queued={_playout.QueuedFrames})");
+                    _micGated = false;
+                    FlushMicGateBuffer();
+                }
+            });
+        }
     }
 
     private void UngateMic()
     {
         if (!_micGated) return;
         _micGated = false;
-        _stuckMicTimer?.Change(Timeout.Infinite, Timeout.Infinite); // disarm watchdog
         Log("🔓 Mic ungated (audio done + playout drained)");
         FlushMicGateBuffer();
     }
@@ -191,38 +205,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         _micGated = true;
         _responseCompleted = false;
-        _micGatedAtTick = Environment.TickCount64;
-        // Don't arm stuck-mic timer here — wait until response.audio.done
-        // so we don't false-trigger while OpenAI is still streaming audio.
-    }
-
-    /// <summary>Arm the stuck-mic safety timer (3s from now).</summary>
-    private void ArmStuckMicTimer()
-    {
-        _stuckMicTimer ??= new System.Threading.Timer(_ => OnStuckMicCheck(), null, Timeout.Infinite, Timeout.Infinite);
-        _stuckMicTimer.Change(3000, Timeout.Infinite);
-    }
-
-    /// <summary>Stuck-mic watchdog callback — forces ungate if audio is trapped in the buffer.</summary>
-    private void OnStuckMicCheck()
-    {
-        if (!_micGated) return;
-
-        int buffered;
-        lock (_micGateBufferLock) { buffered = _micGateBuffer.Count; }
-
-        if (buffered > 0)
-        {
-            Log($"⚠️ Stuck mic detected — gated for {(Environment.TickCount64 - _micGatedAtTick)}ms with {buffered} buffered frames. Forcing ungate.");
-            _micGated = false;
-            _responseCompleted = true;
-            FlushMicGateBuffer();
-        }
-        else
-        {
-            // No audio buffered yet — re-arm for another 3s check
-            _stuckMicTimer?.Change(3000, Timeout.Infinite);
-        }
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
@@ -315,7 +297,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-        _stuckMicTimer?.Dispose();
 
         _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
         _session.OnAiInstruction -= OnSessionAiInstruction;
