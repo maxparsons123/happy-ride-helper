@@ -181,6 +181,35 @@ public class CleanCallSession
             }
         }
 
+        // Normalize phonetic passenger homophones (e.g., "for passengers" → "4")
+        if (currentSlot == "passengers")
+        {
+            var phoneticPassengerMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "for", 4 }, { "fore", 4 }, { "pour", 4 }, { "poor", 4 },
+                { "tree", 3 }, { "free", 3 },
+                { "to", 2 }, { "too", 2 }, { "tue", 2 },
+                { "won", 1 }, { "wan", 1 },
+                { "sex", 6 }, { "sax", 6 },
+                { "ate", 8 }, { "ape", 8 },
+                { "fife", 5 }, { "hive", 5 },
+            };
+
+            var paxWords = valueToStore.ToLowerInvariant()
+                .TrimEnd('.', ',', '!', '?')
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var w in paxWords)
+            {
+                if (phoneticPassengerMap.TryGetValue(w, out var num))
+                {
+                    Log($"Passengers phonetic fix: \"{valueToStore}\" → \"{num}\" (word: \"{w}\")");
+                    valueToStore = $"{num}";
+                    break;
+                }
+            }
+        }
+
         // Resolve aliases ("home", "work", "the usual") for address slots
         var resolved = AliasResolver.TryResolve(currentSlot, valueToStore, _callerContext);
         if (resolved != null)
