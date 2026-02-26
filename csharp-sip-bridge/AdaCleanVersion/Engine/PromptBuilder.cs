@@ -64,9 +64,10 @@ public static class PromptBuilder
     {
         return state switch
         {
+            // Greeting states are now handled via BuildGreetingMessage — these are fallbacks
             CollectionState.Greeting when context?.IsReturningCaller == true =>
                 $"[INSTRUCTION] Greet {context.CallerName ?? "the caller"} warmly by name — they're a returning customer. " +
-                "Confirm their name and move on to pickup.",
+                "Confirm their name and ask whereabouts they are.",
 
             CollectionState.Greeting =>
                 "[INSTRUCTION] Greet the caller warmly and ask for their name.",
@@ -74,8 +75,8 @@ public static class PromptBuilder
             CollectionState.CollectingName =>
                 "[INSTRUCTION] Ask the caller for their name.",
 
-            CollectionState.CollectingPickup when context?.LastPickup != null =>
-                $"[INSTRUCTION] {NameAck(rawData)} Ask for their PICKUP address. " +
+            CollectionState.CollectingPickup when context?.IsReturningCaller == true && context.LastPickup != null =>
+                $"[INSTRUCTION] Ask for their PICKUP address. " +
                 $"Their last pickup was \"{context.LastPickup}\" — you can offer it as a suggestion. " +
                 "They must include a house number if it's a street address.",
 
@@ -207,4 +208,32 @@ public static class PromptBuilder
 
     private static string NameAck(RawBookingData data) =>
         string.IsNullOrWhiteSpace(data.NameRaw) ? "" : $"Thanks, {data.NameRaw}.";
+
+    /// <summary>
+    /// Build the greeting message to inject as a conversation item (like AdaSdkModel).
+    /// This is sent as a user message that the AI responds to naturally.
+    /// </summary>
+    public static string BuildGreetingMessage(string companyName, CallerContext? context, CollectionState currentState)
+    {
+        if (context?.IsReturningCaller == true && !string.IsNullOrWhiteSpace(context.CallerName))
+        {
+            // Returning caller — greet by name and ask whereabouts (skip name collection)
+            var lastPickupHint = !string.IsNullOrWhiteSpace(context.LastPickup)
+                ? $" Their last pickup was \"{context.LastPickup}\" — you may offer it as a suggestion."
+                : "";
+
+            return $"[SYSTEM] A returning caller named {context.CallerName} has connected. " +
+                   $"Greet them BY NAME. Say something like: \"Welcome to {companyName}. Hello {context.CallerName}, " +
+                   $"my name is Ada and I am here to help you with your booking today. And whereabouts are you?\" " +
+                   $"⚠️ Ask for their PICKUP AREA/ADDRESS directly — do NOT ask for their name again. " +
+                   $"They must include a house number if it's a street address.{lastPickupHint} " +
+                   $"⚠️ CRITICAL: After this greeting, WAIT PATIENTLY for the caller to respond. Do NOT repeat the question.";
+        }
+
+        // New caller — greet and ask for name
+        return $"[SYSTEM] A new caller has connected. " +
+               $"Greet them warmly. Say: \"Welcome to {companyName}, my name is Ada and I am here to help you with your booking today. " +
+               $"Can I have your name please?\" " +
+               $"⚠️ CRITICAL: After greeting, WAIT PATIENTLY for the caller to respond. Do NOT repeat the question or re-prompt.";
+    }
 }

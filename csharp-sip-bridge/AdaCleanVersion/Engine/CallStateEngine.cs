@@ -25,7 +25,14 @@ public class CallStateEngine
     /// </summary>
     public void BeginCollection()
     {
-        TransitionTo(CollectionState.CollectingName);
+        // Skip to the first missing slot — if name is pre-filled, go straight to pickup
+        var nextSlot = RawData.NextMissingSlot();
+        if (nextSlot == null)
+        {
+            TransitionTo(CollectionState.ReadyForExtraction);
+            return;
+        }
+        TransitionTo(SlotToState(nextSlot));
     }
 
     /// <summary>
