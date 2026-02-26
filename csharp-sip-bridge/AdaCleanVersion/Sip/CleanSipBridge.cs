@@ -254,7 +254,7 @@ public class CleanSipBridge : IDisposable
         _activeCalls[callId] = activeCall;
 
         // Accept the call — sends 200 OK with SDP
-        uas.SetResult(SIPResponseStatusCodesEnum.Ok, null, null, null, rtpSession.CreateAnswer(null).ToString());
+        uas.Answer("application/sdp", rtpSession.CreateAnswer(null).ToString(), SIPDialogueTransferModesEnum.Default);
 
         // Wire RTP lifecycle events
         rtpSession.OnTimeout += (mediaType) =>
@@ -269,15 +269,14 @@ public class CleanSipBridge : IDisposable
             try { uas.Hangup(false); } catch { }
         };
 
-        // Wire BYE / hangup via the transaction
-        uasTx.CDR.Hungup += (cdr) =>
+        // Wire BYE / hangup via RTP session close
+        rtpSession.OnRtpClosed += (reason) =>
         {
             if (_activeCalls.TryRemove(callId, out var removed))
             {
                 var duration = (DateTime.UtcNow - removed.StartTime).TotalSeconds;
-                Log($"📴 Call ended: {removed.CallerId} ({duration:F0}s)");
+                Log($"📴 Call ended: {removed.CallerId} ({duration:F0}s) — {reason}");
                 removed.Session.EndCall();
-                removed.RtpSession?.Close(null);
                 OnCallEnded?.Invoke(callId);
             }
         };
