@@ -783,18 +783,17 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     private static string BuildStrictResponseInstruction(string instruction)
     {
-        // Extra guard for fare presentation — prevent greeting reset
-        var antiGreeting = instruction.Contains("Present the booking summary") || instruction.Contains("PresentingFare")
-            ? "\n- ⚠️ You are MID-CALL. Do NOT greet the caller. Do NOT say 'Welcome to Ada Taxi'. The call is already in progress."
-            : "";
-
         return $"""
             CRITICAL EXECUTION MODE:
             - Follow the [INSTRUCTION] below exactly.
             - Ask ONLY what the instruction asks for in this turn.
             - Do NOT confirm booking, dispatch taxi, end call, or summarize unless explicitly instructed.
             - Do NOT invent or normalize addresses/numbers.
-            - Keep to one concise response, then wait.{antiGreeting}
+            - Keep to one concise response, then wait.
+            - ⛔ FORBIDDEN: Do NOT say "have a great day", "safe travels", "your ride is on its way",
+              "booking confirmed", "thank you for confirming", "is there anything else", "goodbye",
+              or ANY farewell/closing phrase. The call is IN PROGRESS. You are MID-CONVERSATION.
+            - ⛔ Do NOT greet the caller. Do NOT say "Welcome to Ada Taxi". The call is already in progress.
 
             {instruction}
             """;

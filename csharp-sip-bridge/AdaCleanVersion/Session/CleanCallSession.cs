@@ -39,6 +39,8 @@ public class CleanCallSession
     // Pending verification correction: raw STT stored here until Ada's interpretation arrives
     private string? _pendingVerificationTranscript;
     private CollectionState? _pendingVerificationState;
+    // Geocode deduplication: prevents cascading geocode calls from multiple Ada transcripts
+    private volatile bool _geocodeInFlight;
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -497,14 +499,19 @@ public class CleanCallSession
     {
         if (string.IsNullOrWhiteSpace(adaText)) return;
 
+        // ── Farewell filter: discard rogue farewell responses during active collection ──
+        // When the AI hallucinates farewell text during verification/collection states,
+        // we must NOT process it (it would trigger duplicate geocoding and cascading loops).
+        if (_engine.State < CollectionState.ReadyForExtraction && IsFarewellText(adaText))
+        {
+            Log($"⚠️ Farewell transcript DISCARDED in {_engine.State}: \"{adaText[..Math.Min(60, adaText.Length)]}...\"");
+            return;
+        }
+
         // Store for extraction context
         _adaTranscripts.Add(adaText);
 
         // ── Name refinement from Ada's readback ──
-        // When Ada responds after name collection (e.g., "Nice to meet you, Max"),
-        // her LLM interpretation is more accurate than raw Whisper STT ("much", "MUX").
-        // Extract and correct the name if Ada used a different one.
-        // Check: state is past name collection, name hasn't been refined yet, and we have a raw name.
         if (!_nameRefined && _engine.State >= CollectionState.CollectingPickup &&
             _engine.State <= CollectionState.CollectingDestination &&
             !string.IsNullOrWhiteSpace(_engine.RawData.NameRaw))
@@ -514,8 +521,6 @@ public class CleanCallSession
         }
 
         // ── Pending verification correction check (dual approach) ──
-        // If the caller spoke during verification, we deferred the Gemini check until now
-        // so we can send BOTH the raw caller STT and Ada's interpretation for maximum accuracy.
         if (_pendingVerificationTranscript != null && 
             (_engine.State == CollectionState.VerifyingPickup || _engine.State == CollectionState.VerifyingDestination))
         {
@@ -535,13 +540,12 @@ public class CleanCallSession
                     foreach (var slot in _engine.RawData.FilledSlots)
                         slotValues[slot] = _engine.RawData.GetSlot(slot) ?? "";
 
-                    // Get Ada's previous readback (what she said BEFORE the caller responded)
                     var adaContext = _adaTranscripts.Count > 1 ? _adaTranscripts[^2] : null;
 
                     var aiCorrection = await _burstDispatcher.DetectCorrectionAsync(
                         pendingRawStt, slotValues, ct,
                         adaContext: adaContext,
-                        adaReadback: adaText); // Ada's interpretation of the caller's correction
+                        adaReadback: adaText);
 
                     if (aiCorrection != null)
                     {
@@ -552,7 +556,6 @@ public class CleanCallSession
                     else
                     {
                         Log($"[DualCorrection] No correction — caller confirmed {verifyingSlot}, proceeding with geocoding");
-                        // Fall through to normal geocoding below
                     }
                 }
                 catch (Exception ex)
@@ -564,29 +567,72 @@ public class CleanCallSession
             }
             else
             {
-                // No burst dispatcher — treat as correction to the verifying slot
                 Log($"[DualCorrection] No Gemini — treating as correction to {verifyingSlot}");
                 await CorrectSlotAsync(verifyingSlot, pendingRawStt, ct);
                 return;
             }
         }
 
-        // If we're in a verification state, Ada just read back the address.
-        // Now trigger geocoding with both the raw caller STT and Ada's readback.
+        // ── Geocode deduplication: prevent cascading geocode calls ──
+        // When Ada generates multiple responses rapidly (hallucinated farewells),
+        // each triggers ProcessAdaTranscriptAsync → RunInlineGeocodeAsync.
+        // Only the FIRST call should proceed; subsequent ones are no-ops.
         if (_engine.State == CollectionState.VerifyingPickup)
         {
-            var rawAddress = _engine.RawData.PickupRaw ?? "";
-            Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\")");
-            await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText);
+            if (_geocodeInFlight)
+            {
+                Log($"⚠️ Geocode already in flight for pickup — skipping duplicate trigger from: \"{adaText[..Math.Min(60, adaText.Length)]}\"");
+                return;
+            }
+            _geocodeInFlight = true;
+            try
+            {
+                var rawAddress = _engine.RawData.PickupRaw ?? "";
+                Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\")");
+                await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText);
+            }
+            finally { _geocodeInFlight = false; }
             return;
         }
         if (_engine.State == CollectionState.VerifyingDestination)
         {
-            var rawAddress = _engine.RawData.DestinationRaw ?? "";
-            Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\")");
-            await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText);
+            if (_geocodeInFlight)
+            {
+                Log($"⚠️ Geocode already in flight for destination — skipping duplicate trigger from: \"{adaText[..Math.Min(60, adaText.Length)]}\"");
+                return;
+            }
+            _geocodeInFlight = true;
+            try
+            {
+                var rawAddress = _engine.RawData.DestinationRaw ?? "";
+                Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\")");
+                await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText);
+            }
+            finally { _geocodeInFlight = false; }
             return;
         }
+    }
+
+    /// <summary>
+    /// Detect hallucinated farewell/closing responses that should be discarded.
+    /// These occur when the AI ignores instruction updates and generates stale context responses.
+    /// </summary>
+    private static bool IsFarewellText(string text)
+    {
+        var lower = text.ToLowerInvariant();
+        // Quick keyword scan — these phrases NEVER appear in legitimate mid-call instructions
+        return lower.Contains("have a great day") ||
+               lower.Contains("have a safe journey") ||
+               lower.Contains("have a good day") ||
+               lower.Contains("safe travels") ||
+               lower.Contains("your ride will be on its way") ||
+               lower.Contains("your taxi is on its way") ||
+               lower.Contains("booking confirmed") ||
+               lower.Contains("ride will be on its way shortly") ||
+               lower.Contains("thank you for confirming the details") ||
+               lower.Contains("is there anything else you need") ||
+               (lower.Contains("goodbye") && !lower.Contains("say goodbye")) ||
+               (lower.Contains("you're welcome") && lower.Length < 60);
     }
 
     /// <summary>
