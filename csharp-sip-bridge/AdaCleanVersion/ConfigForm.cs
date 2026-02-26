@@ -21,6 +21,11 @@ public sealed class ConfigForm : Form
     private CheckBox chkSimliEnabled = null!;
     private NumericUpDown nudMaxSimliReconnect = null!;
     private TextBox txtCompanyName = null!;
+    // iCabbi
+    private CheckBox chkIcabbiEnabled = null!;
+    private TextBox txtIcabbiTenantBase = null!, txtIcabbiAppKey = null!, txtIcabbiSecretKey = null!;
+    private TextBox txtIcabbiCompanyId = null!;
+    private NumericUpDown nudIcabbiSiteId = null!;
 
     public ConfigForm(CleanAppSettings settings)
     {
@@ -99,7 +104,19 @@ public sealed class ConfigForm : Form
         var tabCompany = new TabPage("🚕 Company") { BackColor = BackColor };
         txtCompanyName = AddField(tabCompany, "Company Name:", 20, bgInput, fgInput);
 
-        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabDispatch, tabAudio, tabBackend, tabSimli, tabCompany });
+        // ── iCabbi Tab ──
+        var tabIcabbi = new TabPage("🚕 iCabbi") { BackColor = BackColor };
+        chkIcabbiEnabled = new CheckBox { Text = "Enable iCabbi dispatch integration", Location = new Point(15, 15), AutoSize = true, ForeColor = fgInput };
+        tabIcabbi.Controls.Add(chkIcabbiEnabled);
+        txtIcabbiTenantBase = AddField(tabIcabbi, "Tenant Base URL:", 50, bgInput, fgInput);
+        txtIcabbiAppKey = AddField(tabIcabbi, "App Key:", 90, bgInput, fgInput, masked: true);
+        txtIcabbiSecretKey = AddField(tabIcabbi, "Secret Key:", 130, bgInput, fgInput, masked: true);
+        txtIcabbiCompanyId = AddField(tabIcabbi, "Company ID:", 170, bgInput, fgInput);
+        var lblSiteId = new Label { Text = "Site ID:", Location = new Point(15, 213), AutoSize = true };
+        nudIcabbiSiteId = new NumericUpDown { Location = new Point(120, 210), Size = new Size(100, 23), Minimum = 0, Maximum = 99999, Increment = 1, BackColor = bgInput, ForeColor = fgInput };
+        tabIcabbi.Controls.AddRange(new Control[] { lblSiteId, nudIcabbiSiteId });
+
+        tabs.TabPages.AddRange(new TabPage[] { tabAi, tabDispatch, tabAudio, tabBackend, tabSimli, tabCompany, tabIcabbi });
 
         // ── OK / Cancel ──
         var pnlButtons = new Panel { Dock = DockStyle.Bottom, Height = 45, BackColor = BackColor };
@@ -149,6 +166,13 @@ public sealed class ConfigForm : Form
         chkSimliEnabled.Checked = Settings.Simli.Enabled;
         nudMaxSimliReconnect.Value = Settings.Rtp.MaxSimliReconnectAttempts;
         txtCompanyName.Text = Settings.Taxi.CompanyName;
+        // iCabbi
+        chkIcabbiEnabled.Checked = Settings.Icabbi.Enabled;
+        txtIcabbiTenantBase.Text = Settings.Icabbi.TenantBase;
+        txtIcabbiAppKey.Text = Settings.Icabbi.AppKey;
+        txtIcabbiSecretKey.Text = Settings.Icabbi.SecretKey;
+        txtIcabbiCompanyId.Text = Settings.Icabbi.CompanyId;
+        nudIcabbiSiteId.Value = Settings.Icabbi.SiteId;
     }
 
     private void WriteToSettings()
@@ -172,6 +196,13 @@ public sealed class ConfigForm : Form
         Settings.Simli.Enabled = chkSimliEnabled.Checked;
         Settings.Rtp.MaxSimliReconnectAttempts = (int)nudMaxSimliReconnect.Value;
         Settings.Taxi.CompanyName = txtCompanyName.Text.Trim();
+        // iCabbi
+        Settings.Icabbi.Enabled = chkIcabbiEnabled.Checked;
+        Settings.Icabbi.TenantBase = txtIcabbiTenantBase.Text.Trim();
+        Settings.Icabbi.AppKey = txtIcabbiAppKey.Text.Trim();
+        Settings.Icabbi.SecretKey = txtIcabbiSecretKey.Text.Trim();
+        Settings.Icabbi.CompanyId = txtIcabbiCompanyId.Text.Trim();
+        Settings.Icabbi.SiteId = (int)nudIcabbiSiteId.Value;
     }
 
     private static CleanAppSettings Clone(CleanAppSettings src)
