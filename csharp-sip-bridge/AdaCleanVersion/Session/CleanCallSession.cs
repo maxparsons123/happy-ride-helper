@@ -604,15 +604,25 @@ public class CleanCallSession
         switch (_engine.State)
         {
             case CollectionState.AwaitingClarification:
-                // Caller responded to "which area?" — accept and re-run pipeline
+                // Caller responded to "which area?" — accept and re-geocode inline
                 Log($"Clarification response: \"{transcript}\"");
+                var clarifiedField = _engine.PendingClarification?.AmbiguousField ?? "pickup";
                 _engine.AcceptClarification(transcript);
 
-                // Re-run extraction + geocoding with the clarified address
-                if (_engine.State == CollectionState.ReadyForExtraction)
-                    await RunExtractionAsync(ct);
+                // Re-run inline geocoding for the clarified field (NOT full extraction)
+                if (_engine.State == CollectionState.VerifyingPickup ||
+                    _engine.State == CollectionState.VerifyingDestination)
+                {
+                    var rawAddr = clarifiedField == "pickup"
+                        ? _engine.RawData.PickupRaw ?? ""
+                        : _engine.RawData.DestinationRaw ?? "";
+                    Log($"Re-geocoding {clarifiedField} after clarification: \"{rawAddr}\"");
+                    await RunInlineGeocodeAsync(clarifiedField, rawAddr, ct);
+                }
                 else
+                {
                     EmitCurrentInstruction();
+                }
                 break;
 
             case CollectionState.AwaitingPaymentChoice:
