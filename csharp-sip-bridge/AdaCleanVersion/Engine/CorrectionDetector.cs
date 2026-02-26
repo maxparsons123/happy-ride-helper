@@ -73,8 +73,13 @@ public static class CorrectionDetector
         // Step 3: Extract the new value
         var newValue = ExtractNewValue(lower, targetSlot);
 
-        if (string.IsNullOrWhiteSpace(newValue))
-            return null;
+        // Strip trailing politeness ("please?", "thanks", etc.) before checking emptiness
+        if (!string.IsNullOrWhiteSpace(newValue))
+        {
+            newValue = Regex.Replace(newValue,
+                @"[,.]?\s*(?:please|thanks|thank you|cheers|ta)[?.!]*$",
+                "", RegexOptions.IgnoreCase).Trim().TrimEnd('.', ',', '?', '!');
+        }
 
         // Step 4: If no explicit slot target, fall back to current or most recent slot
         targetSlot ??= FallbackSlot(currentSlot, filledSlots);
@@ -82,7 +87,9 @@ public static class CorrectionDetector
         if (targetSlot == null)
             return null;
 
-        return new CorrectionMatch(targetSlot, newValue.Trim());
+        // If the caller said "can I change the pickup" without a new value,
+        // return match with empty value — the session will handle re-collection
+        return new CorrectionMatch(targetSlot, (newValue ?? "").Trim());
     }
 
     /// <summary>

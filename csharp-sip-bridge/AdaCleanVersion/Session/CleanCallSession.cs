@@ -809,6 +809,25 @@ public class CleanCallSession
             @"[,.]?\s*(?:please|thanks|thank you|cheers|ta)[?.!]*$",
             "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim().TrimEnd('.', ',', '?', '!');
 
+        // If the caller said "can I change the pickup" without providing a new value,
+        // clear the slot and re-collect it — don't verify/geocode an empty string
+        if (string.IsNullOrWhiteSpace(newValue) && slotName is "pickup" or "destination")
+        {
+            Log($"Change request for {slotName} with no new value — clearing slot and re-collecting");
+            _engine.RawData.SetSlot(slotName, "");
+            _engine.ClearFareResult();
+            _engine.ClearVerifiedAddress(slotName);
+
+            // Force to CollectingPickup/CollectingDestination so Ada asks for the new address
+            if (slotName == "pickup")
+                _engine.ForceState(CollectionState.CollectingPickup);
+            else
+                _engine.ForceState(CollectionState.CollectingDestination);
+
+            EmitCurrentInstruction();
+            return;
+        }
+
         var oldValue = _engine.RawData.GetSlot(slotName);
         _engine.CorrectSlot(slotName, newValue);
 
