@@ -296,10 +296,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
-                    type = "server_vad",
-                    threshold = 0.5,
-                    prefix_padding_ms = 300,
-                    silence_duration_ms = 500
+                    type = "semantic_vad",
+                    eagerness = "low",
+                    interrupt_response = true
                 },
                 tools = Array.Empty<object>()
             }
@@ -523,10 +522,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
-        // Cancel any auto-response and clear playout BEFORE processing.
-        // The instruction sequence will send its own cancel+response.create,
-        // so we DON'T fire a separate cancel here — just clear playout.
-        _playout.Clear();
+        // Do NOT clear playout here — the instruction sequence sends response.cancel
+        // which triggers barge-in path (speech_started) for clean audio cutover.
+        // Clearing here was causing jittery audio by hard-cutting mid-sentence.
 
         try
         {
@@ -590,7 +588,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// Send the pending instruction (session.update + response.create).
     /// Called either by response.canceled event or by fallback timer.
     /// Thread-safe: only the first caller sends; subsequent calls are no-ops.
-    /// Includes Auto VAD Switching based on current engine state.
+    /// Uses stable VAD config — no mid-session switching to avoid audio pipeline resets.
     /// </summary>
     private async Task SendPendingInstructionAsync()
     {
@@ -599,18 +597,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         try
         {
-            // ── Auto VAD Switching ──
-            // Semantic VAD for address/name slots (patient, waits for semantic completion).
-            // Server VAD for quick slots like passengers, time, confirmations (low latency).
-            var vadConfig = GetVadConfigForCurrentState();
-
+            // ── Stable VAD ──
+            // Do NOT switch VAD type mid-session — it causes OpenAI to reset its
+            // audio pipeline, creating bidirectional jitter/glitches.
+            // Use semantic_vad throughout for taxi booking (addresses need patience).
             await SendJsonAsync(new
             {
                 type = "session.update",
                 session = new
                 {
-                    instructions = instruction,
-                    turn_detection = vadConfig
+                    instructions = instruction
                 }
             });
 
@@ -620,7 +616,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 response = new { modalities = new[] { "text", "audio" } }
             });
 
-            Log($"📋 Instruction update sent (VAD: {vadConfig.type})");
+            Log("📋 Instruction update sent");
         }
         catch (Exception ex)
         {
