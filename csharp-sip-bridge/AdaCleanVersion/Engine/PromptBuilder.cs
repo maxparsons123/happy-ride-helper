@@ -268,22 +268,14 @@ public static class PromptBuilder
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified pickup address to the caller EXACTLY and IN FULL. " +
-                $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedPickup.Address)} for pickup.\" " +
-                BuildStreetNameGuard(verifiedPickup.Address) +
-                BuildPostcodeGuard(verifiedPickup.Address) +
-                "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
-                "Then ask for their DESTINATION address. " +
+                "Ask for their DESTINATION address. Do NOT repeat the pickup address again — it was already confirmed. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.CollectingDestination when verifiedPickup != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified pickup address to the caller EXACTLY and IN FULL. " +
-                $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedPickup.Address)} for pickup.\" " +
-                BuildStreetNameGuard(verifiedPickup.Address) +
-                BuildPostcodeGuard(verifiedPickup.Address) +
-                "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
-                "Then ask for their DESTINATION address. " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed. " +
+                "Ask for their DESTINATION address. Do NOT repeat the pickup address again — it was already confirmed. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
@@ -339,12 +331,9 @@ public static class PromptBuilder
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingPassengers when verifiedDestination != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified destination address to the caller EXACTLY and IN FULL. " +
-                $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedDestination.Address)} for the destination.\" " +
-                BuildStreetNameGuard(verifiedDestination.Address) +
-                BuildPostcodeGuard(verifiedDestination.Address) +
-                "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
-                "Then ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
+                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed. " +
+                "Ask how many passengers. Do NOT repeat the destination address again — it was already confirmed. " +
+                "IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
                 "REQUIRED FIELDS REMAINING: passengers, pickup time.",
 
