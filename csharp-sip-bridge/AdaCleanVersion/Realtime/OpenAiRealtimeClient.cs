@@ -150,16 +150,17 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
 
-    // ─── Mic Gate Logic (v4.4 — buffer-all, flush tail, reliable ungate) ─────
+    // ─── Mic Gate Logic (v4.5 — buffer-all, flush tail, playout-driven ungate) ─────
 
     /// <summary>Called when playout queue drains.</summary>
     private void OnPlayoutQueueEmpty()
     {
-        if (!_micGated || !_responseCompleted)
-        {
-            Log($"🔊 Playout empty (micGated={_micGated}, responseCompleted={_responseCompleted}) — not ungating yet");
-            return;
-        }
+        if (!_responseCompleted)
+            return; // AI still streaming audio — wait
+
+        if (!_micGated)
+            return; // already ungated
+
         UngateMic();
     }
 
@@ -175,21 +176,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         {
             UngateMic();
         }
-        else
-        {
-            // Playout should drain remaining frames within ~200ms.
-            // Schedule a 500ms fallback in case OnQueueEmpty doesn't fire.
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(500);
-                if (_micGated && _responseCompleted)
-                {
-                    Log($"🔓 Fallback mic ungate (playout didn't fire OnQueueEmpty, queued={_playout.QueuedFrames})");
-                    _micGated = false;
-                    FlushMicGateBuffer();
-                }
-            });
-        }
+        // else: OnPlayoutQueueEmpty will fire when the queue drains naturally.
+        // No aggressive fallback — let playout finish to avoid stuttering.
     }
 
     private void UngateMic()
