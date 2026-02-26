@@ -50,6 +50,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
 
+    /// <summary>Debounce guard for barge-in events (ms tick).</summary>
+    private long _lastBargeInTick;
+
     /// <summary>OpenAI finished sending audio deltas.</summary>
     private volatile bool _responseCompleted;
 
@@ -472,8 +475,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 }
                 break;
 
-            // ── Barge-in: immediately cut everything and ungate ──
+            // ── Barge-in: immediately cut everything and ungate (with 250ms debounce) ──
             case "input_audio_buffer.speech_started":
+                var now = Environment.TickCount64;
+                var elapsed = now - _lastBargeInTick;
+                if (elapsed < 250)
+                {
+                    Log($"🎤 Barge-in debounced ({elapsed}ms since last — skipped)");
+                    break;
+                }
+                _lastBargeInTick = now;
                 _micGated = false;
                 _playout.Clear();
                 ClearMicTail();
