@@ -199,8 +199,8 @@ public static class PromptBuilder
                 "REQUIRED FIELDS REMAINING: pickup, destination, passengers, pickup time.",
 
             CollectionState.VerifyingPickup =>
-                $"[INSTRUCTION] Read back the pickup address as \"{rawData.PickupRaw}\" and say " +
-                "\"let me just confirm that for you\". Then STOP and wait silently. " +
+                $"[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the pickup address as \"{rawData.PickupRaw}\". " +
+                "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
                 "Do NOT alter or normalize the address — read it back exactly as shown. " +
                 "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
@@ -217,8 +217,8 @@ public static class PromptBuilder
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.VerifyingDestination =>
-                $"[INSTRUCTION] Read back the destination address as \"{rawData.DestinationRaw}\" and say " +
-                "\"let me just confirm that for you\". Then STOP and wait silently. " +
+                $"[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the destination address as \"{rawData.DestinationRaw}\". " +
+                "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
                 "Do NOT alter or normalize the address — read it back exactly as shown. " +
                 "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
