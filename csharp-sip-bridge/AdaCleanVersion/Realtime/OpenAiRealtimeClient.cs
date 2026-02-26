@@ -83,6 +83,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             Engine.CollectionState.CollectingName => true,
             Engine.CollectionState.CollectingPickup => true,
             Engine.CollectionState.CollectingDestination => true,
+            Engine.CollectionState.CollectingPassengers => true,  // compound phrases like "four passengers"
             Engine.CollectionState.AwaitingClarification => true,
             Engine.CollectionState.VerifyingPickup => false,    // silence during geocoding
             Engine.CollectionState.VerifyingDestination => false, // silence during geocoding
