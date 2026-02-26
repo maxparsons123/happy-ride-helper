@@ -51,6 +51,11 @@ public static class FreeFormSplitter
         @"^(?:just\s+me|myself|\d)\.?$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Tail passengers in address — "with three passengers", "for 4 people"
+    private static readonly Regex TailPassengersInline = new(
+        @"[,.]?\s*(?:with|for)\s+(\d+|one|two|three|four|five|six|seven|eight)\s*(?:passengers?|people|persons?|pax)?\.?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     // Time patterns — detect ASAP/time answers given out of order
     private static readonly Regex TimePattern = new(
         @"^(?:now|asap|as\s+soon\s+as\s+possible|straight\s+away|right\s+away|immediately|in\s+\d+\s+minutes?)\.?$",
@@ -153,6 +158,26 @@ public static class FreeFormSplitter
                     {
                         PrimaryValue = destPart,
                         OverflowSlots = { ["pickup"] = pickupPart }
+                    };
+                }
+            }
+        }
+
+        // ── Tail passenger extraction from address slots ──
+        if (currentSlot is "pickup" or "destination")
+        {
+            var tailPax = TailPassengersInline.Match(trimmed);
+            if (tailPax.Success)
+            {
+                var addressPart = trimmed[..tailPax.Index].TrimEnd(',', '.', ' ');
+                var paxValue = tailPax.Groups[1].Value;
+
+                if (!string.IsNullOrWhiteSpace(addressPart))
+                {
+                    return new SplitResult
+                    {
+                        PrimaryValue = addressPart,
+                        OverflowSlots = { ["passengers"] = paxValue }
                     };
                 }
             }
