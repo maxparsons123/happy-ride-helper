@@ -237,6 +237,11 @@ public class CleanSipBridge : IDisposable
         }
 
         await rtpSession.Start();
+
+        // Stop the AudioExtrasSource so it doesn't interfere with G711RtpPlayout's 20ms send loop.
+        // We only needed it for SDP/codec negotiation — G711RtpPlayout owns all outbound audio now.
+        try { audioSource.CloseAudio().Wait(500); } catch { }
+
         Log("✅ Call answered and RTP started");
 
         // Look up returning caller
