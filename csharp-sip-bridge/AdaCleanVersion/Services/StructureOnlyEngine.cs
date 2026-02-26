@@ -224,12 +224,18 @@ public class StructureOnlyEngine : IExtractionService
                 • Keep addresses VERBATIM from Ada's interpretation — preserve exact house numbers, flat numbers, spelling
                 • Extract passenger count as integer (1-8)
                 • Normalize time into: "ASAP" or "YYYY-MM-DD HH:MM" (24h format, UK timezone)
-                  - "now", "straight away", "right away", "immediately", "asap" → "ASAP"
+                  - "now", "straight away", "right away", "immediately", "asap", "in a bit" → "ASAP"
                   - "tomorrow at 5pm" → calculate from REFERENCE_DATETIME → e.g. "2026-02-27 17:00"
-                  - "in 30 minutes" → calculate from REFERENCE_DATETIME
-                  - "half past 3" → assume PM for taxi bookings unless "am" or "morning" specified → "15:30" today or tomorrow if already passed
+                  - "in 30 minutes", "in an hour" → add offset to REFERENCE_DATETIME
+                  - "half seven", "half past 7" → 07:30 or 19:30 — if REFERENCE_DATETIME is before 12:00, assume AM; if after 12:00, assume PM. If that time has already passed today, use tomorrow.
+                  - "quarter to 5" → 16:45 (PM default for taxi bookings unless "am"/"morning" specified)
                   - "Monday at 3pm" → calculate next Monday from REFERENCE_DATETIME
+                  - "first thing tomorrow", "first thing in the morning" → next day 07:00
+                  - "tonight", "this evening" → today 20:00 (or next day if already past 20:00)
+                  - "after work", "end of day" → today 17:30 (or tomorrow if past)
+                  - "when the pubs close" → today/tomorrow 23:30
                   - ALWAYS use the REFERENCE_DATETIME above to compute absolute dates/times
+                • Set time_warning if the resolved time is in the past or ambiguous (e.g. "Did you mean 7:30 AM or 7:30 PM?")
                 • Extract luggage info if present
                 • Extract special requests if present
 
@@ -260,8 +266,10 @@ public class StructureOnlyEngine : IExtractionService
             • Keep addresses VERBATIM — preserve exact house numbers, spelling
             • Normalize time into: "ASAP" or "YYYY-MM-DD HH:MM"
               - Use REFERENCE_DATETIME above to compute absolute dates/times
-              - "now", "straight away", "immediately" → "ASAP"
+              - "now", "straight away", "immediately", "in a bit" → "ASAP"
               - Relative phrases ("in 30 minutes", "tomorrow at 5") → resolved absolute datetime
+              - UK colloquialisms: "half seven" → 07:30/19:30 based on time of day, "first thing" → 07:00
+            • Set time_warning if the resolved time is in the past or ambiguous
 
             You MUST NOT:
             • Re-copy existing fields into the output
@@ -315,6 +323,8 @@ public class StructureOnlyEngine : IExtractionService
             warnings.Add("Pickup address could not be normalized");
         if (string.IsNullOrWhiteSpace(normalized.DropoffLocation))
             warnings.Add("Destination address could not be normalized");
+        if (!string.IsNullOrWhiteSpace(normalized.TimeWarning))
+            warnings.Add($"Time: {normalized.TimeWarning}");
 
         var booking = new StructuredBooking
         {
@@ -455,13 +465,14 @@ public class StructureOnlyEngine : IExtractionService
             pickup_location = new { type = new[] { "string", "null" } },
             dropoff_location = new { type = new[] { "string", "null" } },
             pickup_time = new { type = new[] { "string", "null" } },
+            time_warning = new { type = new[] { "string", "null" } },
             number_of_passengers = new { type = new[] { "integer", "null" } },
             luggage = new { type = new[] { "string", "null" } },
             special_requests = new { type = new[] { "string", "null" } }
         },
         required = new[]
         {
-            "pickup_location", "dropoff_location", "pickup_time",
+            "pickup_location", "dropoff_location", "pickup_time", "time_warning",
             "number_of_passengers", "luggage", "special_requests"
         },
         additionalProperties = false
@@ -525,6 +536,9 @@ internal class NormalizedBooking
 
     [JsonPropertyName("pickup_time")]
     public string? PickupTime { get; set; }
+
+    [JsonPropertyName("time_warning")]
+    public string? TimeWarning { get; set; }
 
     [JsonPropertyName("number_of_passengers")]
     public int? NumberOfPassengers { get; set; }
