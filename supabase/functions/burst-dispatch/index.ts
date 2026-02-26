@@ -61,20 +61,27 @@ Ada may have corrected STT errors (e.g., "mucks" → "Max").
 
 const CORRECTION_PROMPT = `You are an intent detection engine for a taxi booking system.
 The caller has already provided booking details and is now speaking again.
-Determine if they are CORRECTING a previously given field, or saying something unrelated (e.g. confirming, asking a question).
+Determine if they are CORRECTING a previously given field, CONFIRMING it, or saying something unrelated.
 
 FILLED SLOTS (what the caller has already provided):
 {FILLED_SLOTS}
 
+ADA'S LAST MESSAGE (what the AI assistant just said to the caller):
+{ADA_CONTEXT}
+
 RULES:
+- Use Ada's last message for CONTEXT — if Ada just read back a pickup address and the caller says "no, it's X", they're correcting pickup
+- If Ada just read back a destination and the caller says "that's wrong, it's Y", they're correcting destination
+- Confirmation signals: "yes", "yeah", "that's right", "correct", "yep", "uh huh", "sounds good", "perfect"
+- If the caller is CONFIRMING (not changing anything), return is_correction=false
 - Only return a correction if the caller is clearly changing a previously-given field
 - Correction signals: "actually", "no", "not that", "wrong", "change", "it's X not Y", "I said X", "sorry", "I meant"
 - If the caller says a new address and mentions "pickup"/"collection"/"from" → they're correcting pickup
 - If they say a new address and mention "destination"/"going to"/"drop off" → they're correcting destination  
-- If they just say an address with NO slot keyword, and context suggests they're correcting something → infer the most likely slot
+- If they just say an address with NO slot keyword, and Ada just read back an address → they're correcting THAT slot
 - "It's Dovey not Dover" → correction of whichever slot currently has "Dover" in it
 - Keep house numbers EXACTLY as stated
-- If no correction intent is detected, return slot_name as null
+- If no correction intent is detected, return is_correction=false
 
 SPEECH-TO-TEXT AWARENESS:
 Inputs come from live speech recognition. Apply phonetic reasoning for garbled words.`;
@@ -82,16 +89,19 @@ Inputs come from live speech recognition. Apply phonetic reasoning for garbled w
 async function handleCorrectionMode(
   transcript: string,
   filledSlots: Record<string, string>,
-  apiKey: string
+  apiKey: string,
+  adaContext?: string
 ): Promise<Response> {
-  console.log(`🔧 [burst-dispatch] CORRECTION mode: "${transcript}", slots=${JSON.stringify(filledSlots)}`);
+  console.log(`🔧 [burst-dispatch] CORRECTION mode: "${transcript}", slots=${JSON.stringify(filledSlots)}, adaContext="${adaContext || 'none'}"`);
 
   const slotSummary = Object.entries(filledSlots)
     .filter(([_, v]) => v)
     .map(([k, v]) => `- ${k}: "${v}"`)
     .join("\n");
 
-  const systemPrompt = CORRECTION_PROMPT.replace("{FILLED_SLOTS}", slotSummary || "(none)");
+  const systemPrompt = CORRECTION_PROMPT
+    .replace("{FILLED_SLOTS}", slotSummary || "(none)")
+    .replace("{ADA_CONTEXT}", adaContext || "(not available)");
 
   const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
@@ -192,7 +202,7 @@ serve(async (req) => {
       });
     }
 
-    const { transcript, phone, ada_readback, caller_area, mode, filled_slots } = body;
+    const { transcript, phone, ada_readback, caller_area, mode, filled_slots, ada_context } = body;
 
     if (!transcript?.trim()) {
       return new Response(JSON.stringify({ error: "transcript is required", status: "error" }), {
@@ -211,7 +221,7 @@ serve(async (req) => {
 
     // ── CORRECTION MODE ──
     if (mode === "correction" && filled_slots) {
-      return await handleCorrectionMode(transcript, filled_slots, LOVABLE_API_KEY);
+      return await handleCorrectionMode(transcript, filled_slots, LOVABLE_API_KEY, ada_context);
     }
 
     console.log(`🔥 [burst-dispatch] transcript="${transcript}", phone="${phone || ''}", ada_readback="${ada_readback || ''}", area="${caller_area || ''}"`);

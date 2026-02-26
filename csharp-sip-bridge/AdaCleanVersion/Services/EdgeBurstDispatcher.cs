@@ -147,19 +147,21 @@ public class EdgeBurstDispatcher
     public async Task<CorrectionResult?> DetectCorrectionAsync(
         string transcript,
         Dictionary<string, string> filledSlots,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? adaContext = null)
     {
         if (string.IsNullOrWhiteSpace(transcript) || filledSlots.Count == 0)
             return null;
 
-        _log.LogInformation("[BurstDispatch] Correction check: \"{T}\", slots={S}",
-            transcript.Trim(), string.Join(", ", filledSlots.Keys));
+        _log.LogInformation("[BurstDispatch] Correction check: \"{T}\", slots={S}, adaContext={A}",
+            transcript.Trim(), string.Join(", ", filledSlots.Keys), adaContext != null ? "yes" : "no");
 
         var payload = new
         {
             transcript = transcript.Trim(),
             mode = "correction",
-            filled_slots = filledSlots
+            filled_slots = filledSlots,
+            ada_context = adaContext ?? ""
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, _functionUrl);

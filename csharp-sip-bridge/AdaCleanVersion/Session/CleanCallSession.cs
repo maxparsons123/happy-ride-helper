@@ -116,16 +116,56 @@ public class CleanCallSession
             return;
         }
 
-        // ── Priority 0.5: If verifying an address and caller speaks, treat as correction ──
+        // ── Priority 0.5: If verifying an address and caller speaks, send to Gemini with context ──
         // When in VerifyingPickup/VerifyingDestination, the caller is hearing Ada's readback.
-        // If they speak, they're correcting the address being verified — NOT providing the next slot.
-        // Without this gate, NextMissingSlot() would return "destination" during VerifyingPickup,
-        // causing the corrected pickup to be stored as destination.
+        // Send Ada's last message + caller's reply to Gemini so it can determine:
+        //   - Confirmation → proceed normally (advance past verification)
+        //   - Correction → update the correct slot and re-verify
+        // Without this, NextMissingSlot() would return "destination" during VerifyingPickup,
+        // causing a corrected pickup to be stored as destination.
         if (_engine.State == CollectionState.VerifyingPickup || 
             _engine.State == CollectionState.VerifyingDestination)
         {
             var verifyingSlot = _engine.State == CollectionState.VerifyingPickup ? "pickup" : "destination";
-            Log($"Caller spoke during {_engine.State}: \"{transcript}\" — treating as correction to {verifyingSlot}");
+            Log($"Caller spoke during {_engine.State}: \"{transcript}\"");
+
+            if (_burstDispatcher != null)
+            {
+                try
+                {
+                    var slotValues = new Dictionary<string, string>();
+                    foreach (var slot in _engine.RawData.FilledSlots)
+                        slotValues[slot] = _engine.RawData.GetSlot(slot) ?? "";
+
+                    // Get Ada's last readback as context for Gemini
+                    var adaContext = _adaTranscripts.Count > 0 ? _adaTranscripts[^1] : null;
+
+                    var aiCorrection = await _burstDispatcher.DetectCorrectionAsync(
+                        transcript, slotValues, ct, adaContext: adaContext);
+
+                    if (aiCorrection != null)
+                    {
+                        Log($"Verification correction via Gemini: {aiCorrection.SlotName} → \"{aiCorrection.NewValue}\"");
+                        await CorrectSlotAsync(aiCorrection.SlotName, aiCorrection.NewValue, ct);
+                        return;
+                    }
+                    else
+                    {
+                        // Gemini says no correction — caller confirmed or said something unrelated
+                        Log($"Caller confirmed {verifyingSlot} during verification (Gemini: no correction)");
+                        // Don't block — let the normal flow continue (geocoding is already in progress
+                        // or will be triggered by ProcessAdaTranscript)
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Gemini verification check failed: {ex.Message} — treating as correction to {verifyingSlot}");
+                }
+            }
+
+            // Fallback if no burst dispatcher: treat as correction to the verifying slot
+            Log($"No Gemini available — treating caller input as correction to {verifyingSlot}");
             await CorrectSlotAsync(verifyingSlot, transcript, ct);
             return;
         }
