@@ -90,9 +90,10 @@ async function handleCorrectionMode(
   transcript: string,
   filledSlots: Record<string, string>,
   apiKey: string,
-  adaContext?: string
+  adaContext?: string,
+  adaReadback?: string
 ): Promise<Response> {
-  console.log(`🔧 [burst-dispatch] CORRECTION mode: "${transcript}", slots=${JSON.stringify(filledSlots)}, adaContext="${adaContext || 'none'}"`);
+  console.log(`🔧 [burst-dispatch] CORRECTION mode: "${transcript}", slots=${JSON.stringify(filledSlots)}, adaContext="${adaContext || 'none'}", adaReadback="${adaReadback || 'none'}"`);
 
   const slotSummary = Object.entries(filledSlots)
     .filter(([_, v]) => v)
@@ -113,7 +114,9 @@ async function handleCorrectionMode(
       model: "google/gemini-2.5-flash-lite",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Caller says: "${transcript}"` },
+        { role: "user", content: adaReadback 
+            ? `Raw caller speech: "${transcript}"\nAda's interpretation of caller's response: "${adaReadback}"` 
+            : `Caller says: "${transcript}"` },
       ],
       temperature: 0.0,
       tools: [{
@@ -221,7 +224,7 @@ serve(async (req) => {
 
     // ── CORRECTION MODE ──
     if (mode === "correction" && filled_slots) {
-      return await handleCorrectionMode(transcript, filled_slots, LOVABLE_API_KEY, ada_context);
+      return await handleCorrectionMode(transcript, filled_slots, LOVABLE_API_KEY, ada_context, ada_readback);
     }
 
     console.log(`🔥 [burst-dispatch] transcript="${transcript}", phone="${phone || ''}", ada_readback="${ada_readback || ''}", area="${caller_area || ''}"`);

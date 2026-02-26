@@ -36,6 +36,9 @@ public class CleanCallSession
     // The last instruction emitted to Ada — used as "Ada's question" for 3-way geocoding context.
     private string _lastEmittedInstruction = "";
     private bool _nameRefined; // prevents double name-refinement attempts
+    // Pending verification correction: raw STT stored here until Ada's interpretation arrives
+    private string? _pendingVerificationTranscript;
+    private CollectionState? _pendingVerificationState;
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -118,56 +121,18 @@ public class CleanCallSession
 
         // ── Priority 0.5: If verifying an address and caller speaks, send to Gemini with context ──
         // When in VerifyingPickup/VerifyingDestination, the caller is hearing Ada's readback.
-        // Send Ada's last message + caller's reply to Gemini so it can determine:
-        //   - Confirmation → proceed normally (advance past verification)
-        //   - Correction → update the correct slot and re-verify
-        // Without this, NextMissingSlot() would return "destination" during VerifyingPickup,
+        // Store the raw STT and wait for Ada's interpretation to arrive in ProcessAdaTranscriptAsync.
+        // Then we send BOTH signals to Gemini for maximum accuracy (dual approach).
+        // Without this gate, NextMissingSlot() would return "destination" during VerifyingPickup,
         // causing a corrected pickup to be stored as destination.
         if (_engine.State == CollectionState.VerifyingPickup || 
             _engine.State == CollectionState.VerifyingDestination)
         {
             var verifyingSlot = _engine.State == CollectionState.VerifyingPickup ? "pickup" : "destination";
-            Log($"Caller spoke during {_engine.State}: \"{transcript}\"");
-
-            if (_burstDispatcher != null)
-            {
-                try
-                {
-                    var slotValues = new Dictionary<string, string>();
-                    foreach (var slot in _engine.RawData.FilledSlots)
-                        slotValues[slot] = _engine.RawData.GetSlot(slot) ?? "";
-
-                    // Get Ada's last readback as context for Gemini
-                    var adaContext = _adaTranscripts.Count > 0 ? _adaTranscripts[^1] : null;
-
-                    var aiCorrection = await _burstDispatcher.DetectCorrectionAsync(
-                        transcript, slotValues, ct, adaContext: adaContext);
-
-                    if (aiCorrection != null)
-                    {
-                        Log($"Verification correction via Gemini: {aiCorrection.SlotName} → \"{aiCorrection.NewValue}\"");
-                        await CorrectSlotAsync(aiCorrection.SlotName, aiCorrection.NewValue, ct);
-                        return;
-                    }
-                    else
-                    {
-                        // Gemini says no correction — caller confirmed or said something unrelated
-                        Log($"Caller confirmed {verifyingSlot} during verification (Gemini: no correction)");
-                        // Don't block — let the normal flow continue (geocoding is already in progress
-                        // or will be triggered by ProcessAdaTranscript)
-                        return;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log($"Gemini verification check failed: {ex.Message} — treating as correction to {verifyingSlot}");
-                }
-            }
-
-            // Fallback if no burst dispatcher: treat as correction to the verifying slot
-            Log($"No Gemini available — treating caller input as correction to {verifyingSlot}");
-            await CorrectSlotAsync(verifyingSlot, transcript, ct);
-            return;
+            Log($"Caller spoke during {_engine.State}: \"{transcript}\" — storing for dual Gemini check when Ada's interpretation arrives");
+            _pendingVerificationTranscript = transcript;
+            _pendingVerificationState = _engine.State;
+            return; // Wait for Ada's interpretation in ProcessAdaTranscriptAsync
         }
 
         // Step 1: Check for correction intent BEFORE normal slot processing
@@ -550,6 +515,64 @@ public class CleanCallSession
         {
             Log($"[NameRefine] Checking Ada text (state={_engine.State}, transcripts={_adaTranscripts.Count}): \"{adaText}\"");
             TryRefineNameFromAda(adaText);
+        }
+
+        // ── Pending verification correction check (dual approach) ──
+        // If the caller spoke during verification, we deferred the Gemini check until now
+        // so we can send BOTH the raw caller STT and Ada's interpretation for maximum accuracy.
+        if (_pendingVerificationTranscript != null && 
+            (_engine.State == CollectionState.VerifyingPickup || _engine.State == CollectionState.VerifyingDestination))
+        {
+            var pendingRawStt = _pendingVerificationTranscript;
+            var pendingState = _pendingVerificationState;
+            _pendingVerificationTranscript = null;
+            _pendingVerificationState = null;
+
+            var verifyingSlot = pendingState == CollectionState.VerifyingPickup ? "pickup" : "destination";
+            Log($"[DualCorrection] Processing pending verification: raw=\"{pendingRawStt}\", adaInterpretation=\"{adaText}\"");
+
+            if (_burstDispatcher != null)
+            {
+                try
+                {
+                    var slotValues = new Dictionary<string, string>();
+                    foreach (var slot in _engine.RawData.FilledSlots)
+                        slotValues[slot] = _engine.RawData.GetSlot(slot) ?? "";
+
+                    // Get Ada's previous readback (what she said BEFORE the caller responded)
+                    var adaContext = _adaTranscripts.Count > 1 ? _adaTranscripts[^2] : null;
+
+                    var aiCorrection = await _burstDispatcher.DetectCorrectionAsync(
+                        pendingRawStt, slotValues, ct,
+                        adaContext: adaContext,
+                        adaReadback: adaText); // Ada's interpretation of the caller's correction
+
+                    if (aiCorrection != null)
+                    {
+                        Log($"[DualCorrection] ✅ Correction detected: {aiCorrection.SlotName} → \"{aiCorrection.NewValue}\"");
+                        await CorrectSlotAsync(aiCorrection.SlotName, aiCorrection.NewValue, ct);
+                        return;
+                    }
+                    else
+                    {
+                        Log($"[DualCorrection] No correction — caller confirmed {verifyingSlot}, proceeding with geocoding");
+                        // Fall through to normal geocoding below
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"[DualCorrection] Gemini failed: {ex.Message} — falling back to treat as correction to {verifyingSlot}");
+                    await CorrectSlotAsync(verifyingSlot, pendingRawStt, ct);
+                    return;
+                }
+            }
+            else
+            {
+                // No burst dispatcher — treat as correction to the verifying slot
+                Log($"[DualCorrection] No Gemini — treating as correction to {verifyingSlot}");
+                await CorrectSlotAsync(verifyingSlot, pendingRawStt, ct);
+                return;
+            }
         }
 
         // If we're in a verification state, Ada just read back the address.

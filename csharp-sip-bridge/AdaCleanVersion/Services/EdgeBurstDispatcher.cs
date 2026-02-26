@@ -148,20 +148,23 @@ public class EdgeBurstDispatcher
         string transcript,
         Dictionary<string, string> filledSlots,
         CancellationToken ct = default,
-        string? adaContext = null)
+        string? adaContext = null,
+        string? adaReadback = null)
     {
         if (string.IsNullOrWhiteSpace(transcript) || filledSlots.Count == 0)
             return null;
 
-        _log.LogInformation("[BurstDispatch] Correction check: \"{T}\", slots={S}, adaContext={A}",
-            transcript.Trim(), string.Join(", ", filledSlots.Keys), adaContext != null ? "yes" : "no");
+        _log.LogInformation("[BurstDispatch] Correction check: \"{T}\", slots={S}, adaContext={A}, adaReadback={R}",
+            transcript.Trim(), string.Join(", ", filledSlots.Keys), 
+            adaContext != null ? "yes" : "no", adaReadback != null ? "yes" : "no");
 
         var payload = new
         {
             transcript = transcript.Trim(),
             mode = "correction",
             filled_slots = filledSlots,
-            ada_context = adaContext ?? ""
+            ada_context = adaContext ?? "",
+            ada_readback = adaReadback ?? ""
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, _functionUrl);
