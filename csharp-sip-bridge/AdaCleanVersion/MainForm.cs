@@ -275,8 +275,7 @@ public partial class MainForm : Form
                 SetInCall(true);
                 statusCallId.Text = $"{session.CallerId} [{callId}]";
 
-                // Wire engine state updates to UI
-                session.OnLog += msg => SafeInvoke(() => Log(msg));
+                // Engine/session logs already flow via bridge.OnLog — only wire UI-specific events here
                 session.OnBookingReady += booking => SafeInvoke(() =>
                 {
                     lblCallInfo.Text = $"{booking.CallerName} | {booking.Pickup.DisplayName} → {booking.Destination.DisplayName}";
