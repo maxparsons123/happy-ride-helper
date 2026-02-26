@@ -202,8 +202,7 @@ public class CleanSipBridge : IDisposable
             audioEncoder,
             new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
 
-        audioSource.RestrictFormats(fmt =>
-            fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
+        audioSource.RestrictFormats(fmt => fmt.Codec == AudioCodecsEnum.PCMA);
 
         var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
         var rtpSession = new VoIPMediaSession(mediaEndPoints);
@@ -211,10 +210,16 @@ public class CleanSipBridge : IDisposable
 
         // Track negotiated codec
         var codec = G711CodecType.PCMA;
+        var callId = inviteRequest.Header.CallId;
         rtpSession.OnAudioFormatsNegotiated += formats =>
         {
             var fmt = formats.FirstOrDefault();
-            codec = fmt.Codec == AudioCodecsEnum.PCMU ? G711CodecType.PCMU : G711CodecType.PCMA;
+            var negotiated = fmt.Codec == AudioCodecsEnum.PCMU ? G711CodecType.PCMU : G711CodecType.PCMA;
+            codec = negotiated;
+
+            if (_activeCalls.TryGetValue(callId, out var call))
+                call.Codec = negotiated;
+
             Log($"🎵 Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
         };
 
@@ -248,7 +253,7 @@ public class CleanSipBridge : IDisposable
         }
 
         // Create clean session
-        var callId = inviteRequest.Header.CallId;
+        // callId already extracted above for codec negotiation handler
         var session = new CleanCallSession(
             sessionId: callId,
             callerId: callerId,
@@ -416,16 +421,15 @@ public class CleanSipBridge : IDisposable
     /// <summary>
     /// Send RTP audio to a specific call (for OpenAI TTS output).
     /// </summary>
-    public void SendAudio(string callId, byte[] g711Payload, uint duration)
+    public void SendAudio(string callId, byte[] g711Payload)
     {
         if (!_activeCalls.TryGetValue(callId, out var call) || call.RawRtpSession == null)
             return;
 
         try
         {
-            call.RawRtpSession.SendAudio(
-                (uint)(duration * 8), // timestamp increment for 8kHz G.711
-                g711Payload);
+            // G.711 @ 8kHz: timestamp increment == number of samples == number of bytes
+            call.RawRtpSession.SendAudio((uint)g711Payload.Length, g711Payload);
 
             // Reset on success
             call.ConsecutiveRtpFailures = 0;
