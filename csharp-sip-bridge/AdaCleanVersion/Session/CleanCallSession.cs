@@ -180,7 +180,8 @@ public class CleanCallSession
         {
             var lower = valueToStore.ToLowerInvariant();
             if (lower.Contains("now") || lower.Contains("asap") || lower.Contains("straight away") ||
-                lower.Contains("right away") || lower.Contains("immediately"))
+                lower.Contains("right away") || lower.Contains("immediately") ||
+                lower.Contains("ace up") || lower.Contains("as up") || lower.Contains("a sap"))
             {
                 Log($"Time detected as ASAP: \"{valueToStore}\"");
                 valueToStore = "ASAP";
@@ -908,10 +909,17 @@ public class CleanCallSession
 
         // === PRIORITY 1: Ada's readback (highest confidence) ===
         // Ada was asked "how many passengers?" — her response is context-aware.
+        // Only consider lines that contain passenger-related keywords to avoid
+        // picking up digits from address readbacks (e.g., "1 Lifford Lane").
         var recentAda = _adaTranscripts.TakeLast(3);
         foreach (var adaLine in recentAda.Reverse())
         {
             var adaLower = adaLine.ToLowerInvariant();
+
+            // Skip lines that look like address readbacks (contain street/road/lane etc.)
+            if (System.Text.RegularExpressions.Regex.IsMatch(adaLower,
+                @"\b(road|street|lane|avenue|drive|close|way|crescent|court|place|grove|terrace|airport|station)\b"))
+                continue;
 
             // Check for digits first (e.g., "Got it, 4 passengers")
             var digitMatch = System.Text.RegularExpressions.Regex.Match(adaLower, @"\b([1-8])\b");

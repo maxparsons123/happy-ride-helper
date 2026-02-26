@@ -120,8 +120,19 @@ public static class SlotValidator
         { "fife", "five" }, { "hive", "five" },
     };
 
+    // Goodbye / end-call phrases — reject from any slot
+    private static readonly HashSet<string> GoodbyePhrases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "bye", "goodbye", "good bye", "see you", "see ya", "later", "cheers",
+        "ta ta", "ta-ta", "tata", "ciao", "take care", "have a good day"
+    };
+
     private static string? ValidatePassengers(string lower)
     {
+        // Reject goodbye phrases before number extraction
+        if (GoodbyePhrases.Contains(lower.TrimEnd('.', '!', '?', ',')))
+            return "goodbye_not_passengers";
+
         // Accept digit strings
         if (Regex.IsMatch(lower, @"^\d+$"))
             return null;
@@ -155,10 +166,11 @@ public static class SlotValidator
 
     private static string? ValidatePickupTime(string lower)
     {
-        // Accept ASAP variants
+        // Accept ASAP variants (including common STT garbles)
         if (lower.Contains("now") || lower.Contains("asap") || lower.Contains("soon") ||
             lower.Contains("straight away") || lower.Contains("right away") ||
-            lower.Contains("immediately") || lower.Contains("quick"))
+            lower.Contains("immediately") || lower.Contains("quick") ||
+            lower.Contains("ace up") || lower.Contains("as up") || lower.Contains("a sap"))
             return null;
 
         // Accept time patterns (digits with optional colon)
