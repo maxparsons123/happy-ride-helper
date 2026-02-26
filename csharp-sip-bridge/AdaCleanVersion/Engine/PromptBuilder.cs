@@ -153,6 +153,17 @@ public static class PromptBuilder
         string? rejectedReason = null,
         bool isRecalculating = false)
     {
+        // ── Fare address override: prefer inline-verified addresses over fare pipeline addresses ──
+        // The fare pipeline's address-dispatch can return stale/wrong addresses (caching, Gemini drift).
+        // The inline-verified addresses are authoritative — they were confirmed during the call.
+        if (fareResult != null && verifiedPickup != null && fareResult.Pickup.Address != verifiedPickup.Address)
+        {
+            fareResult = fareResult with { Pickup = verifiedPickup };
+        }
+        if (fareResult != null && verifiedDestination != null && fareResult.Destination.Address != verifiedDestination.Address)
+        {
+            fareResult = fareResult with { Destination = verifiedDestination };
+        }
         // If a slot was just rejected, generate a specific re-prompt instead of the default
         if (rejectedReason != null)
         {

@@ -645,10 +645,6 @@ public class CleanCallSession
         var currentName = _engine.RawData.NameRaw;
         if (string.IsNullOrWhiteSpace(currentName)) return;
 
-        // Match patterns where Ada addresses the caller by name
-        // e.g., "Thank you, Max.", "Thanks, Max.", "Nice to meet you, Max."
-        // e.g., "Thank you Max. Can I have..."
-        // Also match: "Thank you, Max. Can you please..."
         var namePatterns = new[]
         {
             @"(?:[Tt]hank\s+you|[Tt]hanks|[Nn]ice\s+to\s+meet\s+you|[Hh]i|[Hh]ello),?\s+([A-Z][a-zA-Z]+)",
@@ -661,9 +657,8 @@ public class CleanCallSession
             if (match.Success)
             {
                 var adaName = match.Groups[1].Value.Trim().TrimEnd('.', ',', '!');
-                _nameRefined = true; // Mark as attempted regardless of outcome
+                _nameRefined = true;
 
-                // Skip common non-name words Ada might use after "Thank you"
                 var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                     { "Can", "Could", "Please", "Now", "For", "So", "What", "Where", "How", "And", "The" };
                 if (skipWords.Contains(adaName))
@@ -675,15 +670,58 @@ public class CleanCallSession
                 // Only correct if Ada used a different name (case-insensitive compare)
                 if (!string.Equals(adaName, currentName, StringComparison.OrdinalIgnoreCase) && adaName.Length >= 2)
                 {
+                    // ── Hallucination guard: require phonetic similarity ──
+                    // Ada sometimes hallucinates completely unrelated names (e.g., "Mark" → "Prachi").
+                    // Only accept refinement if the names share the same first letter OR
+                    // have significant character overlap (≥40% of shorter name's chars).
+                    if (!NamesAreSimilar(currentName, adaName))
+                    {
+                        Log($"[NameRefine] ⚠️ Hallucination blocked: \"{currentName}\" → \"{adaName}\" (no phonetic similarity)");
+                        return;
+                    }
+
                     Log($"📝 Name refined from Ada: \"{currentName}\" → \"{adaName}\"");
                     _engine.RawData.NameRaw = adaName;
                     return;
                 }
                 Log($"[NameRefine] Ada confirmed same name: \"{adaName}\"");
-                return; // Ada confirmed the same name, no change needed
+                return;
             }
         }
         Log($"[NameRefine] No name pattern matched in: \"{adaText[..Math.Min(80, adaText.Length)]}...\"");
+    }
+
+    /// <summary>
+    /// Check if two names are phonetically similar enough to allow refinement.
+    /// Returns true if: same first letter, OR ≥40% character overlap of the shorter name.
+    /// This prevents Ada hallucinating completely unrelated names (e.g., "Mark" → "Prachi").
+    /// </summary>
+    private static bool NamesAreSimilar(string rawName, string adaName)
+    {
+        var a = rawName.ToLowerInvariant();
+        var b = adaName.ToLowerInvariant();
+
+        // Same first letter is a strong phonetic signal (e.g., "much" → "Max")
+        if (a.Length > 0 && b.Length > 0 && a[0] == b[0])
+            return true;
+
+        // Character overlap: count shared characters
+        var shorter = a.Length <= b.Length ? a : b;
+        var longer = a.Length <= b.Length ? b : a;
+        var sharedCount = 0;
+        var longerChars = new List<char>(longer);
+        foreach (var c in shorter)
+        {
+            var idx = longerChars.IndexOf(c);
+            if (idx >= 0)
+            {
+                sharedCount++;
+                longerChars.RemoveAt(idx); // prevent double-counting
+            }
+        }
+
+        // ≥40% overlap of shorter name
+        return shorter.Length > 0 && (double)sharedCount / shorter.Length >= 0.4;
     }
 
     /// <summary>
