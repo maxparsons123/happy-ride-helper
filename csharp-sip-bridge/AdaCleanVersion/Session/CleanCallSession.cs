@@ -217,13 +217,13 @@ public class CleanCallSession
                     if (burst.Pickup != null)
                     {
                         _engine.RawData.SetSlot("pickup", burst.Pickup);
-                        _engine.RawData.PickupGemini = burst.Pickup; // Store Gemini-cleaned version for readback
+                        _engine.RawData.SetGeminiSlot("pickup", burst.Pickup); // Store Gemini-cleaned version for readback
                         Log($"[BurstDispatch] pickup=\"{burst.Pickup}\"");
                     }
                     if (burst.Destination != null)
                     {
                         _engine.RawData.SetSlot("destination", burst.Destination);
-                        _engine.RawData.DestinationGemini = burst.Destination; // Store Gemini-cleaned version for readback
+                        _engine.RawData.SetGeminiSlot("destination", burst.Destination); // Store Gemini-cleaned version for readback
                         Log($"[BurstDispatch] destination=\"{burst.Destination}\"");
                     }
                     if (burst.Passengers.HasValue)
@@ -437,9 +437,8 @@ public class CleanCallSession
         {
             // Try to get Gemini-cleaned version for better readback (non-blocking, best-effort)
             var addressField = _engine.State == CollectionState.VerifyingPickup ? "pickup" : "destination";
-            if (_burstDispatcher != null && 
-                ((addressField == "pickup" && _engine.RawData.PickupGemini == null) ||
-                 (addressField == "destination" && _engine.RawData.DestinationGemini == null)))
+            if (_burstDispatcher != null &&
+                string.IsNullOrWhiteSpace(_engine.RawData.GetGeminiSlot(addressField)))
             {
                 try
                 {
@@ -455,10 +454,7 @@ public class CleanCallSession
                         
                         if (!string.IsNullOrWhiteSpace(cleaned))
                         {
-                            if (addressField == "pickup")
-                                _engine.RawData.PickupGemini = cleaned;
-                            else
-                                _engine.RawData.DestinationGemini = cleaned;
+                            _engine.RawData.SetGeminiSlot(addressField, cleaned);
                             Log($"[GeminiClean] {addressField}: \"{valueToStore}\" → \"{cleaned}\"");
                         }
                     }
