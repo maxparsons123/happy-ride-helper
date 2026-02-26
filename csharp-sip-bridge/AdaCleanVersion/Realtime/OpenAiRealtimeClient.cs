@@ -57,15 +57,20 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>OpenAI finished sending audio deltas.</summary>
     private volatile bool _responseCompleted;
 
-    /// <summary>Pending instruction to send after response.canceled arrives.</summary>
-    private volatile string? _pendingInstruction;
+    private sealed record PendingInstruction(string Text, bool IsReprompt);
 
-    // Ring buffer mic tail: keeps only last 10 frames (200ms) while mic is gated
+    /// <summary>Pending instruction to send after response.canceled arrives.</summary>
+    private PendingInstruction? _pendingInstruction;
+
+    // Ring buffer mic tail: keep last gated frames (activity-filtered before flush)
     private const int MicTailMaxFrames = 10;
+    private const int MicTailFlushCapFrames = 4; // avoid bursty ghost transcripts
     private readonly byte[][] _micTail = new byte[MicTailMaxFrames][];
+    private readonly bool[] _micTailHasSpeech = new bool[MicTailMaxFrames];
     private int _micTailIndex;
     private int _micTailCount;
     private readonly object _micTailLock = new();
+    private readonly byte _g711SilenceByte;
 
     // ─── Auto VAD Config ───────────────────────────────────
     /// <summary>
@@ -133,6 +138,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _session = session;
         _logger = logger;
         _codec = codec;
+        _g711SilenceByte = G711Codec.SilenceByte(codec);
 
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
@@ -331,7 +337,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         var payload = rtpPacket.Payload;
 
-        // Ring-buffer mic tail: keep only last 200ms while mic is gated
+        // Ring-buffer mic tail while mic is gated
         if (_micGated)
         {
             lock (_micTailLock)
@@ -340,7 +346,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 {
                     var copy = new byte[payload.Length];
                     Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
+
+                    // Mark frame as speech-like only if enough bytes differ from codec silence.
+                    // This filters low-level line noise from being flushed as ghost speech.
+                    int nonSilence = 0;
+                    for (int i = 0; i < copy.Length; i++)
+                    {
+                        if (copy[i] != _g711SilenceByte && ++nonSilence >= 12)
+                            break;
+                    }
+
                     _micTail[_micTailIndex] = copy;
+                    _micTailHasSpeech[_micTailIndex] = nonSilence >= 12;
                     _micTailIndex = (_micTailIndex + 1) % MicTailMaxFrames;
                     if (_micTailCount < MicTailMaxFrames) _micTailCount++;
                     return;
@@ -367,26 +384,43 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Flush the ring-buffer mic tail (max 10 frames / 200ms).
-    /// Preserves initial syllables without flooding OpenAI.
+    /// Flush mic tail with activity filtering.
+    /// Sends at most 4 recent speech-like frames to avoid ghost transcript bursts.
     /// </summary>
     private void FlushMicTail()
     {
         byte[][] frames;
-        int count;
 
         lock (_micTailLock)
         {
             if (_micTailCount == 0) return;
-            count = _micTailCount;
-            frames = new byte[count][];
-            int start = (_micTailIndex - count + MicTailMaxFrames) % MicTailMaxFrames;
-            for (int i = 0; i < count; i++)
-                frames[i] = _micTail[(start + i) % MicTailMaxFrames];
+
+            var selected = new System.Collections.Generic.List<byte[]>(MicTailFlushCapFrames);
+            int start = (_micTailIndex - _micTailCount + MicTailMaxFrames) % MicTailMaxFrames;
+
+            for (int i = 0; i < _micTailCount; i++)
+            {
+                int idx = (start + i) % MicTailMaxFrames;
+                if (_micTailHasSpeech[idx] && _micTail[idx] != null)
+                    selected.Add(_micTail[idx]);
+            }
+
+            if (selected.Count > MicTailFlushCapFrames)
+                selected = selected.GetRange(selected.Count - MicTailFlushCapFrames, MicTailFlushCapFrames);
+
+            frames = selected.ToArray();
             _micTailCount = 0;
+            _micTailIndex = 0;
+            Array.Clear(_micTailHasSpeech, 0, _micTailHasSpeech.Length);
         }
 
-        Log($"🎤 Flushing {count} mic tail frames");
+        if (frames.Length == 0)
+        {
+            Log("🎤 Mic tail flush skipped (no speech energy)");
+            return;
+        }
+
+        Log($"🎤 Flushing {frames.Length} mic tail frame(s) (speech-filtered)");
         foreach (var f in frames)
             ForwardToOpenAi(f);
     }
@@ -398,6 +432,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         {
             _micTailCount = 0;
             _micTailIndex = 0;
+            Array.Clear(_micTailHasSpeech, 0, _micTailHasSpeech.Length);
         }
     }
 
@@ -595,13 +630,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                instruction.Contains("Do NOT speak at all");
     }
 
-    private bool _pendingIsReprompt;
-
     private void OnSessionAiInstruction(string instruction, bool isReprompt)
     {
         Log(isReprompt ? "📋 Queuing REPROMPT instruction update" : "📋 Queuing instruction update");
-        _pendingIsReprompt = isReprompt;
-        _ = StartInstructionSequenceAsync(instruction, isReprompt);
+        _ = StartInstructionSequenceAsync(new PendingInstruction(instruction, isReprompt));
     }
 
     /// <summary>
@@ -609,17 +641,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// The actual session.update + response.create happens when response.canceled arrives.
     /// If no response is active, the fallback timer sends it after 150ms.
     /// </summary>
-    private async Task StartInstructionSequenceAsync(string instruction, bool isReprompt = false)
+    private async Task StartInstructionSequenceAsync(PendingInstruction pending)
     {
         try
         {
-            _pendingInstruction = instruction;
-            _pendingIsReprompt = isReprompt;
+            Interlocked.Exchange(ref _pendingInstruction, pending);
 
             // Cancel any in-progress response — response.canceled event will trigger the rest
             await SendJsonAsync(new { type = "response.cancel" });
 
-            if (isReprompt)
+            if (pending.IsReprompt)
             {
                 // HARDENED: For reprompts, also clear the input audio buffer to prevent
                 // the AI from using stale audio context to generate a rogue response
@@ -661,8 +692,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private async Task SendPendingInstructionAsync()
     {
-        var instruction = Interlocked.Exchange(ref _pendingInstruction, null);
-        if (instruction == null) return; // already sent or no pending
+        var pending = Interlocked.Exchange(ref _pendingInstruction, null);
+        if (pending == null) return; // already sent or no pending
+
+        var instruction = pending.Text;
 
         try
         {
@@ -688,7 +721,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 return;
             }
 
-            var isReprompt = _pendingIsReprompt;
+            var isReprompt = pending.IsReprompt;
             await SendJsonAsync(new
             {
                 type = "response.create",
