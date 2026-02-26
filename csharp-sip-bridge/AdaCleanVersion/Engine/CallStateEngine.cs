@@ -281,7 +281,7 @@ public class CallStateEngine
     /// </summary>
     public void AcceptPaymentChoice(string method)
     {
-        if (State != CollectionState.AwaitingPaymentChoice)
+        if (State != CollectionState.AwaitingPaymentChoice && State != CollectionState.PresentingFare)
         {
             Log($"Payment choice ignored in state {State}");
             return;
