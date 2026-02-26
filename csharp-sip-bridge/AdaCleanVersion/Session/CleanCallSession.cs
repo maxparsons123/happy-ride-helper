@@ -20,6 +20,7 @@ public class CleanCallSession
     private readonly IExtractionService _extractionService;
     private readonly FareGeocodingService? _fareService;
     private readonly LocalGeminiReconciler? _reconciler;
+    private readonly AiFreeFormSplitter? _aiSplitter;
     private readonly IcabbiBookingService? _icabbiService;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
@@ -55,6 +56,7 @@ public class CleanCallSession
         FareGeocodingService? fareService = null,
         CallerContext? callerContext = null,
         LocalGeminiReconciler? reconciler = null,
+        AiFreeFormSplitter? aiSplitter = null,
         IcabbiBookingService? icabbiService = null)
     {
         SessionId = sessionId;
@@ -64,6 +66,7 @@ public class CleanCallSession
         _fareService = fareService;
         _callerContext = callerContext;
         _reconciler = reconciler;
+        _aiSplitter = aiSplitter;
         _icabbiService = icabbiService;
 
         _engine.OnLog += msg => OnLog?.Invoke(msg);
@@ -134,56 +137,92 @@ public class CleanCallSession
             return;
         }
 
-        // ── Free-form splitting BEFORE validation ──
-        // Must run first so "Three passengers" during destination doesn't get validated as an address
-        if (currentSlot != "name")
+        // ── AI-powered splitting (primary) with regex fallback ──
+        // Try AI splitter first for robust compound utterance parsing.
+        // Falls back to deterministic regex FreeFormSplitter on timeout/error.
+        var aiHandled = false;
+        if (_aiSplitter != null)
         {
-            var split = FreeFormSplitter.Analyze(transcript, currentSlot);
-            if (split.WasSplit)
+            try
             {
-                if (split.RerouteToSlot != null)
+                var aiResult = await _aiSplitter.AnalyzeAsync(transcript, currentSlot, ct);
+                if (aiResult != null)
                 {
-                    // Input belongs to a different slot entirely (e.g., "Three passengers" during destination)
-                    Log($"Cross-slot reroute: '{currentSlot}' input \"{transcript}\" → slot '{split.RerouteToSlot}'");
-                    var rerouteValue = split.OverflowSlots[split.RerouteToSlot];
-                    _engine.AcceptSlotValue(split.RerouteToSlot, rerouteValue);
+                    var primaryValue = aiResult.GetSlot(currentSlot);
+                    var overflow = aiResult.GetOverflowSlots(currentSlot);
 
-                    // After storing the rerouted value, emit instruction for the actual current slot
-                    // (which is still missing and needs to be asked for)
-                    EmitCurrentInstruction();
-                    return;
-                }
-
-                if (split.PrimaryValue != null && split.OverflowSlots.Count > 0)
-                {
-                    // Multi-slot split (e.g., "52A David Road, going to Manchester")
-                    Log($"Free-form split: primary '{currentSlot}'=\"{split.PrimaryValue}\"");
-                    transcript = split.PrimaryValue;
-                    _engine.RawData.IsMultiSlotBurst = true;
-
-                    // Store overflow slots silently
-                    foreach (var (overflowSlot, overflowValue) in split.OverflowSlots)
+                    if (primaryValue != null || overflow.Count > 0)
                     {
-                        Log($"Free-form overflow: '{overflowSlot}'=\"{overflowValue}\"");
-                        _engine.RawData.SetSlot(overflowSlot, overflowValue);
+                        aiHandled = true;
+
+                        if (overflow.Count > 0)
+                        {
+                            Log($"[AiSplit] Primary '{currentSlot}'=\"{primaryValue}\", overflow={overflow.Count}");
+                            _engine.RawData.IsMultiSlotBurst = true;
+
+                            foreach (var (slot, value) in overflow)
+                            {
+                                Log($"[AiSplit] Overflow: '{slot}'=\"{value}\"");
+                                _engine.RawData.SetSlot(slot, value);
+                            }
+                        }
+
+                        if (primaryValue != null)
+                            transcript = primaryValue;
                     }
                 }
             }
-        }
-        else
-        {
-            // Name slot: check for all-in-one burst ("It's Max, 52A David Road going to Manchester for 4")
-            var nameBurst = FreeFormSplitter.AnalyzeNameBurst(transcript);
-            if (nameBurst != null)
+            catch (Exception ex)
             {
-                Log($"Name burst detected: name=\"{nameBurst.Name}\", overflow slots={nameBurst.OverflowSlots.Count}");
-                transcript = nameBurst.Name;
-                _engine.RawData.IsMultiSlotBurst = true;
+                Log($"[AiSplit] Failed, falling back to regex: {ex.Message}");
+            }
+        }
 
-                foreach (var (overflowSlot, overflowValue) in nameBurst.OverflowSlots)
+        // ── Regex fallback (deterministic) ──
+        if (!aiHandled)
+        {
+            if (currentSlot != "name")
+            {
+                var split = FreeFormSplitter.Analyze(transcript, currentSlot);
+                if (split.WasSplit)
                 {
-                    Log($"Name burst overflow: '{overflowSlot}'=\"{overflowValue}\"");
-                    _engine.RawData.SetSlot(overflowSlot, overflowValue);
+                    if (split.RerouteToSlot != null)
+                    {
+                        Log($"Cross-slot reroute: '{currentSlot}' input \"{transcript}\" → slot '{split.RerouteToSlot}'");
+                        var rerouteValue = split.OverflowSlots[split.RerouteToSlot];
+                        _engine.AcceptSlotValue(split.RerouteToSlot, rerouteValue);
+                        EmitCurrentInstruction();
+                        return;
+                    }
+
+                    if (split.PrimaryValue != null && split.OverflowSlots.Count > 0)
+                    {
+                        Log($"Free-form split: primary '{currentSlot}'=\"{split.PrimaryValue}\"");
+                        transcript = split.PrimaryValue;
+                        _engine.RawData.IsMultiSlotBurst = true;
+
+                        foreach (var (overflowSlot, overflowValue) in split.OverflowSlots)
+                        {
+                            Log($"Free-form overflow: '{overflowSlot}'=\"{overflowValue}\"");
+                            _engine.RawData.SetSlot(overflowSlot, overflowValue);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                var nameBurst = FreeFormSplitter.AnalyzeNameBurst(transcript);
+                if (nameBurst != null)
+                {
+                    Log($"Name burst detected: name=\"{nameBurst.Name}\", overflow slots={nameBurst.OverflowSlots.Count}");
+                    transcript = nameBurst.Name;
+                    _engine.RawData.IsMultiSlotBurst = true;
+
+                    foreach (var (overflowSlot, overflowValue) in nameBurst.OverflowSlots)
+                    {
+                        Log($"Name burst overflow: '{overflowSlot}'=\"{overflowValue}\"");
+                        _engine.RawData.SetSlot(overflowSlot, overflowValue);
+                    }
                 }
             }
         }
