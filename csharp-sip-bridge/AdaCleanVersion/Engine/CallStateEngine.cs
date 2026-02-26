@@ -37,7 +37,8 @@ public class CallStateEngine
 
     /// <summary>
     /// Store a raw slot value and advance state if appropriate.
-    /// Called when caller provides information for the current slot.
+    /// For pickup/destination, transitions to VerifyingPickup/VerifyingDestination
+    /// so the session can geocode inline before asking the next question.
     /// </summary>
     /// <returns>The next slot to collect, or null if all slots are filled.</returns>
     public string? AcceptSlotValue(string slotName, string rawValue)
@@ -47,6 +48,18 @@ public class CallStateEngine
 
         RawData.SetSlot(slotName, rawValue.Trim());
         Log($"Slot '{slotName}' set: \"{rawValue.Trim()}\"");
+
+        // For address slots, transition to verification state (inline geocoding)
+        if (slotName == "pickup")
+        {
+            TransitionTo(CollectionState.VerifyingPickup);
+            return RawData.NextMissingSlot();
+        }
+        if (slotName == "destination")
+        {
+            TransitionTo(CollectionState.VerifyingDestination);
+            return RawData.NextMissingSlot();
+        }
 
         // Check if all slots are now filled
         if (RawData.AllRequiredPresent)
@@ -114,8 +127,70 @@ public class CallStateEngine
             Log($"Cannot geocode in state {State}");
             return;
         }
-        // State already Geocoding — just log
         Log("Geocoding started");
+    }
+
+    /// <summary>
+    /// Geocoded addresses stored per-slot for inline verification.
+    /// </summary>
+    public GeocodedAddress? VerifiedPickup { get; private set; }
+    public GeocodedAddress? VerifiedDestination { get; private set; }
+
+    /// <summary>
+    /// Store verified pickup address from inline geocoding and advance to next slot.
+    /// </summary>
+    public void CompletePickupVerification(GeocodedAddress geocoded)
+    {
+        VerifiedPickup = geocoded;
+        Log($"Pickup verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
+
+        // Advance to next missing slot
+        if (RawData.AllRequiredPresent)
+        {
+            TransitionTo(CollectionState.ReadyForExtraction);
+        }
+        else
+        {
+            var next = RawData.NextMissingSlot();
+            TransitionTo(next != null ? SlotToState(next) : CollectionState.ReadyForExtraction);
+        }
+    }
+
+    /// <summary>
+    /// Store verified destination address from inline geocoding and advance.
+    /// </summary>
+    public void CompleteDestinationVerification(GeocodedAddress geocoded)
+    {
+        VerifiedDestination = geocoded;
+        Log($"Destination verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
+
+        if (RawData.AllRequiredPresent)
+        {
+            TransitionTo(CollectionState.ReadyForExtraction);
+        }
+        else
+        {
+            var next = RawData.NextMissingSlot();
+            TransitionTo(next != null ? SlotToState(next) : CollectionState.ReadyForExtraction);
+        }
+    }
+
+    /// <summary>
+    /// Inline geocoding failed — skip verification, proceed to next slot.
+    /// The full geocoding pipeline will run later.
+    /// </summary>
+    public void SkipVerification(string field, string reason)
+    {
+        Log($"Verification skipped for {field}: {reason}");
+        if (RawData.AllRequiredPresent)
+        {
+            TransitionTo(CollectionState.ReadyForExtraction);
+        }
+        else
+        {
+            var next = RawData.NextMissingSlot();
+            TransitionTo(next != null ? SlotToState(next) : CollectionState.ReadyForExtraction);
+        }
     }
 
     /// <summary>

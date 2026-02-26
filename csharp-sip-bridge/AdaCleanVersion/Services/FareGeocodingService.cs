@@ -44,6 +44,79 @@ public class FareGeocodingService
     }
 
     /// <summary>
+    /// Geocode a single address inline (for pickup/destination verification).
+    /// Uses the address-dispatch edge function with only one address populated.
+    /// Returns the geocoded address, or null on failure.
+    /// </summary>
+    public async Task<GeocodedAddress?> GeocodeAddressAsync(
+        string address,
+        string field, // "pickup" or "destination"
+        string? callerPhone = null,
+        CancellationToken ct = default)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(10000); // 10s timeout for single address
+
+        try
+        {
+            _logger.LogInformation("[FareGeo] Inline geocode ({Field}): \"{Addr}\"", field, address);
+
+            // Use address-dispatch with a dummy for the other field
+            var payload = field == "pickup"
+                ? new { pickup = address, destination = "PLACEHOLDER_SKIP", phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null }
+                : new { pickup = "PLACEHOLDER_SKIP", destination = address, phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null };
+
+            var url = $"{_supabaseUrl}/functions/v1/address-dispatch";
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, url);
+            request.Headers.Add("Authorization", $"Bearer {_serviceRoleKey}");
+            request.Headers.Add("apikey", _serviceRoleKey);
+            request.Content = JsonContent.Create(payload, options: JsonOpts);
+
+            var response = await _httpClient.SendAsync(request, cts.Token);
+            var responseBody = await response.Content.ReadAsStringAsync(cts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[FareGeo] Inline geocode failed ({Status}): {Body}",
+                    response.StatusCode, responseBody);
+                return null;
+            }
+
+            using var doc = JsonDocument.Parse(responseBody);
+            var root = doc.RootElement;
+
+            // Check status
+            var status = root.TryGetProperty("status", out var statusProp)
+                ? statusProp.GetString() : "ready";
+
+            var key = field == "pickup" ? "pickup" : "dropoff";
+            var geocoded = ParseGeocodedAddress(root, key);
+
+            if (status == "clarification_needed" || geocoded.IsAmbiguous)
+            {
+                _logger.LogInformation("[FareGeo] Inline geocode needs clarification for {Field}", field);
+                return geocoded; // Return with IsAmbiguous=true so caller can handle
+            }
+
+            _logger.LogInformation("[FareGeo] ✅ Inline verified: \"{Addr}\" → ({Lat},{Lon})",
+                geocoded.Address, geocoded.Lat, geocoded.Lon);
+
+            return geocoded;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("[FareGeo] Inline geocode timed out for {Field}", field);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[FareGeo] Inline geocode error for {Field}", field);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Geocode both addresses and calculate fare.
     /// Returns null on failure (caller should retry or fall back).
     /// </summary>

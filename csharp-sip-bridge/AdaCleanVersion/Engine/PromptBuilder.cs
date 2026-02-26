@@ -66,7 +66,9 @@ public static class PromptBuilder
         CallerContext? context = null,
         StructuredBooking? booking = null,
         FareResult? fareResult = null,
-        ClarificationInfo? clarification = null)
+        ClarificationInfo? clarification = null,
+        GeocodedAddress? verifiedPickup = null,
+        GeocodedAddress? verifiedDestination = null)
     {
         return state switch
         {
@@ -90,17 +92,23 @@ public static class PromptBuilder
                 $"[INSTRUCTION] {NameAck(rawData)} Ask for their PICKUP address. " +
                 "They must include a house number if it's a street address.",
 
+            CollectionState.VerifyingPickup =>
+                "[INSTRUCTION] Say \"One moment, just confirming that address\" — then STOP and wait silently.",
+
             CollectionState.CollectingDestination when context?.LastDestination != null =>
-                $"[INSTRUCTION] Pickup noted as \"{rawData.PickupRaw}\". " +
+                $"[INSTRUCTION] Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
                 "Now ask for their DESTINATION address.",
 
             CollectionState.CollectingDestination =>
-                $"[INSTRUCTION] Pickup noted as \"{rawData.PickupRaw}\". " +
+                $"[INSTRUCTION] Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
                 "Now ask for their DESTINATION address.",
 
+            CollectionState.VerifyingDestination =>
+                "[INSTRUCTION] Say \"One moment, just confirming that address\" — then STOP and wait silently.",
+
             CollectionState.CollectingPassengers =>
-                $"[INSTRUCTION] Destination noted as \"{rawData.DestinationRaw}\". " +
+                $"[INSTRUCTION] Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
                 "Ask how many passengers.",
 
             CollectionState.CollectingPickupTime =>

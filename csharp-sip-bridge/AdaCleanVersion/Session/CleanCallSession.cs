@@ -149,6 +149,21 @@ public class CleanCallSession
         // Store raw (or alias-resolved) value for current slot
         var nextSlot = _engine.AcceptSlotValue(currentSlot, valueToStore);
 
+        // For address slots, AcceptSlotValue transitions to VerifyingPickup/VerifyingDestination.
+        // Trigger inline geocoding before moving to the next question.
+        if (_engine.State == CollectionState.VerifyingPickup)
+        {
+            EmitCurrentInstruction(); // "One moment, confirming that address..."
+            await RunInlineGeocodeAsync("pickup", valueToStore, ct);
+            return;
+        }
+        if (_engine.State == CollectionState.VerifyingDestination)
+        {
+            EmitCurrentInstruction(); // "One moment, confirming that address..."
+            await RunInlineGeocodeAsync("destination", valueToStore, ct);
+            return;
+        }
+
         if (nextSlot == null && _engine.State == CollectionState.ReadyForExtraction)
         {
             // All slots collected — trigger extraction
@@ -250,6 +265,80 @@ public class CleanCallSession
     /// Get the system prompt for the AI voice interface.
     /// </summary>
     public string GetSystemPrompt() => PromptBuilder.BuildSystemPrompt(_companyName, _callerContext);
+
+    // ─── Inline Address Verification ────────────────────────
+
+    /// <summary>
+    /// Geocode a single address inline after it's collected.
+    /// Ada pauses ("one moment, confirming that address"), geocodes, then reads back
+    /// the verified address before asking for the next slot.
+    /// </summary>
+    private async Task RunInlineGeocodeAsync(string field, string rawAddress, CancellationToken ct)
+    {
+        if (_fareService == null)
+        {
+            Log($"No fare service — skipping inline geocode for {field}");
+            _engine.SkipVerification(field, "no fare service");
+            EmitCurrentInstruction();
+            return;
+        }
+
+        try
+        {
+            Log($"Inline geocoding {field}: \"{rawAddress}\"");
+            var geocoded = await _fareService.GeocodeAddressAsync(rawAddress, field, CallerId, ct);
+
+            if (geocoded == null)
+            {
+                Log($"Inline geocode returned null for {field} — skipping");
+                _engine.SkipVerification(field, "geocode failed");
+                EmitCurrentInstruction();
+                return;
+            }
+
+            if (geocoded.IsAmbiguous)
+            {
+                Log($"Inline geocode: {field} is ambiguous — entering clarification");
+                _engine.EnterClarification(new ClarificationInfo
+                {
+                    AmbiguousField = field,
+                    Message = "Which area is that in?",
+                    Alternatives = geocoded.Alternatives,
+                    Attempt = 0
+                });
+                EmitCurrentInstruction();
+                return;
+            }
+
+            // Success — store verified address and advance
+            if (field == "pickup")
+            {
+                _engine.CompletePickupVerification(geocoded);
+                // Update the raw slot with the verified address for better readback
+                Log($"✅ Pickup verified: \"{geocoded.Address}\"");
+            }
+            else
+            {
+                _engine.CompleteDestinationVerification(geocoded);
+                Log($"✅ Destination verified: \"{geocoded.Address}\"");
+            }
+
+            // Emit instruction with verified address in the prompt
+            EmitCurrentInstruction();
+
+            // Check if all slots are now filled after verification
+            if (_engine.State == CollectionState.ReadyForExtraction)
+            {
+                await RunExtractionAsync(ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Inline geocode error for {field}: {ex.Message}");
+            _engine.SkipVerification(field, ex.Message);
+            EmitCurrentInstruction();
+        }
+    }
 
     // ─── Private ─────────────────────────────────────────────
 
@@ -473,7 +562,8 @@ public class CleanCallSession
         var instruction = PromptBuilder.BuildInstruction(
             _engine.State, _engine.RawData, _callerContext,
             _engine.StructuredResult, _engine.FareResult,
-            _engine.PendingClarification);
+            _engine.PendingClarification,
+            _engine.VerifiedPickup, _engine.VerifiedDestination);
         OnAiInstruction?.Invoke(instruction);
     }
 
