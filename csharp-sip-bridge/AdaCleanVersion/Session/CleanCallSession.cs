@@ -129,12 +129,23 @@ public class CleanCallSession
             return;
         }
 
-        // Resolve aliases ("home", "work", "the usual") for address slots
-        var resolved = AliasResolver.TryResolve(currentSlot, transcript, _callerContext);
         var valueToStore = transcript;
+
+        // Strip common name prefixes ("It's Max" → "Max", "My name is John" → "John")
+        if (currentSlot == "name")
+        {
+            valueToStore = System.Text.RegularExpressions.Regex.Replace(
+                valueToStore,
+                @"^(it'?s\s+|that'?s\s+|i'?m\s+|my\s+name\s+is\s+|i\s+am\s+|they\s+call\s+me\s+|call\s+me\s+|this\s+is\s+)",
+                "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim().TrimEnd('.', '!', ',');
+            Log($"Name cleaned: \"{transcript}\" → \"{valueToStore}\"");
+        }
+
+        // Resolve aliases ("home", "work", "the usual") for address slots
+        var resolved = AliasResolver.TryResolve(currentSlot, valueToStore, _callerContext);
         if (resolved != null)
         {
-            Log($"Alias resolved: \"{transcript}\" → \"{resolved.ResolvedAddress}\" (alias: {resolved.AliasName})");
+            Log($"Alias resolved: \"{valueToStore}\" → \"{resolved.ResolvedAddress}\" (alias: {resolved.AliasName})");
             valueToStore = resolved.ResolvedAddress;
         }
 
