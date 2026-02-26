@@ -46,7 +46,7 @@ public sealed class OutboundDspPlugin : IDisposable
         for (int i = 0; i < alawFrame.Length; i++)
         {
             // Decode A-law → PCM16 → float [-1..1]
-            short pcm = G711Codec.ALawToLinear(alawFrame[i]);
+            short pcm = G711Codec.ALawDecode(alawFrame[i]);
             float sample = pcm / 32768f;
 
             // Apply DSP chain
@@ -136,7 +136,7 @@ public sealed class OutboundDspPlugin : IDisposable
         float d2 = _dither.NextSingle();
         float dithered = pcm + (d1 - d2) * 0.5f;
         int sample = (int)Math.Clamp(dithered, -32768f, 32767f);
-        return G711Codec.LinearToALaw((short)sample);
+        return G711Codec.ALawEncode((short)sample);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
