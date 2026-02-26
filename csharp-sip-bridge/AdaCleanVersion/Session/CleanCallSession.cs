@@ -249,6 +249,20 @@ public class CleanCallSession
                         Log($"[BurstDispatch] pickup_time=\"{burst.PickupTime}\"");
                     }
 
+                    // ── Smart Slot Picker: if we're collecting pickup and burst only returned a destination,
+                    // treat the single address as the pickup (caller is answering the pickup question).
+                    // Only keep it as destination if they explicitly said "to" or "going to".
+                    if (currentSlot == "pickup" && burst.Pickup == null && burst.Destination != null
+                        && !System.Text.RegularExpressions.Regex.IsMatch(transcript, @"\b(to|going to|drop off|drop me)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    {
+                        Log($"[BurstDispatch] Smart slot picker: reassigning destination → pickup (caller answering pickup question)");
+                        _engine.RawData.SetSlot("pickup", burst.Destination);
+                        _engine.RawData.SetGeminiSlot("pickup", burst.Destination);
+                        _engine.RawData.SetSlot("destination", null!); // Clear the misclassified destination
+                        _engine.RawData.SetGeminiSlot("destination", null!);
+                        burst = burst with { Pickup = burst.Destination, Destination = null };
+                    }
+
                     _engine.RawData.IsMultiSlotBurst = true;
 
                     // Cache geocoded result so verification states can skip separate geocoding
