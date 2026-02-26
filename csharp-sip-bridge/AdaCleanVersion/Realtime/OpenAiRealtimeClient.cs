@@ -511,7 +511,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 }
                 break;
 
-            // ── Barge-in: immediately cut everything and ungate (with 250ms debounce) ──
+            // ── Barge-in: immediately cut everything and ungate (with debounce) ──
             case "input_audio_buffer.speech_started":
                 var now = Environment.TickCount64;
                 var elapsed = now - _lastBargeInTick;
@@ -521,6 +521,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     break;
                 }
                 _lastBargeInTick = now;
+
+                // If mic is already ungated, skip re-flush to avoid fragmenting
+                // the caller's ongoing speech into tiny clips that Whisper misreads
+                if (!_micGated)
+                {
+                    Log("🎤 Barge-in — mic already ungated, skipping re-flush");
+                    break;
+                }
+
                 _micGated = false;
                 _playout.Clear();
                 FlushMicGateBuffer(); // v4.2: flush (not clear) — preserve leading speech
