@@ -37,7 +37,8 @@ public sealed class G711RtpPlayout : IDisposable
     private const int FrameSize = 160;          // 20ms @ 8kHz
 
     private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start
-    private const int ResumeThresholdFrames = 5;       // 100ms for mid-stream resume
+    private const int MinResumeThresholdFrames = 5;    // 100ms minimum for mid-stream resume
+    private const int MaxResumeThresholdFrames = 10;   // 200ms maximum adaptive ceiling
     private const int MaxPoolSize = 200;
     private const int MaxSendErrors = 10;
 
@@ -66,10 +67,17 @@ public sealed class G711RtpPlayout : IDisposable
     private volatile int _clearEpoch;
     private bool _buffering = true;
     private bool _hasPlayedAudio;
+    private bool _hadPlayedBeforeClear;   // preserves mid-call awareness across barge-in
     private IntPtr _timer;
     private bool _useTimer;
 
     private int _sendErrorCount;
+
+    // ─── Adaptive jitter tracking ───────────────────────────
+    private long _lastEnqueueTick;
+    private double _jitterEwma;                      // exponential weighted moving average of inter-arrival variance (ms)
+    private const double JitterAlpha = 0.15;         // smoothing factor
+    private int _adaptiveResumeFrames = MinResumeThresholdFrames;
 
     private readonly TypingSoundGenerator _typingSound;
     private volatile bool _typingSoundsEnabled = true;
@@ -176,6 +184,22 @@ public sealed class G711RtpPlayout : IDisposable
     {
         if (g711Data == null || g711Data.Length == 0) return;
 
+        // ── Adaptive jitter measurement ──
+        long nowTick = Stopwatch.GetTimestamp();
+        long prev = Interlocked.Exchange(ref _lastEnqueueTick, nowTick);
+        if (prev > 0)
+        {
+            double deltaMs = (nowTick - prev) * NsPerTick / 1_000_000.0;
+            double deviation = Math.Abs(deltaMs - 20.0); // ideal is 20ms per frame
+            _jitterEwma = (_jitterEwma == 0)
+                ? deviation
+                : _jitterEwma * (1 - JitterAlpha) + deviation * JitterAlpha;
+
+            // Adapt resume threshold: more jitter → larger buffer (5-10 frames = 100-200ms)
+            int newThreshold = MinResumeThresholdFrames + (int)Math.Min(_jitterEwma / 10.0, MaxResumeThresholdFrames - MinResumeThresholdFrames);
+            _adaptiveResumeFrames = Math.Clamp(newThreshold, MinResumeThresholdFrames, MaxResumeThresholdFrames);
+        }
+
         var epoch = Volatile.Read(ref _clearEpoch);
 
         lock (_accLock)
@@ -256,7 +280,7 @@ public sealed class G711RtpPlayout : IDisposable
 
         if (_buffering)
         {
-            int threshold = _hasPlayedAudio ? ResumeThresholdFrames : ColdStartThresholdFrames;
+            int threshold = (_hasPlayedAudio || _hadPlayedBeforeClear) ? _adaptiveResumeFrames : ColdStartThresholdFrames;
             if (q < threshold)
             {
                 var fillFrame = _typingSoundsEnabled && !_hasPlayedAudio
@@ -346,6 +370,7 @@ public sealed class G711RtpPlayout : IDisposable
             ReturnFrame(item.data);
         }
         _buffering = true;
+        _hadPlayedBeforeClear = _hasPlayedAudio || _hadPlayedBeforeClear; // preserve mid-call awareness
         _hasPlayedAudio = false;
         Volatile.Write(ref _clearRequested, false);
     }

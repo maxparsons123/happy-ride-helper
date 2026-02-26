@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -532,14 +533,28 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         var b64 = root.GetProperty("delta").GetString();
         if (string.IsNullOrEmpty(b64)) return;
 
-        // Native G.711 passthrough — OpenAI already sends g711_alaw/g711_ulaw, no conversion needed
-        var g711 = Convert.FromBase64String(b64);
+        // GC-free decode: rent from ArrayPool, copy to exact-size span, return rental
+        int maxBytes = (b64.Length / 4 + 1) * 3;
+        byte[] rented = ArrayPool<byte>.Shared.Rent(maxBytes);
+        try
+        {
+            if (!Convert.TryFromBase64String(b64, rented, out int written) || written == 0)
+                return;
 
-        // Buffer through playout engine (handles 160-byte framing + 20ms pacing)
-        _playout.BufferG711(g711);
+            // Copy to exact-size array for BufferG711 (which takes ownership for framing)
+            var g711 = new byte[written];
+            Buffer.BlockCopy(rented, 0, g711, 0, written);
 
-        // Fire audio out event for avatar feeding — non-blocking
-        try { OnAudioOut?.Invoke(g711); } catch { }
+            // Buffer through playout engine (handles 160-byte framing + 20ms pacing)
+            _playout.BufferG711(g711);
+
+            // Fire audio out event for avatar feeding — non-blocking
+            try { OnAudioOut?.Invoke(g711); } catch { }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     private Task HandleCallerTranscript(JsonElement root)
