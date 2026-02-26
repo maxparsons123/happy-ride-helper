@@ -58,7 +58,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private long _micGatedAtTick;
 
     /// <summary>Stuck-mic watchdog timer — force-flushes if mic stays gated too long with buffered audio.</summary>
-    private Timer? _stuckMicTimer;
+    private System.Threading.Timer? _stuckMicTimer;
 
     /// <summary>Debounce guard for barge-in events (ms tick).</summary>
     private long _lastBargeInTick;
