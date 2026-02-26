@@ -1001,12 +1001,20 @@ public class CleanCallSession
                 return;
             }
 
-            // Clean the geocoded address — strip raw STT prefix if Gemini prepended it
+            // Clean the geocoded address — strip raw STT prefix ONLY if the remaining part
+            // still contains a street name (i.e., Gemini duplicated the raw input as a prefix).
+            // If the geocoded address IS "raw + city/postcode", stripping would lose the street.
             var rawSlotValue = field == "pickup" ? _engine.RawData.PickupRaw : _engine.RawData.DestinationRaw;
             if (!string.IsNullOrEmpty(rawSlotValue) && geocoded.Address.StartsWith(rawSlotValue, StringComparison.OrdinalIgnoreCase))
             {
                 var cleaned = geocoded.Address[rawSlotValue.Length..].TrimStart(',', ' ');
-                if (!string.IsNullOrWhiteSpace(cleaned))
+                // Only strip if the remainder still contains a street-like token (Road, Street, etc.)
+                // Otherwise we'd be removing the actual street name and leaving just "City, Postcode"
+                var hasStreetToken = System.Text.RegularExpressions.Regex.IsMatch(
+                    cleaned,
+                    @"\b(Road|Street|Avenue|Lane|Drive|Close|Way|Place|Crescent|Court|Terrace|Grove|Hill|Gardens|Square|Parade|Row|Walk|Rise|Mews)\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (!string.IsNullOrWhiteSpace(cleaned) && hasStreetToken)
                 {
                     Log($"🧹 Stripped raw STT prefix from geocoded address: \"{geocoded.Address}\" → \"{cleaned}\"");
                     geocoded = new GeocodedAddress
@@ -1022,6 +1030,10 @@ public class CleanCallSession
                         Alternatives = geocoded.Alternatives,
                         MatchedFromHistory = geocoded.MatchedFromHistory
                     };
+                }
+                else
+                {
+                    Log($"🧹 Prefix strip skipped — remainder \"{cleaned}\" has no street token, keeping full address");
                 }
             }
 
