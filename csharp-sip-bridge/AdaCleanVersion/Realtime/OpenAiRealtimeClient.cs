@@ -475,8 +475,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 try { OnBargeIn?.Invoke(); } catch { }
                 break;
 
-            // ── Speech ended ──
+            // ── Speech ended → proactively cancel auto-response ──
+            // With VAD enabled, OpenAI auto-generates a response when speech ends.
+            // We MUST cancel it immediately because our deterministic engine drives
+            // all responses via [INSTRUCTION] session.update + response.create.
+            // If we wait for the transcript, the auto-response has already started speaking.
             case "input_audio_buffer.speech_stopped":
+                await SendJsonAsync(new { type = "response.cancel" });
                 break;
 
             // ── Cancel confirmed: now safe to send pending instruction ──
@@ -527,22 +532,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
-        // Deterministic turn control:
-        // Cancel any auto-started model response immediately on transcript completion,
-        // so only backend-instruction-driven speech is emitted for this turn.
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await SendJsonAsync(new { type = "response.cancel" });
-            }
-            catch { }
-        });
-
-        // CRITICAL: Do NOT await transcript processing in the receive loop!
-        // ProcessCallerResponseAsync does slot validation, regex, and potentially GPT extraction
-        // which can take 100-500ms+. Awaiting it here blocks ALL audio delta processing,
-        // causing audible gaps and stuttering. Fire-and-forget on a background task instead.
+        // Process transcript on background task to avoid blocking audio delta receive loop.
+        // The auto-response was already canceled on speech_stopped (above).
+        // ProcessCallerResponseAsync → engine → emits instruction → session.update + response.create.
         _ = Task.Run(async () =>
         {
             try
