@@ -231,7 +231,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             var responseMsg = new
             {
                 type = "response.create",
-                response = new { modalities = new[] { "text", "audio" } }
+                response = new
+                {
+                    modalities = new[] { "text", "audio" },
+                    instructions = "You must speak exactly one concise greeting question, then stop and wait for caller response. Do not add booking assumptions."
+                }
             };
             await SendJsonAsync(responseMsg);
 
@@ -630,7 +634,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             await SendJsonAsync(new
             {
                 type = "response.create",
-                response = new { modalities = new[] { "text", "audio" } }
+                response = new
+                {
+                    modalities = new[] { "text", "audio" },
+                    instructions = BuildStrictResponseInstruction(instruction)
+                }
             });
 
             Log($"📋 Instruction update sent (VAD: {vadConfig.type})");
@@ -639,6 +647,20 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         {
             Log($"⚠ Instruction send error: {ex.Message}");
         }
+    }
+
+    private static string BuildStrictResponseInstruction(string instruction)
+    {
+        return $"""
+            CRITICAL EXECUTION MODE:
+            - Follow the [INSTRUCTION] below exactly.
+            - Ask ONLY what the instruction asks for in this turn.
+            - Do NOT confirm booking, dispatch taxi, end call, or summarize unless explicitly instructed.
+            - Do NOT invent or normalize addresses/numbers.
+            - Keep to one concise response, then wait.
+
+            {instruction}
+            """;
     }
 
     // ─── WebSocket Send ─────────────────────────────────────
