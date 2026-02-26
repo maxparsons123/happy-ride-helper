@@ -2,15 +2,21 @@ namespace AdaCleanVersion.Models;
 
 /// <summary>
 /// Payload sent to AI for the single authoritative extraction pass.
-/// Contains ONLY raw slot values — never full transcript.
+/// Contains raw slot values (refined by Ada's interpretation) and Ada's transcript context.
 /// </summary>
 public sealed class ExtractionRequest
 {
     /// <summary>Caller context (optional, helps AI with disambiguation).</summary>
     public CallerContext? Context { get; init; }
 
-    /// <summary>Raw verbatim slot values from conversation.</summary>
+    /// <summary>Raw slot values — refined by Ada's spoken interpretation when available.</summary>
     public required RawSlots Slots { get; init; }
+
+    /// <summary>
+    /// Ada's recent spoken responses — the authoritative interpretation of caller input.
+    /// Used as additional context during extraction to resolve ambiguity.
+    /// </summary>
+    public string? AdaTranscriptContext { get; set; }
 }
 
 public sealed class RawSlots

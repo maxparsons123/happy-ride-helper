@@ -24,6 +24,13 @@ public class CleanCallSession
     private readonly HashSet<string> _changedSlots = new();
     private int _clarificationAttempts; // loop-breaker counter
 
+    // ─── Ada Transcript Tracking (Source of Truth) ─────────────
+    // Ada's spoken responses are the authoritative interpretation of caller input.
+    // We track which slot was being collected when Ada responded, so we can
+    // refine the raw slot value with Ada's confirmed interpretation.
+    private readonly List<string> _adaTranscripts = new();
+    private string? _lastSlotCollected;  // Which slot was just filled before Ada responded
+
     public string SessionId { get; }
     public string CallerId { get; }
     public DateTime StartedAt { get; } = DateTime.UtcNow;
@@ -98,6 +105,7 @@ public class CleanCallSession
         if (correction != null)
         {
             Log($"Correction detected: {correction.SlotName} → \"{correction.NewValue}\"");
+            _lastSlotCollected = correction.SlotName; // Track for Ada refinement
             await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
             return;
         }
@@ -106,6 +114,7 @@ public class CleanCallSession
         if (currentSlot == null)
         {
             // All slots filled — might be a correction or confirmation
+            _lastSlotCollected = null;
             await HandlePostCollectionInput(transcript, ct);
             return;
         }
@@ -129,6 +138,9 @@ public class CleanCallSession
             valueToStore = resolved.ResolvedAddress;
         }
 
+        // Track which slot was just filled (Ada's next response will refine this)
+        _lastSlotCollected = currentSlot;
+
         // Store raw (or alias-resolved) value for current slot
         var nextSlot = _engine.AcceptSlotValue(currentSlot, valueToStore);
 
@@ -141,6 +153,44 @@ public class CleanCallSession
         {
             EmitCurrentInstruction();
         }
+    }
+
+    /// <summary>
+    /// Process Ada's spoken response transcript.
+    /// Ada's interpretation is the source of truth — her echo-back refines raw slot values.
+    /// Called from OpenAiRealtimeClient on response.audio_transcript.done.
+    /// </summary>
+    public void ProcessAdaTranscript(string adaText)
+    {
+        if (string.IsNullOrWhiteSpace(adaText)) return;
+
+        // Store for extraction context
+        _adaTranscripts.Add(adaText);
+
+        // If Ada just responded after a slot was filled, refine the slot value
+        // using Ada's interpretation (she's more reliable than raw Whisper STT)
+        if (_lastSlotCollected != null)
+        {
+            var refinedValue = AdaSlotRefiner.ExtractSlotValue(_lastSlotCollected, adaText);
+            if (refinedValue != null)
+            {
+                var oldValue = _engine.RawData.GetSlot(_lastSlotCollected);
+                if (oldValue != refinedValue)
+                {
+                    Log($"Ada refined slot '{_lastSlotCollected}': \"{oldValue}\" → \"{refinedValue}\"");
+                    _engine.RawData.SetSlot(_lastSlotCollected, refinedValue);
+                }
+            }
+            _lastSlotCollected = null;
+        }
+    }
+
+    /// <summary>
+    /// Get Ada's accumulated transcript for extraction context.
+    /// </summary>
+    public string GetAdaTranscriptContext()
+    {
+        return string.Join("\n", _adaTranscripts.TakeLast(10)); // last 10 responses
     }
 
     /// <summary>
@@ -212,9 +262,15 @@ public class CleanCallSession
         try
         {
             var request = _engine.BuildExtractionRequest(_callerContext);
+
+            // Include Ada's transcript as additional context — Ada is source of truth
+            request.AdaTranscriptContext = GetAdaTranscriptContext();
+
             Log($"Extracting: name={request.Slots.Name}, pickup={request.Slots.Pickup}, " +
                 $"dest={request.Slots.Destination}, pax={request.Slots.Passengers}, " +
                 $"time={request.Slots.PickupTime}");
+            if (!string.IsNullOrEmpty(request.AdaTranscriptContext))
+                Log($"Ada context: {request.AdaTranscriptContext.Length} chars");
 
             var result = await _extractionService.ExtractAsync(request, ct);
 
