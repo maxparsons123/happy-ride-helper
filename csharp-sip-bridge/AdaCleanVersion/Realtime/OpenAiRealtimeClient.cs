@@ -205,6 +205,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Wire session instructions → OpenAI session.update
         _session.OnAiInstruction += OnSessionAiInstruction;
 
+        // Wire typing sounds control for recalculation bridge
+        _session.OnTypingSoundsChanged += enabled =>
+        {
+            _playout.TypingSoundsEnabled = enabled;
+            Log(enabled ? "🔊 Typing sounds enabled (recalculation)" : "🔇 Typing sounds disabled (fare ready)");
+        };
+
         // Start playout engine
         _playout.Start();
 

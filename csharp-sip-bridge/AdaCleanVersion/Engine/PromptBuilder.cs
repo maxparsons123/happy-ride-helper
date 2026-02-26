@@ -139,7 +139,8 @@ public static class PromptBuilder
         ClarificationInfo? clarification = null,
         GeocodedAddress? verifiedPickup = null,
         GeocodedAddress? verifiedDestination = null,
-        string? rejectedReason = null)
+        string? rejectedReason = null,
+        bool isRecalculating = false)
     {
         // If a slot was just rejected, generate a specific re-prompt instead of the default
         if (rejectedReason != null)
@@ -204,6 +205,15 @@ public static class PromptBuilder
                 "They must include a house number if it's a street address. " +
                 "REQUIRED FIELDS REMAINING: pickup, destination, passengers, pickup time.",
 
+            CollectionState.VerifyingPickup when isRecalculating =>
+                "[INSTRUCTION] The caller just changed their pickup address. " +
+                "Say \"No problem, let me update that for you\" and then read back the new pickup address " +
+                $"\"{rawData.GetSlot("pickup")}\" AS YOU UNDERSTOOD IT. " +
+                "Then say \"One moment while I recalculate the fare.\" " +
+                "Then STOP and wait silently. " +
+                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
+                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\".",
+
             CollectionState.VerifyingPickup =>
                 "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the pickup address " +
                 "AS YOU UNDERSTOOD IT from the caller's speech. Do NOT read the raw transcript — use your own " +
@@ -242,6 +252,15 @@ public static class PromptBuilder
                 "Ask for their DESTINATION address. " +
                 "Do NOT read any raw transcript text back to the caller. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+
+            CollectionState.VerifyingDestination when isRecalculating =>
+                "[INSTRUCTION] The caller just changed their destination address. " +
+                "Say \"No problem, let me update that for you\" and then read back the new destination address " +
+                $"\"{rawData.GetSlot("destination")}\" AS YOU UNDERSTOOD IT. " +
+                "Then say \"One moment while I recalculate the fare.\" " +
+                "Then STOP and wait silently. " +
+                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
+                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\".",
 
             CollectionState.VerifyingDestination =>
                 "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the destination address " +
