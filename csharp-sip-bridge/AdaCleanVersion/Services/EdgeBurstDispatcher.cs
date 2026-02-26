@@ -55,10 +55,20 @@ public class EdgeBurstDispatcher
     /// <summary>
     /// Reuse the same burst-detection heuristic from AiFreeFormSplitter.
     /// </summary>
+    /// <summary>
+    /// Short phrases that are just ASAP variants — NOT bursts even though they contain signal words.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex SimpleAsapPattern = new(
+        @"^\s*(?:now|now\s*now|right\s*now|asap|a\.?s\.?a\.?p\.?|straight\s*away|right\s*away|as\s*soon\s*as\s*possible|immediately|s\.?a\.?p\.?)[.!?,\s]*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public static bool LooksLikeBurst(string transcript)
     {
         if (string.IsNullOrWhiteSpace(transcript)) return false;
         var trimmed = transcript.Trim();
+
+        // Short ASAP-only phrases should never trigger burst dispatch
+        if (SimpleAsapPattern.IsMatch(trimmed)) return false;
 
         // Must contain at least ONE multi-slot signal keyword to qualify as a burst.
         // A single address like "Morrison's in Coventry" should NOT trigger burst dispatch —
