@@ -42,6 +42,12 @@ public class CleanCallSession
     // Geocode deduplication: prevents cascading geocode calls from multiple Ada transcripts
     private volatile bool _geocodeInFlight;
 
+    // No-reply watchdog: recovers when VAD/transcription misses a short caller reply
+    private CancellationTokenSource? _noReplyCts;
+    private int _noReplyCount;
+    private const int NoReplyTimeoutSeconds = 12;
+    private const int MaxNoReplyReprompts = 2;
+
     public string SessionId { get; }
     public string CallerId { get; }
     public DateTime StartedAt { get; } = DateTime.UtcNow;
@@ -114,6 +120,10 @@ public class CleanCallSession
     /// </summary>
     public async Task ProcessCallerResponseAsync(string transcript, CancellationToken ct = default)
     {
+        // Any caller transcript means they did respond — stop no-reply watchdog.
+        CancelNoReplyWatchdog();
+        _noReplyCount = 0;
+
         // ── Priority 0: If awaiting clarification, route directly — do NOT treat as a new slot ──
         if (_engine.State == CollectionState.AwaitingClarification)
         {
@@ -1403,6 +1413,75 @@ public class CleanCallSession
         }
     }
 
+    private static bool IsAwaitingCallerResponseState(CollectionState state) => state switch
+    {
+        CollectionState.CollectingName => true,
+        CollectionState.CollectingPickup => true,
+        CollectionState.CollectingDestination => true,
+        CollectionState.CollectingPassengers => true,
+        CollectionState.CollectingPickupTime => true,
+        CollectionState.AwaitingClarification => true,
+        CollectionState.PresentingFare => true,
+        CollectionState.AwaitingPaymentChoice => true,
+        CollectionState.AwaitingConfirmation => true,
+        _ => false
+    };
+
+    private void ArmNoReplyWatchdog()
+    {
+        CancelNoReplyWatchdog();
+
+        if (!IsAwaitingCallerResponseState(_engine.State))
+            return;
+
+        var expectedState = _engine.State;
+        var expectedMissingSlot = _engine.RawData.NextMissingSlot();
+        var cts = new CancellationTokenSource();
+        _noReplyCts = cts;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(NoReplyTimeoutSeconds), cts.Token);
+
+                if (cts.IsCancellationRequested)
+                    return;
+
+                if (_engine.State != expectedState)
+                    return;
+
+                if (_engine.RawData.NextMissingSlot() != expectedMissingSlot)
+                    return;
+
+                _noReplyCount++;
+                Log($"⏱️ No-reply timeout in state {_engine.State} (attempt {_noReplyCount}/{MaxNoReplyReprompts})");
+
+                if (_noReplyCount <= MaxNoReplyReprompts)
+                {
+                    EmitRepromptInstruction("no_reply");
+                }
+                else
+                {
+                    Log("⏱️ No-reply max attempts reached — keeping current prompt active");
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Log($"No-reply watchdog error: {ex.Message}");
+            }
+        });
+    }
+
+    private void CancelNoReplyWatchdog()
+    {
+        var cts = Interlocked.Exchange(ref _noReplyCts, null);
+        if (cts == null) return;
+        try { cts.Cancel(); } catch { }
+        cts.Dispose();
+    }
+
     private int _repromptCount = 0;
     private string? _lastRepromptSlot;
 
@@ -1420,6 +1499,8 @@ public class CleanCallSession
             isRecalculating: _engine.IsRecalculating);
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, false);
+
+        ArmNoReplyWatchdog();
     }
 
     private void EmitRepromptInstruction(string rejectedReason)
@@ -1443,11 +1524,17 @@ public class CleanCallSession
             rejectedReason: rejectedReason);
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, true); // isReprompt = true
+
+        ArmNoReplyWatchdog();
     }
 
     private void OnEngineStateChanged(CollectionState from, CollectionState to)
     {
         Log($"State transition: {from} → {to}");
+
+        // Ensure stale timers don't leak across state transitions.
+        if (!IsAwaitingCallerResponseState(to))
+            CancelNoReplyWatchdog();
     }
 
     private void Log(string msg) => OnLog?.Invoke($"[Session:{SessionId}] {msg}");
