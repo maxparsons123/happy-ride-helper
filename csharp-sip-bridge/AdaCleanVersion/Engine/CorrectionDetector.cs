@@ -25,13 +25,15 @@ public static class CorrectionDetector
     ];
 
     // Slot-specific keywords — maps spoken phrases to slot names
+    // IMPORTANT: Do NOT include bare "to" or "from" — they appear in virtually every sentence
+    // and cause false slot detection (e.g., "change my pickup to X" would match destination).
     private static readonly Dictionary<string, string[]> SlotKeywords = new()
     {
-        ["pickup"] = ["pickup", "pick up", "pick-up", "collection", "collect me", "from address", "starting point", "from"],
-        ["destination"] = ["destination", "drop off", "dropoff", "drop-off", "going to", "heading to", "to address", "where i'm going", "where im going", "to"],
+        ["pickup"] = ["pickup", "pick up", "pick-up", "collection", "collect me", "from address", "starting point", "pickup address", "the pickup"],
+        ["destination"] = ["destination", "drop off", "dropoff", "drop-off", "going to", "heading to", "to address", "where i'm going", "where im going", "destination address", "the destination"],
         ["name"] = ["name", "my name", "called", "i'm called", "im called"],
         ["passengers"] = ["passengers", "passenger", "people", "of us", "pax", "seats"],
-        ["pickup_time"] = ["time", "pickup time", "pick up time", "when", "schedule", "book for", "at"],
+        ["pickup_time"] = ["time", "pickup time", "pick up time", "when", "schedule", "book for"],
     };
 
     // Regex to extract the new value after slot keyword
@@ -89,16 +91,28 @@ public static class CorrectionDetector
     /// </summary>
     private static string? DetectTargetSlot(string lower, IReadOnlySet<string> filledSlots)
     {
+        // Find ALL matching slots with their best (longest) keyword match length
+        // Then pick the slot with the longest keyword — this ensures "pickup address"
+        // beats a short match like "time" if both appear in the sentence.
+        string? bestSlot = null;
+        int bestKeywordLength = 0;
+
         foreach (var (slot, keywords) in SlotKeywords)
         {
             if (!filledSlots.Contains(slot))
                 continue;
 
-            if (keywords.Any(kw => lower.Contains(kw)))
-                return slot;
+            foreach (var kw in keywords)
+            {
+                if (lower.Contains(kw) && kw.Length > bestKeywordLength)
+                {
+                    bestSlot = slot;
+                    bestKeywordLength = kw.Length;
+                }
+            }
         }
 
-        return null;
+        return bestSlot;
     }
 
     /// <summary>
