@@ -257,7 +257,7 @@ public class CleanSipBridge : IDisposable
         uas.Answer("application/sdp", rtpSession.CreateAnswer(null).ToString(), SIPDialogueTransferModesEnum.Default);
 
         // Wire RTP lifecycle events
-        rtpSession.OnTimeout += (mediaType) =>
+        rtpSession.OnTimeout += () =>
         {
             Log($"⏱ RTP timeout for {callId} — treating as call end");
             if (_activeCalls.TryRemove(callId, out var timedOut))
