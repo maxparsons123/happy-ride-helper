@@ -37,6 +37,7 @@ public class CleanSipBridge : IDisposable
     private readonly FareGeocodingService _fareService;
     private readonly CallerLookupService _callerLookup;
     private readonly IcabbiBookingService? _icabbiService;
+    private readonly EdgeBurstDispatcher? _burstDispatcher;
     private readonly ConcurrentDictionary<string, ActiveCall> _activeCalls = new();
 
     private SIPTransport? _sipTransport;
@@ -83,6 +84,18 @@ public class CleanSipBridge : IDisposable
                 .CreateLogger<IcabbiBookingService>();
             _icabbiService = new IcabbiBookingService(icabbiLogger, settings.Icabbi, settings.Supabase);
             Log("🚕 iCabbi dispatch integration enabled");
+        }
+
+        // Wire EdgeBurstDispatcher for single-round-trip split+geocode
+        if (!string.IsNullOrWhiteSpace(settings.Supabase.Url) && !string.IsNullOrWhiteSpace(settings.Supabase.AnonKey))
+        {
+            var burstLogger = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Debug))
+                .CreateLogger<EdgeBurstDispatcher>();
+            _burstDispatcher = new EdgeBurstDispatcher(
+                settings.Supabase.Url,
+                settings.Supabase.AnonKey,
+                burstLogger);
+            Log("🔥 EdgeBurstDispatcher enabled (burst-dispatch edge function)");
         }
     }
 
@@ -267,6 +280,10 @@ public class CleanSipBridge : IDisposable
             Log($"👤 New caller: {callerId}");
         }
 
+        // Warm-up burst-dispatch edge function (fire-and-forget to avoid cold start)
+        if (_burstDispatcher != null)
+            _ = _burstDispatcher.WarmUpAsync();
+
         // Create clean session
         // callId already extracted above for codec negotiation handler
         var session = new CleanCallSession(
@@ -276,6 +293,7 @@ public class CleanSipBridge : IDisposable
             extractionService: _extractionService,
             fareService: _fareService,
             callerContext: context,
+            burstDispatcher: _burstDispatcher,
             icabbiService: _icabbiService
         );
 

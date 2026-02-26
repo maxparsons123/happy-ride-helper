@@ -20,7 +20,7 @@ public class CleanCallSession
     private readonly IExtractionService _extractionService;
     private readonly FareGeocodingService? _fareService;
     private readonly LocalGeminiReconciler? _reconciler;
-    private readonly AiFreeFormSplitter? _aiSplitter;
+    private readonly EdgeBurstDispatcher? _burstDispatcher;
     private readonly IcabbiBookingService? _icabbiService;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
@@ -56,7 +56,7 @@ public class CleanCallSession
         FareGeocodingService? fareService = null,
         CallerContext? callerContext = null,
         LocalGeminiReconciler? reconciler = null,
-        AiFreeFormSplitter? aiSplitter = null,
+        EdgeBurstDispatcher? burstDispatcher = null,
         IcabbiBookingService? icabbiService = null)
     {
         SessionId = sessionId;
@@ -66,7 +66,7 @@ public class CleanCallSession
         _fareService = fareService;
         _callerContext = callerContext;
         _reconciler = reconciler;
-        _aiSplitter = aiSplitter;
+        _burstDispatcher = burstDispatcher;
         _icabbiService = icabbiService;
 
         _engine.OnLog += msg => OnLog?.Invoke(msg);
@@ -137,64 +137,70 @@ public class CleanCallSession
             return;
         }
 
-        // ── Freeform Burst Detection + AI Splitting ──
-        // If the transcript looks "dense" (multiple keywords, long sentence), try AI splitting first.
-        // The AI extracts ALL booking fields at once — no slot context needed.
+        // ── Freeform Burst Detection + Edge Burst Dispatch ──
+        // If the transcript looks "dense" (multiple keywords, long sentence), try burst-dispatch.
+        // This splits ALL fields AND geocodes addresses in a single round-trip.
         // Falls back to deterministic regex FreeFormSplitter on timeout/error.
         var aiHandled = false;
-        if (_aiSplitter != null && AiFreeFormSplitter.LooksLikeBurst(transcript))
+        if (_burstDispatcher != null && EdgeBurstDispatcher.LooksLikeBurst(transcript))
         {
             try
             {
-                Log($"[AiSplit] Burst detected, calling AI splitter...");
-                var extracted = await _aiSplitter.SplitAsync(transcript, ct);
+                Log($"[BurstDispatch] Burst detected, calling edge function...");
+                var burst = await _burstDispatcher.DispatchAsync(
+                    transcript,
+                    phone: CallerId,
+                    callerArea: _engine.Snapshot.PickupArea,
+                    ct: ct);
 
-                if (extracted != null && extracted.FilledCount > 0)
+                if (burst != null && burst.Status != "error")
                 {
                     aiHandled = true;
 
                     // Map extracted data to raw slots
-                    if (extracted.Name != null)
+                    if (burst.Name != null)
                     {
-                        _engine.RawData.SetSlot("name", extracted.Name);
-                        Log($"[AiSplit] name=\"{extracted.Name}\"");
+                        _engine.RawData.SetSlot("name", burst.Name);
+                        Log($"[BurstDispatch] name=\"{burst.Name}\"");
                     }
-                    if (extracted.Pickup != null)
+                    if (burst.Pickup != null)
                     {
-                        _engine.RawData.SetSlot("pickup", extracted.Pickup);
-                        Log($"[AiSplit] pickup=\"{extracted.Pickup}\"");
+                        _engine.RawData.SetSlot("pickup", burst.Pickup);
+                        Log($"[BurstDispatch] pickup=\"{burst.Pickup}\"");
                     }
-                    if (extracted.Destination != null)
+                    if (burst.Destination != null)
                     {
-                        _engine.RawData.SetSlot("destination", extracted.Destination);
-                        Log($"[AiSplit] destination=\"{extracted.Destination}\"");
+                        _engine.RawData.SetSlot("destination", burst.Destination);
+                        Log($"[BurstDispatch] destination=\"{burst.Destination}\"");
                     }
-                    if (extracted.Passengers.HasValue)
+                    if (burst.Passengers.HasValue)
                     {
-                        _engine.RawData.SetSlot("passengers", extracted.Passengers.Value.ToString());
-                        Log($"[AiSplit] passengers={extracted.Passengers.Value}");
+                        _engine.RawData.SetSlot("passengers", burst.Passengers.Value.ToString());
+                        Log($"[BurstDispatch] passengers={burst.Passengers.Value}");
                     }
-                    if (extracted.PickupTime != null)
+                    if (burst.PickupTime != null)
                     {
-                        _engine.RawData.SetSlot("pickup_time", extracted.PickupTime);
-                        Log($"[AiSplit] pickup_time=\"{extracted.PickupTime}\"");
-                    }
-
-                    if (extracted.IsBurst)
-                    {
-                        _engine.RawData.IsMultiSlotBurst = true;
-                        Log($"[AiSplit] ✅ Multi-slot burst — {extracted.FilledCount} fields extracted");
+                        _engine.RawData.SetSlot("pickup_time", burst.PickupTime);
+                        Log($"[BurstDispatch] pickup_time=\"{burst.PickupTime}\"");
                     }
 
-                    // Fast-track: jump to the first thing that needs verification.
-                    // If pickup was extracted, go to VerifyingPickup. Otherwise advance normally.
-                    if (extracted.Pickup != null)
+                    _engine.RawData.IsMultiSlotBurst = true;
+
+                    // Cache geocoded result so verification states can skip separate geocoding
+                    if (burst.Geocoded.HasValue)
+                    {
+                        _engine.RawData.BurstGeocodedResult = burst.Geocoded.Value;
+                        Log($"[BurstDispatch] ✅ Geocoded data cached (status={burst.Status})");
+                    }
+
+                    // Fast-track: jump to verification of the first address
+                    if (burst.Pickup != null)
                     {
                         _engine.ForceState(CollectionState.VerifyingPickup);
                         EmitCurrentInstruction();
                         return;
                     }
-                    else if (extracted.Destination != null)
+                    else if (burst.Destination != null)
                     {
                         _engine.ForceState(CollectionState.VerifyingDestination);
                         EmitCurrentInstruction();
@@ -203,8 +209,7 @@ public class CleanCallSession
                     else
                     {
                         // Only non-address fields extracted — let normal flow continue
-                        // with the first extracted value as the transcript for current slot
-                        var primaryValue = extracted.Name ?? extracted.Passengers?.ToString() ?? extracted.PickupTime;
+                        var primaryValue = burst.Name ?? burst.Passengers?.ToString() ?? burst.PickupTime;
                         if (primaryValue != null)
                             transcript = primaryValue;
                     }
@@ -212,7 +217,7 @@ public class CleanCallSession
             }
             catch (Exception ex)
             {
-                Log($"[AiSplit] Failed, falling back to regex: {ex.Message}");
+                Log($"[BurstDispatch] Failed, falling back to regex: {ex.Message}");
             }
         }
 
