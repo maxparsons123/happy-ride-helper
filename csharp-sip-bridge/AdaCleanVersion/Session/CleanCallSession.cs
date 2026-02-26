@@ -163,19 +163,17 @@ public class CleanCallSession
             Log($"Name cleaned: \"{transcript}\" → \"{valueToStore}\"");
         }
 
-        // Normalize pickup time: "tomorrow at 5pm" → "2026-02-27 17:00", "now" → "ASAP"
+        // Quick ASAP detection for pickup_time — full normalization happens in StructureOnlyEngine
         if (currentSlot == "pickup_time")
         {
-            var normalized = TimeNormalizer.Normalize(valueToStore);
-            if (normalized != null)
+            var lower = valueToStore.ToLowerInvariant();
+            if (lower.Contains("now") || lower.Contains("asap") || lower.Contains("straight away") ||
+                lower.Contains("right away") || lower.Contains("immediately"))
             {
-                Log($"Time normalized: \"{valueToStore}\" → \"{normalized}\"");
-                valueToStore = normalized;
+                Log($"Time detected as ASAP: \"{valueToStore}\"");
+                valueToStore = "ASAP";
             }
-            else
-            {
-                Log($"Time could not be normalized: \"{valueToStore}\" — storing raw");
-            }
+        }
         }
 
         // Resolve aliases ("home", "work", "the usual") for address slots
