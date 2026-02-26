@@ -18,6 +18,11 @@ public record BurstResult(
 );
 
 /// <summary>
+/// Result from correction mode — which slot to correct and the new value.
+/// </summary>
+public record CorrectionResult(string SlotName, string NewValue);
+
+/// <summary>
 /// Calls the burst-dispatch edge function to split a freeform utterance
 /// into booking slots AND geocode addresses in a single round-trip.
 /// 
@@ -130,6 +135,72 @@ public class EdgeBurstDispatcher
         catch (Exception ex)
         {
             _log.LogError(ex, "[BurstDispatch] Unexpected error");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Use Gemini to detect if the caller is correcting a previously-given slot.
+    /// Sends filled slots as context so AI can determine which field is being changed.
+    /// Returns null if no correction detected or on error — caller falls back to regex.
+    /// </summary>
+    public async Task<CorrectionResult?> DetectCorrectionAsync(
+        string transcript,
+        Dictionary<string, string> filledSlots,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(transcript) || filledSlots.Count == 0)
+            return null;
+
+        _log.LogInformation("[BurstDispatch] Correction check: \"{T}\", slots={S}",
+            transcript.Trim(), string.Join(", ", filledSlots.Keys));
+
+        var payload = new
+        {
+            transcript = transcript.Trim(),
+            mode = "correction",
+            filled_slots = filledSlots
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, _functionUrl);
+        request.Headers.Add("Authorization", $"Bearer {_anonKey}");
+        request.Content = JsonContent.Create(payload);
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(4000); // 4s — lighter than full burst
+
+        try
+        {
+            var response = await _http.SendAsync(request, cts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _log.LogWarning("[BurstDispatch] Correction HTTP {S}", (int)response.StatusCode);
+                return null;
+            }
+
+            var json = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
+
+            if (!json.TryGetProperty("correction", out var corr) || corr.ValueKind == JsonValueKind.Null)
+                return null;
+
+            var slotName = TryGetString(corr, "slot_name");
+            var newValue = TryGetString(corr, "new_value");
+
+            if (string.IsNullOrWhiteSpace(slotName) || string.IsNullOrWhiteSpace(newValue))
+                return null;
+
+            _log.LogInformation("[BurstDispatch] ✅ Correction: {S} → \"{V}\"", slotName, newValue);
+            return new CorrectionResult(slotName, newValue);
+        }
+        catch (OperationCanceledException)
+        {
+            _log.LogWarning("[BurstDispatch] Correction timed out");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "[BurstDispatch] Correction error");
             return null;
         }
     }

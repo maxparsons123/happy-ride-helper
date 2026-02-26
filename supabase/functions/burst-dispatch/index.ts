@@ -6,17 +6,23 @@ const corsHeaders = {
 };
 
 /**
- * burst-dispatch: Single edge function that splits a freeform caller utterance
- * into booking slots (name, pickup, destination, passengers, time) via Gemini,
- * then geocodes both addresses using the existing address-dispatch pipeline.
+ * burst-dispatch: Single edge function that:
+ * 1. SPLIT MODE (default): Splits a freeform caller utterance into booking slots
+ *    via Gemini, then geocodes addresses using address-dispatch.
+ * 2. CORRECTION MODE (mode="correction"): Detects which slot the caller is
+ *    correcting and extracts the new value — replaces regex CorrectionDetector.
  *
  * Input:
- *   { transcript, phone?, ada_readback?, caller_area? }
+ *   { transcript, phone?, ada_readback?, caller_area?, mode?, filled_slots? }
  *
- * Output:
+ * Output (split mode):
  *   { split: { name, pickup, destination, passengers, pickup_time },
  *     geocoded: <full address-dispatch result or null>,
  *     status: "ready" | "partial" | "split_only" | "error" }
+ *
+ * Output (correction mode):
+ *   { correction: { slot_name, new_value } | null,
+ *     status: "correction_detected" | "no_correction" | "error" }
  */
 
 const SPLIT_PROMPT = `You are a data extraction engine for a taxi booking system.
@@ -53,6 +59,124 @@ Ada may have corrected STT errors (e.g., "mucks" → "Max").
 - For HOUSE NUMBERS: trust raw STT over Ada's readback
 - For STREET NAMES / POIs: compare both, prefer the more plausible one`;
 
+const CORRECTION_PROMPT = `You are an intent detection engine for a taxi booking system.
+The caller has already provided booking details and is now speaking again.
+Determine if they are CORRECTING a previously given field, or saying something unrelated (e.g. confirming, asking a question).
+
+FILLED SLOTS (what the caller has already provided):
+{FILLED_SLOTS}
+
+RULES:
+- Only return a correction if the caller is clearly changing a previously-given field
+- Correction signals: "actually", "no", "not that", "wrong", "change", "it's X not Y", "I said X", "sorry", "I meant"
+- If the caller says a new address and mentions "pickup"/"collection"/"from" → they're correcting pickup
+- If they say a new address and mention "destination"/"going to"/"drop off" → they're correcting destination  
+- If they just say an address with NO slot keyword, and context suggests they're correcting something → infer the most likely slot
+- "It's Dovey not Dover" → correction of whichever slot currently has "Dover" in it
+- Keep house numbers EXACTLY as stated
+- If no correction intent is detected, return slot_name as null
+
+SPEECH-TO-TEXT AWARENESS:
+Inputs come from live speech recognition. Apply phonetic reasoning for garbled words.`;
+
+async function handleCorrectionMode(
+  transcript: string,
+  filledSlots: Record<string, string>,
+  apiKey: string
+): Promise<Response> {
+  console.log(`🔧 [burst-dispatch] CORRECTION mode: "${transcript}", slots=${JSON.stringify(filledSlots)}`);
+
+  const slotSummary = Object.entries(filledSlots)
+    .filter(([_, v]) => v)
+    .map(([k, v]) => `- ${k}: "${v}"`)
+    .join("\n");
+
+  const systemPrompt = CORRECTION_PROMPT.replace("{FILLED_SLOTS}", slotSummary || "(none)");
+
+  const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "google/gemini-2.5-flash-lite",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Caller says: "${transcript}"` },
+      ],
+      temperature: 0.0,
+      tools: [{
+        type: "function",
+        function: {
+          name: "detect_correction",
+          description: "Detect if the caller is correcting a booking field",
+          parameters: {
+            type: "object",
+            properties: {
+              slot_name: {
+                type: "string",
+                enum: ["name", "pickup", "destination", "passengers", "pickup_time"],
+                description: "Which slot is being corrected, or null if no correction",
+              },
+              new_value: {
+                type: "string",
+                description: "The corrected value the caller wants to use",
+              },
+              is_correction: {
+                type: "boolean",
+                description: "Whether this is actually a correction attempt",
+              },
+            },
+            required: ["is_correction"],
+            additionalProperties: false,
+          },
+        },
+      }],
+      tool_choice: { type: "function", function: { name: "detect_correction" } },
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error(`[burst-dispatch] Correction AI error ${response.status}: ${errText}`);
+    return new Response(JSON.stringify({ correction: null, status: "error" }), {
+      status: response.status === 429 ? 429 : response.status === 402 ? 402 : 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const data = await response.json();
+  const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+
+  if (!toolCall?.function?.arguments) {
+    console.log(`[burst-dispatch] No tool call in correction response`);
+    return new Response(JSON.stringify({ correction: null, status: "no_correction" }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const argsJson = typeof toolCall.function.arguments === "string"
+    ? toolCall.function.arguments
+    : JSON.stringify(toolCall.function.arguments);
+  const result = JSON.parse(argsJson);
+
+  if (!result.is_correction || !result.slot_name || !result.new_value?.trim()) {
+    console.log(`[burst-dispatch] No correction detected: is_correction=${result.is_correction}`);
+    return new Response(JSON.stringify({ correction: null, status: "no_correction" }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  console.log(`✅ [burst-dispatch] Correction: ${result.slot_name} → "${result.new_value}"`);
+  return new Response(JSON.stringify({
+    correction: { slot_name: result.slot_name, new_value: result.new_value.trim() },
+    status: "correction_detected",
+  }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -68,7 +192,7 @@ serve(async (req) => {
       });
     }
 
-    const { transcript, phone, ada_readback, caller_area } = body;
+    const { transcript, phone, ada_readback, caller_area, mode, filled_slots } = body;
 
     if (!transcript?.trim()) {
       return new Response(JSON.stringify({ error: "transcript is required", status: "error" }), {
@@ -84,6 +208,11 @@ serve(async (req) => {
 
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
+
+    // ── CORRECTION MODE ──
+    if (mode === "correction" && filled_slots) {
+      return await handleCorrectionMode(transcript, filled_slots, LOVABLE_API_KEY);
+    }
 
     console.log(`🔥 [burst-dispatch] transcript="${transcript}", phone="${phone || ''}", ada_readback="${ada_readback || ''}", area="${caller_area || ''}"`);
 
