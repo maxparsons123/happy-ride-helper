@@ -135,7 +135,8 @@ public static class PromptBuilder
 
             CollectionState.CollectingPassengers =>
                 $"[INSTRUCTION] Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
-                "Ask how many passengers.",
+                "Ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
+                "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\").",
 
             CollectionState.CollectingPickupTime =>
                 $"[INSTRUCTION] {rawData.PassengersRaw} passenger(s). " +
