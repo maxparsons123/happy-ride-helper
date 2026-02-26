@@ -20,10 +20,14 @@ public class CleanCallSession
     private readonly IExtractionService _extractionService;
     private readonly FareGeocodingService? _fareService;
     private readonly LocalGeminiReconciler? _reconciler;
+    private readonly IcabbiBookingService? _icabbiService;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
     private readonly HashSet<string> _changedSlots = new();
     private int _clarificationAttempts; // loop-breaker counter
+
+    // iCabbi dispatch result — stored after successful dispatch
+    private IcabbiBookingResult? _icabbiResult;
 
     // ─── Ada Transcript Tracking (Source of Truth) ─────────────
     // Ada's spoken responses are accumulated for extraction context.
@@ -48,7 +52,8 @@ public class CleanCallSession
         IExtractionService extractionService,
         FareGeocodingService? fareService = null,
         CallerContext? callerContext = null,
-        LocalGeminiReconciler? reconciler = null)
+        LocalGeminiReconciler? reconciler = null,
+        IcabbiBookingService? icabbiService = null)
     {
         SessionId = sessionId;
         CallerId = callerId;
@@ -57,6 +62,7 @@ public class CleanCallSession
         _fareService = fareService;
         _callerContext = callerContext;
         _reconciler = reconciler;
+        _icabbiService = icabbiService;
 
         _engine.OnLog += msg => OnLog?.Invoke(msg);
         _engine.OnStateChanged += OnEngineStateChanged;
@@ -300,13 +306,76 @@ public class CleanCallSession
     }
 
     /// <summary>
-    /// Confirm the booking and dispatch.
+    /// Confirm the booking and dispatch — sends to iCabbi if enabled.
+    /// </summary>
+    public async Task ConfirmBookingAsync(CancellationToken ct = default)
+    {
+        _engine.ConfirmBooking();
+
+        // Dispatch to iCabbi if enabled
+        if (_icabbiService != null && _engine.StructuredResult != null && _engine.FareResult != null)
+        {
+            Log("Dispatching booking to iCabbi...");
+            try
+            {
+                _icabbiResult = await _icabbiService.CreateAndDispatchAsync(
+                    _engine.StructuredResult,
+                    _engine.FareResult,
+                    CallerId,
+                    _callerContext?.CallerName,
+                    ct: ct);
+
+                if (_icabbiResult.Success)
+                {
+                    Log($"✅ iCabbi booking dispatched — Journey: {_icabbiResult.JourneyId}, Tracking: {_icabbiResult.TrackingUrl}");
+                }
+                else
+                {
+                    Log($"⚠️ iCabbi dispatch failed: {_icabbiResult.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"❌ iCabbi dispatch error: {ex.Message}");
+            }
+        }
+
+        EmitCurrentInstruction();
+    }
+
+    /// <summary>
+    /// Synchronous ConfirmBooking for backward compatibility — fires async dispatch.
     /// </summary>
     public void ConfirmBooking()
     {
         _engine.ConfirmBooking();
+        
+        // Fire-and-forget iCabbi dispatch
+        if (_icabbiService != null && _engine.StructuredResult != null && _engine.FareResult != null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    _icabbiResult = await _icabbiService.CreateAndDispatchAsync(
+                        _engine.StructuredResult,
+                        _engine.FareResult,
+                        CallerId,
+                        _callerContext?.CallerName);
+
+                    Log(_icabbiResult.Success
+                        ? $"✅ iCabbi dispatched — Journey: {_icabbiResult.JourneyId}"
+                        : $"⚠️ iCabbi failed: {_icabbiResult.Message}");
+                }
+                catch (Exception ex) { Log($"❌ iCabbi error: {ex.Message}"); }
+            });
+        }
+
         EmitCurrentInstruction();
     }
+
+    /// <summary>Get the iCabbi booking result (if dispatched).</summary>
+    public IcabbiBookingResult? IcabbiResult => _icabbiResult;
 
     /// <summary>
     /// End the call.
@@ -595,6 +664,37 @@ public class CleanCallSession
             // Success — reset clarification counter
             _clarificationAttempts = 0;
 
+            // Try to get iCabbi fare quote if enabled (overrides local fare)
+            if (_icabbiService != null)
+            {
+                try
+                {
+                    var paxCount = booking.Passengers > 0 ? booking.Passengers : 1;
+                    var icabbiFare = await _icabbiService.GetFareQuoteAsync(fareResult, paxCount, ct);
+                    if (icabbiFare != null)
+                    {
+                        Log($"🚕 iCabbi fare quote: {icabbiFare.FareDisplay} (replacing local: {fareResult.Fare})");
+                        fareResult = fareResult with
+                        {
+                            Fare = icabbiFare.FareDisplay,
+                            FareSpoken = icabbiFare.FareSpoken,
+                            DriverEtaMinutes = icabbiFare.EtaMinutes ?? fareResult.DriverEtaMinutes,
+                            DriverEta = icabbiFare.EtaMinutes.HasValue
+                                ? $"{icabbiFare.EtaMinutes} minutes"
+                                : fareResult.DriverEta
+                        };
+                    }
+                    else
+                    {
+                        Log("iCabbi fare quote unavailable — using local fare");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"iCabbi fare quote error: {ex.Message} — using local fare");
+                }
+            }
+
             _engine.CompleteGeocoding(fareResult);
             OnFareReady?.Invoke(fareResult);
 
@@ -658,7 +758,7 @@ public class CleanCallSession
                     lower.Contains("yeah") || lower.Contains("yep"))
                 {
                     Log($"Fare accepted — confirming booking");
-                    ConfirmBooking();
+                    await ConfirmBookingAsync(ct);
                 }
                 else if (lower.Contains("no") || lower.Contains("cancel") || lower.Contains("don't") ||
                          lower.Contains("never mind"))
