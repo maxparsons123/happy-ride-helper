@@ -457,6 +457,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             case "response.audio_transcript.done":
                 var aiText = doc.RootElement.GetProperty("transcript").GetString();
                 Log($"🤖 AI: {aiText}");
+                // Feed Ada's transcript to session — Ada is source of truth
+                if (!string.IsNullOrWhiteSpace(aiText))
+                    _session.ProcessAdaTranscript(aiText);
                 break;
 
             // ── Barge-in: immediately cut everything and ungate ──

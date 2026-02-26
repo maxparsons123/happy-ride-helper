@@ -65,7 +65,7 @@ public class StructureOnlyEngine : IExtractionService
             LuggageRaw = null
         };
 
-        var result = await NormalizeAsync(rawInput, existing: null, ct);
+        var result = await NormalizeAsync(rawInput, existing: null, request.AdaTranscriptContext, ct);
         return ToExtractionResult(result, request.Slots.Name);
     }
 
@@ -98,7 +98,7 @@ public class StructureOnlyEngine : IExtractionService
             NumberOfPassengers = existingBooking.Passengers
         };
 
-        var result = await NormalizeAsync(rawInput, existing, ct);
+        var result = await NormalizeAsync(rawInput, existing, request.AdaTranscriptContext, ct);
         return MergeUpdateResult(result, existingBooking, request.Slots.Name);
     }
 
@@ -107,6 +107,7 @@ public class StructureOnlyEngine : IExtractionService
     private async Task<NormalizedBooking?> NormalizeAsync(
         RawBookingInput raw,
         ExistingBookingContext? existing,
+        string? adaContext,
         CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -114,7 +115,7 @@ public class StructureOnlyEngine : IExtractionService
 
         var isUpdate = existing != null;
         var systemPrompt = BuildSystemPrompt(isUpdate);
-        var userPayload = BuildUserPayload(raw, existing);
+        var userPayload = BuildUserPayload(raw, existing, adaContext);
 
         // Serialize schema with default naming (camelCase) to preserve "additionalProperties" exactly.
         // The snake_case policy in JsonOpts would corrupt it to "additional_properties".
@@ -205,12 +206,19 @@ public class StructureOnlyEngine : IExtractionService
             return """
                 You are a STRICT booking data normalizer for a UK taxi company.
 
+                You receive TWO inputs:
+                1. RAW INPUT: Slot values from caller speech-to-text (may contain STT errors)
+                2. ADA'S CONFIRMED INTERPRETATION: What the AI agent said back to the caller (source of truth)
+
+                PRIORITY: If Ada's interpretation differs from raw input, ALWAYS prefer Ada's version.
+                Ada has already corrected STT errors (e.g., "528" → "52A", "war road" → "Warwick Road").
+
                 You MUST:
-                • Keep pickup and dropoff addresses VERBATIM — preserve exact house numbers, flat numbers, spelling
+                • Keep addresses VERBATIM from Ada's interpretation — preserve exact house numbers, flat numbers, spelling
                 • Extract passenger count as integer (1-8)
                 • Normalize time into: "ASAP" or "YYYY-MM-DD HH:MM" (24h format, UK timezone)
-                • Extract luggage info if present (e.g. "2 suitcases, 1 carry-on")
-                • Extract special requests if present (e.g. "wheelchair accessible", "child seat")
+                • Extract luggage info if present
+                • Extract special requests if present
 
                 You MUST NOT:
                 • Guess missing data — return null for missing fields
@@ -247,11 +255,18 @@ public class StructureOnlyEngine : IExtractionService
     }
 
     private static string BuildUserPayload(
-        RawBookingInput raw, ExistingBookingContext? existing)
+        RawBookingInput raw, ExistingBookingContext? existing, string? adaContext)
     {
         var sb = new StringBuilder();
         sb.AppendLine("RAW INPUT:");
         sb.AppendLine(JsonSerializer.Serialize(raw, JsonOpts));
+
+        if (!string.IsNullOrWhiteSpace(adaContext))
+        {
+            sb.AppendLine();
+            sb.AppendLine("ADA'S CONFIRMED INTERPRETATION (source of truth — prefer these values over raw input if they differ):");
+            sb.AppendLine(adaContext);
+        }
 
         if (existing != null)
         {
