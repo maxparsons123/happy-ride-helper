@@ -162,6 +162,12 @@ public class CleanCallSession
         // Strip common name prefixes ("It's Max" → "Max", "My name is John" → "John")
         if (currentSlot == "name")
         {
+            // Strip conversational filler ("All right, Trevor" → "Trevor", "Hi, it's Max" → "Max")
+            valueToStore = System.Text.RegularExpressions.Regex.Replace(
+                valueToStore,
+                @"^(all\s*right\s*,?\s*|alright\s*,?\s*|hi\s*,?\s*|hello\s*,?\s*|hey\s*,?\s*|yeah\s*,?\s*|yes\s*,?\s*|oh\s*,?\s*|well\s*,?\s*|okay\s*,?\s*|ok\s*,?\s*|right\s*,?\s*|so\s*,?\s*|erm\s*,?\s*|um\s*,?\s*|uh\s*,?\s*)",
+                "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Strip common name prefixes ("It's Max" → "Max", "My name is John" → "John")
             valueToStore = System.Text.RegularExpressions.Regex.Replace(
                 valueToStore,
                 @"^(it'?s\s+|that'?s\s+|i'?m\s+|my\s+name\s+is\s+|i\s+am\s+|they\s+call\s+me\s+|call\s+me\s+|this\s+is\s+)",
@@ -339,6 +345,12 @@ public class CleanCallSession
     /// </summary>
     public async Task ConfirmBookingAsync(CancellationToken ct = default)
     {
+        // Advance through intermediate states if we're still at PresentingFare
+        // (payment choice is currently skipped — go straight to confirmation)
+        if (_engine.State == CollectionState.PresentingFare)
+        {
+            _engine.AcceptPaymentChoice("meter"); // Default to meter when skipping payment step
+        }
         _engine.ConfirmBooking();
 
         // Dispatch to iCabbi if enabled
@@ -377,6 +389,10 @@ public class CleanCallSession
     /// </summary>
     public void ConfirmBooking()
     {
+        if (_engine.State == CollectionState.PresentingFare)
+        {
+            _engine.AcceptPaymentChoice("meter");
+        }
         _engine.ConfirmBooking();
         
         // Fire-and-forget iCabbi dispatch
