@@ -14,11 +14,11 @@ namespace AdaCleanVersion.Realtime;
 /// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via G711RtpPlayout.
 /// Supports both PCMU (µ-law) and PCMA (A-law) codecs.
 ///
-/// Mic Gate v4.2 (ported from AdaSdkModel v3.1):
-///   Mic gated while AI is speaking.
-///   ALL audio during gate is BUFFERED (not discarded).
-///   Ungated when response.audio.done AND playout queue drained → flushes ALL buffered audio.
-///   Barge-in (speech_started) immediately cuts, ungates, and FLUSHES buffer (preserves leading speech).
+/// Mic Gate v4.3 (hybrid buffer-all, flush-tail):
+///   Mic gated while AI is speaking. ALL audio buffered during gate.
+///   On ungate/barge-in, only trailing speech frames are flushed (max 25 = 500ms).
+///   Energy filter prevents silence/noise from causing ghost transcripts.
+///   Barge-in flushes tail (not clears) to preserve leading syllables.
 ///   Audio commit on speech_stopped. Event-driven instruction sequence.
 ///   Instruction sequence is event-driven (waits for response.canceled).
 /// </summary>
@@ -45,10 +45,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private readonly G711RtpPlayout _playout;
 
-    // ─── Mic Gate v4.2 (ported from AdaSdkModel v3.1) ──────
-    // Mic gated while AI speaks. Ungated when response.audio.done AND playout drains.
-    // All audio during gate is BUFFERED (not discarded) and flushed to OpenAI on ungate.
-    // On barge-in, buffer is flushed (not cleared) to preserve leading speech.
+    // ─── Mic Gate v4.3 (hybrid: buffer-all, flush tail only) ──
+    // Mic gated while AI speaks. ALL audio buffered during gate.
+    // On ungate/barge-in, only the TRAILING speech frames are flushed (not hundreds
+    // of silence frames that cause ghost transcripts like "Bye.").
+    // This preserves leading speech syllables without flooding OpenAI with noise.
 
     /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
@@ -64,9 +65,17 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>Pending instruction to send after response.canceled arrives.</summary>
     private PendingInstruction? _pendingInstruction;
 
-    // Mic gate buffer: stores ALL gated audio and flushes to OpenAI on ungate (no cap, no energy filter)
+    // Mic gate buffer: stores ALL gated audio; only trailing speech frames are flushed
     private readonly List<byte[]> _micGateBuffer = new();
+    private readonly bool[] _micGateEnergy = new bool[0]; // resized dynamically
     private readonly object _micGateBufferLock = new();
+    private readonly byte _g711SilenceByte;
+
+    /// <summary>Max trailing frames to flush (25 frames = 500ms — enough for "four passengers").</summary>
+    private const int MicTailMaxFlush = 25;
+
+    /// <summary>Min non-silence bytes in a 160-byte frame to count as speech.</summary>
+    private const int SpeechEnergyThreshold = 8;
 
     // ─── Auto VAD Config ───────────────────────────────────
     /// <summary>
@@ -135,7 +144,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _session = session;
         _logger = logger;
         _codec = codec;
-
+        _g711SilenceByte = G711Codec.SilenceByte(codec);
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
         _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
@@ -202,7 +211,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Start receive loop
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
-        Log("✅ Bidirectional audio bridge active (mic gate v4.2)");
+        Log("✅ Bidirectional audio bridge active (mic gate v4.3)");
 
         // Send greeting as a conversation item (matches AdaSdkModel flow)
         // This happens AFTER session config so the AI knows its role.
@@ -333,7 +342,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         var payload = rtpPacket.Payload;
 
-        // v4.2: Buffer ALL audio while mic is gated (ported from AdaSdkModel v3.1)
+        // v4.3: Buffer audio while mic is gated (energy-tagged for selective flush)
         if (_micGated)
         {
             lock (_micGateBufferLock)
@@ -367,29 +376,58 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Flush ALL buffered mic audio to OpenAI (no cap, no energy filter).
-    /// Ported from AdaSdkModel v3.1 — preserves leading speech that arrives during gate.
+    /// Flush only the TRAILING speech frames from the mic gate buffer.
+    /// Scans backwards from end to find the last contiguous speech region,
+    /// then sends up to MicTailMaxFlush frames. This prevents hundreds of
+    /// silence frames from causing ghost transcripts while preserving
+    /// leading syllables of the caller's actual speech.
     /// </summary>
     private void FlushMicGateBuffer()
     {
-        byte[][] frames;
+        byte[][] toFlush;
         lock (_micGateBufferLock)
         {
-            if (_micGateBuffer.Count == 0)
+            int count = _micGateBuffer.Count;
+            if (count == 0)
             {
                 Log("🎤 Mic buffer flush skipped (empty)");
                 return;
             }
-            frames = _micGateBuffer.ToArray();
+
+            // Tag each frame with speech energy
+            int tailStart = Math.Max(0, count - MicTailMaxFlush);
+            var selected = new List<byte[]>();
+
+            for (int i = tailStart; i < count; i++)
+            {
+                var frame = _micGateBuffer[i];
+                int nonSilence = 0;
+                for (int j = 0; j < frame.Length; j++)
+                {
+                    if (frame[j] != _g711SilenceByte && ++nonSilence >= SpeechEnergyThreshold)
+                        break;
+                }
+                if (nonSilence >= SpeechEnergyThreshold)
+                    selected.Add(frame);
+            }
+
+            Log($"🎤 Mic buffer: {count} total, tail region {count - tailStart}, speech frames {selected.Count}");
+            toFlush = selected.ToArray();
             _micGateBuffer.Clear();
         }
 
-        Log($"🎤 Flushing {frames.Length} buffered mic frame(s)");
-        foreach (var f in frames)
+        if (toFlush.Length == 0)
+        {
+            Log("🎤 Mic tail flush skipped (no speech energy in tail)");
+            return;
+        }
+
+        Log($"🎤 Flushing {toFlush.Length} speech frame(s) from tail");
+        foreach (var f in toFlush)
             ForwardToOpenAi(f);
     }
 
-    /// <summary>Clear the buffer (only used on session reset, NOT on barge-in).</summary>
+    /// <summary>Clear the buffer (only used on session reset).</summary>
     private void ClearMicGateBuffer()
     {
         lock (_micGateBufferLock)
