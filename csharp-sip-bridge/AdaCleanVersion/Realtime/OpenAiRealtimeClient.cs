@@ -731,6 +731,27 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             }
 
             var isReprompt = pending.IsReprompt;
+
+            // ── Reprompt Grounding ──
+            // Inject an explicit system-level conversation item to break the model
+            // out of any hallucinated booking confirmation context before re-asking.
+            if (isReprompt)
+            {
+                await SendJsonAsync(new
+                {
+                    type = "conversation.item.create",
+                    item = new
+                    {
+                        type = "message",
+                        role = "user",
+                        content = new[]
+                        {
+                            new { type = "input_text", text = "[SYSTEM] The user's last response was INVALID and has been DISCARDED. The booking is NOT confirmed. Do NOT dispatch a taxi. Re-ask the question as instructed." }
+                        }
+                    }
+                });
+            }
+
             await SendJsonAsync(new
             {
                 type = "response.create",
