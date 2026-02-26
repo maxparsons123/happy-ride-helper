@@ -32,3 +32,6 @@ verify_jwt = false
 
 [functions.find-local-events]
 verify_jwt = false
+
+[functions.burst-dispatch]
+verify_jwt = false
