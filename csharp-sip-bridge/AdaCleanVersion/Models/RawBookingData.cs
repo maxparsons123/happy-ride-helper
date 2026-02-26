@@ -18,6 +18,13 @@ public class RawBookingData
     /// </summary>
     public bool IsMultiSlotBurst { get; set; }
 
+    /// <summary>
+    /// Pre-cached geocoding result from burst-dispatch edge function.
+    /// When set, verification states can skip separate geocoding calls.
+    /// Contains coordinates, zone info, fare data from address-dispatch.
+    /// </summary>
+    public System.Text.Json.JsonElement? BurstGeocodedResult { get; set; }
+
     /// <summary>True when all required raw slots have a non-empty value.</summary>
     public bool AllRequiredPresent =>
         !string.IsNullOrWhiteSpace(NameRaw) &&
