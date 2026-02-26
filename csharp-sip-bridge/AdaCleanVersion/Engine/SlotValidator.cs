@@ -1,0 +1,140 @@
+using System.Text.RegularExpressions;
+
+namespace AdaCleanVersion.Engine;
+
+/// <summary>
+/// Validates raw caller input before accepting it as a slot value.
+/// Rejects greetings, filler words, and obviously invalid responses.
+/// Returns null if valid, or a rejection reason if invalid.
+/// </summary>
+public static class SlotValidator
+{
+    // Common greetings / non-name responses
+    private static readonly HashSet<string> Greetings = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hello", "hi", "hey", "hiya", "yo", "good morning", "good afternoon",
+        "good evening", "morning", "afternoon", "evening", "howdy",
+        "what's up", "whats up", "how are you", "alright"
+    };
+
+    // Filler / hesitation words — not valid for any slot
+    private static readonly HashSet<string> FillerWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "um", "uh", "hmm", "er", "ah", "umm", "uhh", "hmm",
+        "well", "so", "like", "right", "okay", "ok"
+    };
+
+    // Patterns that are clearly not addresses
+    private static readonly Regex NonAddressPattern = new(
+        @"^(yes|no|yeah|nah|sure|please|thanks|thank you|cheers|ta|bye|goodbye)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Validate a raw value for a specific slot.
+    /// Returns null if valid, or a short reason string if rejected.
+    /// </summary>
+    public static string? Validate(string slotName, string rawValue)
+    {
+        var trimmed = rawValue.Trim();
+        var lower = trimmed.ToLowerInvariant();
+
+        // Universal: reject empty or pure filler
+        if (string.IsNullOrWhiteSpace(trimmed))
+            return "empty";
+
+        if (FillerWords.Contains(lower))
+            return "filler";
+
+        // Strip trailing punctuation for matching
+        var cleaned = lower.TrimEnd('.', '!', '?', ',');
+
+        return slotName.ToLowerInvariant() switch
+        {
+            "name" => ValidateName(cleaned),
+            "pickup" or "destination" => ValidateAddress(cleaned),
+            "passengers" => ValidatePassengers(cleaned),
+            "pickup_time" => ValidatePickupTime(cleaned),
+            _ => null
+        };
+    }
+
+    private static string? ValidateName(string lower)
+    {
+        // Reject greetings used as names
+        if (Greetings.Contains(lower))
+            return "greeting_not_name";
+
+        // Reject if it's a non-address conversational filler
+        if (NonAddressPattern.IsMatch(lower))
+            return "conversational_not_name";
+
+        // Must be at least 2 chars
+        if (lower.Length < 2)
+            return "too_short";
+
+        return null;
+    }
+
+    private static string? ValidateAddress(string lower)
+    {
+        // Reject pure conversational responses
+        if (NonAddressPattern.IsMatch(lower))
+            return "conversational_not_address";
+
+        // Must be at least 3 chars (shortest real address: "A1")
+        if (lower.Length < 2)
+            return "too_short";
+
+        return null;
+    }
+
+    private static string? ValidatePassengers(string lower)
+    {
+        // Accept digit strings
+        if (Regex.IsMatch(lower, @"^\d+$"))
+            return null;
+
+        // Accept common spoken numbers
+        var numberWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+            "1", "2", "3", "4", "5", "6", "7", "8"
+        };
+
+        // Extract number words from the input (e.g., "three passengers" → "three")
+        var words = lower.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var word in words)
+        {
+            if (numberWords.Contains(word))
+                return null;
+        }
+
+        // Also accept patterns like "just me", "myself" = 1
+        if (lower.Contains("just me") || lower == "myself" || lower == "me")
+            return null;
+
+        return "no_number_found";
+    }
+
+    private static string? ValidatePickupTime(string lower)
+    {
+        // Accept ASAP variants
+        if (lower.Contains("now") || lower.Contains("asap") || lower.Contains("soon") ||
+            lower.Contains("straight away") || lower.Contains("right away") ||
+            lower.Contains("immediately") || lower.Contains("quick"))
+            return null;
+
+        // Accept time patterns (digits with optional colon)
+        if (Regex.IsMatch(lower, @"\d"))
+            return null;
+
+        // Accept time words
+        if (lower.Contains("minute") || lower.Contains("hour") || lower.Contains("o'clock") ||
+            lower.Contains("oclock") || lower.Contains("half") || lower.Contains("quarter") ||
+            lower.Contains("morning") || lower.Contains("afternoon") || lower.Contains("evening") ||
+            lower.Contains("tonight") || lower.Contains("tomorrow") || lower.Contains("today"))
+            return null;
+
+        return "no_time_found";
+    }
+}

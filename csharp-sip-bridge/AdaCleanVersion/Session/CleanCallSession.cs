@@ -98,6 +98,16 @@ public class CleanCallSession
             return;
         }
 
+        // Validate the input before accepting it as a slot value
+        var validationError = SlotValidator.Validate(currentSlot, transcript);
+        if (validationError != null)
+        {
+            Log($"Slot '{currentSlot}' rejected: \"{transcript}\" (reason: {validationError})");
+            // Re-emit the current instruction so AI re-asks the same question
+            EmitCurrentInstruction();
+            return;
+        }
+
         // Resolve aliases ("home", "work", "the usual") for address slots
         var resolved = AliasResolver.TryResolve(currentSlot, transcript, _callerContext);
         var valueToStore = transcript;

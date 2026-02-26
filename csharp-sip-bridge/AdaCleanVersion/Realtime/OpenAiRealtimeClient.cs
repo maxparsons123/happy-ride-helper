@@ -457,6 +457,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
+        // CRITICAL: Cancel any auto-response OpenAI started (based on old instructions)
+        // and clear the playout buffer so the caller doesn't hear stale audio.
+        // This prevents the "AI responds with old instruction" race condition.
+        try
+        {
+            await SendJsonAsync(new { type = "response.cancel" });
+        }
+        catch { /* best effort */ }
+        _playout.Clear();
+
         try
         {
             await _session.ProcessCallerResponseAsync(transcript, _cts.Token);
