@@ -63,6 +63,14 @@ public static class PromptBuilder
             - No filler phrases
             - Never rush, never sound robotic
 
+            FREEFORM DETECTION:
+            If the caller provides multiple pieces of information at once 
+            (e.g., "It's Max, I'm at 52A David Road going to the Train Station for 4 people"):
+            - Do NOT make them repeat the information.
+            - Acknowledge the details briefly (e.g., "Got all that, Max.").
+            - Then STOP and wait for the system [INSTRUCTION] to tell you which part to verify first.
+            - Do NOT try to confirm everything at once. The system will guide you step by step.
+
             LANGUAGE AUTO-SWITCH (MANDATORY):
             After EVERY caller utterance, detect their spoken language.
             If different from current, SWITCH immediately. Do NOT ask permission.
@@ -214,6 +222,16 @@ public static class PromptBuilder
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
                 "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\".",
 
+            CollectionState.VerifyingPickup when rawData.IsMultiSlotBurst =>
+                "[INSTRUCTION] The caller provided multiple details at once. " +
+                "You must prioritize verifying the PICKUP first. " +
+                $"Say: \"I've got all those details. First, let me confirm the pickup: {FormatAddressForSpeech(rawData.PickupRaw ?? "")}.\" " +
+                "Do NOT confirm the destination or passengers yet. Then STOP and wait silently. " +
+                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
+                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
+                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
+                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+
             CollectionState.VerifyingPickup =>
                 "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the pickup address " +
                 "AS YOU UNDERSTOOD IT from the caller's speech. Do NOT read the raw transcript — use your own " +
@@ -261,6 +279,16 @@ public static class PromptBuilder
                 "Then STOP and wait silently. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
                 "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\".",
+
+            CollectionState.VerifyingDestination when rawData.IsMultiSlotBurst =>
+                "[INSTRUCTION] The caller provided multiple details at once. " +
+                "Now verify the DESTINATION. " +
+                $"Say: \"And for the destination, that's {FormatAddressForSpeech(rawData.DestinationRaw ?? "")}.\" " +
+                "Then STOP and wait silently. Do NOT confirm passengers or time yet. " +
+                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
+                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
+                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
+                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.VerifyingDestination =>
                 "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the destination address " +

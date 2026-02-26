@@ -148,6 +148,13 @@ public class CallStateEngine
         VerifiedPickup = geocoded;
         Log($"Pickup verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
 
+        // If destination is pre-filled (burst) but unverified, go verify it next
+        if (!string.IsNullOrWhiteSpace(RawData.DestinationRaw) && VerifiedDestination == null)
+        {
+            TransitionTo(CollectionState.VerifyingDestination);
+            return;
+        }
+
         // Advance to next missing slot
         if (RawData.AllRequiredPresent)
         {
@@ -167,6 +174,13 @@ public class CallStateEngine
     {
         VerifiedDestination = geocoded;
         Log($"Destination verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
+
+        // Clear burst flag — both addresses verified, resume normal flow
+        if (RawData.IsMultiSlotBurst)
+        {
+            RawData.IsMultiSlotBurst = false;
+            Log("Multi-slot burst complete — resuming normal flow");
+        }
 
         if (RawData.AllRequiredPresent)
         {

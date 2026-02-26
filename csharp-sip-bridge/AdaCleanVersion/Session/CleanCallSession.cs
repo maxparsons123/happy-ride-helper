@@ -134,6 +134,60 @@ public class CleanCallSession
             return;
         }
 
+        // ── Free-form splitting BEFORE validation ──
+        // Must run first so "Three passengers" during destination doesn't get validated as an address
+        if (currentSlot != "name")
+        {
+            var split = FreeFormSplitter.Analyze(transcript, currentSlot);
+            if (split.WasSplit)
+            {
+                if (split.RerouteToSlot != null)
+                {
+                    // Input belongs to a different slot entirely (e.g., "Three passengers" during destination)
+                    Log($"Cross-slot reroute: '{currentSlot}' input \"{transcript}\" → slot '{split.RerouteToSlot}'");
+                    var rerouteValue = split.OverflowSlots[split.RerouteToSlot];
+                    _engine.AcceptSlotValue(split.RerouteToSlot, rerouteValue);
+
+                    // After storing the rerouted value, emit instruction for the actual current slot
+                    // (which is still missing and needs to be asked for)
+                    EmitCurrentInstruction();
+                    return;
+                }
+
+                if (split.PrimaryValue != null && split.OverflowSlots.Count > 0)
+                {
+                    // Multi-slot split (e.g., "52A David Road, going to Manchester")
+                    Log($"Free-form split: primary '{currentSlot}'=\"{split.PrimaryValue}\"");
+                    transcript = split.PrimaryValue;
+                    _engine.RawData.IsMultiSlotBurst = true;
+
+                    // Store overflow slots silently
+                    foreach (var (overflowSlot, overflowValue) in split.OverflowSlots)
+                    {
+                        Log($"Free-form overflow: '{overflowSlot}'=\"{overflowValue}\"");
+                        _engine.RawData.SetSlot(overflowSlot, overflowValue);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Name slot: check for all-in-one burst ("It's Max, 52A David Road going to Manchester for 4")
+            var nameBurst = FreeFormSplitter.AnalyzeNameBurst(transcript);
+            if (nameBurst != null)
+            {
+                Log($"Name burst detected: name=\"{nameBurst.Name}\", overflow slots={nameBurst.OverflowSlots.Count}");
+                transcript = nameBurst.Name;
+                _engine.RawData.IsMultiSlotBurst = true;
+
+                foreach (var (overflowSlot, overflowValue) in nameBurst.OverflowSlots)
+                {
+                    Log($"Name burst overflow: '{overflowSlot}'=\"{overflowValue}\"");
+                    _engine.RawData.SetSlot(overflowSlot, overflowValue);
+                }
+            }
+        }
+
         // Validate the input before accepting it as a slot value
         var validationError = SlotValidator.Validate(currentSlot, transcript);
         if (validationError != null)
@@ -168,41 +222,6 @@ public class CleanCallSession
         }
 
         var valueToStore = transcript;
-
-        // ── Free-form splitting: detect multi-slot utterances and cross-slot mismatches ──
-        if (currentSlot != "name") // Name slot doesn't need splitting
-        {
-            var split = FreeFormSplitter.Analyze(valueToStore, currentSlot);
-            if (split.WasSplit)
-            {
-                if (split.RerouteToSlot != null)
-                {
-                    // Input belongs to a different slot entirely (e.g., "Three passengers" during destination)
-                    Log($"Cross-slot reroute: '{currentSlot}' input \"{valueToStore}\" → slot '{split.RerouteToSlot}'");
-                    var rerouteValue = split.OverflowSlots[split.RerouteToSlot];
-                    _engine.AcceptSlotValue(split.RerouteToSlot, rerouteValue);
-
-                    // After storing the rerouted value, emit instruction for the actual current slot
-                    // (which is still missing and needs to be asked for)
-                    EmitCurrentInstruction();
-                    return;
-                }
-
-                if (split.PrimaryValue != null)
-                {
-                    // Multi-slot split (e.g., "52A David Road, going to Manchester")
-                    Log($"Free-form split: primary '{currentSlot}'=\"{split.PrimaryValue}\"");
-                    valueToStore = split.PrimaryValue;
-
-                    // Store overflow slots silently
-                    foreach (var (overflowSlot, overflowValue) in split.OverflowSlots)
-                    {
-                        Log($"Free-form overflow: '{overflowSlot}'=\"{overflowValue}\"");
-                        _engine.RawData.SetSlot(overflowSlot, overflowValue);
-                    }
-                }
-            }
-        }
 
         // Strip common name prefixes ("It's Max" → "Max", "My name is John" → "John")
         if (currentSlot == "name")
