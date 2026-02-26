@@ -242,7 +242,7 @@ public class CleanCallSession
                     // Cache geocoded result so verification states can skip separate geocoding
                     if (burst.Geocoded.HasValue)
                     {
-                        _engine.RawData.BurstGeocodedResult = burst.Geocoded.Value;
+                        _engine.RawData.SetBurstGeocodedResult(burst.Geocoded.Value);
                         Log($"[BurstDispatch] ✅ Geocoded data cached (status={burst.Status})");
                     }
 
