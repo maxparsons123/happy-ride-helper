@@ -557,7 +557,17 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    // ─── Instruction Updates (Event-Driven v4.0) ────────────
+    // ─── Instruction Updates (Event-Driven v4.1) ────────────
+
+    /// <summary>
+    /// Determines if the instruction is a "silent" state where Ada should not speak.
+    /// For these states, we update session instructions but do NOT trigger response.create.
+    /// </summary>
+    private static bool IsSilentInstruction(string instruction)
+    {
+        return instruction.Contains("ABSOLUTE SILENCE") ||
+               instruction.Contains("Do NOT speak at all");
+    }
 
     private void OnAiInstruction(string instruction)
     {
@@ -619,8 +629,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         try
         {
             // ── Auto VAD Switching ──
-            // Semantic VAD for address/name slots (patient, waits for semantic completion).
-            // Server VAD for quick slots like passengers, time, confirmations (low latency).
             var vadConfig = GetVadConfigForCurrentState();
 
             await SendJsonAsync(new
@@ -632,6 +640,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     turn_detection = vadConfig
                 }
             });
+
+            // ── Silent State Suppression ──
+            // For Extracting/Geocoding, do NOT send response.create.
+            // This prevents Ada from speaking "your taxi is on its way" etc.
+            if (IsSilentInstruction(instruction))
+            {
+                Log($"📋 Silent instruction update sent (VAD: {vadConfig.type}) — NO response.create");
+                return;
+            }
 
             await SendJsonAsync(new
             {
@@ -653,13 +670,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     private static string BuildStrictResponseInstruction(string instruction)
     {
+        // Extra guard for fare presentation — prevent greeting reset
+        var antiGreeting = instruction.Contains("Present the booking summary") || instruction.Contains("PresentingFare")
+            ? "\n- ⚠️ You are MID-CALL. Do NOT greet the caller. Do NOT say 'Welcome to Ada Taxi'. The call is already in progress."
+            : "";
+
         return $"""
             CRITICAL EXECUTION MODE:
             - Follow the [INSTRUCTION] below exactly.
             - Ask ONLY what the instruction asks for in this turn.
             - Do NOT confirm booking, dispatch taxi, end call, or summarize unless explicitly instructed.
             - Do NOT invent or normalize addresses/numbers.
-            - Keep to one concise response, then wait.
+            - Keep to one concise response, then wait.{antiGreeting}
 
             {instruction}
             """;

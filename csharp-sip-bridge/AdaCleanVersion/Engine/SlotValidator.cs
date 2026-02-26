@@ -14,7 +14,9 @@ public static class SlotValidator
     {
         "hello", "hi", "hey", "hiya", "yo", "good morning", "good afternoon",
         "good evening", "morning", "afternoon", "evening", "howdy",
-        "what's up", "whats up", "how are you", "alright"
+        "what's up", "whats up", "how are you", "alright",
+        "thanks", "thanks much", "thank you", "thank you much", "cheers", "ta",
+        "thanks a lot", "thank you very much", "many thanks", "much appreciated"
     };
 
     // Filler / hesitation words — not valid for any slot
