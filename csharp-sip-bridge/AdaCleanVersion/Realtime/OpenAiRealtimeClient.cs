@@ -527,6 +527,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
+        // Deterministic turn control:
+        // Cancel any auto-started model response immediately on transcript completion,
+        // so only backend-instruction-driven speech is emitted for this turn.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await SendJsonAsync(new { type = "response.cancel" });
+            }
+            catch { }
+        });
+
         // CRITICAL: Do NOT await transcript processing in the receive loop!
         // ProcessCallerResponseAsync does slot validation, regex, and potentially GPT extraction
         // which can take 100-500ms+. Awaiting it here blocks ALL audio delta processing,
