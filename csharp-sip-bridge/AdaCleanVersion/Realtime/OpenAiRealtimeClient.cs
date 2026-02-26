@@ -173,6 +173,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // If playout already drained, ungate now
         if (_playout.QueuedFrames == 0)
             UngateMic();
+        else
+            ArmStuckMicTimer(); // safety net: if playout never drains, force-ungate after 3s
     }
 
     private void UngateMic()
@@ -190,10 +192,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _micGated = true;
         _responseCompleted = false;
         _micGatedAtTick = Environment.TickCount64;
+        // Don't arm stuck-mic timer here — wait until response.audio.done
+        // so we don't false-trigger while OpenAI is still streaming audio.
+    }
 
-        // Arm stuck-mic watchdog: if mic stays gated >5s with buffered audio, force-flush
+    /// <summary>Arm the stuck-mic safety timer (3s from now).</summary>
+    private void ArmStuckMicTimer()
+    {
         _stuckMicTimer ??= new System.Threading.Timer(_ => OnStuckMicCheck(), null, Timeout.Infinite, Timeout.Infinite);
-        _stuckMicTimer.Change(3000, Timeout.Infinite); // single-shot 3s
+        _stuckMicTimer.Change(3000, Timeout.Infinite);
     }
 
     /// <summary>Stuck-mic watchdog callback — forces ungate if audio is trapped in the buffer.</summary>
