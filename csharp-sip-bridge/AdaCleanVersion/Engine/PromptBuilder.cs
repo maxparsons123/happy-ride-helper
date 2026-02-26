@@ -219,7 +219,7 @@ public static class PromptBuilder
             CollectionState.VerifyingPickup when isRecalculating =>
                 "[INSTRUCTION] The caller just changed their pickup address. " +
                 "Say \"No problem, let me update that for you\" and then read back the new pickup address " +
-                $"\"{FormatAddressForSpeech(rawData.PickupGemini ?? rawData.GetSlot("pickup") ?? "")}\" VERBATIM. " +
+                $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? rawData.GetSlot("pickup") ?? "")}\" VERBATIM. " +
                 "Then say \"One moment while I recalculate the fare.\" " +
                 "Then STOP and wait silently. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
@@ -228,16 +228,16 @@ public static class PromptBuilder
             CollectionState.VerifyingPickup when rawData.IsMultiSlotBurst =>
                 "[INSTRUCTION] The caller provided multiple details at once. " +
                 "You must prioritize verifying the PICKUP first. " +
-                $"Say: \"I've got all those details. First, let me confirm the pickup: {FormatAddressForSpeech(rawData.PickupGemini ?? rawData.PickupRaw ?? "")}.\" " +
+                $"Say: \"I've got all those details. First, let me confirm the pickup: {FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? rawData.PickupRaw ?? "")}.\" " +
                 "Do NOT confirm the destination or passengers yet. Then STOP and wait silently. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
                 "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
                 "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
-            CollectionState.VerifyingPickup when rawData.PickupGemini != null =>
+            CollectionState.VerifyingPickup when rawData.GetGeminiSlot("pickup") != null =>
                 "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back EXACTLY this pickup address: " +
-                $"\"{FormatAddressForSpeech(rawData.PickupGemini)}\". " +
+                $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? "")}\". " +
                 "This is the AI-cleaned version — read it VERBATIM, do NOT change or reinterpret it. " +
                 "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
@@ -291,7 +291,7 @@ public static class PromptBuilder
             CollectionState.VerifyingDestination when isRecalculating =>
                 "[INSTRUCTION] The caller just changed their destination address. " +
                 "Say \"No problem, let me update that for you\" and then read back the new destination address " +
-                $"\"{FormatAddressForSpeech(rawData.DestinationGemini ?? rawData.GetSlot("destination") ?? "")}\" VERBATIM. " +
+                $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? rawData.GetSlot("destination") ?? "")}\" VERBATIM. " +
                 "Then say \"One moment while I recalculate the fare.\" " +
                 "Then STOP and wait silently. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
@@ -300,16 +300,16 @@ public static class PromptBuilder
             CollectionState.VerifyingDestination when rawData.IsMultiSlotBurst =>
                 "[INSTRUCTION] The caller provided multiple details at once. " +
                 "Now verify the DESTINATION. " +
-                $"Say: \"And for the destination, that's {FormatAddressForSpeech(rawData.DestinationGemini ?? rawData.DestinationRaw ?? "")}.\" " +
+                $"Say: \"And for the destination, that's {FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? rawData.DestinationRaw ?? "")}.\" " +
                 "Then STOP and wait silently. Do NOT confirm passengers or time yet. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
                 "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
                 "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
-            CollectionState.VerifyingDestination when rawData.DestinationGemini != null =>
+            CollectionState.VerifyingDestination when rawData.GetGeminiSlot("destination") != null =>
                 "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back EXACTLY this destination address: " +
-                $"\"{FormatAddressForSpeech(rawData.DestinationGemini)}\". " +
+                $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? "")}\". " +
                 "This is the AI-cleaned version — read it VERBATIM, do NOT change or reinterpret it. " +
                 "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
                 "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
