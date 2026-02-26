@@ -220,7 +220,7 @@ public class CleanSipBridge : IDisposable
             if (_activeCalls.TryGetValue(callId, out var call))
                 call.Codec = negotiated;
 
-            Log($"🎵 Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
+            Log($"🎵 Negotiated SIP codec: {fmt.Codec} (PT{fmt.FormatID}, mapped={negotiated})");
         };
 
         // Accept and answer the call
