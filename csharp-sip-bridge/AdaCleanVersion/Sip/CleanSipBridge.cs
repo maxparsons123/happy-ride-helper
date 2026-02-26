@@ -401,7 +401,11 @@ public class CleanSipBridge : IDisposable
 
     private void Log(string msg)
     {
-        _logger.LogInformation(msg);
+        // Fire-and-forget to avoid blocking SIP/RTP threads on logger I/O
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { _logger.LogInformation(msg); } catch { }
+        });
         OnLog?.Invoke(msg);
     }
 
