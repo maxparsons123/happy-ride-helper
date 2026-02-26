@@ -128,7 +128,7 @@ public class CleanSipBridge : IDisposable
             // Register with SIP trunk if configured
             RegisterTrunk();
 
-            Log($"✅ CleanSipBridge started on {protocol} :{listenPort}");
+            Log($"✅ CleanSipBridge started on {protocol} (local={localIp})");
             return true;
         }
         catch (Exception ex)
