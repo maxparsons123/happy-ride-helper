@@ -243,6 +243,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         var systemPrompt = _session.GetSystemPrompt();
 
+        // Use native G.711 passthrough — no PCM16 conversion needed
+        var audioFormat = _codec == G711CodecType.PCMU ? "g711_ulaw" : "g711_alaw";
+
         var config = new
         {
             type = "session.update",
@@ -251,8 +254,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 modalities = new[] { "text", "audio" },
                 voice = _voice,
                 instructions = systemPrompt,
-                input_audio_format = "pcm16",
-                output_audio_format = "pcm16",
+                input_audio_format = audioFormat,
+                output_audio_format = audioFormat,
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
@@ -266,7 +269,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         };
 
         await SendJsonAsync(config);
-        Log("📋 Session configured: VAD + whisper transcription, no tools");
+        Log($"📋 Session configured: {audioFormat} passthrough, VAD + whisper, no tools");
     }
 
     // ─── RTP → OpenAI (Caller Audio In) ─────────────────────
@@ -302,16 +305,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         try
         {
-            // Decode G.711 → PCM16
-            var pcm16 = new byte[g711Payload.Length * 2];
-            for (int i = 0; i < g711Payload.Length; i++)
-            {
-                var sample = G711Codec.Decode(g711Payload[i], _codec);
-                pcm16[i * 2] = (byte)(sample & 0xFF);
-                pcm16[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
-            }
-
-            var b64 = Convert.ToBase64String(pcm16);
+            // Native G.711 passthrough — no decode needed, OpenAI accepts g711_alaw/g711_ulaw directly
+            var b64 = Convert.ToBase64String(g711Payload);
             var msg = new { type = "input_audio_buffer.append", audio = b64 };
             _ = SendJsonAsync(msg);
         }
@@ -441,17 +436,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         var b64 = root.GetProperty("delta").GetString();
         if (string.IsNullOrEmpty(b64)) return;
 
-        var pcm16 = Convert.FromBase64String(b64);
+        // Native G.711 passthrough — OpenAI already sends g711_alaw/g711_ulaw, no conversion needed
+        var g711 = Convert.FromBase64String(b64);
 
-        // Encode PCM16 → G.711 (codec-aware)
-        var g711 = new byte[pcm16.Length / 2];
-        for (int i = 0; i < g711.Length; i++)
-        {
-            var sample = (short)(pcm16[i * 2] | (pcm16[i * 2 + 1] << 8));
-            g711[i] = G711Codec.Encode(sample, _codec);
-        }
-
-        // Buffer through playout engine (not sent directly!)
+        // Buffer through playout engine (handles 160-byte framing + 20ms pacing)
         _playout.BufferG711(g711);
 
         // Fire audio out event for avatar feeding
