@@ -193,7 +193,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         // Arm stuck-mic watchdog: if mic stays gated >5s with buffered audio, force-flush
         _stuckMicTimer ??= new Timer(_ => OnStuckMicCheck(), null, Timeout.Infinite, Timeout.Infinite);
-        _stuckMicTimer.Change(5000, Timeout.Infinite); // single-shot 5s
+        _stuckMicTimer.Change(3000, Timeout.Infinite); // single-shot 3s
     }
 
     /// <summary>Stuck-mic watchdog callback — forces ungate if audio is trapped in the buffer.</summary>
@@ -213,8 +213,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         }
         else
         {
-            // No audio buffered yet — re-arm for another 5s check
-            _stuckMicTimer?.Change(5000, Timeout.Infinite);
+            // No audio buffered yet — re-arm for another 3s check
+            _stuckMicTimer?.Change(3000, Timeout.Infinite);
         }
     }
 
