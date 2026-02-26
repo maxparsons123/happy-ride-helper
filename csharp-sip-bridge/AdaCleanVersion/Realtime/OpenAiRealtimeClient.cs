@@ -296,9 +296,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 input_audio_transcription = new { model = "whisper-1" },
                 turn_detection = new
                 {
-                    type = "semantic_vad",
-                    eagerness = "low",
-                    interrupt_response = true
+                    type = "server_vad",
+                    threshold = 0.5,
+                    prefix_padding_ms = 300,
+                    silence_duration_ms = 500
                 },
                 tools = Array.Empty<object>()
             }
@@ -588,7 +589,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// Send the pending instruction (session.update + response.create).
     /// Called either by response.canceled event or by fallback timer.
     /// Thread-safe: only the first caller sends; subsequent calls are no-ops.
-    /// Uses stable VAD config — no mid-session switching to avoid audio pipeline resets.
+    /// Includes Auto VAD Switching based on current engine state.
     /// </summary>
     private async Task SendPendingInstructionAsync()
     {
@@ -597,16 +598,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         try
         {
-            // ── Stable VAD ──
-            // Do NOT switch VAD type mid-session — it causes OpenAI to reset its
-            // audio pipeline, creating bidirectional jitter/glitches.
-            // Use semantic_vad throughout for taxi booking (addresses need patience).
+            // ── Auto VAD Switching ──
+            // Semantic VAD for address/name slots (patient, waits for semantic completion).
+            // Server VAD for quick slots like passengers, time, confirmations (low latency).
+            var vadConfig = GetVadConfigForCurrentState();
+
             await SendJsonAsync(new
             {
                 type = "session.update",
                 session = new
                 {
-                    instructions = instruction
+                    instructions = instruction,
+                    turn_detection = vadConfig
                 }
             });
 
@@ -616,7 +619,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 response = new { modalities = new[] { "text", "audio" } }
             });
 
-            Log("📋 Instruction update sent");
+            Log($"📋 Instruction update sent (VAD: {vadConfig.type})");
         }
         catch (Exception ex)
         {
