@@ -713,7 +713,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     private void Log(string msg)
     {
-        _logger.LogInformation(msg);
+        // Fire-and-forget to avoid blocking audio/WebSocket threads on logger I/O
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { _logger.LogInformation(msg); } catch { }
+        });
         OnLog?.Invoke($"[RT:{_callId}] {msg}");
     }
 }
