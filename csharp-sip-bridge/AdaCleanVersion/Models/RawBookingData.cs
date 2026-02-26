@@ -13,6 +13,18 @@ public class RawBookingData
     public string? PickupTimeRaw { get; set; }
 
     /// <summary>
+    /// Gemini-cleaned version of pickup address (from burst-dispatch).
+    /// Used for Ada readback so she reads the AI-corrected version, not raw STT.
+    /// </summary>
+    public string? PickupGemini { get; set; }
+
+    /// <summary>
+    /// Gemini-cleaned version of destination address (from burst-dispatch).
+    /// Used for Ada readback so she reads the AI-corrected version, not raw STT.
+    /// </summary>
+    public string? DestinationGemini { get; set; }
+
+    /// <summary>
     /// True when the caller provided multiple slots in a single utterance.
     /// Used by PromptBuilder to adjust verification instructions.
     /// </summary>

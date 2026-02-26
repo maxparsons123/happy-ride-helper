@@ -198,11 +198,13 @@ public class CleanCallSession
                     if (burst.Pickup != null)
                     {
                         _engine.RawData.SetSlot("pickup", burst.Pickup);
+                        _engine.RawData.PickupGemini = burst.Pickup; // Store Gemini-cleaned version for readback
                         Log($"[BurstDispatch] pickup=\"{burst.Pickup}\"");
                     }
                     if (burst.Destination != null)
                     {
                         _engine.RawData.SetSlot("destination", burst.Destination);
+                        _engine.RawData.DestinationGemini = burst.Destination; // Store Gemini-cleaned version for readback
                         Log($"[BurstDispatch] destination=\"{burst.Destination}\"");
                     }
                     if (burst.Passengers.HasValue)
@@ -409,13 +411,46 @@ public class CleanCallSession
         var nextSlot = _engine.AcceptSlotValue(currentSlot, valueToStore);
 
         // For address slots, AcceptSlotValue transitions to VerifyingPickup/VerifyingDestination.
-        // Emit instruction telling Ada to read back the address — geocoding is triggered
-        // AFTER Ada's readback arrives via ProcessAdaTranscript, giving us both the raw
-        // caller STT and Ada's interpretation to send to address-dispatch.
+        // Run through burst-dispatch to get Gemini-cleaned version for Ada's readback,
+        // then emit instruction. Geocoding is triggered AFTER Ada's readback arrives.
         if (_engine.State == CollectionState.VerifyingPickup ||
             _engine.State == CollectionState.VerifyingDestination)
         {
-            EmitCurrentInstruction(); // "Read back the address... let me confirm that"
+            // Try to get Gemini-cleaned version for better readback (non-blocking, best-effort)
+            var addressField = _engine.State == CollectionState.VerifyingPickup ? "pickup" : "destination";
+            if (_burstDispatcher != null && 
+                ((addressField == "pickup" && _engine.RawData.PickupGemini == null) ||
+                 (addressField == "destination" && _engine.RawData.DestinationGemini == null)))
+            {
+                try
+                {
+                    using var cleanCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    var cleanResult = await _burstDispatcher.DispatchAsync(
+                        valueToStore, phone: CallerId, ct: cleanCts.Token);
+                    
+                    if (cleanResult != null)
+                    {
+                        var cleaned = addressField == "pickup" ? cleanResult.Pickup : cleanResult.Destination;
+                        // Fallback: if Gemini put it in the wrong field, check the other
+                        cleaned ??= addressField == "pickup" ? cleanResult.Destination : cleanResult.Pickup;
+                        
+                        if (!string.IsNullOrWhiteSpace(cleaned))
+                        {
+                            if (addressField == "pickup")
+                                _engine.RawData.PickupGemini = cleaned;
+                            else
+                                _engine.RawData.DestinationGemini = cleaned;
+                            Log($"[GeminiClean] {addressField}: \"{valueToStore}\" → \"{cleaned}\"");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"[GeminiClean] Failed for {addressField}, Ada will use own interpretation: {ex.Message}");
+                }
+            }
+
+            EmitCurrentInstruction(); // Instruction now uses Gemini-cleaned version if available
             return; // Geocoding will be triggered when Ada's readback arrives
         }
 
