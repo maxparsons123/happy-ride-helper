@@ -96,8 +96,10 @@ public class CleanSipBridge : IDisposable
             _started = true;
             _sipTransport = new SIPTransport();
 
-            // Listen on configured port
-            var listenPort = _settings.Sip.ListenPort;
+            // Resolve local IP (same approach as AdaSdkModel)
+            var localIp = GetLocalIp();
+            Log($"➡ Local IP: {localIp}");
+
             var protocol = _settings.Sip.Transport.ToUpperInvariant() switch
             {
                 "TCP" => SIPProtocolsEnum.tcp,
@@ -105,10 +107,16 @@ public class CleanSipBridge : IDisposable
                 _ => SIPProtocolsEnum.udp
             };
 
-            _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, listenPort)));
-
-            if (protocol == SIPProtocolsEnum.tcp)
-                _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, listenPort)));
+            // Bind to local IP with ephemeral port (port 0) — matches AdaSdkModel pattern
+            switch (protocol)
+            {
+                case SIPProtocolsEnum.tcp:
+                    _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(localIp, 0)));
+                    break;
+                default:
+                    _sipTransport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(localIp, 0)));
+                    break;
+            }
 
             // Wire incoming INVITE handler via SIPUserAgent
             _listenerAgent = new SIPUserAgent(_sipTransport, null);
@@ -369,6 +377,22 @@ public class CleanSipBridge : IDisposable
     }
 
     public int ActiveCallCount => _activeCalls.Count;
+
+    private static IPAddress GetLocalIp()
+    {
+        try
+        {
+            using var socket = new System.Net.Sockets.Socket(
+                System.Net.Sockets.AddressFamily.InterNetwork,
+                System.Net.Sockets.SocketType.Dgram, 0);
+            socket.Connect("8.8.8.8", 65530);
+            return ((IPEndPoint)socket.LocalEndPoint!).Address;
+        }
+        catch
+        {
+            return IPAddress.Loopback;
+        }
+    }
 
     /// <summary>
     /// Send RTP audio to a specific call (for OpenAI TTS output).
