@@ -13,11 +13,11 @@ namespace AdaCleanVersion.Realtime;
 /// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via G711RtpPlayout.
 /// Supports both PCMU (µ-law) and PCMA (A-law) codecs.
 ///
-/// Mic Gate v4.0 — Simplified:
+/// Mic Gate v4.1:
 ///   Mic gated while AI is speaking.
-///   Ungated immediately on response.audio.done (playout drains naturally).
+///   Ungated when response.audio.done AND playout queue drained.
 ///   Barge-in (speech_started) immediately cuts and ungates.
-///   Audio commit on speech_stopped for deterministic transcription.
+///   Audio commit on speech_stopped. Event-driven instruction sequence.
 ///   Instruction sequence is event-driven (waits for response.canceled).
 /// </summary>
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
@@ -43,11 +43,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private readonly G711RtpPlayout _playout;
 
-    // ─── Simplified Mic Gate (v4.0) ────────────────────────
-    // Mic gated while AI speaks. Ungated on response.audio.done or barge-in.
+    // ─── Mic Gate v4.1 ─────────────────────────────────────
+    // Mic gated while AI speaks. Ungated when response.audio.done AND playout drains.
+    // No echo guard timer — just wait for both conditions.
 
     /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
+
+    /// <summary>OpenAI finished sending audio deltas.</summary>
+    private volatile bool _responseCompleted;
 
     /// <summary>Pending instruction to send after response.canceled arrives.</summary>
     private volatile string? _pendingInstruction;
@@ -88,19 +92,33 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
+        _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
 
-    // ─── Simplified Mic Gate Logic (v4.0) ────────────────────
+    // ─── Mic Gate Logic (v4.1) ─────────────────────────────
 
-    /// <summary>
-    /// Called when response.audio.done arrives — AI finished sending audio.
-    /// Ungate mic immediately; playout drains naturally.
-    /// </summary>
+    /// <summary>Called when playout queue drains.</summary>
+    private void OnPlayoutQueueEmpty()
+    {
+        if (!_micGated || !_responseCompleted) return;
+        UngateMic();
+    }
+
+    /// <summary>Called when response.audio.done arrives.</summary>
     private void OnResponseAudioDone()
     {
+        _responseCompleted = true;
         _playout.Flush();
+        // If playout already drained, ungate now
+        if (_playout.QueuedFrames == 0)
+            UngateMic();
+    }
+
+    private void UngateMic()
+    {
+        if (!_micGated) return;
         _micGated = false;
-        Log("🔓 Mic ungated (response.audio.done)");
+        Log("🔓 Mic ungated (audio done + playout drained)");
         FlushMicTail();
     }
 
@@ -108,6 +126,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private void ArmMicGate()
     {
         _micGated = true;
+        _responseCompleted = false;
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
@@ -137,7 +156,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Start receive loop
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
-        Log("✅ Bidirectional audio bridge active (mic gate v4.0)");
+        Log("✅ Bidirectional audio bridge active (mic gate v4.1)");
 
         // Send greeting as a conversation item (matches AdaSdkModel flow)
         // This happens AFTER session config so the AI knows its role.
