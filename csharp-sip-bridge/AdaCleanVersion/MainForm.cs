@@ -254,7 +254,7 @@ public partial class MainForm : Form
 
             _bridge = CleanBridgeFactory.Create(_settings, logger);
 
-            _bridge.OnLog += msg => SafeInvoke(() => Log(msg));
+            // Bridge logs already flow via ILogger -> CallbackLoggerProvider(Log), so avoid double subscription here.
 
             // Wire audio out → Simli feeder channel (non-blocking enqueue)
             _bridge.OnAudioOut += mulawFrame =>
