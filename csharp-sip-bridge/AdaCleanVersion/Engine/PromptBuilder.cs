@@ -38,11 +38,15 @@ public static class PromptBuilder
         var londonNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, londonTz);
         var referenceDateTime = londonNow.ToString("dddd, dd MMMM yyyy HH:mm");
 
+        // Derive language pre-warning from phone country code or caller history
+        var languagePrewarn = GetLanguagePrewarn(context);
+
         return $"""
             You are Ada, a friendly and professional AI taxi booking assistant for {companyName}.
             You speak naturally with a warm tone. Respond in the caller's language.
 
             REFERENCE_DATETIME (London): {referenceDateTime}
+            {languagePrewarn}
 
             IMPORTANT — YOUR ROLE:
             - You are a VOICE INTERFACE only
@@ -354,4 +358,65 @@ public static class PromptBuilder
                $"Can I have your name please?\" " +
                $"⚠️ CRITICAL: After greeting, WAIT PATIENTLY for the caller to respond. Do NOT repeat the question or re-prompt.";
     }
+
+    /// <summary>
+    /// Derive a language pre-warning from the caller's phone country code or stored preference.
+    /// This hints Whisper STT and Ada to expect non-English speech, preventing gibberish transcription.
+    /// </summary>
+    private static string GetLanguagePrewarn(CallerContext? context)
+    {
+        // Priority 1: Stored language preference from caller history
+        if (context?.PreferredLanguage != null && context.PreferredLanguage != "en")
+        {
+            var langName = MapLanguageCode(context.PreferredLanguage);
+            if (langName != null)
+                return $"\n[LANGUAGE PREWARN] This caller previously spoke {langName}. " +
+                       $"EXPECT them to speak {langName}. Greet in {langName}. " +
+                       "Switch if they respond in a different language.";
+        }
+
+        // Priority 2: Derive from phone country code
+        if (!string.IsNullOrWhiteSpace(context?.CallerPhone))
+        {
+            var phone = context.CallerPhone.TrimStart('+');
+            var langName = phone switch
+            {
+                _ when phone.StartsWith("31") => "Dutch",       // Netherlands
+                _ when phone.StartsWith("32") => "Dutch",       // Belgium (Flemish majority)
+                _ when phone.StartsWith("33") => "French",      // France
+                _ when phone.StartsWith("34") => "Spanish",     // Spain
+                _ when phone.StartsWith("39") => "Italian",     // Italy
+                _ when phone.StartsWith("48") => "Polish",      // Poland
+                _ when phone.StartsWith("49") => "German",      // Germany
+                _ when phone.StartsWith("351") => "Portuguese", // Portugal
+                _ when phone.StartsWith("352") => "French",     // Luxembourg
+                _ when phone.StartsWith("353") => null,         // Ireland (English)
+                _ when phone.StartsWith("41") => "German",      // Switzerland
+                _ when phone.StartsWith("43") => "German",      // Austria
+                _ when phone.StartsWith("44") => null,          // UK (English)
+                _ when phone.StartsWith("1") => null,           // US/Canada (English)
+                _ => null
+            };
+
+            if (langName != null)
+                return $"\n[LANGUAGE PREWARN] Caller's phone number is from a {langName}-speaking country. " +
+                       $"EXPECT the caller to speak {langName}. Greet in {langName}. " +
+                       "Switch if they respond in a different language.";
+        }
+
+        return ""; // English default — no pre-warning needed
+    }
+
+    private static string? MapLanguageCode(string code) => code.ToLowerInvariant() switch
+    {
+        "nl" => "Dutch",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "it" => "Italian",
+        "pl" => "Polish",
+        "pt" => "Portuguese",
+        "en" => null, // No pre-warning for English
+        _ => null
+    };
 }
