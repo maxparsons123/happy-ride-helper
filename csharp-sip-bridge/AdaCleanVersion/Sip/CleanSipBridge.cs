@@ -478,8 +478,8 @@ internal class ActiveCall
     public SIPUserAgent? CallAgent { get; init; }
     public VoIPMediaSession? RtpSession { get; init; }
 
-    /// <summary>Raw underlying RTP session for direct packet access.</summary>
-    public RTPSession? RawRtpSession => RtpSession?.RtpSession;
+    /// <summary>VoIPMediaSession IS an RTPSession (inheritance) — direct access for raw RTP.</summary>
+    public RTPSession? RawRtpSession => RtpSession;
 
     public G711CodecType Codec { get; set; } = G711CodecType.PCMA;
     public int PayloadType => G711Codec.PayloadType(Codec);
