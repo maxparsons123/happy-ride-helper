@@ -207,14 +207,27 @@ public static class PromptBuilder
                 "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
+            CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
+                $"[INSTRUCTION] {SLOT_GUARD}First, confirm the pickup by saying something like: " +
+                $"\"Great, so that's {verifiedPickup.Address} for pickup.\" " +
+                $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
+                "Then ask for their DESTINATION address. " +
+                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+
+            CollectionState.CollectingDestination when verifiedPickup != null =>
+                $"[INSTRUCTION] {SLOT_GUARD}First, confirm the pickup by saying something like: " +
+                $"\"Great, so that's {verifiedPickup.Address} for pickup.\" " +
+                "Then ask for their DESTINATION address. " +
+                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+
             CollectionState.CollectingDestination when context?.LastDestination != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{rawData.PickupRaw}\". " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
                 "Now ask for their DESTINATION address. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.CollectingDestination =>
-                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{rawData.PickupRaw}\". " +
                 "Now ask for their DESTINATION address. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
@@ -226,8 +239,15 @@ public static class PromptBuilder
                 "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
+            CollectionState.CollectingPassengers when verifiedDestination != null =>
+                $"[INSTRUCTION] {SLOT_GUARD}First, confirm the destination by saying something like: " +
+                $"\"Great, so that's {verifiedDestination.Address} for the destination.\" " +
+                "Then ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
+                "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
+                "REQUIRED FIELDS REMAINING: passengers, pickup time.",
+
             CollectionState.CollectingPassengers =>
-                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed as \"{rawData.DestinationRaw}\". " +
                 "Ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
                 "REQUIRED FIELDS REMAINING: passengers, pickup time.",
