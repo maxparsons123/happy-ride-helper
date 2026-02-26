@@ -54,6 +54,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
 
+    /// <summary>When the mic was last gated (UTC ticks). Used by stuck-mic watchdog.</summary>
+    private long _micGatedAtTick;
+
+    /// <summary>Stuck-mic watchdog timer — force-flushes if mic stays gated too long with buffered audio.</summary>
+    private Timer? _stuckMicTimer;
+
     /// <summary>Debounce guard for barge-in events (ms tick).</summary>
     private long _lastBargeInTick;
 
@@ -92,7 +98,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             Engine.CollectionState.CollectingName => true,
             Engine.CollectionState.CollectingPickup => true,
             Engine.CollectionState.CollectingDestination => true,
-            Engine.CollectionState.CollectingPassengers => true,  // compound phrases like "four passengers"
+            Engine.CollectionState.CollectingPassengers => false, // short answer — server_vad is snappier
             Engine.CollectionState.AwaitingClarification => true,
             Engine.CollectionState.VerifyingPickup => false,    // silence during geocoding
             Engine.CollectionState.VerifyingDestination => false, // silence during geocoding
@@ -173,6 +179,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         if (!_micGated) return;
         _micGated = false;
+        _stuckMicTimer?.Change(Timeout.Infinite, Timeout.Infinite); // disarm watchdog
         Log("🔓 Mic ungated (audio done + playout drained)");
         FlushMicGateBuffer();
     }
@@ -182,6 +189,33 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         _micGated = true;
         _responseCompleted = false;
+        _micGatedAtTick = Environment.TickCount64;
+
+        // Arm stuck-mic watchdog: if mic stays gated >5s with buffered audio, force-flush
+        _stuckMicTimer ??= new Timer(_ => OnStuckMicCheck(), null, Timeout.Infinite, Timeout.Infinite);
+        _stuckMicTimer.Change(5000, Timeout.Infinite); // single-shot 5s
+    }
+
+    /// <summary>Stuck-mic watchdog callback — forces ungate if audio is trapped in the buffer.</summary>
+    private void OnStuckMicCheck()
+    {
+        if (!_micGated) return;
+
+        int buffered;
+        lock (_micGateBufferLock) { buffered = _micGateBuffer.Count; }
+
+        if (buffered > 0)
+        {
+            Log($"⚠️ Stuck mic detected — gated for {(Environment.TickCount64 - _micGatedAtTick)}ms with {buffered} buffered frames. Forcing ungate.");
+            _micGated = false;
+            _responseCompleted = true;
+            FlushMicGateBuffer();
+        }
+        else
+        {
+            // No audio buffered yet — re-arm for another 5s check
+            _stuckMicTimer?.Change(5000, Timeout.Infinite);
+        }
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
@@ -274,6 +308,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
+        _stuckMicTimer?.Dispose();
 
         _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
         _session.OnAiInstruction -= OnSessionAiInstruction;
