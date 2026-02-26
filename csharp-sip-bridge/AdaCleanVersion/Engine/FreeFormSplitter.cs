@@ -162,6 +162,81 @@ public static class FreeFormSplitter
         return new SplitResult { PrimaryValue = trimmed };
     }
 
+    /// <summary>
+    /// Result of name burst analysis — extracted name and any additional slots.
+    /// </summary>
+    public record NameBurstResult(string Name, Dictionary<string, string> OverflowSlots);
+
+    // Pattern for name followed by address info:
+    // "It's Max, 52A David Road going to Manchester"
+    // "My name is John, I'm at 14 Oak Lane heading to the station for 3"
+    private static readonly Regex NameThenAddress = new(
+        @"^(?:it'?s\s+|that'?s\s+|i'?m\s+|my\s+name\s+is\s+|i\s+am\s+|call\s+me\s+|this\s+is\s+)?(\w+)[\s,]+(?:i'?m\s+at\s+|at\s+|from\s+|picking?\s*up\s+(?:at|from)\s+)?(.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Passenger count in tail: "for 4 people", "4 passengers", "for three"
+    private static readonly Regex TailPassengers = new(
+        @"[,.]?\s*(?:for\s+)?(\d+|one|two|three|four|five|six|seven|eight)\s*(?:passengers?|people|persons?|pax)?\.?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Analyze a transcript from the name slot for all-in-one bursts.
+    /// Returns null if the input is just a name.
+    /// </summary>
+    public static NameBurstResult? AnalyzeNameBurst(string transcript)
+    {
+        if (string.IsNullOrWhiteSpace(transcript))
+            return null;
+
+        var trimmed = transcript.Trim();
+
+        // Must contain address-like content after a name to qualify as a burst
+        var match = NameThenAddress.Match(trimmed);
+        if (!match.Success)
+            return null;
+
+        var name = match.Groups[1].Value.Trim();
+        var rest = match.Groups[2].Value.Trim();
+
+        // Must have actual address markers in the rest to be a burst
+        if (!HasAddressMarkers(rest) && !DestinationSignal.IsMatch(rest))
+            return null;
+
+        var overflow = new Dictionary<string, string>();
+
+        // Extract passenger count from tail
+        var paxMatch = TailPassengers.Match(rest);
+        if (paxMatch.Success)
+        {
+            overflow["passengers"] = paxMatch.Groups[1].Value;
+            rest = rest[..paxMatch.Index].TrimEnd(',', '.', ' ');
+        }
+
+        // Split pickup and destination
+        var destMatch = DestinationSignal.Match(rest);
+        if (destMatch.Success)
+        {
+            var pickupPart = rest[..destMatch.Index].TrimEnd(',', '.', ' ');
+            var destPart = destMatch.Groups[1].Value.TrimEnd('.', ',', '!', '?');
+
+            if (!string.IsNullOrWhiteSpace(pickupPart))
+                overflow["pickup"] = pickupPart;
+            if (!string.IsNullOrWhiteSpace(destPart))
+                overflow["destination"] = destPart;
+        }
+        else if (!string.IsNullOrWhiteSpace(rest))
+        {
+            // Just pickup, no destination signal
+            overflow["pickup"] = rest;
+        }
+
+        // Only return a burst if we actually extracted overflow slots
+        if (overflow.Count == 0)
+            return null;
+
+        return new NameBurstResult(name, overflow);
+    }
+
     private static bool IsSpokenNumber(string s) =>
         s is "one" or "two" or "three" or "four" or "five" or "six" or "seven" or "eight";
 

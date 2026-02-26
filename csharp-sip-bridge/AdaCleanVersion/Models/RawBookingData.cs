@@ -12,6 +12,12 @@ public class RawBookingData
     public string? PassengersRaw { get; set; }
     public string? PickupTimeRaw { get; set; }
 
+    /// <summary>
+    /// True when the caller provided multiple slots in a single utterance.
+    /// Used by PromptBuilder to adjust verification instructions.
+    /// </summary>
+    public bool IsMultiSlotBurst { get; set; }
+
     /// <summary>True when all required raw slots have a non-empty value.</summary>
     public bool AllRequiredPresent =>
         !string.IsNullOrWhiteSpace(NameRaw) &&
