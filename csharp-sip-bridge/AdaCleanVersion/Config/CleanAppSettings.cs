@@ -21,6 +21,11 @@ public class CleanAppSettings
     public DispatchSettings Dispatch { get; set; } = new();
     public SupabaseSettings Supabase { get; set; } = new();
     public SimliSettings Simli { get; set; } = new();
+    public GoogleMapsSettings GoogleMaps { get; set; } = new();
+    public GeminiSettings Gemini { get; set; } = new();
+    public IcabbiSettings Icabbi { get; set; } = new();
+    public ZoneGuardSettings ZoneGuard { get; set; } = new();
+    public SumUpSettings SumUp { get; set; } = new();
 
     // Legacy compat
     public string SupabaseUrl { get => Supabase.Url; set => Supabase.Url = value; }
@@ -105,6 +110,56 @@ public class SimliSettings
     public string ApiKey { get; set; } = "";
     public string FaceId { get; set; } = "";
     public bool Enabled { get; set; } = false;
+}
+
+public class GoogleMapsSettings
+{
+    public string ApiKey { get; set; } = "";
+}
+
+/// <summary>
+/// Settings for direct Google Gemini API calls (address geocoding/fare).
+/// </summary>
+public class GeminiSettings
+{
+    public string ApiKey { get; set; } = "";
+    public string Model { get; set; } = "gemini-2.0-flash";
+    public bool Enabled { get; set; } = false;
+}
+
+public class IcabbiSettings
+{
+    public bool Enabled { get; set; } = false;
+    public string AppKey { get; set; } = "";
+    public string SecretKey { get; set; } = "";
+    public string TenantBase { get; set; } = "https://yourtenant.icabbi.net";
+    public int SiteId { get; set; } = 0;
+    public string CompanyId { get; set; } = "";
+}
+
+/// <summary>
+/// Controls the Zone Guard — pickup address validation against zone POIs.
+/// </summary>
+public class ZoneGuardSettings
+{
+    public bool Enabled { get; set; } = false;
+    public float MinSimilarity { get; set; } = 0.25f;
+    public bool BlockOnNoMatch { get; set; } = false;
+    public int MaxCandidates { get; set; } = 10;
+    public string CompanyId { get; set; } = "";
+}
+
+/// <summary>
+/// SumUp payment link generation settings.
+/// </summary>
+public class SumUpSettings
+{
+    public bool Enabled { get; set; } = false;
+    public string MerchantCode { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public string Currency { get; set; } = "GBP";
+    public string PayToEmail { get; set; } = "";
+    public string PaymentPageBaseUrl { get; set; } = "https://happy-ride-helper.lovable.app";
 }
 
 /// <summary>
