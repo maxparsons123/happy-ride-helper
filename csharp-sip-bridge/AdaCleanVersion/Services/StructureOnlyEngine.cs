@@ -116,6 +116,11 @@ public class StructureOnlyEngine : IExtractionService
         var systemPrompt = BuildSystemPrompt(isUpdate);
         var userPayload = BuildUserPayload(raw, existing);
 
+        // Serialize schema with default naming (camelCase) to preserve "additionalProperties" exactly.
+        // The snake_case policy in JsonOpts would corrupt it to "additional_properties".
+        var schemaJson = JsonSerializer.Serialize(NormalizedBookingSchema);
+        var schemaElement = JsonSerializer.Deserialize<JsonElement>(schemaJson);
+
         var payload = new
         {
             model = Model,
@@ -132,7 +137,7 @@ public class StructureOnlyEngine : IExtractionService
                 {
                     name = "normalized_booking",
                     strict = true,
-                    schema = NormalizedBookingSchema
+                    schema = schemaElement
                 }
             }
         };
