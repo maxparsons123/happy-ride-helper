@@ -36,7 +36,7 @@ public sealed class G711RtpPlayout : IDisposable
 
     private const int FrameSize = 160;          // 20ms @ 8kHz
     private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start
-    private const int ResumeThresholdFrames = 5;       // 100ms for mid-stream resume
+    private const int ResumeThresholdFrames = 10;      // 200ms for mid-stream resume — absorbs WebSocket jitter
     private const int MaxPoolSize = 200;
     private const int MaxSendErrors = 10;
 
