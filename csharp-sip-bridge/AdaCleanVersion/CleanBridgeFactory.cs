@@ -80,7 +80,7 @@ public static class CleanBridgeFactory
             await client.ConnectAsync();
 
             // Keep alive until RTP session closes
-            rtpSession.OnClosed += async (reason) =>
+            rtpSession.OnRtpClosed += (reason) =>
             {
                 logger.LogInformation($"[RT:{callId}] RTP closed — disposing Realtime client");
                 await client.DisposeAsync();
