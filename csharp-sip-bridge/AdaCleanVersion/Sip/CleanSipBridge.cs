@@ -335,11 +335,30 @@ public class CleanSipBridge : IDisposable
         var username = _settings.Sip.Username;
         var authUser = _settings.Sip.EffectiveAuthUser;
 
+        // Match AdaSdkModel registration target behavior: register to server[:port]
+        var resolvedHost = server;
+        try
+        {
+            resolvedHost = Dns.GetHostAddresses(server)
+                .First(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .ToString();
+            Log($"➡ Registrar DNS: {server} -> {resolvedHost}");
+        }
+        catch
+        {
+            Log($"⚠ Registrar DNS resolve failed for {server}; using hostname directly");
+        }
+
+        var registrarHostWithPort = _settings.Sip.Port == 5060
+            ? resolvedHost
+            : $"{resolvedHost}:{_settings.Sip.Port}";
+
+        // Use SIP username for AOR identity (same as AdaSdkModel).
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            authUser,
+            username,
             _settings.Sip.Password,
-            domain,
+            registrarHostWithPort,
             120); // expiry seconds
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
