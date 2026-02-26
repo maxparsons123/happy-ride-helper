@@ -468,7 +468,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 if (!string.IsNullOrWhiteSpace(aiText))
                 {
                     var text = aiText; // capture for closure
-                    _ = Task.Run(() => { try { _session.ProcessAdaTranscript(text); } catch { } });
+                    _ = Task.Run(async () => { try { await _session.ProcessAdaTranscriptAsync(text); } catch (Exception ex) { Log($"⚠️ Ada transcript processing error: {ex.Message}"); } });
                 }
                 break;
 

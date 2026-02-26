@@ -363,14 +363,15 @@ serve(async (req) => {
       return new Response(JSON.stringify({ status: "warm" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
     
-    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode, caller_area } = body;
+    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode, caller_area, ada_readback } = body;
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}", callerArea="${caller_area || ''}"`);
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", adaReadback="${ada_readback || ''}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}", callerArea="${caller_area || ''}"`);
+
 
     // Look up caller history from database
     let callerHistory = "";
@@ -638,8 +639,14 @@ serve(async (req) => {
       ? `\nCALLER_AREA (the caller stated they are in this area/district — use as STRONG bias for all address resolution): "${caller_area}". Prefer street matches and POIs within or near this area. This is stronger than phone-prefix bias but weaker than an explicit city name in the address itself.`
       : '';
 
+    // Ada's readback — the AI assistant's interpretation of the caller's speech.
+    // This provides a second signal alongside the raw STT for better address extraction accuracy.
+    const adaReadbackHint = ada_readback
+      ? `\nADA_READBACK (AI assistant's interpretation of the caller's address — use alongside the raw STT above for reconciliation): "${ada_readback}". Compare with the raw pickup/destination input. If they differ, Ada's readback may have corrected STT mishearings. Use BOTH signals to determine the most accurate address.`
+      : '';
+
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerAreaHint}${callerHistory}`;
+User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerAreaHint}${adaReadbackHint}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",

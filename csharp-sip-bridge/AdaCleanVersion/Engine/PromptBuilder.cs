@@ -93,7 +93,9 @@ public static class PromptBuilder
                 "They must include a house number if it's a street address.",
 
             CollectionState.VerifyingPickup =>
-                "[INSTRUCTION] Say \"One moment, just confirming that address\" — then STOP and wait silently.",
+                $"[INSTRUCTION] Read back the pickup address as \"{rawData.PickupRaw}\" and say " +
+                "\"let me just confirm that for you\". Then STOP and wait silently. " +
+                "Do NOT alter or normalize the address — read it back exactly as shown.",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
                 $"[INSTRUCTION] Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
@@ -105,7 +107,9 @@ public static class PromptBuilder
                 "Now ask for their DESTINATION address.",
 
             CollectionState.VerifyingDestination =>
-                "[INSTRUCTION] Say \"One moment, just confirming that address\" — then STOP and wait silently.",
+                $"[INSTRUCTION] Read back the destination address as \"{rawData.DestinationRaw}\" and say " +
+                "\"let me just confirm that for you\". Then STOP and wait silently. " +
+                "Do NOT alter or normalize the address — read it back exactly as shown.",
 
             CollectionState.CollectingPassengers =>
                 $"[INSTRUCTION] Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
