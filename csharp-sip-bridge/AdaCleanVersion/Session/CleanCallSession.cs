@@ -130,28 +130,26 @@ public class CleanCallSession
         var validationError = SlotValidator.Validate(currentSlot, transcript);
         if (validationError != null)
         {
-            // For passengers, try Ada's interpretation as fallback before rejecting.
-            // STT often garbles numbers (e.g., "four passengers" → "poor passengers")
-            // but Ada's spoken response usually has the correct number.
+            // For passengers, try Ada's readback as authoritative source before rejecting.
+            // Ada's LLM context understands "four" even when STT hears "poor".
             if (currentSlot == "passengers" && validationError == "no_number_found")
             {
-                var adaFallback = TryExtractPassengersFromAdaContext(transcript);
-                if (adaFallback != null)
+                var adaVerified = GetVerifiedPassengerCount(transcript);
+                if (adaVerified != null)
                 {
-                    Log($"Passengers recovered from Ada interpretation: \"{transcript}\" → \"{adaFallback}\"");
-                    valueToStore = adaFallback;
-                    // Fall through to normal slot acceptance below
-                    goto acceptSlot;
+                    Log($"Passengers recovered from Ada readback: \"{transcript}\" → \"{adaVerified}\"");
+                    transcript = adaVerified; // Override with Ada's interpretation
+                    validationError = null;   // Clear rejection
                 }
             }
 
-            Log($"Slot '{currentSlot}' rejected: \"{transcript}\" (reason: {validationError})");
-            // Emit a re-prompt instruction (different from the original ask)
-            EmitRepromptInstruction(validationError);
-            return;
+            if (validationError != null)
+            {
+                Log($"Slot '{currentSlot}' rejected: \"{transcript}\" (reason: {validationError})");
+                EmitRepromptInstruction(validationError);
+                return;
+            }
         }
-
-        acceptSlot:
 
         var valueToStore = transcript;
 
@@ -720,16 +718,46 @@ public class CleanCallSession
     private void Log(string msg) => OnLog?.Invoke($"[Session:{SessionId}] {msg}");
 
     /// <summary>
-    /// Try to extract a passenger count from Ada's recent transcript context.
-    /// Ada's interpretation is authoritative — if she said "four passengers"
-    /// but STT heard "poor passengers", we trust Ada.
+    /// Extract verified passenger count using Ada's readback as the authoritative source.
+    /// Ada's LLM context acts as a "denoising filter" — she understands "four" even when
+    /// STT garbles it to "poor". We trust her interpretation over raw STT.
     /// </summary>
-    private string? TryExtractPassengersFromAdaContext(string rawCallerStt)
+    private string? GetVerifiedPassengerCount(string rawCallerStt)
     {
-        // Check Ada's last few transcripts for a number
-        var recentAda = _adaTranscripts.TakeLast(3);
+        var numberWords = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "one", 1 }, { "two", 2 }, { "three", 3 }, { "four", 4 },
+            { "five", 5 }, { "six", 6 }, { "seven", 7 }, { "eight", 8 },
+        };
 
-        // Also check the raw STT phonetically — "poor" ≈ "four", "tree" ≈ "three", etc.
+        // === PRIORITY 1: Ada's readback (highest confidence) ===
+        // Ada was asked "how many passengers?" — her response is context-aware.
+        var recentAda = _adaTranscripts.TakeLast(3);
+        foreach (var adaLine in recentAda.Reverse())
+        {
+            var adaLower = adaLine.ToLowerInvariant();
+
+            // Check for digits first (e.g., "Got it, 4 passengers")
+            var digitMatch = System.Text.RegularExpressions.Regex.Match(adaLower, @"\b([1-8])\b");
+            if (digitMatch.Success)
+            {
+                var n = int.Parse(digitMatch.Value);
+                Log($"Pax from Ada digit: \"{adaLine}\" → {n}");
+                return $"{n}";
+            }
+
+            // Check for number words (e.g., "Great, four passengers")
+            foreach (var (word, num) in numberWords)
+            {
+                if (adaLower.Contains(word))
+                {
+                    Log($"Pax from Ada word: \"{adaLine}\" → {num}");
+                    return $"{num}";
+                }
+            }
+        }
+
+        // === PRIORITY 2: Phonetic correction on raw STT ===
         var phoneticMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "poor", "four" }, { "pour", "four" }, { "for", "four" },
@@ -740,13 +768,6 @@ public class CleanCallSession
             { "ate", "eight" }, { "ape", "eight" },
         };
 
-        var numberWords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            { "one", "1" }, { "two", "2" }, { "three", "3" }, { "four", "4" },
-            { "five", "5" }, { "six", "6" }, { "seven", "7" }, { "eight", "8" },
-        };
-
-        // First: try phonetic correction on the raw caller STT
         var callerWords = rawCallerStt.ToLowerInvariant()
             .TrimEnd('.', '!', '?', ',')
             .Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -754,28 +775,10 @@ public class CleanCallSession
         foreach (var word in callerWords)
         {
             if (phoneticMap.TryGetValue(word, out var corrected) &&
-                numberWords.TryGetValue(corrected, out var digit))
+                numberWords.TryGetValue(corrected, out var num))
             {
-                return $"{corrected} passengers";
-            }
-        }
-
-        // Second: scan Ada's recent transcripts for number words
-        foreach (var adaLine in recentAda.Reverse())
-        {
-            var adaLower = adaLine.ToLowerInvariant();
-            foreach (var (word, digit) in numberWords)
-            {
-                if (adaLower.Contains(word) || adaLower.Contains(digit))
-                {
-                    return $"{word} passengers";
-                }
-            }
-            // Also check for digit patterns
-            var digitMatch = System.Text.RegularExpressions.Regex.Match(adaLower, @"\b(\d)\b");
-            if (digitMatch.Success)
-            {
-                return $"{digitMatch.Value} passengers";
+                Log($"Pax from phonetic: \"{word}\" → {corrected} ({num})");
+                return $"{num}";
             }
         }
 
