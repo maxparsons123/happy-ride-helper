@@ -188,7 +188,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
 
         // Wire session instructions → OpenAI session.update
-        _session.OnAiInstruction += OnAiInstruction;
+        _session.OnAiInstruction += OnSessionAiInstruction;
 
         // Start playout engine
         _playout.Start();
@@ -254,7 +254,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _cts.Cancel();
 
         _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
-        _session.OnAiInstruction -= OnAiInstruction;
+        _session.OnAiInstruction -= OnSessionAiInstruction;
 
         _playout.Stop();
 
@@ -569,10 +569,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                instruction.Contains("Do NOT speak at all");
     }
 
-    private void OnAiInstruction(string instruction)
+    private bool _pendingIsReprompt;
+
+    private void OnSessionAiInstruction(string instruction, bool isReprompt)
     {
-        Log("📋 Queuing instruction update");
-        _ = StartInstructionSequenceAsync(instruction);
+        Log(isReprompt ? "📋 Queuing REPROMPT instruction update" : "📋 Queuing instruction update");
+        _pendingIsReprompt = isReprompt;
+        _ = StartInstructionSequenceAsync(instruction, isReprompt);
     }
 
     /// <summary>
@@ -580,14 +583,23 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// The actual session.update + response.create happens when response.canceled arrives.
     /// If no response is active, the fallback timer sends it after 150ms.
     /// </summary>
-    private async Task StartInstructionSequenceAsync(string instruction)
+    private async Task StartInstructionSequenceAsync(string instruction, bool isReprompt = false)
     {
         try
         {
             _pendingInstruction = instruction;
+            _pendingIsReprompt = isReprompt;
 
             // Cancel any in-progress response — response.canceled event will trigger the rest
             await SendJsonAsync(new { type = "response.cancel" });
+
+            if (isReprompt)
+            {
+                // HARDENED: For reprompts, also clear the input audio buffer to prevent
+                // the AI from using stale audio context to generate a rogue response
+                await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+                Log("🔒 Reprompt: cleared input audio buffer");
+            }
 
             // Fallback: if no response was active, response.canceled won't fire.
             // Wait briefly, then check if _pendingInstruction is still set.
@@ -650,17 +662,22 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 return;
             }
 
+            var isReprompt = _pendingIsReprompt;
             await SendJsonAsync(new
             {
                 type = "response.create",
                 response = new
                 {
                     modalities = new[] { "text", "audio" },
-                    instructions = BuildStrictResponseInstruction(instruction)
+                    instructions = isReprompt
+                        ? BuildRepromptResponseInstruction(instruction)
+                        : BuildStrictResponseInstruction(instruction)
                 }
             });
 
-            Log($"📋 Instruction update sent (VAD: {vadConfig.type})");
+            Log(isReprompt
+                ? $"🔒 REPROMPT instruction sent (VAD: {vadConfig.type})"
+                : $"📋 Instruction update sent (VAD: {vadConfig.type})");
         }
         catch (Exception ex)
         {
@@ -683,6 +700,35 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             - Do NOT invent or normalize addresses/numbers.
             - Keep to one concise response, then wait.{antiGreeting}
 
+            {instruction}
+            """;
+    }
+
+    /// <summary>
+    /// Ultra-strict instruction wrapper for reprompts after validation failure.
+    /// The AI MUST only re-ask the question — nothing else.
+    /// </summary>
+    private static string BuildRepromptResponseInstruction(string instruction)
+    {
+        return $"""
+            ⛔⛔⛔ ABSOLUTE OVERRIDE — REPROMPT MODE ⛔⛔⛔
+            
+            YOUR PREVIOUS RESPONSE WAS DISCARDED. The user's input was INVALID.
+            You MUST re-ask the EXACT question specified in the [INSTRUCTION] below.
+            
+            FORBIDDEN (violation = system failure):
+            ❌ Do NOT say "understood", "got it", "thank you", "no problem"
+            ❌ Do NOT confirm any booking or dispatch any taxi
+            ❌ Do NOT say goodbye, safe travels, or any farewell
+            ❌ Do NOT say "your taxi is on its way" or "booking confirmed"
+            ❌ Do NOT acknowledge what the user just said
+            ❌ Do NOT add any commentary or filler
+            ❌ Do NOT end the conversation
+            
+            REQUIRED (exactly ONE of these):
+            ✅ Say ONLY what the [INSTRUCTION] tells you to say
+            ✅ Then STOP and WAIT for the user's answer
+            
             {instruction}
             """;
     }

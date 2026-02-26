@@ -41,7 +41,7 @@ public class CleanCallSession
     public CallStateEngine Engine => _engine;
 
     public event Action<string>? OnLog;
-    public event Action<string>? OnAiInstruction;
+    public event Action<string, bool>? OnAiInstruction; // (instruction, isReprompt)
     public event Action<StructuredBooking>? OnBookingReady;
     public event Action<FareResult>? OnFareReady;
 
@@ -320,7 +320,7 @@ public class CleanCallSession
 
         var instruction = PromptBuilder.BuildCorrectionInstruction(
             slotName, oldValue ?? "", newValue);
-        OnAiInstruction?.Invoke(instruction);
+        OnAiInstruction?.Invoke(instruction, false);
 
         // Re-check if ready for extraction after correction
         if (_engine.RawData.AllRequiredPresent &&
@@ -866,19 +866,37 @@ public class CleanCallSession
         }
     }
 
+    private int _repromptCount = 0;
+    private string? _lastRepromptSlot;
+
     private void EmitCurrentInstruction()
     {
+        // Reset reprompt counter when we successfully advance
+        _repromptCount = 0;
+        _lastRepromptSlot = null;
+
         var instruction = PromptBuilder.BuildInstruction(
             _engine.State, _engine.RawData, _callerContext,
             _engine.StructuredResult, _engine.FareResult,
             _engine.PendingClarification,
             _engine.VerifiedPickup, _engine.VerifiedDestination);
         _lastEmittedInstruction = instruction;
-        OnAiInstruction?.Invoke(instruction);
+        OnAiInstruction?.Invoke(instruction, false);
     }
 
     private void EmitRepromptInstruction(string rejectedReason)
     {
+        var currentSlot = _engine.RawData.NextMissingSlot() ?? "unknown";
+        if (_lastRepromptSlot == currentSlot)
+            _repromptCount++;
+        else
+        {
+            _repromptCount = 1;
+            _lastRepromptSlot = currentSlot;
+        }
+
+        Log($"Re-prompt #{_repromptCount} for slot '{currentSlot}' (reason: {rejectedReason})");
+
         var instruction = PromptBuilder.BuildInstruction(
             _engine.State, _engine.RawData, _callerContext,
             _engine.StructuredResult, _engine.FareResult,
@@ -886,7 +904,7 @@ public class CleanCallSession
             _engine.VerifiedPickup, _engine.VerifiedDestination,
             rejectedReason: rejectedReason);
         _lastEmittedInstruction = instruction;
-        OnAiInstruction?.Invoke(instruction);
+        OnAiInstruction?.Invoke(instruction, true); // isReprompt = true
     }
 
     private void OnEngineStateChanged(CollectionState from, CollectionState to)
