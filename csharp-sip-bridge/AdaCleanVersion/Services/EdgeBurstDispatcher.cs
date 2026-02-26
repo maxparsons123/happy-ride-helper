@@ -59,11 +59,20 @@ public class EdgeBurstDispatcher
     {
         if (string.IsNullOrWhiteSpace(transcript)) return false;
         var trimmed = transcript.Trim();
-        if (trimmed.Length >= 25) return true;
-        var matches = System.Text.RegularExpressions.Regex.Matches(trimmed,
-            @"\b(?:to|going|heading|from|picking?\s*up|drop(?:ping)?\s*(?:off)?|for|with|passenger|people|person|asap|now|straight\s+away)\b",
+
+        // Must contain at least ONE multi-slot signal keyword to qualify as a burst.
+        // A single address like "Morrison's in Coventry" should NOT trigger burst dispatch —
+        // it's just answering the current slot question normally.
+        var signals = System.Text.RegularExpressions.Regex.Matches(trimmed,
+            @"\b(?:going\s+to|heading\s+to|drop(?:ping)?\s*(?:off)?\s*(?:at|to)|from|picking?\s*up|passenger|people|person|asap|now|straight\s+away|for\s+\d+)\b",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return matches.Count >= 2;
+
+        // Need at least 2 signal words (e.g., "from X going to Y", "to X for 3 passengers")
+        // OR 1 signal word in a long transcript (>50 chars, likely compound sentence)
+        if (signals.Count >= 2) return true;
+        if (signals.Count == 1 && trimmed.Length >= 50) return true;
+
+        return false;
     }
 
     /// <summary>
