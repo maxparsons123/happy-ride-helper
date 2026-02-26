@@ -201,7 +201,7 @@ public class CleanCallSession
                 var burst = await _burstDispatcher.DispatchAsync(
                     transcript,
                     phone: CallerId,
-                    callerArea: _engine.Snapshot.PickupArea,
+                    callerArea: null,
                     ct: ct);
 
                 if (burst != null && burst.Status != "error")
@@ -646,7 +646,7 @@ public class CleanCallSession
     public void ProcessAdaTranscript(string adaText)
     {
         if (string.IsNullOrWhiteSpace(adaText)) return;
-        _ = ProcessAdaTranscriptAsync(adaText);
+        _ = Task.Run(() => ProcessAdaTranscriptAsync(adaText));
     }
 
     /// <summary>
