@@ -234,6 +234,7 @@ public sealed class G711RtpPlayout : IDisposable
                 if (waitMs > 0)
                 {
                     _wakeFence.Wait(waitMs);
+                    _wakeFence.Reset();
                     if (Volatile.Read(ref _clearRequested)) continue;
                 }
             }
