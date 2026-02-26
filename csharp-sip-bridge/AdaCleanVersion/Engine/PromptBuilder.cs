@@ -205,6 +205,13 @@ public static class PromptBuilder
                 (CollectionState.CollectingPickupTime, _) =>
                     "[INSTRUCTION] ⛔ MANDATORY: I didn't catch when you need the taxi. You MUST ask again: " +
                     "\"Sorry, when do you need the taxi — now or at a specific time?\" Do NOT say anything else.",
+                (CollectionState.PresentingFare, _) =>
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't hear your response. You MUST ask again: " +
+                    "\"Sorry, would you like to go ahead with this booking?\" Do NOT say anything else. " +
+                    "Do NOT repeat the fare. Do NOT repeat the addresses. Do NOT ask about pickup time. ONLY ask for confirmation.",
+                (CollectionState.AwaitingConfirmation, _) =>
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't hear your response. You MUST ask again: " +
+                    "\"Sorry, shall I confirm this booking for you?\" Do NOT say anything else.",
                 _ => $"[INSTRUCTION] ⛔ MANDATORY: I didn't catch that. Ask the caller to repeat. Do NOT say anything else."
             };
         }

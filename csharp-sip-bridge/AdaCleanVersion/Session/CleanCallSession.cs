@@ -46,6 +46,7 @@ public class CleanCallSession
     private CancellationTokenSource? _noReplyCts;
     private int _noReplyCount;
     private const int NoReplyTimeoutSeconds = 12;
+    private const int NoReplyTimeoutLongSeconds = 25; // For fare recap (long audio)
     private const int MaxNoReplyReprompts = 2;
 
     public string SessionId { get; }
@@ -1060,7 +1061,7 @@ public class CleanCallSession
             // still contains a street name (i.e., Gemini duplicated the raw input as a prefix).
             // If the geocoded address IS "raw + city/postcode", stripping would lose the street.
             var rawSlotValue = field == "pickup" ? _engine.RawData.PickupRaw : _engine.RawData.DestinationRaw;
-            var streetTokenPattern = @"\b(Road|Street|Avenue|Lane|Drive|Close|Way|Place|Crescent|Court|Terrace|Grove|Hill|Gardens|Square|Parade|Row|Walk|Rise|Mews)\b";
+            var streetTokenPattern = @"\b(Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|Close|Cl|Way|Place|Pl|Crescent|Cres|Court|Ct|Terrace|Tce|Grove|Gr|Hill|Gardens|Gdns|Square|Sq|Parade|Row|Walk|Rise|Mews|Boulevard|Blvd)\b";
             // Only attempt prefix stripping if the raw input is a POI/landmark (no street token).
             // If the raw input already contains a street name (e.g., "52A David Road, Coventry"),
             // stripping would remove the street and leave just the postcode.
@@ -1495,7 +1496,10 @@ public class CleanCallSession
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(NoReplyTimeoutSeconds), cts.Token);
+                var timeout = expectedState == CollectionState.PresentingFare
+                    ? NoReplyTimeoutLongSeconds
+                    : NoReplyTimeoutSeconds;
+                await Task.Delay(TimeSpan.FromSeconds(timeout), cts.Token);
 
                 if (cts.IsCancellationRequested)
                     return;
