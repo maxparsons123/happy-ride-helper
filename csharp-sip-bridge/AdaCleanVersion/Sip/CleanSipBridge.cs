@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Net;
+using SIPSorcery.Media;
 using SIPSorceryMedia.Abstractions;
 
 namespace AdaCleanVersion.Sip;
@@ -38,6 +39,7 @@ public class CleanSipBridge : IDisposable
     private readonly ConcurrentDictionary<string, ActiveCall> _activeCalls = new();
 
     private SIPTransport? _sipTransport;
+    private SIPUserAgent? _listenerAgent;
     private SIPRegistrationUserAgent? _regAgent;
     private bool _started;
 
@@ -48,7 +50,7 @@ public class CleanSipBridge : IDisposable
     /// The consumer should wire this to their OpenAI Realtime client
     /// for bidirectional audio streaming.
     /// </summary>
-    public event Action<string, RTPSession, CleanCallSession>? OnCallConnected;
+    public event Action<string, VoIPMediaSession, CleanCallSession>? OnCallConnected;
 
     /// <summary>Fires with G.711 audio frames from the AI output (for Simli avatar feeding).</summary>
     public event Action<byte[]>? OnAudioOut;
@@ -108,8 +110,12 @@ public class CleanSipBridge : IDisposable
             if (protocol == SIPProtocolsEnum.tcp)
                 _sipTransport.AddSIPChannel(new SIPTCPChannel(new IPEndPoint(IPAddress.Any, listenPort)));
 
-            // Wire incoming INVITE handler
-            _sipTransport.SIPTransportRequestReceived += OnSipRequestReceived;
+            // Wire incoming INVITE handler via SIPUserAgent
+            _listenerAgent = new SIPUserAgent(_sipTransport, null);
+            _listenerAgent.OnIncomingCall += (ua, req) =>
+            {
+                _ = OnIncomingCallSafe(req);
+            };
 
             // Register with SIP trunk if configured
             RegisterTrunk();
@@ -130,7 +136,7 @@ public class CleanSipBridge : IDisposable
 
         foreach (var call in _activeCalls.Values)
         {
-            try { call.UserAgent?.Hangup(false); }
+            try { call.CallAgent?.Hangup(); }
             catch { /* best effort */ }
         }
         _activeCalls.Clear();
@@ -147,33 +153,24 @@ public class CleanSipBridge : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    // ─── SIP Request Handler ────────────────────────────────
+    // ─── SIP Call Handler ────────────────────────────────────
 
-    private async Task OnSipRequestReceived(
-        SIPEndPoint localSipEndPoint,
-        SIPEndPoint remoteEndPoint,
-        SIPRequest sipRequest)
+    private async Task OnIncomingCallSafe(SIPRequest sipRequest)
     {
-        if (sipRequest.Method != SIPMethodsEnum.INVITE)
-        {
-            // Auto-respond to non-INVITE (OPTIONS, etc.)
-            if (sipRequest.Method == SIPMethodsEnum.OPTIONS)
-            {
-                var optResp = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
-                await _sipTransport!.SendResponseAsync(optResp);
-            }
-            return;
-        }
-
         var callerId = sipRequest.Header.From.FromURI.User;
         var callerName = sipRequest.Header.From.FromName ?? callerId;
         var dialedNo = sipRequest.Header.To.ToURI.User;
 
-        Log($"📞 Incoming INVITE: {callerId} ({callerName}) → {dialedNo}");
+        Log($"📞 Incoming call from {callerId} ({callerName}) → {dialedNo}");
 
         try
         {
-            await HandleIncomingCallAsync(sipRequest, localSipEndPoint, remoteEndPoint, callerId, callerName);
+            // Send 180 Ringing first
+            var ringing = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ringing, null);
+            await _sipTransport!.SendResponseAsync(ringing);
+            Log("🔔 Sent 180 Ringing");
+
+            await HandleIncomingCallAsync(sipRequest, callerId, callerName);
         }
         catch (Exception ex)
         {
@@ -185,23 +182,49 @@ public class CleanSipBridge : IDisposable
 
     private async Task HandleIncomingCallAsync(
         SIPRequest inviteRequest,
-        SIPEndPoint localEp,
-        SIPEndPoint remoteEp,
         string callerId,
         string callerName)
     {
-        // Create SIPSorcery user agent for this call
-        var uasTx = new UASInviteTransaction(_sipTransport, inviteRequest, null);
-        var uas = new SIPServerUserAgent(_sipTransport, null, uasTx, null);
+        // Create a per-call SIPUserAgent (same pattern as AdaSdkModel)
+        var callAgent = new SIPUserAgent(_sipTransport, null);
 
-        // Create RTP session with configured G.711 codec
-        var codec = G711Codec.Parse(_settings.Audio.PreferredCodec);
-        var rtpSession = new RTPSession(false, false, false);
-        var audioCodecEnum = codec == G711CodecType.PCMA ? AudioCodecsEnum.PCMA : AudioCodecsEnum.PCMU;
-        var payloadId = G711Codec.PayloadType(codec);
-        var audioFormat = new AudioFormat(audioCodecEnum, payloadId, 8000);
-        var audioTrack = new MediaStreamTrack(audioFormat);
-        rtpSession.addTrack(audioTrack);
+        // Create VoIPMediaSession with audio source
+        var audioEncoder = new AudioEncoder();
+        var audioSource = new AudioExtrasSource(
+            audioEncoder,
+            new AudioSourceOptions { AudioSource = AudioSourcesEnum.None });
+
+        audioSource.RestrictFormats(fmt =>
+            fmt.Codec == AudioCodecsEnum.PCMA || fmt.Codec == AudioCodecsEnum.PCMU);
+
+        var mediaEndPoints = new MediaEndPoints { AudioSource = audioSource };
+        var rtpSession = new VoIPMediaSession(mediaEndPoints);
+        rtpSession.AcceptRtpFromAny = true;
+
+        // Track negotiated codec
+        var codec = G711CodecType.PCMA;
+        rtpSession.OnAudioFormatsNegotiated += formats =>
+        {
+            var fmt = formats.FirstOrDefault();
+            codec = fmt.Codec == AudioCodecsEnum.PCMU ? G711CodecType.PCMU : G711CodecType.PCMA;
+            Log($"🎵 Negotiated codec: {fmt.Codec} (PT{fmt.FormatID})");
+        };
+
+        // Accept and answer the call
+        var serverUa = callAgent.AcceptCall(inviteRequest);
+
+        // Short delay to let SIP signaling settle
+        await Task.Delay(200);
+
+        var answered = await callAgent.Answer(serverUa, rtpSession);
+        if (!answered)
+        {
+            Log("❌ Failed to answer call — callAgent.Answer returned false");
+            return;
+        }
+
+        await rtpSession.Start();
+        Log("✅ Call answered and RTP started");
 
         // Look up returning caller
         var context = await _callerLookup.LookupAsync(callerId);
@@ -217,8 +240,9 @@ public class CleanSipBridge : IDisposable
         }
 
         // Create clean session
+        var callId = inviteRequest.Header.CallId;
         var session = new CleanCallSession(
-            sessionId: inviteRequest.Header.CallId,
+            sessionId: callId,
             callerId: callerId,
             companyName: _settings.Taxi.CompanyName,
             extractionService: _extractionService,
@@ -231,7 +255,6 @@ public class CleanSipBridge : IDisposable
         session.OnAiInstruction += instruction =>
         {
             Log($"📋 Instruction: {instruction}");
-            // Consumer wires this to OpenAI Realtime session.update
         };
 
         session.OnBookingReady += booking =>
@@ -247,21 +270,17 @@ public class CleanSipBridge : IDisposable
                 $"ETA: {fare.DriverEta} | Zone: {fare.ZoneName ?? "none"}");
         };
 
-        var callId = inviteRequest.Header.CallId;
         var activeCall = new ActiveCall
         {
             CallId = callId,
             Session = session,
             CallerId = callerId,
             StartTime = DateTime.UtcNow,
-            UserAgent = uas,
+            CallAgent = callAgent,
             RtpSession = rtpSession,
             Codec = codec
         };
         _activeCalls[callId] = activeCall;
-
-        // Accept the call — sends 200 OK with SDP
-        uas.Answer("application/sdp", rtpSession.CreateAnswer(null).ToString(), SIPDialogueTransferModesEnum.Default);
 
         // Wire RTP lifecycle events
         rtpSession.OnTimeout += (mediaType) =>
@@ -273,10 +292,9 @@ public class CleanSipBridge : IDisposable
                 timedOut.RtpSession?.Close(null);
                 OnCallEnded?.Invoke(callId);
             }
-            try { uas.Hangup(false); } catch { }
+            try { callAgent.Hangup(); } catch { }
         };
 
-        // Wire BYE / hangup via RTP session close
         rtpSession.OnRtpClosed += (reason) =>
         {
             if (_activeCalls.TryRemove(callId, out var removed))
@@ -288,12 +306,11 @@ public class CleanSipBridge : IDisposable
             }
         };
 
-        Log("✅ Call connected — engine starting");
-
         // Start the deterministic booking engine
         session.Start();
 
         // Notify consumer so they can wire OpenAI Realtime ↔ RTP audio
+        Log("✅ Call connected — engine starting");
         OnCallConnected?.Invoke(callId, rtpSession, session);
     }
 
@@ -385,7 +402,7 @@ public class CleanSipBridge : IDisposable
                     tripped.RtpSession?.Close(null);
                     OnCallEnded?.Invoke(callId);
                 }
-                try { call.UserAgent?.Hangup(false); } catch { }
+                try { call.CallAgent?.Hangup(); } catch { }
             }
         }
     }
@@ -397,7 +414,7 @@ public class CleanSipBridge : IDisposable
     {
         if (_activeCalls.TryGetValue(callId, out var call))
         {
-            call.UserAgent?.Hangup(false);
+            call.CallAgent?.Hangup();
         }
     }
 }
@@ -411,9 +428,9 @@ internal class ActiveCall
     public required CleanCallSession Session { get; init; }
     public string CallerId { get; init; } = "";
     public DateTime StartTime { get; init; }
-    public SIPServerUserAgent? UserAgent { get; init; }
-    public RTPSession? RtpSession { get; init; }
-    public G711CodecType Codec { get; init; } = G711CodecType.PCMU;
+    public SIPUserAgent? CallAgent { get; init; }
+    public VoIPMediaSession? RtpSession { get; init; }
+    public G711CodecType Codec { get; set; } = G711CodecType.PCMA;
     public int PayloadType => G711Codec.PayloadType(Codec);
 
     /// <summary>Tracks consecutive RTP send failures for circuit breaker logic.</summary>

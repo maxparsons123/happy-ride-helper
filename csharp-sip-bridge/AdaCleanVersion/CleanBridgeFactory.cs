@@ -5,6 +5,7 @@ using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
 using AdaCleanVersion.Sip;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.Media;
 using SIPSorcery.Net;
 
 namespace AdaCleanVersion;
@@ -51,7 +52,7 @@ public static class CleanBridgeFactory
 
     private static async Task SpawnRealtimeClientAsync(
         string callId,
-        RTPSession rtpSession,
+        VoIPMediaSession rtpSession,
         CleanCallSession session,
         CleanAppSettings settings,
         ILogger logger,
