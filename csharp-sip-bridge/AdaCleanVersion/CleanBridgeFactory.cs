@@ -52,13 +52,17 @@ public static class CleanBridgeFactory
 
     private static async Task SpawnRealtimeClientAsync(
         string callId,
-        VoIPMediaSession rtpSession,
+        VoIPMediaSession mediaSession,
         CleanCallSession session,
         CleanAppSettings settings,
         ILogger logger,
         CleanSipBridge bridge)
     {
         var codec = G711Codec.Parse(settings.Audio.PreferredCodec);
+
+        // VoIPMediaSession wraps RTPSession internally — extract it for raw RTP access.
+        // OpenAiRealtimeClient handles G.711 ↔ PCM16 conversion itself.
+        var rtpSession = mediaSession.RtpSession;
 
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,

@@ -418,12 +418,12 @@ public class CleanSipBridge : IDisposable
     /// </summary>
     public void SendAudio(string callId, byte[] g711Payload, uint duration)
     {
-        if (!_activeCalls.TryGetValue(callId, out var call) || call.RtpSession == null)
+        if (!_activeCalls.TryGetValue(callId, out var call) || call.RawRtpSession == null)
             return;
 
         try
         {
-            call.RtpSession.SendAudio(
+            call.RawRtpSession.SendAudio(
                 (uint)(duration * 8), // timestamp increment for 8kHz G.711
                 g711Payload);
 
@@ -473,6 +473,10 @@ internal class ActiveCall
     public DateTime StartTime { get; init; }
     public SIPUserAgent? CallAgent { get; init; }
     public VoIPMediaSession? RtpSession { get; init; }
+
+    /// <summary>Raw underlying RTP session for direct packet access.</summary>
+    public RTPSession? RawRtpSession => RtpSession?.RtpSession;
+
     public G711CodecType Codec { get; set; } = G711CodecType.PCMA;
     public int PayloadType => G711Codec.PayloadType(Codec);
 
