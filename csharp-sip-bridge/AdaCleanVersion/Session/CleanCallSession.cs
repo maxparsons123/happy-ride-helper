@@ -54,21 +54,33 @@ public class CleanCallSession
     }
 
     /// <summary>
-    /// Start the call — send greeting instruction to AI.
+    /// Start the call — prepare engine state. Greeting is sent separately via SendGreeting.
+    /// Matches AdaSdkModel sequence: history → connect → inject context → greeting.
     /// </summary>
     public void Start()
     {
         Log($"Call started: {CallerId}");
 
-        // Auto-fill name for returning callers
+        // Auto-fill name for returning callers (so BeginCollection skips to pickup)
         if (_callerContext?.IsReturningCaller == true && !string.IsNullOrWhiteSpace(_callerContext.CallerName))
         {
             _engine.RawData.SetSlot("name", _callerContext.CallerName);
             Log($"Auto-filled name from caller history: {_callerContext.CallerName}");
         }
 
+        // Advance engine to first missing slot (skips name if pre-filled)
         _engine.BeginCollection();
-        EmitCurrentInstruction();
+        // NOTE: Do NOT emit instruction here — the greeting will be sent by OpenAiRealtimeClient
+        // after the session is configured, matching AdaSdkModel's flow.
+    }
+
+    /// <summary>
+    /// Build the greeting message to inject as a conversation item.
+    /// Matches AdaSdkModel's explicit greeting style.
+    /// </summary>
+    public string BuildGreetingMessage()
+    {
+        return PromptBuilder.BuildGreetingMessage(_companyName, _callerContext, _engine.State);
     }
 
     /// <summary>

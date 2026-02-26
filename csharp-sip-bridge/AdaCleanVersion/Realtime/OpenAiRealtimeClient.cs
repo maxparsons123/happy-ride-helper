@@ -204,6 +204,52 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
         Log("✅ Bidirectional audio bridge active (dual-latch mic gate v3.1)");
+
+        // Send greeting as a conversation item (matches AdaSdkModel flow)
+        // This happens AFTER session config so the AI knows its role.
+        await SendGreetingAsync();
+    }
+
+    /// <summary>
+    /// Send the greeting as an explicit conversation item, matching AdaSdkModel's approach.
+    /// Injects a user message with exact greeting wording, then triggers a response.
+    /// </summary>
+    private async Task SendGreetingAsync()
+    {
+        try
+        {
+            var greetingMessage = _session.BuildGreetingMessage();
+
+            // Inject as a user message (same as AdaSdkModel's AddItem + StartResponse)
+            var itemMsg = new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "user",
+                    content = new[]
+                    {
+                        new { type = "input_text", text = greetingMessage }
+                    }
+                }
+            };
+            await SendJsonAsync(itemMsg);
+
+            // Trigger the AI to respond to the greeting
+            var responseMsg = new
+            {
+                type = "response.create",
+                response = new { modalities = new[] { "text", "audio" } }
+            };
+            await SendJsonAsync(responseMsg);
+
+            Log("📢 Greeting sent via conversation item");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Greeting send error: {ex.Message}");
+        }
     }
 
     public async ValueTask DisposeAsync()
