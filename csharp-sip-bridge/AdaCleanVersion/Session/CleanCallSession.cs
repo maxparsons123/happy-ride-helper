@@ -131,8 +131,8 @@ public class CleanCallSession
         if (validationError != null)
         {
             Log($"Slot '{currentSlot}' rejected: \"{transcript}\" (reason: {validationError})");
-            // Re-emit the current instruction so AI re-asks the same question
-            EmitCurrentInstruction();
+            // Emit a re-prompt instruction (different from the original ask)
+            EmitRepromptInstruction(validationError);
             return;
         }
 
@@ -653,7 +653,19 @@ public class CleanCallSession
             _engine.StructuredResult, _engine.FareResult,
             _engine.PendingClarification,
             _engine.VerifiedPickup, _engine.VerifiedDestination);
-        _lastEmittedInstruction = instruction; // Track for 3-way geocoding context
+        _lastEmittedInstruction = instruction;
+        OnAiInstruction?.Invoke(instruction);
+    }
+
+    private void EmitRepromptInstruction(string rejectedReason)
+    {
+        var instruction = PromptBuilder.BuildInstruction(
+            _engine.State, _engine.RawData, _callerContext,
+            _engine.StructuredResult, _engine.FareResult,
+            _engine.PendingClarification,
+            _engine.VerifiedPickup, _engine.VerifiedDestination,
+            rejectedReason: rejectedReason);
+        _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction);
     }
 

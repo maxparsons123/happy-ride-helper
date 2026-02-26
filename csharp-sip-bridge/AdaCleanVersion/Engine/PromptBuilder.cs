@@ -70,8 +70,28 @@ public static class PromptBuilder
         FareResult? fareResult = null,
         ClarificationInfo? clarification = null,
         GeocodedAddress? verifiedPickup = null,
-        GeocodedAddress? verifiedDestination = null)
+        GeocodedAddress? verifiedDestination = null,
+        string? rejectedReason = null)
     {
+        // If a slot was just rejected, generate a specific re-prompt instead of the default
+        if (rejectedReason != null)
+        {
+            return state switch
+            {
+                CollectionState.CollectingPassengers =>
+                    "[INSTRUCTION] I didn't catch the number of passengers. Ask again: \"Sorry, how many passengers will there be?\"",
+                CollectionState.CollectingName =>
+                    "[INSTRUCTION] I didn't catch the name. Ask again: \"Sorry, could I have your name for the booking?\"",
+                CollectionState.CollectingPickup =>
+                    "[INSTRUCTION] I didn't catch the pickup address. Ask again: \"Sorry, could you repeat your pickup address please?\"",
+                CollectionState.CollectingDestination =>
+                    "[INSTRUCTION] I didn't catch the destination. Ask again: \"Sorry, could you repeat your destination please?\"",
+                CollectionState.CollectingPickupTime =>
+                    "[INSTRUCTION] I didn't catch when you need the taxi. Ask again: \"Sorry, when do you need the taxi — now or at a specific time?\"",
+                _ => $"[INSTRUCTION] I didn't catch that. Please ask the caller to repeat."
+            };
+        }
+
         return state switch
         {
             // Greeting states are now handled via BuildGreetingMessage — these are fallbacks
