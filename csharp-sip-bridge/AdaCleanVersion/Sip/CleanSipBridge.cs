@@ -257,9 +257,9 @@ public class CleanSipBridge : IDisposable
         uas.Answer("application/sdp", rtpSession.CreateAnswer(null).ToString(), SIPDialogueTransferModesEnum.Default);
 
         // Wire RTP lifecycle events
-        rtpSession.OnTimeout += () =>
+        rtpSession.OnTimeout += (mediaType) =>
         {
-            Log($"⏱ RTP timeout for {callId} — treating as call end");
+            Log($"⏱ RTP timeout for {callId} (media={mediaType}) — treating as call end");
             if (_activeCalls.TryRemove(callId, out var timedOut))
             {
                 timedOut.Session.EndCall();
@@ -302,47 +302,38 @@ public class CleanSipBridge : IDisposable
         var domain = _settings.Sip.Domain ?? server;
         var username = _settings.Sip.Username;
         var authUser = _settings.Sip.EffectiveAuthUser;
-        var password = _settings.Sip.Password;
-
-        // Build the proper SIP URIs for registration
-        // AOR (Address of Record): user@domain — this is who we ARE
-        // Registrar: server — this is WHERE we register
-        var aor = SIPURI.ParseSIPURI($"sip:{username}@{domain}");
-        var registrarHost = server;
-
-        Log($"📡 Registering trunk: {username}@{domain} → registrar={registrarHost}, authUser={authUser}");
-
-        // Use the full constructor that separates registrar from AOR
-        var outboundProxy = SIPEndPoint.ParseSIPEndPoint($"{registrarHost}:{_settings.Sip.Port}");
 
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            outboundProxy,        // proxy/registrar endpoint
-            aor,                  // AOR (address of record)
-            authUser,             // auth username (may differ from SIP username)
-            password,
-            domain,               // realm for digest auth
-            120);                 // expiry seconds
+            authUser,
+            _settings.Sip.Password,
+            domain,
+            120); // expiry seconds
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
             Log($"✅ Trunk registered: {uri} (status={resp?.StatusCode})");
 
-        _regAgent.RegistrationTemporaryFailure += (uri, msg) =>
-            Log($"⚠ Trunk registration temporary failure: {uri} — {msg}");
+        _regAgent.RegistrationTemporaryFailure += (uri, resp, err) =>
+        {
+            var statusCode = resp?.StatusCode.ToString() ?? "no-response";
+            var reasonPhrase = resp?.ReasonPhrase ?? "unknown";
+            Log($"⚠ Trunk registration temporary failure: {uri}");
+            Log($"   Status: {statusCode} ({reasonPhrase})");
+            Log($"   Error: {err}");
+        };
 
         _regAgent.RegistrationFailed += (uri, resp, err) =>
         {
             var statusCode = resp?.StatusCode.ToString() ?? "no-response";
             var reasonPhrase = resp?.ReasonPhrase ?? "unknown";
-            var authHeader = resp?.Header?.AuthenticationHeader?.ToString() ?? "none";
             Log($"❌ Trunk registration FAILED: {uri}");
             Log($"   Status: {statusCode} ({reasonPhrase})");
             Log($"   Error: {err}");
-            Log($"   Auth challenge: {authHeader}");
-            Log($"   Config: user={username}, authUser={authUser}, domain={domain}, server={server}");
+            Log($"   Config: user={username}, authUser={authUser}, domain={domain}, server={server}, port={_settings.Sip.Port}");
         };
 
         _regAgent.Start();
+        Log($"📡 Registering trunk: {username}@{domain} via {server}:{_settings.Sip.Port} (authUser={authUser})");
     }
 
     // ─── Helpers ────────────────────────────────────────────
