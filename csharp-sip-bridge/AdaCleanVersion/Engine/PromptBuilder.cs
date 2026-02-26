@@ -436,6 +436,16 @@ public static class PromptBuilder
             return $"[INSTRUCTION] Ask the caller about their {fieldLabel} address: {info.Message}";
         }
 
+        // If exactly 2 alternatives, present them immediately — no point asking "which area?"
+        if (info.Alternatives != null && info.Alternatives.Count == 2)
+        {
+            var alt1 = info.Alternatives[0];
+            var alt2 = info.Alternatives[1];
+            return $"[INSTRUCTION] The {fieldLabel} address \"{rawValue}\" exists in two areas. " +
+                   $"Ask the caller: \"Is that {rawValue} in {alt1} or {alt2}?\" " +
+                   "Do NOT say anything else. Wait for their answer.";
+        }
+
         // Attempt 1: just ask "which area?"
         // Attempt 2+: if alternatives available, offer them
         if (info.Attempt <= 1 || info.Alternatives == null || info.Alternatives.Count == 0)
