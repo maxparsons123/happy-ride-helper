@@ -34,6 +34,7 @@ public class CleanCallSession
     private readonly List<string> _adaTranscripts = new();
     // The last instruction emitted to Ada — used as "Ada's question" for 3-way geocoding context.
     private string _lastEmittedInstruction = "";
+    private bool _nameRefined; // prevents double name-refinement attempts
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -284,8 +285,12 @@ public class CleanCallSession
         // When Ada responds after name collection (e.g., "Nice to meet you, Max"),
         // her LLM interpretation is more accurate than raw Whisper STT ("much", "MUX").
         // Extract and correct the name if Ada used a different one.
-        if (_engine.State == CollectionState.CollectingPickup && _adaTranscripts.Count <= 3)
+        // Check: state is past name collection, name hasn't been refined yet, and we have a raw name.
+        if (!_nameRefined && _engine.State >= CollectionState.CollectingPickup &&
+            _engine.State <= CollectionState.CollectingDestination &&
+            !string.IsNullOrWhiteSpace(_engine.RawData.NameRaw))
         {
+            Log($"[NameRefine] Checking Ada text (state={_engine.State}, transcripts={_adaTranscripts.Count}): \"{adaText}\"");
             TryRefineNameFromAda(adaText);
         }
 
@@ -320,10 +325,11 @@ public class CleanCallSession
         // Match patterns where Ada addresses the caller by name
         // e.g., "Thank you, Max.", "Thanks, Max.", "Nice to meet you, Max."
         // e.g., "Thank you Max. Can I have..."
+        // Also match: "Thank you, Max. Can you please..."
         var namePatterns = new[]
         {
-            @"(?:thank\s+you|thanks|nice\s+to\s+meet\s+you|hi|hello),?\s+([A-Z][a-zA-Z]+)",
-            @"(?:So|OK|Alright|Great),?\s+([A-Z][a-zA-Z]+)[,.]",
+            @"(?:[Tt]hank\s+you|[Tt]hanks|[Nn]ice\s+to\s+meet\s+you|[Hh]i|[Hh]ello),?\s+([A-Z][a-zA-Z]+)",
+            @"(?:[Ss]o|[Oo][Kk]|[Aa]lright|[Gg]reat),?\s+([A-Z][a-zA-Z]+)[,.\s]",
         };
 
         foreach (var pattern in namePatterns)
@@ -332,7 +338,17 @@ public class CleanCallSession
             if (match.Success)
             {
                 var adaName = match.Groups[1].Value.Trim().TrimEnd('.', ',', '!');
-                
+                _nameRefined = true; // Mark as attempted regardless of outcome
+
+                // Skip common non-name words Ada might use after "Thank you"
+                var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    { "Can", "Could", "Please", "Now", "For", "So", "What", "Where", "How", "And", "The" };
+                if (skipWords.Contains(adaName))
+                {
+                    Log($"[NameRefine] Skipping non-name word: \"{adaName}\"");
+                    continue;
+                }
+
                 // Only correct if Ada used a different name (case-insensitive compare)
                 if (!string.Equals(adaName, currentName, StringComparison.OrdinalIgnoreCase) && adaName.Length >= 2)
                 {
@@ -340,9 +356,11 @@ public class CleanCallSession
                     _engine.RawData.NameRaw = adaName;
                     return;
                 }
+                Log($"[NameRefine] Ada confirmed same name: \"{adaName}\"");
                 return; // Ada confirmed the same name, no change needed
             }
         }
+        Log($"[NameRefine] No name pattern matched in: \"{adaText[..Math.Min(80, adaText.Length)]}...\"");
     }
 
     /// <summary>
