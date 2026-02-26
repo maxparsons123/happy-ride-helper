@@ -39,6 +39,7 @@ public class CleanSipBridge : IDisposable
 
     private SIPTransport? _sipTransport;
     private SIPRegistrationUserAgent? _regAgent;
+    private bool _started;
 
     public event Action<string>? OnLog;
 
@@ -83,8 +84,14 @@ public class CleanSipBridge : IDisposable
 
     public bool Start()
     {
+        if (_started)
+        {
+            Log("⚠ CleanSipBridge.Start() called again — ignoring duplicate");
+            return true;
+        }
         try
         {
+            _started = true;
             _sipTransport = new SIPTransport();
 
             // Listen on configured port
