@@ -1,4 +1,5 @@
 using AdaCleanVersion.Models;
+using AdaCleanVersion.Services;
 
 namespace AdaCleanVersion.Engine;
 
@@ -485,35 +486,53 @@ public static class PromptBuilder
     };
 
     /// <summary>
-    /// Format an address for TTS readback — spaces out alphanumeric house numbers
-    /// so the voice model doesn't mangle them (e.g. "52A" → "52 A", "1214A" → "1 2 1 4 A").
+    /// Format an address for TTS readback by parsing the house number with AddressParser
+    /// and reattaching it as a spaced-out "sacred string" that the voice model cannot
+    /// misinterpret as a mathematical range (e.g. "52A David Road" → "5 2 A David Road").
     /// </summary>
     internal static string FormatAddressForSpeech(string address)
     {
         if (string.IsNullOrWhiteSpace(address)) return address;
 
-        // Match leading house number that contains letters (e.g. "52A", "1214A", "3B")
-        var match = System.Text.RegularExpressions.Regex.Match(
-            address, @"^(\d+)([A-Za-z]+)\b");
-        
-        if (!match.Success) return address;
+        var parsed = AddressParser.ParseAddress(address);
 
-        var digits = match.Groups[1].Value;
-        var letters = match.Groups[2].Value.ToUpperInvariant();
+        // No house number found — return as-is
+        if (!parsed.HasHouseNumber) return address;
 
-        // For 3+ character house numbers, read digit-by-digit
+        var houseNum = parsed.HouseNumber; // e.g. "52A", "1214A", "3B", "43"
+
+        // Check if house number contains letters (alphanumeric)
+        bool hasLetters = houseNum.Any(char.IsLetter);
+
         string spoken;
-        if ((digits.Length + letters.Length) >= 3)
+        if (hasLetters)
         {
-            var digitByDigit = string.Join(" ", digits.ToCharArray());
-            spoken = $"{digitByDigit} {letters}";
+            // For 3+ character alphanumeric house numbers, read digit-by-digit
+            if (houseNum.Length >= 3)
+            {
+                spoken = string.Join(" ", houseNum.ToUpperInvariant().ToCharArray());
+            }
+            else
+            {
+                // Short like "3B" — just space the letter away
+                spoken = string.Join(" ", houseNum.ToUpperInvariant().ToCharArray());
+            }
         }
         else
         {
-            // Short house numbers like "3B" — just add a space
-            spoken = $"{digits} {letters}";
+            // Pure numeric house number — no mangling risk, keep as-is
+            return address;
         }
 
-        return spoken + address[match.Length..];
+        // Rebuild: replace the original house number with the spaced version
+        // The parsed street/town/etc form the remainder
+        var remainder = address;
+        var houseIdx = remainder.IndexOf(houseNum, StringComparison.OrdinalIgnoreCase);
+        if (houseIdx >= 0)
+        {
+            remainder = remainder[..houseIdx] + spoken + remainder[(houseIdx + houseNum.Length)..];
+        }
+
+        return remainder;
     }
 }
