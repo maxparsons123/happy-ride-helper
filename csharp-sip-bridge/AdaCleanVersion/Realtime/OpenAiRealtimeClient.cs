@@ -270,6 +270,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         await SendJsonAsync(config);
         Log($"📋 Session configured: {audioFormat} passthrough, VAD + whisper, no tools");
+        Log($"🔊 Realtime configured codec: {_codec} (format={audioFormat}, PT={G711Codec.PayloadType(_codec)})");
     }
 
     // ─── RTP → OpenAI (Caller Audio In) ─────────────────────
@@ -468,24 +469,42 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private void OnAiInstruction(string instruction)
     {
         Log("📋 Sending instruction update");
+        _ = SendInstructionSequenceAsync(instruction);
+    }
 
-        // Cancel any in-progress response first to avoid "active response" collision
-        var cancelMsg = new { type = "response.cancel" };
-        _ = SendJsonAsync(cancelMsg);
-
-        var msg = new
+    /// <summary>
+    /// Sends cancel → session.update → response.create sequentially,
+    /// ensuring each completes before the next to avoid "active response" collisions.
+    /// </summary>
+    private async Task SendInstructionSequenceAsync(string instruction)
+    {
+        try
         {
-            type = "session.update",
-            session = new { instructions = instruction }
-        };
-        _ = SendJsonAsync(msg);
+            // 1) Cancel any in-progress response
+            await SendJsonAsync(new { type = "response.cancel" });
 
-        var responseMsg = new
+            // Small delay to let OpenAI process the cancel
+            await Task.Delay(50, _cts.Token);
+
+            // 2) Update session instructions
+            await SendJsonAsync(new
+            {
+                type = "session.update",
+                session = new { instructions = instruction }
+            });
+
+            // 3) Request new response
+            await SendJsonAsync(new
+            {
+                type = "response.create",
+                response = new { modalities = new[] { "text", "audio" } }
+            });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
         {
-            type = "response.create",
-            response = new { modalities = new[] { "text", "audio" } }
-        };
-        _ = SendJsonAsync(responseMsg);
+            Log($"⚠ Instruction sequence error: {ex.Message}");
+        }
     }
 
     // ─── WebSocket Send ─────────────────────────────────────
