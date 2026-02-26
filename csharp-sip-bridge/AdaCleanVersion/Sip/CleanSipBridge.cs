@@ -308,10 +308,19 @@ public class CleanSipBridge : IDisposable
             120); // expiry seconds
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
-            Log($"✅ Trunk registered: {uri}");
+            Log($"✅ Trunk registered: {uri} (status={resp?.StatusCode})");
 
         _regAgent.RegistrationFailed += (uri, resp, err) =>
-            Log($"❌ Trunk registration failed: {uri} — {err}");
+        {
+            var statusCode = resp?.StatusCode.ToString() ?? "no-response";
+            var reasonPhrase = resp?.ReasonPhrase ?? "unknown";
+            var authHeader = resp?.Header?.AuthenticationHeader?.ToString() ?? "none";
+            Log($"❌ Trunk registration FAILED: {uri}");
+            Log($"   Status: {statusCode} ({reasonPhrase})");
+            Log($"   Error: {err}");
+            Log($"   Auth challenge: {authHeader}");
+            Log($"   Config: user={_settings.Sip.Username}, authUser={_settings.Sip.EffectiveAuthUser}, domain={_settings.Sip.Domain ?? "(null)"}, server={_settings.Sip.Server}");
+        };
 
         _regAgent.Start();
 
