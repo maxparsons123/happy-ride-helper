@@ -249,6 +249,8 @@ public static class PromptBuilder
             CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified pickup address to the caller EXACTLY and IN FULL. " +
                 $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedPickup.Address)} for pickup.\" " +
+                BuildStreetNameGuard(verifiedPickup.Address) +
+                BuildPostcodeGuard(verifiedPickup.Address) +
                 "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
                 "Then ask for their DESTINATION address. " +
@@ -257,6 +259,8 @@ public static class PromptBuilder
             CollectionState.CollectingDestination when verifiedPickup != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified pickup address to the caller EXACTLY and IN FULL. " +
                 $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedPickup.Address)} for pickup.\" " +
+                BuildStreetNameGuard(verifiedPickup.Address) +
+                BuildPostcodeGuard(verifiedPickup.Address) +
                 "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
                 "Then ask for their DESTINATION address. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
@@ -306,6 +310,8 @@ public static class PromptBuilder
             CollectionState.CollectingPassengers when verifiedDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified destination address to the caller EXACTLY and IN FULL. " +
                 $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedDestination.Address)} for the destination.\" " +
+                BuildStreetNameGuard(verifiedDestination.Address) +
+                BuildPostcodeGuard(verifiedDestination.Address) +
                 "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
                 "Then ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
@@ -348,6 +354,10 @@ public static class PromptBuilder
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
                 $"- Driver ETA: {fareResult.BusyMessage}\n" +
+                BuildStreetNameGuard(fareResult.Pickup.Address) +
+                BuildStreetNameGuard(fareResult.Destination.Address) +
+                BuildPostcodeGuard(fareResult.Pickup.Address) +
+                BuildPostcodeGuard(fareResult.Destination.Address) +
                 $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressForSpeech(fareResult.Pickup.Address)} to {FormatAddressForSpeech(fareResult.Destination.Address)}, the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. Would you like to go ahead with this booking?\" " +
                 "Do NOT paraphrase addresses.",
 
@@ -584,5 +594,60 @@ public static class PromptBuilder
         }
 
         return remainder;
+    }
+
+    /// <summary>
+    /// Build a phonetic reinforcement warning for the street name in a verified address.
+    /// This prevents the AI from substituting similar-sounding common words
+    /// (e.g., "Dovey" → "Dover", "Hockley" → "Hockey").
+    /// </summary>
+    internal static string BuildStreetNameGuard(string verifiedAddress)
+    {
+        if (string.IsNullOrWhiteSpace(verifiedAddress)) return "";
+
+        var parsed = AddressParser.ParseAddress(verifiedAddress);
+        var streetName = parsed.StreetName;
+        if (string.IsNullOrWhiteSpace(streetName)) return "";
+
+        // Extract just the name part before the street type (Road, Street, etc.)
+        var streetTypes = new[] { "Road", "Street", "Close", "Avenue", "Lane", "Drive", "Way",
+            "Crescent", "Terrace", "Grove", "Place", "Court", "Gardens", "Square",
+            "Parade", "Rise", "Mews", "Hill", "Boulevard", "Walk", "Row", "View", "Green", "End" };
+
+        string? nameOnly = null;
+        foreach (var st in streetTypes)
+        {
+            if (streetName.EndsWith($" {st}", StringComparison.OrdinalIgnoreCase))
+            {
+                nameOnly = streetName[..^(st.Length + 1)].Trim();
+                break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(nameOnly)) return "";
+
+        // Spell it out letter-by-letter for phonetic anchoring
+        var spelled = string.Join("-", nameOnly.ToUpperInvariant().ToCharArray());
+
+        return $"⚠️ STREET NAME PRONUNCIATION: The street is \"{nameOnly}\" (spelled {spelled}). " +
+               $"Say \"{nameOnly}\" EXACTLY — do NOT substitute a similar word. ";
+    }
+
+    /// <summary>
+    /// Build postcode enforcement reminder for readback instructions.
+    /// </summary>
+    internal static string BuildPostcodeGuard(string verifiedAddress)
+    {
+        if (string.IsNullOrWhiteSpace(verifiedAddress)) return "";
+
+        // Check if address contains a UK postcode pattern
+        var postcodeMatch = System.Text.RegularExpressions.Regex.Match(
+            verifiedAddress,
+            @"[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        if (!postcodeMatch.Success) return "";
+
+        return $"⚠️ POSTCODE MANDATORY: You MUST say the postcode \"{postcodeMatch.Value}\" — do NOT skip it. ";
     }
 }
