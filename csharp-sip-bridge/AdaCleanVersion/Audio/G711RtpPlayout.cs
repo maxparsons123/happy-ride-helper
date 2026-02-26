@@ -64,7 +64,6 @@ public sealed class G711RtpPlayout : IDisposable
     private volatile int _queueCount;
     private volatile bool _clearRequested;
     private volatile int _clearEpoch;
-    private uint _ts;
     private bool _buffering = true;
     private bool _hasPlayedAudio;
     private IntPtr _timer;
@@ -101,7 +100,6 @@ public sealed class G711RtpPlayout : IDisposable
         _buffering = true;
         _hasPlayedAudio = false;
         _sendErrorCount = 0;
-        _ts = (uint)Random.Shared.Next();
 
         if (IsWindows)
         {
@@ -326,13 +324,13 @@ public sealed class G711RtpPlayout : IDisposable
 
         try
         {
-            _rtpSession.SendAudio(_ts, payload160);
-            _ts += FrameSize;
+            // SIPSorcery SendAudio(durationRtpUnits, sample) — pass frame duration, not absolute timestamp.
+            // For G.711 @ 8kHz: 20ms = 160 samples = 160 RTP timestamp units.
+            _rtpSession.SendAudio(FrameSize, payload160);
             _sendErrorCount = 0;
         }
         catch (Exception ex)
         {
-            _ts += FrameSize;
             if (Interlocked.Increment(ref _sendErrorCount) == MaxSendErrors)
             {
                 SafeLog($"[RTP] Circuit breaker tripped after {MaxSendErrors} errors: {ex.Message}");
