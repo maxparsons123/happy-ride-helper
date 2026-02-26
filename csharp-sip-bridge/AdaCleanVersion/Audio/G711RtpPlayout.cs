@@ -353,13 +353,22 @@ public sealed class G711RtpPlayout : IDisposable
         }
     }
 
-    private void Send(byte[] payload160)
+    // Reusable send buffer — avoids sending oversized ArrayPool rentals
+    private readonly byte[] _sendBuf = new byte[FrameSize];
+
+    private void Send(byte[] payload)
     {
         if (_sendErrorCount >= MaxSendErrors) return;
 
         try
         {
-            _rtpSession.SendAudio(FrameSize, payload160);
+            // ArrayPool may return >160 bytes; SIPSorcery sends payload.Length,
+            // so copy exactly FrameSize into the fixed send buffer.
+            var buf = (payload.Length == FrameSize) ? payload : _sendBuf;
+            if (buf == _sendBuf)
+                Buffer.BlockCopy(payload, 0, _sendBuf, 0, FrameSize);
+
+            _rtpSession.SendAudio(FrameSize, buf);
             _sendErrorCount = 0;
         }
         catch (Exception ex)
