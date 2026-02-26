@@ -42,7 +42,7 @@ public sealed class G711RtpPlayout : IDisposable
     private const int FrameSize = 160;          // 20ms @ 8kHz
 
     private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start
-    private const int ResumeThresholdFrames = 3;       // 60ms — smooth mid-stream resume (fixed, no adaptive jitter)
+    private const int ResumeThresholdFrames = 3;       // 60ms — smooth mid-stream resume
     private const int MaxSendErrors = 10;
 
     private static readonly double NsPerTick = 1_000_000_000.0 / Stopwatch.Frequency;
@@ -231,30 +231,11 @@ public sealed class G711RtpPlayout : IDisposable
                 long waitNs = (long)(wait * NsPerTick);
                 int waitMs = Math.Max(1, (int)(waitNs / 1_000_000) - 1);
 
-                if (_useTimer && waitNs > 1_000_000)
+                if (waitMs > 0)
                 {
-                    long due = -(waitNs / 100);
-                    if (SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
-                        WaitForSingleObject(_timer, (uint)waitMs);
-                }
-                else if (waitNs > 2_000_000)
-                {
-                    // Interruptible wait — barge-in wakes us immediately via _wakeFence
                     _wakeFence.Wait(waitMs);
+                    if (Volatile.Read(ref _clearRequested)) continue;
                 }
-                else
-                {
-                    Thread.Yield();
-                }
-
-                // Reset the fence after waking (whether from timeout or signal)
-                _wakeFence.Reset();
-
-                // Re-check barge-in after any sleep
-                if (Volatile.Read(ref _clearRequested))
-                    ExecuteClear();
-
-                continue;
             }
 
             TickOnce();
