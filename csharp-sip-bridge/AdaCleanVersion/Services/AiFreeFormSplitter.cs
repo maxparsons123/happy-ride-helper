@@ -1,20 +1,25 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
 namespace AdaCleanVersion.Services;
 
 /// <summary>
-/// AI-powered utterance splitter — uses a fast Gemini model via the Lovable AI gateway
-/// to decompose compound caller utterances into structured slot JSON.
+/// AI-powered freeform utterance splitter — takes messy caller speech and
+/// "explodes" it into clean booking slot JSON using a fast LLM.
 /// 
+/// Uses burst detection heuristics to avoid unnecessary AI calls on simple inputs.
 /// Falls back gracefully (returns null) on timeout/error so the caller can
 /// use the deterministic regex-based FreeFormSplitter as a safety net.
 /// 
-/// Example:
-///   Input:  "7 Russell Street with three passengers"  (currentSlot: "destination")
-///   Output: { destination: "7 Russell Street", passengers: "3" }
+/// Examples:
+///   "It's Max at 52A David Road going to the station for 4"
+///     → { Name: "Max", Pickup: "52A David Road", Destination: "the station", Passengers: 4 }
+///   "7 Russell Street with three passengers"
+///     → { Destination: null, Pickup: null, ... depends on context }
+///     → Actually: { Pickup: "7 Russell Street", Passengers: 3 } (AI figures it out)
 /// </summary>
 public class AiFreeFormSplitter
 {
@@ -31,27 +36,37 @@ public class AiFreeFormSplitter
     };
 
     private const string SPLIT_PROMPT = """
-        You are a taxi booking utterance parser. You receive a caller's raw speech and the slot 
-        the system is currently collecting. Your job is to split the utterance into the correct 
-        booking fields.
+        You are a data extraction engine for a taxi booking system.
+        Extract fields from the user's speech.
+        If a field is not mentioned, do NOT include it.
 
-        BOOKING FIELDS:
-        - name: Caller's name
-        - pickup: Pickup address (house number + street, or POI name)
-        - destination: Destination address (house number + street, or POI name)  
-        - passengers: Number of passengers (as a digit string, e.g. "3")
-        - pickup_time: When they want pickup (e.g. "ASAP", "in 10 minutes", "3:30pm")
+        FIELDS:
+        - name: Person's name (from "it's Max", "my name is John", "I'm Sarah", etc.)
+        - pickup: Full pickup address or landmark (house number + street, or POI name)
+        - destination: Full destination address or landmark
+        - passengers: Integer count (extract from "for 4", "three people", "with 2 passengers", "just me" = 1)
+        - pickup_time: "ASAP" or time expression (extract from "now", "straight away", "in 10 minutes", "at 3:30")
 
         RULES:
-        - Extract ONLY fields that are explicitly stated in the utterance
-        - Preserve house numbers EXACTLY as spoken (e.g., "52A" stays "52A")
-        - Convert spoken numbers to digits for passengers (e.g., "three" → "3")
-        - If the utterance contains ONLY data for the current slot, put it all in that slot
-        - If trailing info belongs to another slot, split it out
-        - Keywords: "with N passengers/people", "for N", "going to", "heading to", "from"
-        - Do NOT hallucinate fields that aren't in the utterance
-        - The primary_slot field should contain the value for the current_slot being collected
+        - Treat "ASAP", "now", "straight away", "right away", "immediately" as "ASAP"
+        - Keep house numbers EXACTLY as stated (e.g., "52A" stays "52A", never "52-84" or "528")
+        - Convert spoken number words to digits for passengers (e.g., "three" → 3)
+        - "just me" or "myself" = 1 passenger
+        - Do NOT guess or infer data that isn't explicitly stated
+        - If the sentence has "from X to Y" or "X going to Y", X = pickup, Y = destination
+        - If only one address is given with no directional keyword, use context:
+          * With "pick up from" / "at" / "from" → it's pickup
+          * With "going to" / "heading to" / "drop off at" → it's destination
+          * Ambiguous single address → set as pickup (most common case)
         """;
+
+    // ── Burst Detection Heuristics ──
+    // Only call the AI if the transcript looks "dense" enough to contain multiple fields.
+    private static readonly Regex BurstKeywords = new(
+        @"\b(?:to|going|heading|from|picking?\s*up|drop(?:ping)?\s*(?:off)?|for|with|passenger|people|person|asap|now|straight\s+away)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private const int MinBurstLength = 25; // Short phrases rarely contain multiple fields
 
     public AiFreeFormSplitter(
         string serviceRoleKey,
@@ -71,11 +86,11 @@ public class AiFreeFormSplitter
         public string? Name { get; set; }
         public string? Pickup { get; set; }
         public string? Destination { get; set; }
-        public string? Passengers { get; set; }
+        public int? Passengers { get; set; }
         public string? PickupTime { get; set; }
 
-        /// <summary>True if more than one field was extracted.</summary>
-        public bool HasOverflow
+        /// <summary>Count of non-null fields extracted.</summary>
+        public int FilledCount
         {
             get
             {
@@ -83,41 +98,38 @@ public class AiFreeFormSplitter
                 if (Name != null) count++;
                 if (Pickup != null) count++;
                 if (Destination != null) count++;
-                if (Passengers != null) count++;
+                if (Passengers.HasValue) count++;
                 if (PickupTime != null) count++;
-                return count > 1;
+                return count;
             }
         }
 
-        /// <summary>Get the value for a specific slot, or null.</summary>
-        public string? GetSlot(string slotName) => slotName switch
-        {
-            "name" => Name,
-            "pickup" => Pickup,
-            "destination" => Destination,
-            "passengers" => Passengers,
-            "pickup_time" => PickupTime,
-            _ => null
-        };
+        /// <summary>True if more than one field was extracted (i.e., it's a genuine burst).</summary>
+        public bool IsBurst => FilledCount > 1;
+    }
 
-        /// <summary>Returns all non-null slots as a dictionary, excluding the given primary slot.</summary>
-        public Dictionary<string, string> GetOverflowSlots(string primarySlot)
-        {
-            var overflow = new Dictionary<string, string>();
-            if (Name != null && primarySlot != "name") overflow["name"] = Name;
-            if (Pickup != null && primarySlot != "pickup") overflow["pickup"] = Pickup;
-            if (Destination != null && primarySlot != "destination") overflow["destination"] = Destination;
-            if (Passengers != null && primarySlot != "passengers") overflow["passengers"] = Passengers;
-            if (PickupTime != null && primarySlot != "pickup_time") overflow["pickup_time"] = PickupTime;
-            return overflow;
-        }
+    /// <summary>
+    /// Quick heuristic check: does this transcript look like it might contain multiple booking fields?
+    /// Avoids expensive AI calls for simple inputs like "yes" or "52A David Road".
+    /// </summary>
+    public static bool LooksLikeBurst(string transcript)
+    {
+        if (string.IsNullOrWhiteSpace(transcript)) return false;
+        var trimmed = transcript.Trim();
+
+        // Long utterances are more likely to be bursts
+        if (trimmed.Length >= MinBurstLength) return true;
+
+        // Check for burst keywords (directional/quantity markers)
+        var matches = BurstKeywords.Matches(trimmed);
+        return matches.Count >= 2; // Need at least 2 keyword signals
     }
 
     /// <summary>
     /// Analyze a transcript using AI. Returns null on failure (caller should fall back to regex).
+    /// Call LooksLikeBurst() first to avoid unnecessary AI calls.
     /// </summary>
-    public async Task<AiSplitResult?> AnalyzeAsync(
-        string transcript, string currentSlot, CancellationToken ct = default)
+    public async Task<AiSplitResult?> SplitAsync(string transcript, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(transcript))
             return null;
@@ -127,14 +139,7 @@ public class AiFreeFormSplitter
 
         try
         {
-            _logger.LogInformation(
-                "[AiSplitter] Analyzing: slot={Slot}, transcript=\"{T}\"",
-                currentSlot, transcript);
-
-            var userMessage = $"""
-                CURRENT_SLOT: {currentSlot}
-                TRANSCRIPT: "{transcript.Trim()}"
-                """;
+            _logger.LogInformation("[AiSplitter] Splitting: \"{T}\"", transcript.Trim());
 
             var payload = new
             {
@@ -142,7 +147,7 @@ public class AiFreeFormSplitter
                 messages = new[]
                 {
                     new { role = "system", content = SPLIT_PROMPT },
-                    new { role = "user", content = userMessage }
+                    new { role = "user", content = transcript.Trim() }
                 },
                 temperature = 0.0,
                 tools = new[]
@@ -152,18 +157,18 @@ public class AiFreeFormSplitter
                         type = "function",
                         function = new
                         {
-                            name = "split_utterance",
-                            description = "Split a caller utterance into booking slot fields",
+                            name = "extract_booking",
+                            description = "Extract booking fields from caller speech",
                             parameters = new
                             {
                                 type = "object",
                                 properties = new Dictionary<string, object>
                                 {
-                                    ["name"] = new { type = "string", description = "Caller name if stated" },
-                                    ["pickup"] = new { type = "string", description = "Pickup address if stated" },
-                                    ["destination"] = new { type = "string", description = "Destination address if stated" },
-                                    ["passengers"] = new { type = "string", description = "Passenger count as digit string (e.g. '3')" },
-                                    ["pickup_time"] = new { type = "string", description = "Pickup time if stated (e.g. 'ASAP', '3:30pm')" }
+                                    ["name"] = new { type = "string", description = "Caller's name" },
+                                    ["pickup"] = new { type = "string", description = "Pickup address or landmark" },
+                                    ["destination"] = new { type = "string", description = "Destination address or landmark" },
+                                    ["passengers"] = new { type = "integer", description = "Number of passengers" },
+                                    ["pickup_time"] = new { type = "string", description = "ASAP or time expression" }
                                 },
                                 required = System.Array.Empty<string>(),
                                 additionalProperties = false
@@ -171,7 +176,7 @@ public class AiFreeFormSplitter
                         }
                     }
                 },
-                tool_choice = new { type = "function", function = new { name = "split_utterance" } }
+                tool_choice = new { type = "function", function = new { name = "extract_booking" } }
             };
 
             var url = "https://ai.gateway.lovable.dev/v1/chat/completions";
@@ -214,14 +219,15 @@ public class AiFreeFormSplitter
                 Name = TryGetNonEmpty(args, "name"),
                 Pickup = TryGetNonEmpty(args, "pickup"),
                 Destination = TryGetNonEmpty(args, "destination"),
-                Passengers = TryGetNonEmpty(args, "passengers"),
+                Passengers = TryGetInt(args, "passengers"),
                 PickupTime = TryGetNonEmpty(args, "pickup_time")
             };
 
             _logger.LogInformation(
-                "[AiSplitter] ✅ Split: name={N}, pickup={P}, dest={D}, pax={Pax}, time={T}",
+                "[AiSplitter] ✅ Extracted {Count} fields: name={N}, pickup={P}, dest={D}, pax={Pax}, time={T}",
+                result.FilledCount,
                 result.Name ?? "–", result.Pickup ?? "–", result.Destination ?? "–",
-                result.Passengers ?? "–", result.PickupTime ?? "–");
+                result.Passengers?.ToString() ?? "–", result.PickupTime ?? "–");
 
             return result;
         }
@@ -232,7 +238,7 @@ public class AiFreeFormSplitter
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[AiSplitter] Analysis failed");
+            _logger.LogWarning(ex, "[AiSplitter] Split failed");
             return null;
         }
     }
@@ -243,5 +249,15 @@ public class AiFreeFormSplitter
         if (val.ValueKind == JsonValueKind.Null) return null;
         var s = val.GetString()?.Trim();
         return string.IsNullOrWhiteSpace(s) ? null : s;
+    }
+
+    private static int? TryGetInt(JsonElement el, string prop)
+    {
+        if (!el.TryGetProperty(prop, out var val)) return null;
+        if (val.ValueKind == JsonValueKind.Null) return null;
+        if (val.ValueKind == JsonValueKind.Number) return val.GetInt32();
+        // Handle string numbers (e.g., "3")
+        if (val.ValueKind == JsonValueKind.String && int.TryParse(val.GetString(), out var n)) return n;
+        return null;
     }
 }

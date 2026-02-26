@@ -137,36 +137,74 @@ public class CleanCallSession
             return;
         }
 
-        // ── AI-powered splitting (primary) with regex fallback ──
-        // Try AI splitter first for robust compound utterance parsing.
+        // ── Freeform Burst Detection + AI Splitting ──
+        // If the transcript looks "dense" (multiple keywords, long sentence), try AI splitting first.
+        // The AI extracts ALL booking fields at once — no slot context needed.
         // Falls back to deterministic regex FreeFormSplitter on timeout/error.
         var aiHandled = false;
-        if (_aiSplitter != null)
+        if (_aiSplitter != null && AiFreeFormSplitter.LooksLikeBurst(transcript))
         {
             try
             {
-                var aiResult = await _aiSplitter.AnalyzeAsync(transcript, currentSlot, ct);
-                if (aiResult != null)
+                Log($"[AiSplit] Burst detected, calling AI splitter...");
+                var extracted = await _aiSplitter.SplitAsync(transcript, ct);
+
+                if (extracted != null && extracted.FilledCount > 0)
                 {
-                    var primaryValue = aiResult.GetSlot(currentSlot);
-                    var overflow = aiResult.GetOverflowSlots(currentSlot);
+                    aiHandled = true;
 
-                    if (primaryValue != null || overflow.Count > 0)
+                    // Map extracted data to raw slots
+                    if (extracted.Name != null)
                     {
-                        aiHandled = true;
+                        _engine.RawData.SetSlot("name", extracted.Name);
+                        Log($"[AiSplit] name=\"{extracted.Name}\"");
+                    }
+                    if (extracted.Pickup != null)
+                    {
+                        _engine.RawData.SetSlot("pickup", extracted.Pickup);
+                        Log($"[AiSplit] pickup=\"{extracted.Pickup}\"");
+                    }
+                    if (extracted.Destination != null)
+                    {
+                        _engine.RawData.SetSlot("destination", extracted.Destination);
+                        Log($"[AiSplit] destination=\"{extracted.Destination}\"");
+                    }
+                    if (extracted.Passengers.HasValue)
+                    {
+                        _engine.RawData.SetSlot("passengers", extracted.Passengers.Value.ToString());
+                        Log($"[AiSplit] passengers={extracted.Passengers.Value}");
+                    }
+                    if (extracted.PickupTime != null)
+                    {
+                        _engine.RawData.SetSlot("pickup_time", extracted.PickupTime);
+                        Log($"[AiSplit] pickup_time=\"{extracted.PickupTime}\"");
+                    }
 
-                        if (overflow.Count > 0)
-                        {
-                            Log($"[AiSplit] Primary '{currentSlot}'=\"{primaryValue}\", overflow={overflow.Count}");
-                            _engine.RawData.IsMultiSlotBurst = true;
+                    if (extracted.IsBurst)
+                    {
+                        _engine.RawData.IsMultiSlotBurst = true;
+                        Log($"[AiSplit] ✅ Multi-slot burst — {extracted.FilledCount} fields extracted");
+                    }
 
-                            foreach (var (slot, value) in overflow)
-                            {
-                                Log($"[AiSplit] Overflow: '{slot}'=\"{value}\"");
-                                _engine.RawData.SetSlot(slot, value);
-                            }
-                        }
-
+                    // Fast-track: jump to the first thing that needs verification.
+                    // If pickup was extracted, go to VerifyingPickup. Otherwise advance normally.
+                    if (extracted.Pickup != null)
+                    {
+                        _engine.ForceState(CollectionState.VerifyingPickup);
+                        EmitCurrentInstruction();
+                        return;
+                    }
+                    else if (extracted.Destination != null)
+                    {
+                        _engine.ForceState(CollectionState.VerifyingDestination);
+                        EmitCurrentInstruction();
+                        return;
+                    }
+                    else
+                    {
+                        // Only non-address fields extracted — let normal flow continue
+                        // with the first extracted value as the transcript for current slot
+                        var primaryValue = extracted.Name ?? extracted.Passengers?.ToString() ?? extracted.PickupTime;
                         if (primaryValue != null)
                             transcript = primaryValue;
                     }
