@@ -174,7 +174,6 @@ public class CleanCallSession
                 valueToStore = "ASAP";
             }
         }
-        }
 
         // Resolve aliases ("home", "work", "the usual") for address slots
         var resolved = AliasResolver.TryResolve(currentSlot, valueToStore, _callerContext);
