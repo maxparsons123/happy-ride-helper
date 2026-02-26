@@ -395,7 +395,7 @@ public partial class MainForm : Form
         var lines = new List<string>();
         lines.Add($"═══ Raw Slots ═══");
         foreach (var slot in engine.RawData.FilledSlots)
-            lines.Add($"  {slot.Key}: {slot.Value}");
+            lines.Add($"  {slot}: {engine.RawData.GetSlot(slot) ?? "(empty)"}");
 
         var missing = engine.RawData.NextMissingSlot();
         if (missing != null)

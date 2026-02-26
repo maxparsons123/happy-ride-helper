@@ -69,9 +69,9 @@ public class CallerLookupService
             _logger.LogInformation(
                 "[CallerLookup] Returning caller: {Name} ({Phone}), {Bookings} bookings, aliases: {Aliases}",
                 caller.Name, phoneNumber, caller.TotalBookings,
-                caller.AddressAliases != null ? string.Join(", ", ParseAliases(caller.AddressAliases).Keys) : "none");
+                caller.AddressAliases is JsonElement ae ? string.Join(", ", ParseAliases(ae).Keys) : "none");
 
-            var aliases = caller.AddressAliases != null ? ParseAliases(caller.AddressAliases) : null;
+            var aliases = caller.AddressAliases is JsonElement ae2 ? ParseAliases(ae2) : null;
 
             return new CallerContext
             {

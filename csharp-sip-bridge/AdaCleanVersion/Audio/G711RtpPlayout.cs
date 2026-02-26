@@ -326,7 +326,7 @@ public sealed class G711RtpPlayout : IDisposable
 
         try
         {
-            _rtpSession.SendAudioFrame(_ts, _payloadType, payload160);
+            _rtpSession.SendAudio(_ts, payload160);
             _ts += FrameSize;
             _sendErrorCount = 0;
         }
