@@ -3,7 +3,7 @@ using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
 using AdaCleanVersion.Session;
 using AdaCleanVersion.Sip;
-using AdaSdkModel.Avatar;
+using AdaCleanVersion.Avatar;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
 
