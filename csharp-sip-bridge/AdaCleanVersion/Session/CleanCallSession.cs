@@ -98,6 +98,13 @@ public class CleanCallSession
     /// </summary>
     public async Task ProcessCallerResponseAsync(string transcript, CancellationToken ct = default)
     {
+        // ── Priority 0: If awaiting clarification, route directly — do NOT treat as a new slot ──
+        if (_engine.State == CollectionState.AwaitingClarification)
+        {
+            await HandlePostCollectionInput(transcript, ct);
+            return;
+        }
+
         // Step 1: Check for correction intent BEFORE normal slot processing
         var correction = CorrectionDetector.Detect(
             transcript,
@@ -107,7 +114,6 @@ public class CleanCallSession
         if (correction != null)
         {
             Log($"Correction detected: {correction.SlotName} → \"{correction.NewValue}\"");
-            // Correction will be re-extracted by StructureOnlyEngine with Ada context
             await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
             return;
         }
@@ -116,7 +122,6 @@ public class CleanCallSession
         if (currentSlot == null)
         {
             // All slots filled — might be a correction or confirmation
-            // All slots filled
             await HandlePostCollectionInput(transcript, ct);
             return;
         }
