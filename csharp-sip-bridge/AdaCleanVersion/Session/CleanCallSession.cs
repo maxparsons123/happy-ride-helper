@@ -19,6 +19,7 @@ public class CleanCallSession
     private readonly CallStateEngine _engine = new();
     private readonly IExtractionService _extractionService;
     private readonly FareGeocodingService? _fareService;
+    private readonly LocalGeminiReconciler? _reconciler;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
     private readonly HashSet<string> _changedSlots = new();
@@ -27,6 +28,8 @@ public class CleanCallSession
     // ─── Ada Transcript Tracking (Source of Truth) ─────────────
     // Ada's spoken responses are accumulated for extraction context.
     private readonly List<string> _adaTranscripts = new();
+    // The last instruction emitted to Ada — used as "Ada's question" for 3-way geocoding context.
+    private string _lastEmittedInstruction = "";
 
     public string SessionId { get; }
     public string CallerId { get; }
@@ -44,7 +47,8 @@ public class CleanCallSession
         string companyName,
         IExtractionService extractionService,
         FareGeocodingService? fareService = null,
-        CallerContext? callerContext = null)
+        CallerContext? callerContext = null,
+        LocalGeminiReconciler? reconciler = null)
     {
         SessionId = sessionId;
         CallerId = callerId;
@@ -52,6 +56,7 @@ public class CleanCallSession
         _extractionService = extractionService;
         _fareService = fareService;
         _callerContext = callerContext;
+        _reconciler = reconciler;
 
         _engine.OnLog += msg => OnLog?.Invoke(msg);
         _engine.OnStateChanged += OnEngineStateChanged;
@@ -288,28 +293,79 @@ public class CleanCallSession
     // ─── Inline Address Verification ────────────────────────
 
     /// <summary>
-    /// Geocode a single address inline after it's collected.
-    /// Ada pauses ("one moment, confirming that address"), geocodes, then reads back
-    /// the verified address before asking for the next slot.
+    /// Geocode a single address inline after Ada reads it back.
+    /// Uses the full 3-way context (Ada's question + raw STT + Ada's readback)
+    /// for "Level 5" dispatch accuracy.
+    /// 
+    /// Strategy:
+    ///   1. Primary: address-dispatch edge function with 3-way context
+    ///   2. Fallback: local Gemini reconciler (if edge function fails)
     /// </summary>
     private async Task RunInlineGeocodeAsync(string field, string rawAddress, CancellationToken ct, string? adaReadback = null)
     {
-        if (_fareService == null)
+        if (_fareService == null && _reconciler == null)
         {
-            Log($"No fare service — skipping inline geocode for {field}");
-            _engine.SkipVerification(field, "no fare service");
+            Log($"No fare service or reconciler — skipping inline geocode for {field}");
+            _engine.SkipVerification(field, "no fare/reconciler service");
             EmitCurrentInstruction();
             return;
         }
 
         try
         {
-            Log($"Inline geocoding {field}: raw=\"{rawAddress}\", adaReadback=\"{adaReadback ?? "none"}\"");
-            var geocoded = await _fareService.GeocodeAddressAsync(rawAddress, field, CallerId, ct, adaReadback);
+            // Get Ada's question that prompted this address (the instruction before the verifying state)
+            var adaQuestion = _lastEmittedInstruction;
+
+            Log($"Inline geocoding {field}: raw=\"{rawAddress}\", adaReadback=\"{adaReadback ?? "none"}\", adaQuestion present={!string.IsNullOrEmpty(adaQuestion)}");
+
+            GeocodedAddress? geocoded = null;
+
+            // Primary path: address-dispatch edge function with 3-way context
+            if (_fareService != null)
+            {
+                geocoded = await _fareService.GeocodeAddressAsync(
+                    rawAddress, field, CallerId, ct,
+                    adaReadback: adaReadback,
+                    adaQuestion: adaQuestion);
+            }
+
+            // Fallback: local Gemini reconciler if primary failed
+            if (geocoded == null && _reconciler != null)
+            {
+                Log($"Primary geocode failed — trying local Gemini reconciler for {field}");
+                var reconcileRequest = new ReconcileContextRequest
+                {
+                    AdaQuestion = adaQuestion,
+                    UserRawSpeech = rawAddress,
+                    AdaReadback = adaReadback,
+                    CurrentCity = _callerContext?.LastPickup?.Split(',').LastOrDefault()?.Trim(),
+                    Context = field,
+                    CallerPhone = CallerId
+                };
+
+                var reconciled = await _reconciler.ReconcileAsync(reconcileRequest, ct);
+                if (reconciled != null && reconciled.Confidence >= 0.4)
+                {
+                    geocoded = reconciled.ToGeocodedAddress();
+                    Log($"Local reconciler resolved {field}: \"{geocoded.Address}\" (conf={reconciled.Confidence:F2})");
+                }
+                else if (reconciled != null)
+                {
+                    Log($"Local reconciler low confidence ({reconciled.Confidence:F2}) for {field} — treating as ambiguous");
+                    geocoded = new GeocodedAddress
+                    {
+                        Address = reconciled.ReconciledAddress,
+                        Lat = reconciled.Lat,
+                        Lon = reconciled.Lon,
+                        IsAmbiguous = true,
+                        Alternatives = reconciled.Alternatives,
+                    };
+                }
+            }
 
             if (geocoded == null)
             {
-                Log($"Inline geocode returned null for {field} — skipping");
+                Log($"All geocoding paths returned null for {field} — skipping");
                 _engine.SkipVerification(field, "geocode failed");
                 EmitCurrentInstruction();
                 return;
@@ -333,7 +389,6 @@ public class CleanCallSession
             if (field == "pickup")
             {
                 _engine.CompletePickupVerification(geocoded);
-                // Update the raw slot with the verified address for better readback
                 Log($"✅ Pickup verified: \"{geocoded.Address}\"");
             }
             else
@@ -583,6 +638,7 @@ public class CleanCallSession
             _engine.StructuredResult, _engine.FareResult,
             _engine.PendingClarification,
             _engine.VerifiedPickup, _engine.VerifiedDestination);
+        _lastEmittedInstruction = instruction; // Track for 3-way geocoding context
         OnAiInstruction?.Invoke(instruction);
     }
 
