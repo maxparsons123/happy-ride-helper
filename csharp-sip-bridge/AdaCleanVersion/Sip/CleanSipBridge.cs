@@ -298,17 +298,37 @@ public class CleanSipBridge : IDisposable
             _settings.Sip.Server == "sip.example.com")
             return;
 
-        var domain = _settings.Sip.Domain ?? _settings.Sip.Server;
+        var server = _settings.Sip.Server;
+        var domain = _settings.Sip.Domain ?? server;
+        var username = _settings.Sip.Username;
+        var authUser = _settings.Sip.EffectiveAuthUser;
+        var password = _settings.Sip.Password;
+
+        // Build the proper SIP URIs for registration
+        // AOR (Address of Record): user@domain — this is who we ARE
+        // Registrar: server — this is WHERE we register
+        var aor = SIPURI.ParseSIPURI($"sip:{username}@{domain}");
+        var registrarHost = server;
+
+        Log($"📡 Registering trunk: {username}@{domain} → registrar={registrarHost}, authUser={authUser}");
+
+        // Use the full constructor that separates registrar from AOR
+        var outboundProxy = SIPEndPoint.ParseSIPEndPoint($"{registrarHost}:{_settings.Sip.Port}");
 
         _regAgent = new SIPRegistrationUserAgent(
             _sipTransport,
-            _settings.Sip.EffectiveAuthUser,
-            _settings.Sip.Password,
-            domain,
-            120); // expiry seconds
+            outboundProxy,        // proxy/registrar endpoint
+            aor,                  // AOR (address of record)
+            authUser,             // auth username (may differ from SIP username)
+            password,
+            domain,               // realm for digest auth
+            120);                 // expiry seconds
 
         _regAgent.RegistrationSuccessful += (uri, resp) =>
             Log($"✅ Trunk registered: {uri} (status={resp?.StatusCode})");
+
+        _regAgent.RegistrationTemporaryFailure += (uri, msg) =>
+            Log($"⚠ Trunk registration temporary failure: {uri} — {msg}");
 
         _regAgent.RegistrationFailed += (uri, resp, err) =>
         {
@@ -319,12 +339,10 @@ public class CleanSipBridge : IDisposable
             Log($"   Status: {statusCode} ({reasonPhrase})");
             Log($"   Error: {err}");
             Log($"   Auth challenge: {authHeader}");
-            Log($"   Config: user={_settings.Sip.Username}, authUser={_settings.Sip.EffectiveAuthUser}, domain={_settings.Sip.Domain ?? "(null)"}, server={_settings.Sip.Server}");
+            Log($"   Config: user={username}, authUser={authUser}, domain={domain}, server={server}");
         };
 
         _regAgent.Start();
-
-        Log($"📡 Registering trunk: {_settings.Sip.Username}@{domain}");
     }
 
     // ─── Helpers ────────────────────────────────────────────
