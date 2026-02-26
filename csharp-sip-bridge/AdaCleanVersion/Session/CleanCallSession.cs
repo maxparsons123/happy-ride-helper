@@ -117,16 +117,48 @@ public class CleanCallSession
         }
 
         // Step 1: Check for correction intent BEFORE normal slot processing
-        var correction = CorrectionDetector.Detect(
-            transcript,
-            _engine.RawData.NextMissingSlot(),
-            _engine.RawData.FilledSlots);
-
-        if (correction != null)
+        // Use AI (Gemini via burst-dispatch) for reliable slot detection,
+        // with regex CorrectionDetector as a fast fallback if AI is unavailable.
+        var filledSlots = _engine.RawData.FilledSlots;
+        if (filledSlots.Count > 0 && HasCorrectionSignal(transcript))
         {
-            Log($"Correction detected: {correction.SlotName} → \"{correction.NewValue}\"");
-            await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
-            return;
+            // Try AI correction detection first
+            if (_burstDispatcher != null)
+            {
+                try
+                {
+                    var slotValues = new Dictionary<string, string>();
+                    foreach (var slot in filledSlots)
+                        slotValues[slot] = _engine.RawData.GetSlot(slot) ?? "";
+
+                    var aiCorrection = await _burstDispatcher.DetectCorrectionAsync(
+                        transcript, slotValues, ct);
+
+                    if (aiCorrection != null)
+                    {
+                        Log($"AI correction detected: {aiCorrection.SlotName} → \"{aiCorrection.NewValue}\"");
+                        await CorrectSlotAsync(aiCorrection.SlotName, aiCorrection.NewValue, ct);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"AI correction detection failed, falling back to regex: {ex.Message}");
+                }
+            }
+
+            // Regex fallback
+            var correction = CorrectionDetector.Detect(
+                transcript,
+                _engine.RawData.NextMissingSlot(),
+                filledSlots);
+
+            if (correction != null)
+            {
+                Log($"Regex correction detected: {correction.SlotName} → \"{correction.NewValue}\"");
+                await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
+                return;
+            }
         }
 
         var currentSlot = _engine.RawData.NextMissingSlot();
@@ -1050,15 +1082,42 @@ public class CleanCallSession
             return;
         }
 
-        // Check for correction intent first — even post-collection
-        var correction = CorrectionDetector.Detect(
-            transcript, null, _engine.RawData.FilledSlots);
-
-        if (correction != null)
+        // Check for correction intent first — even post-collection (AI then regex fallback)
+        if (HasCorrectionSignal(transcript))
         {
-            Log($"Post-collection correction: {correction.SlotName} → \"{correction.NewValue}\"");
-            await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
-            return;
+            if (_burstDispatcher != null)
+            {
+                try
+                {
+                    var slotValues = new Dictionary<string, string>();
+                    foreach (var slot in _engine.RawData.FilledSlots)
+                        slotValues[slot] = _engine.RawData.GetSlot(slot) ?? "";
+
+                    var aiCorrection = await _burstDispatcher.DetectCorrectionAsync(
+                        transcript, slotValues, ct);
+
+                    if (aiCorrection != null)
+                    {
+                        Log($"Post-collection AI correction: {aiCorrection.SlotName} → \"{aiCorrection.NewValue}\"");
+                        await CorrectSlotAsync(aiCorrection.SlotName, aiCorrection.NewValue, ct);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Post-collection AI correction failed: {ex.Message}");
+                }
+            }
+
+            var correction = CorrectionDetector.Detect(
+                transcript, null, _engine.RawData.FilledSlots);
+
+            if (correction != null)
+            {
+                Log($"Post-collection regex correction: {correction.SlotName} → \"{correction.NewValue}\"");
+                await CorrectSlotAsync(correction.SlotName, correction.NewValue, ct);
+                return;
+            }
         }
 
         var lower = transcript.ToLowerInvariant().Trim();
@@ -1262,5 +1321,21 @@ public class CleanCallSession
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Quick regex check for correction signal words — gates the AI call
+    /// so we don't waste a round-trip on every normal utterance.
+    /// </summary>
+    private static bool HasCorrectionSignal(string transcript)
+    {
+        var lower = transcript.ToLowerInvariant();
+        return lower.Contains("actually") || lower.Contains("no wait") || lower.Contains("no no") ||
+               lower.Contains("sorry") || lower.Contains("i meant") || lower.Contains("i mean") ||
+               lower.Contains("change") || lower.Contains("wrong") || lower.Contains("not that") ||
+               lower.Contains("correct") || lower.Contains("instead") || lower.Contains("it's not") ||
+               lower.Contains("that's not") || lower.Contains("no it's") || lower.Contains("no its") ||
+               lower.Contains("not dover") || lower.Contains("not that one") ||
+               lower.Contains("hang on") || lower.Contains("hold on") || lower.Contains("update");
     }
 }
