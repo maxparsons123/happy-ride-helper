@@ -180,6 +180,7 @@ public static class SlotValidator
             lower.Contains("straight away") || lower.Contains("right away") ||
             lower.Contains("immediately") || lower.Contains("quick") ||
             lower.Contains("ace up") || lower.Contains("as up") || lower.Contains("a sap") ||
+            lower.Contains("s.a.p") || lower.Contains("s a p") || lower.Contains("sap.") ||
             lower.Contains("just possible") || lower.Contains("that's just") ||
             lower.Contains("possible"))
             return null;
