@@ -469,6 +469,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         Log("📋 Sending instruction update");
 
+        // Cancel any in-progress response first to avoid "active response" collision
+        var cancelMsg = new { type = "response.cancel" };
+        _ = SendJsonAsync(cancelMsg);
+
         var msg = new
         {
             type = "session.update",
