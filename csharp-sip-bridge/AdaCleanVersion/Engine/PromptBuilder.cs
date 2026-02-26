@@ -223,14 +223,16 @@ public static class PromptBuilder
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{rawData.PickupRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup address verified. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
-                "Now ask for their DESTINATION address. " +
+                "Then ask for their DESTINATION address. " +
+                "Do NOT read any raw transcript text back to the caller. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.CollectingDestination =>
-                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{rawData.PickupRaw}\". " +
-                "Now ask for their DESTINATION address. " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup address verified. " +
+                "Ask for their DESTINATION address. " +
+                "Do NOT read any raw transcript text back to the caller. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.VerifyingDestination =>
@@ -250,9 +252,10 @@ public static class PromptBuilder
                 "REQUIRED FIELDS REMAINING: passengers, pickup time.",
 
             CollectionState.CollectingPassengers =>
-                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed as \"{rawData.DestinationRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Destination address verified. " +
                 "Ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
+                "Do NOT read any raw transcript text back to the caller. " +
                 "REQUIRED FIELDS REMAINING: passengers, pickup time.",
 
             CollectionState.CollectingPickupTime =>
@@ -277,17 +280,16 @@ public static class PromptBuilder
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
                 $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'. " +
-                $"Present the booking summary and fare NOW:\n" +
+                "You MUST read the verified pickup and destination EXACTLY as written below (no shortening):\n" +
                 $"- Name: {booking.CallerName}\n" +
-                $"- Pickup: {fareResult.Pickup.Address}\n" +
-                $"- Destination: {fareResult.Destination.Address}\n" +
+                $"- Pickup (VERBATIM): {fareResult.Pickup.Address}\n" +
+                $"- Destination (VERBATIM): {fareResult.Destination.Address}\n" +
                 $"- Passengers: {booking.Passengers}\n" +
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
                 $"- Driver ETA: {fareResult.BusyMessage}\n" +
-                "Say something like: \"So {booking.CallerName}, that's from {fareResult.Pickup.Address} to {fareResult.Destination.Address}, " +
-                "the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. " +
-                "Would you like to go ahead with this booking?\"",
+                $"Say EXACTLY: \"So {booking.CallerName}, that's from {fareResult.Pickup.Address} to {fareResult.Destination.Address}, the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. Would you like to go ahead with this booking?\" " +
+                "Do NOT paraphrase addresses.",
 
             CollectionState.PresentingFare when booking != null =>
                 $"[INSTRUCTION] Present the booking summary to the caller:\n" +
