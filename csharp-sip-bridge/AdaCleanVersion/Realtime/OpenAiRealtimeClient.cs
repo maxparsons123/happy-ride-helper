@@ -14,10 +14,11 @@ namespace AdaCleanVersion.Realtime;
 /// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via G711RtpPlayout.
 /// Supports both PCMU (µ-law) and PCMA (A-law) codecs.
 ///
-/// Mic Gate v4.1:
+/// Mic Gate v4.2 (ported from AdaSdkModel v3.1):
 ///   Mic gated while AI is speaking.
-///   Ungated when response.audio.done AND playout queue drained.
-///   Barge-in (speech_started) immediately cuts and ungates.
+///   ALL audio during gate is BUFFERED (not discarded).
+///   Ungated when response.audio.done AND playout queue drained → flushes ALL buffered audio.
+///   Barge-in (speech_started) immediately cuts, ungates, and FLUSHES buffer (preserves leading speech).
 ///   Audio commit on speech_stopped. Event-driven instruction sequence.
 ///   Instruction sequence is event-driven (waits for response.canceled).
 /// </summary>
@@ -44,9 +45,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private readonly G711RtpPlayout _playout;
 
-    // ─── Mic Gate v4.1 ─────────────────────────────────────
+    // ─── Mic Gate v4.2 (ported from AdaSdkModel v3.1) ──────
     // Mic gated while AI speaks. Ungated when response.audio.done AND playout drains.
-    // No echo guard timer — just wait for both conditions.
+    // All audio during gate is BUFFERED (not discarded) and flushed to OpenAI on ungate.
+    // On barge-in, buffer is flushed (not cleared) to preserve leading speech.
 
     /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
@@ -62,15 +64,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>Pending instruction to send after response.canceled arrives.</summary>
     private PendingInstruction? _pendingInstruction;
 
-    // Ring buffer mic tail: keep last gated frames (activity-filtered before flush)
-    private const int MicTailMaxFrames = 10;
-    private const int MicTailFlushCapFrames = 4; // avoid bursty ghost transcripts
-    private readonly byte[][] _micTail = new byte[MicTailMaxFrames][];
-    private readonly bool[] _micTailHasSpeech = new bool[MicTailMaxFrames];
-    private int _micTailIndex;
-    private int _micTailCount;
-    private readonly object _micTailLock = new();
-    private readonly byte _g711SilenceByte;
+    // Mic gate buffer: stores ALL gated audio and flushes to OpenAI on ungate (no cap, no energy filter)
+    private readonly List<byte[]> _micGateBuffer = new();
+    private readonly object _micGateBufferLock = new();
 
     // ─── Auto VAD Config ───────────────────────────────────
     /// <summary>
@@ -138,14 +134,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _session = session;
         _logger = logger;
         _codec = codec;
-        _g711SilenceByte = G711Codec.SilenceByte(codec);
 
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
         _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
 
-    // ─── Mic Gate Logic (v4.1) ─────────────────────────────
+    // ─── Mic Gate Logic (v4.2 — buffer-all, flush-all) ─────
 
     /// <summary>Called when playout queue drains.</summary>
     private void OnPlayoutQueueEmpty()
@@ -169,7 +164,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         if (!_micGated) return;
         _micGated = false;
         Log("🔓 Mic ungated (audio done + playout drained)");
-        FlushMicTail();
+        FlushMicGateBuffer();
     }
 
     /// <summary>Gate mic when AI starts responding.</summary>
@@ -206,7 +201,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Start receive loop
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
-        Log("✅ Bidirectional audio bridge active (mic gate v4.1)");
+        Log("✅ Bidirectional audio bridge active (mic gate v4.2)");
 
         // Send greeting as a conversation item (matches AdaSdkModel flow)
         // This happens AFTER session config so the AI knows its role.
@@ -337,29 +332,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         var payload = rtpPacket.Payload;
 
-        // Ring-buffer mic tail while mic is gated
+        // v4.2: Buffer ALL audio while mic is gated (ported from AdaSdkModel v3.1)
         if (_micGated)
         {
-            lock (_micTailLock)
+            lock (_micGateBufferLock)
             {
                 if (_micGated)
                 {
                     var copy = new byte[payload.Length];
                     Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
-
-                    // Mark frame as speech-like only if enough bytes differ from codec silence.
-                    // This filters low-level line noise from being flushed as ghost speech.
-                    int nonSilence = 0;
-                    for (int i = 0; i < copy.Length; i++)
-                    {
-                        if (copy[i] != _g711SilenceByte && ++nonSilence >= 12)
-                            break;
-                    }
-
-                    _micTail[_micTailIndex] = copy;
-                    _micTailHasSpeech[_micTailIndex] = nonSilence >= 12;
-                    _micTailIndex = (_micTailIndex + 1) % MicTailMaxFrames;
-                    if (_micTailCount < MicTailMaxFrames) _micTailCount++;
+                    _micGateBuffer.Add(copy);
                     return;
                 }
             }
@@ -384,55 +366,34 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Flush mic tail with activity filtering.
-    /// Sends at most 4 recent speech-like frames to avoid ghost transcript bursts.
+    /// Flush ALL buffered mic audio to OpenAI (no cap, no energy filter).
+    /// Ported from AdaSdkModel v3.1 — preserves leading speech that arrives during gate.
     /// </summary>
-    private void FlushMicTail()
+    private void FlushMicGateBuffer()
     {
         byte[][] frames;
-
-        lock (_micTailLock)
+        lock (_micGateBufferLock)
         {
-            if (_micTailCount == 0) return;
-
-            var selected = new System.Collections.Generic.List<byte[]>(MicTailFlushCapFrames);
-            int start = (_micTailIndex - _micTailCount + MicTailMaxFrames) % MicTailMaxFrames;
-
-            for (int i = 0; i < _micTailCount; i++)
+            if (_micGateBuffer.Count == 0)
             {
-                int idx = (start + i) % MicTailMaxFrames;
-                if (_micTailHasSpeech[idx] && _micTail[idx] != null)
-                    selected.Add(_micTail[idx]);
+                Log("🎤 Mic buffer flush skipped (empty)");
+                return;
             }
-
-            if (selected.Count > MicTailFlushCapFrames)
-                selected = selected.GetRange(selected.Count - MicTailFlushCapFrames, MicTailFlushCapFrames);
-
-            frames = selected.ToArray();
-            _micTailCount = 0;
-            _micTailIndex = 0;
-            Array.Clear(_micTailHasSpeech, 0, _micTailHasSpeech.Length);
+            frames = _micGateBuffer.ToArray();
+            _micGateBuffer.Clear();
         }
 
-        if (frames.Length == 0)
-        {
-            Log("🎤 Mic tail flush skipped (no speech energy)");
-            return;
-        }
-
-        Log($"🎤 Flushing {frames.Length} mic tail frame(s) (speech-filtered)");
+        Log($"🎤 Flushing {frames.Length} buffered mic frame(s)");
         foreach (var f in frames)
             ForwardToOpenAi(f);
     }
 
-    /// <summary>Clear the ring buffer (used on barge-in).</summary>
-    private void ClearMicTail()
+    /// <summary>Clear the buffer (only used on session reset, NOT on barge-in).</summary>
+    private void ClearMicGateBuffer()
     {
-        lock (_micTailLock)
+        lock (_micGateBufferLock)
         {
-            _micTailCount = 0;
-            _micTailIndex = 0;
-            Array.Clear(_micTailHasSpeech, 0, _micTailHasSpeech.Length);
+            _micGateBuffer.Clear();
         }
     }
 
@@ -523,8 +484,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 _lastBargeInTick = now;
                 _micGated = false;
                 _playout.Clear();
-                ClearMicTail();
-                Log("🎤 Barge-in — playout cleared, mic ungated");
+                FlushMicGateBuffer(); // v4.2: flush (not clear) — preserve leading speech
+                Log("🎤 Barge-in — playout cleared, mic ungated, buffer flushed");
                 try { OnBargeIn?.Invoke(); } catch { }
                 break;
 
