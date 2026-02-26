@@ -522,8 +522,14 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             case "response.audio_transcript.done":
                 var aiText = doc.RootElement.GetProperty("transcript").GetString();
-                Log($"🤖 AI: {aiText}");
+                // Strip [CORRECTION:xxx] tags from the transcript before logging/processing
+                // These tags are metadata for the session layer, not spoken content
+                var cleanAiText = aiText != null 
+                    ? System.Text.RegularExpressions.Regex.Replace(aiText, @"^\[CORRECTION:\w+\]\s*", "").Trim()
+                    : aiText;
+                Log($"🤖 AI: {cleanAiText}");
                 // Feed Ada's transcript to session on background task — don't block receive loop
+                // NOTE: Pass ORIGINAL text (with tags) to session so it can detect corrections
                 if (!string.IsNullOrWhiteSpace(aiText))
                 {
                     var text = aiText; // capture for closure

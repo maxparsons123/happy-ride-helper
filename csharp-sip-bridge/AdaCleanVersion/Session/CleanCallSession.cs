@@ -523,6 +523,37 @@ public class CleanCallSession
     {
         if (string.IsNullOrWhiteSpace(adaText)) return;
 
+        // ── Hybrid correction tag detection ──
+        // The AI prefixes corrections with [CORRECTION:slotname] based on conversational context.
+        // This is more reliable than regex pattern matching on caller STT.
+        var correctionMatch = System.Text.RegularExpressions.Regex.Match(
+            adaText, @"^\[CORRECTION:(\w+)\]\s*(.+)$", System.Text.RegularExpressions.RegexOptions.Singleline);
+        if (correctionMatch.Success)
+        {
+            var correctionSlot = correctionMatch.Groups[1].Value.ToLowerInvariant();
+            var correctionText = correctionMatch.Groups[2].Value.Trim();
+            Log($"[HybridCorrection] Ada tagged correction for '{correctionSlot}': \"{correctionText}\"");
+            
+            // Validate slot name
+            var validSlots = new HashSet<string> { "pickup", "destination", "name", "passengers", "pickup_time" };
+            if (validSlots.Contains(correctionSlot))
+            {
+                // Extract the new value from what the caller actually said (use pending STT if available)
+                var newValue = _pendingVerificationTranscript ?? correctionText;
+                _pendingVerificationTranscript = null;
+                _pendingVerificationState = null;
+                
+                Log($"[HybridCorrection] Correcting slot '{correctionSlot}' → \"{newValue}\"");
+                await CorrectSlotAsync(correctionSlot, newValue, ct);
+                return;
+            }
+            else
+            {
+                Log($"[HybridCorrection] Unknown slot '{correctionSlot}' — ignoring tag, processing normally");
+                adaText = correctionText; // Strip invalid tag, process rest normally
+            }
+        }
+
         // ── Farewell filter: discard rogue farewell responses during active collection ──
         // When the AI hallucinates farewell text during verification/collection states,
         // we must NOT process it (it would trigger duplicate geocoding and cascading loops).
@@ -532,7 +563,7 @@ public class CleanCallSession
             return;
         }
 
-        // Store for extraction context
+        // Store for extraction context (without correction tag)
         _adaTranscripts.Add(adaText);
 
         // ── Name refinement from Ada's readback ──
