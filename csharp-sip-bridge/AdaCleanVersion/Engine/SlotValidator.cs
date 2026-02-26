@@ -58,9 +58,14 @@ public static class SlotValidator
         };
     }
 
-    // Patterns that are not names — sentences, phrases starting with common words
-    private static readonly Regex SentencePattern = new(
-        @"^(it'?s|that'?s|i'?m|my name|i am|i need|i want|can i|could you|i'd like)",
+    // Prefixes to strip from name input (common ways people say their name)
+    private static readonly Regex NamePrefixPattern = new(
+        @"^(it'?s\s+|that'?s\s+|i'?m\s+|my\s+name\s+is\s+|i\s+am\s+|they\s+call\s+me\s+|call\s+me\s+|this\s+is\s+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Patterns that are clearly NOT names at all (requests, questions)
+    private static readonly Regex NotNamePattern = new(
+        @"^(i\s+need|i\s+want|can\s+i|could\s+you|i'?d\s+like|where|when|how|what)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static string? ValidateName(string lower)
@@ -73,12 +78,16 @@ public static class SlotValidator
         if (NonAddressPattern.IsMatch(lower))
             return "conversational_not_name";
 
-        // Reject sentences/phrases (real names don't start with "it's", "that's", etc.)
-        if (SentencePattern.IsMatch(lower))
-            return "sentence_not_name";
+        // Reject questions/requests (these are not names)
+        if (NotNamePattern.IsMatch(lower))
+            return "request_not_name";
 
-        // Must be at least 2 chars
-        if (lower.Length < 2)
+        // Strip common prefixes — "It's Max" → "Max", "My name is John" → "John"
+        // (the actual slot value will be stored with prefix stripped by ProcessCallerResponseAsync)
+        var stripped = NamePrefixPattern.Replace(lower, "").Trim();
+
+        // Must be at least 2 chars after stripping
+        if (stripped.Length < 2)
             return "too_short";
 
         return null;
