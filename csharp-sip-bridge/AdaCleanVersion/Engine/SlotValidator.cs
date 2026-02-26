@@ -170,7 +170,9 @@ public static class SlotValidator
         if (lower.Contains("now") || lower.Contains("asap") || lower.Contains("soon") ||
             lower.Contains("straight away") || lower.Contains("right away") ||
             lower.Contains("immediately") || lower.Contains("quick") ||
-            lower.Contains("ace up") || lower.Contains("as up") || lower.Contains("a sap"))
+            lower.Contains("ace up") || lower.Contains("as up") || lower.Contains("a sap") ||
+            lower.Contains("just possible") || lower.Contains("that's just") ||
+            lower.Contains("possible"))
             return null;
 
         // Accept time patterns (digits with optional colon)
