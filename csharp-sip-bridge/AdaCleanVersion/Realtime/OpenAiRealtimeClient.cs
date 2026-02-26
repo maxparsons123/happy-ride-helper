@@ -184,8 +184,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         if (!_micGated) return;
         _micGated = false;
-        Log("🔓 Mic ungated (audio done + playout drained)");
-        FlushMicGateBuffer();
+        // Normal ungate after playout: DISCARD the buffer (it's all echo, not caller speech).
+        // Only barge-in should flush tail frames to OpenAI.
+        ClearMicGateBuffer();
+        Log("🔓 Mic ungated (audio done + playout drained) — buffer discarded (echo)");
     }
 
     /// <summary>Gate mic when AI starts responding.</summary>
