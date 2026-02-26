@@ -13,23 +13,17 @@ namespace AdaCleanVersion.Realtime;
 /// Bridges OpenAI Realtime API (WebSocket) ↔ SIPSorcery RTPSession via G711RtpPlayout.
 /// Supports both PCMU (µ-law) and PCMA (A-law) codecs.
 ///
-/// Mic Gate v3.1 — Dual-Latch with Echo Guard:
-///   Latch 1: _responseCompleted  — set when OpenAI sends response.audio.done
-///   Latch 2: OnQueueEmpty        — set when playout queue fully drains
-///   Both latches + echo guard timer must pass before mic ungates.
-///   _drainGateTaskId ensures only the latest drain task can ungate ("latest task wins").
-///   Barge-in (speech_started) immediately cuts both latches and ungates.
+/// Mic Gate v4.0 — Simplified:
+///   Mic gated while AI is speaking.
+///   Ungated immediately on response.audio.done (playout drains naturally).
+///   Barge-in (speech_started) immediately cuts and ungates.
+///   Audio commit on speech_stopped for deterministic transcription.
+///   Instruction sequence is event-driven (waits for response.canceled).
 /// </summary>
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
 {
     private const string RealtimeUrl = "wss://api.openai.com/v1/realtime";
     private const int ReceiveBufferSize = 16384;
-
-    /// <summary>Configurable echo guard delay (ms) after both latches before ungating mic.</summary>
-    private const int EchoGuardMs = 200;
-
-    /// <summary>Debounce window — ignore OnQueueEmpty signals within this period (ms).</summary>
-    private const int DrainDebounceMs = 200;
 
     private readonly string _apiKey;
     private readonly string _model;
@@ -49,25 +43,14 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private readonly G711RtpPlayout _playout;
 
-    // ─── Dual-Latch Mic Gate (v3.1) ─────────────────────────
-    // The mic is gated (blocked) while AI audio is playing.
-    // It only ungates when BOTH latches are set AND the echo guard timer expires.
+    // ─── Simplified Mic Gate (v4.0) ────────────────────────
+    // Mic gated while AI speaks. Ungated on response.audio.done or barge-in.
 
-    /// <summary>True = mic is blocked. Only ungated by the dual-latch mechanism or barge-in.</summary>
+    /// <summary>True = mic is blocked.</summary>
     private volatile bool _micGated;
 
-    /// <summary>Latch 1: OpenAI finished sending audio deltas (response.audio.done received).</summary>
-    private volatile bool _responseCompleted;
-
-    /// <summary>Latch 2: Playout queue has fully drained (all audio sent to caller).</summary>
-    private volatile bool _playoutDrained;
-
-    /// <summary>
-    /// Monotonically increasing ID for drain-gate tasks.
-    /// "Latest task wins" — only the task whose ID matches _drainGateTaskId can ungate.
-    /// Prevents stale drain tasks from ungating after a new response starts.
-    /// </summary>
-    private volatile int _drainGateTaskId;
+    /// <summary>Pending instruction to send after response.canceled arrives.</summary>
+    private volatile string? _pendingInstruction;
 
     // Ring buffer mic tail: keeps only last 10 frames (200ms) while mic is gated
     private const int MicTailMaxFrames = 10;
@@ -105,78 +88,26 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
-        _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
 
-    // ─── Dual-Latch Logic ───────────────────────────────────
+    // ─── Simplified Mic Gate Logic (v4.0) ────────────────────
 
     /// <summary>
-    /// Called when playout queue drains. Sets latch 2 and checks if both latches are set.
-    /// </summary>
-    private void OnPlayoutQueueEmpty()
-    {
-        _playoutDrained = true;
-        TryUngateMic();
-    }
-
-    /// <summary>
-    /// Called when response.audio.done arrives. Sets latch 1 and checks if both latches are set.
+    /// Called when response.audio.done arrives — AI finished sending audio.
+    /// Ungate mic immediately; playout drains naturally.
     /// </summary>
     private void OnResponseAudioDone()
     {
-        _responseCompleted = true;
-        _playout.Flush(); // flush any partial frame in the accumulator
-        TryUngateMic();
-    }
-
-    /// <summary>
-    /// Check both latches. If both are set, start the echo guard timer.
-    /// Only the "latest task wins" — stale drain tasks are discarded.
-    /// </summary>
-    private void TryUngateMic()
-    {
-        if (!_micGated) return;
-        if (!_responseCompleted || !_playoutDrained) return;
-
-        // Both latches set — start echo guard timer
-        var taskId = Interlocked.Increment(ref _drainGateTaskId);
-        _ = RunEchoGuardAsync(taskId);
-    }
-
-    /// <summary>
-    /// Wait for the echo guard period, then ungate if this task is still the latest.
-    /// </summary>
-    private async Task RunEchoGuardAsync(int taskId)
-    {
-        try
-        {
-            await Task.Delay(EchoGuardMs, _cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-
-        // "Latest task wins" — if a new response started during the guard period,
-        // _drainGateTaskId will have been incremented and this task is stale.
-        if (Volatile.Read(ref _drainGateTaskId) != taskId) return;
-
-        // Still the latest — ungate
+        _playout.Flush();
         _micGated = false;
-        Log("🔓 Mic ungated (dual-latch + echo guard)");
+        Log("🔓 Mic ungated (response.audio.done)");
         FlushMicTail();
     }
 
-    /// <summary>
-    /// Reset both latches when a new AI response starts.
-    /// </summary>
+    /// <summary>Gate mic when AI starts responding.</summary>
     private void ArmMicGate()
     {
         _micGated = true;
-        _responseCompleted = false;
-        _playoutDrained = false;
-        // Increment drain gate task ID to invalidate any pending echo guard timer
-        Interlocked.Increment(ref _drainGateTaskId);
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
@@ -206,7 +137,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Start receive loop
         _receiveTask = Task.Run(ReceiveLoopAsync);
 
-        Log("✅ Bidirectional audio bridge active (dual-latch mic gate v3.1)");
+        Log("✅ Bidirectional audio bridge active (mic gate v4.0)");
 
         // Send greeting as a conversation item (matches AdaSdkModel flow)
         // This happens AFTER session config so the AI knows its role.
@@ -451,13 +382,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 HandleAudioDelta(doc.RootElement);
                 break;
 
-            // ── AI response starting → arm the dual-latch mic gate ──
+            // ── AI response starting → arm mic gate ──
             case "response.audio.started":
             case "response.created":
                 ArmMicGate();
                 break;
 
-            // ── Latch 1: OpenAI finished sending audio ──
+            // ── AI finished sending audio → ungate mic ──
             case "response.audio.done":
                 OnResponseAudioDone();
                 break;
@@ -473,20 +404,28 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             // ── Barge-in: immediately cut everything and ungate ──
             case "input_audio_buffer.speech_started":
-                _responseCompleted = false;
-                _playoutDrained = false;
-                Interlocked.Increment(ref _drainGateTaskId); // kill pending echo guard
                 _micGated = false;
                 _playout.Clear();
                 ClearMicTail();
-                Log("🎤 Barge-in — playout cleared, mic ungated immediately");
+                Log("🎤 Barge-in — playout cleared, mic ungated");
                 OnBargeIn?.Invoke();
+                break;
+
+            // ── Speech ended: commit audio buffer for deterministic transcription ──
+            case "input_audio_buffer.speech_stopped":
+                await SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                break;
+
+            // ── Cancel confirmed: now safe to send pending instruction ──
+            case "response.canceled":
+                Log("🛑 Response canceled");
+                await SendPendingInstructionAsync();
                 break;
 
             case "error":
                 var errMsg = doc.RootElement.GetProperty("error")
                     .GetProperty("message").GetString();
-                // "no active response found" is harmless — cancel was sent but response already finished
+                // "no active response found" is harmless
                 if (errMsg != null && errMsg.Contains("no active response found"))
                     break;
                 Log($"⚠ OpenAI error: {errMsg}");
@@ -526,7 +465,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         // CRITICAL: Cancel any auto-response OpenAI started (based on old instructions)
         // and clear the playout buffer so the caller doesn't hear stale audio.
-        // This prevents the "AI responds with old instruction" race condition.
         try
         {
             await SendJsonAsync(new { type = "response.cancel" });
@@ -544,46 +482,82 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         }
     }
 
-    // ─── Instruction Updates ────────────────────────────────
+    // ─── Instruction Updates (Event-Driven v4.0) ────────────
 
     private void OnAiInstruction(string instruction)
     {
-        Log("📋 Sending instruction update");
-        _ = SendInstructionSequenceAsync(instruction);
+        Log("📋 Queuing instruction update");
+        _ = StartInstructionSequenceAsync(instruction);
     }
 
     /// <summary>
-    /// Sends cancel → session.update → response.create sequentially,
-    /// ensuring each completes before the next to avoid "active response" collisions.
+    /// Sends cancel and stores the pending instruction.
+    /// The actual session.update + response.create happens when response.canceled arrives.
+    /// If no response is active, the fallback timer sends it after 150ms.
     /// </summary>
-    private async Task SendInstructionSequenceAsync(string instruction)
+    private async Task StartInstructionSequenceAsync(string instruction)
     {
         try
         {
-            // 1) Cancel any in-progress response
+            _pendingInstruction = instruction;
+
+            // Cancel any in-progress response — response.canceled event will trigger the rest
             await SendJsonAsync(new { type = "response.cancel" });
 
-            // Small delay to let OpenAI process the cancel
-            await Task.Delay(50, _cts.Token);
+            // Fallback: if no response was active, response.canceled won't fire.
+            // Wait briefly, then check if _pendingInstruction is still set.
+            _ = FallbackInstructionSendAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Log($"⚠ Instruction sequence error: {ex.Message}");
+        }
+    }
 
-            // 2) Update session instructions
+    /// <summary>
+    /// Fallback: if response.canceled doesn't arrive within 150ms
+    /// (because no response was active), send the pending instruction anyway.
+    /// </summary>
+    private async Task FallbackInstructionSendAsync()
+    {
+        try
+        {
+            await Task.Delay(150, _cts.Token);
+            await SendPendingInstructionAsync();
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    /// <summary>
+    /// Send the pending instruction (session.update + response.create).
+    /// Called either by response.canceled event or by fallback timer.
+    /// Thread-safe: only the first caller sends; subsequent calls are no-ops.
+    /// </summary>
+    private async Task SendPendingInstructionAsync()
+    {
+        var instruction = Interlocked.Exchange(ref _pendingInstruction, null);
+        if (instruction == null) return; // already sent or no pending
+
+        try
+        {
             await SendJsonAsync(new
             {
                 type = "session.update",
                 session = new { instructions = instruction }
             });
 
-            // 3) Request new response
             await SendJsonAsync(new
             {
                 type = "response.create",
                 response = new { modalities = new[] { "text", "audio" } }
             });
+
+            Log("📋 Instruction update sent");
         }
-        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            Log($"⚠ Instruction sequence error: {ex.Message}");
+            Log($"⚠ Instruction send error: {ex.Message}");
         }
     }
 
