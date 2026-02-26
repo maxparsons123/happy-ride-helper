@@ -209,7 +209,7 @@ public static class PromptBuilder
 
             CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified pickup address to the caller EXACTLY and IN FULL. " +
-                $"Say: \"Great, so that's {verifiedPickup.Address} for pickup.\" " +
+                $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedPickup.Address)} for pickup.\" " +
                 "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
                 "Then ask for their DESTINATION address. " +
@@ -217,7 +217,7 @@ public static class PromptBuilder
 
             CollectionState.CollectingDestination when verifiedPickup != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified pickup address to the caller EXACTLY and IN FULL. " +
-                $"Say: \"Great, so that's {verifiedPickup.Address} for pickup.\" " +
+                $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedPickup.Address)} for pickup.\" " +
                 "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
                 "Then ask for their DESTINATION address. " +
                 "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
@@ -245,7 +245,7 @@ public static class PromptBuilder
 
             CollectionState.CollectingPassengers when verifiedDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}You MUST read the verified destination address to the caller EXACTLY and IN FULL. " +
-                $"Say: \"Great, so that's {verifiedDestination.Address} for the destination.\" " +
+                $"Say: \"Great, so that's {FormatAddressForSpeech(verifiedDestination.Address)} for the destination.\" " +
                 "Do NOT shorten, summarize, or omit any part of that address — read every word including the street number, street name, city, and postcode. " +
                 "Then ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
@@ -282,13 +282,13 @@ public static class PromptBuilder
                 $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'. " +
                 "You MUST read the verified pickup and destination EXACTLY as written below (no shortening):\n" +
                 $"- Name: {booking.CallerName}\n" +
-                $"- Pickup (VERBATIM): {fareResult.Pickup.Address}\n" +
-                $"- Destination (VERBATIM): {fareResult.Destination.Address}\n" +
+                $"- Pickup (VERBATIM): {FormatAddressForSpeech(fareResult.Pickup.Address)}\n" +
+                $"- Destination (VERBATIM): {FormatAddressForSpeech(fareResult.Destination.Address)}\n" +
                 $"- Passengers: {booking.Passengers}\n" +
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
                 $"- Driver ETA: {fareResult.BusyMessage}\n" +
-                $"Say EXACTLY: \"So {booking.CallerName}, that's from {fareResult.Pickup.Address} to {fareResult.Destination.Address}, the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. Would you like to go ahead with this booking?\" " +
+                $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressForSpeech(fareResult.Pickup.Address)} to {FormatAddressForSpeech(fareResult.Destination.Address)}, the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. Would you like to go ahead with this booking?\" " +
                 "Do NOT paraphrase addresses.",
 
             CollectionState.PresentingFare when booking != null =>
@@ -474,4 +474,37 @@ public static class PromptBuilder
         "en" => null, // No pre-warning for English
         _ => null
     };
+
+    /// <summary>
+    /// Format an address for TTS readback — spaces out alphanumeric house numbers
+    /// so the voice model doesn't mangle them (e.g. "52A" → "52 A", "1214A" → "1 2 1 4 A").
+    /// </summary>
+    internal static string FormatAddressForSpeech(string address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return address;
+
+        // Match leading house number that contains letters (e.g. "52A", "1214A", "3B")
+        var match = System.Text.RegularExpressions.Regex.Match(
+            address, @"^(\d+)([A-Za-z]+)\b");
+        
+        if (!match.Success) return address;
+
+        var digits = match.Groups[1].Value;
+        var letters = match.Groups[2].Value.ToUpperInvariant();
+
+        // For 3+ character house numbers, read digit-by-digit
+        string spoken;
+        if ((digits.Length + letters.Length) >= 3)
+        {
+            var digitByDigit = string.Join(" ", digits.ToCharArray());
+            spoken = $"{digitByDigit} {letters}";
+        }
+        else
+        {
+            // Short house numbers like "3B" — just add a space
+            spoken = $"{digits} {letters}";
+        }
+
+        return spoken + address[match.Length..];
+    }
 }
