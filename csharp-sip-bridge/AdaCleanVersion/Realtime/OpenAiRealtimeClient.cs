@@ -63,6 +63,44 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private int _micTailCount;
     private readonly object _micTailLock = new();
 
+    // ─── Auto VAD Config ───────────────────────────────────
+    /// <summary>
+    /// Returns the optimal VAD configuration based on the current engine state.
+    /// Semantic VAD for complex inputs (addresses, names, clarifications).
+    /// Server VAD for quick inputs (passengers, time, confirmations).
+    /// </summary>
+    private dynamic GetVadConfigForCurrentState()
+    {
+        var state = _session.Engine.State;
+
+        var useSemanticVad = state switch
+        {
+            Engine.CollectionState.CollectingName => true,
+            Engine.CollectionState.CollectingPickup => true,
+            Engine.CollectionState.CollectingDestination => true,
+            Engine.CollectionState.AwaitingClarification => true,
+            _ => false
+        };
+
+        if (useSemanticVad)
+        {
+            return new
+            {
+                type = "semantic_vad",
+                eagerness = "low",        // patient — waits for semantic completion
+                interrupt_response = true  // still allow barge-in
+            };
+        }
+
+        return new
+        {
+            type = "server_vad",
+            threshold = 0.5,
+            prefix_padding_ms = 300,
+            silence_duration_ms = 500
+        };
+    }
+
     public event Action<string>? OnLog;
 
     /// <summary>Fires with each G.711 audio frame sent to playout (for Simli avatar feeding).</summary>
@@ -538,14 +576,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Fallback: if response.canceled doesn't arrive within 150ms
+    /// Fallback: if response.canceled doesn't arrive within 300ms
     /// (because no response was active), send the pending instruction anyway.
+    /// Increased from 150ms to avoid racing with OpenAI's auto-response start.
     /// </summary>
     private async Task FallbackInstructionSendAsync()
     {
         try
         {
-            await Task.Delay(150, _cts.Token);
+            await Task.Delay(300, _cts.Token);
             await SendPendingInstructionAsync();
         }
         catch (OperationCanceledException) { }
@@ -555,6 +594,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// Send the pending instruction (session.update + response.create).
     /// Called either by response.canceled event or by fallback timer.
     /// Thread-safe: only the first caller sends; subsequent calls are no-ops.
+    /// Includes Auto VAD Switching based on current engine state.
     /// </summary>
     private async Task SendPendingInstructionAsync()
     {
@@ -563,10 +603,19 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         try
         {
+            // ── Auto VAD Switching ──
+            // Semantic VAD for address/name slots (patient, waits for semantic completion).
+            // Server VAD for quick slots like passengers, time, confirmations (low latency).
+            var vadConfig = GetVadConfigForCurrentState();
+
             await SendJsonAsync(new
             {
                 type = "session.update",
-                session = new { instructions = instruction }
+                session = new
+                {
+                    instructions = instruction,
+                    turn_detection = vadConfig
+                }
             });
 
             await SendJsonAsync(new
@@ -575,7 +624,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 response = new { modalities = new[] { "text", "audio" } }
             });
 
-            Log("📋 Instruction update sent");
+            Log($"📋 Instruction update sent (VAD: {vadConfig.type})");
         }
         catch (Exception ex)
         {
