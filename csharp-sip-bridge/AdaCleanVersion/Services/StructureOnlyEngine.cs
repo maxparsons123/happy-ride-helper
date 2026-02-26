@@ -201,10 +201,17 @@ public class StructureOnlyEngine : IExtractionService
 
     private static string BuildSystemPrompt(bool isUpdate)
     {
+        // Inject London time so the AI can resolve relative time expressions
+        var londonTz = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        var londonNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, londonTz);
+        var referenceDateTime = londonNow.ToString("dddd, dd MMMM yyyy HH:mm");
+
         if (!isUpdate)
         {
-            return """
+            return $"""
                 You are a STRICT booking data normalizer for a UK taxi company.
+
+                REFERENCE_DATETIME (London): {referenceDateTime}
 
                 You receive TWO inputs:
                 1. RAW INPUT: Slot values from caller speech-to-text (may contain STT errors)
@@ -217,6 +224,12 @@ public class StructureOnlyEngine : IExtractionService
                 • Keep addresses VERBATIM from Ada's interpretation — preserve exact house numbers, flat numbers, spelling
                 • Extract passenger count as integer (1-8)
                 • Normalize time into: "ASAP" or "YYYY-MM-DD HH:MM" (24h format, UK timezone)
+                  - "now", "straight away", "right away", "immediately", "asap" → "ASAP"
+                  - "tomorrow at 5pm" → calculate from REFERENCE_DATETIME → e.g. "2026-02-27 17:00"
+                  - "in 30 minutes" → calculate from REFERENCE_DATETIME
+                  - "half past 3" → assume PM for taxi bookings unless "am" or "morning" specified → "15:30" today or tomorrow if already passed
+                  - "Monday at 3pm" → calculate next Monday from REFERENCE_DATETIME
+                  - ALWAYS use the REFERENCE_DATETIME above to compute absolute dates/times
                 • Extract luggage info if present
                 • Extract special requests if present
 
@@ -226,13 +239,16 @@ public class StructureOnlyEngine : IExtractionService
                 • Modify address spelling or house numbers
                 • Add postcodes not explicitly provided
                 • Strip or normalize house numbers (keep "52A" as "52A", "8th" as "8th")
+                • Return raw time phrases like "tomorrow" — ALWAYS resolve to absolute datetime
 
                 Return ONLY valid JSON matching the schema.
                 """;
         }
 
-        return """
+        return $"""
             You are a STRICT booking UPDATE normalizer for a UK taxi company.
+
+            REFERENCE_DATETIME (London): {referenceDateTime}
 
             You will receive:
             • Changed raw fields (the user wants to update these)
@@ -243,6 +259,9 @@ public class StructureOnlyEngine : IExtractionService
             • Return null for fields that were NOT changed
             • Keep addresses VERBATIM — preserve exact house numbers, spelling
             • Normalize time into: "ASAP" or "YYYY-MM-DD HH:MM"
+              - Use REFERENCE_DATETIME above to compute absolute dates/times
+              - "now", "straight away", "immediately" → "ASAP"
+              - Relative phrases ("in 30 minutes", "tomorrow at 5") → resolved absolute datetime
 
             You MUST NOT:
             • Re-copy existing fields into the output
