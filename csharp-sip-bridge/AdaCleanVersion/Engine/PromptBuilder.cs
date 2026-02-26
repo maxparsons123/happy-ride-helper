@@ -50,9 +50,11 @@ public static class PromptBuilder
             - You MUST follow the latest [INSTRUCTION] exactly.
             - Ask ONLY for the current required field.
             - Never skip to later fields (e.g. passengers/time) unless instructed.
-            - Never say "booking arranged" or "taxi scheduled" during collection stages.
+            - ⚠️ NEVER say "booking arranged", "taxi scheduled", "taxi is on its way", "safe travels", or "goodbye" UNLESS the [INSTRUCTION] explicitly tells you to.
+            - ⚠️ If the [INSTRUCTION] says SILENCE or says not to speak, you MUST NOT output any speech at all.
             - If caller gives multiple details in one turn, acknowledge briefly and still follow the latest [INSTRUCTION].
             - Keep responses concise — this is a phone call, not a chat.
+            - NEVER repeat the greeting. You only greet ONCE at the start of the call.
             {callerInfo}
             """;
     }
@@ -120,19 +122,23 @@ public static class PromptBuilder
                 "Ask when they need the taxi — now (ASAP) or a specific time?",
 
             CollectionState.ReadyForExtraction =>
-                "[INSTRUCTION] All details collected. Tell the caller you're just checking availability, one moment.",
+                "[INSTRUCTION] All details collected. Say ONLY: \"Just checking availability for you, one moment please.\" " +
+                "Then STOP. Do NOT say anything else. Do NOT confirm the booking. Do NOT say goodbye.",
 
             CollectionState.Extracting =>
-                "[INSTRUCTION] Stay silent — processing in progress.",
+                "[INSTRUCTION] ⚠️ ABSOLUTE SILENCE. Do NOT speak at all. Do NOT say 'your taxi is on its way'. " +
+                "Do NOT confirm anything. Do NOT say goodbye. Say NOTHING. Wait for the next instruction.",
 
             CollectionState.Geocoding =>
-                "[INSTRUCTION] Stay silent — calculating fare.",
+                "[INSTRUCTION] ⚠️ ABSOLUTE SILENCE. Do NOT speak at all. Do NOT say 'your taxi is on its way'. " +
+                "Do NOT confirm anything. Do NOT say goodbye. Say NOTHING. Wait for the next instruction.",
 
             CollectionState.AwaitingClarification =>
                 BuildClarificationInstruction(rawData, clarification),
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
-                $"[INSTRUCTION] Present the booking summary and fare to the caller:\n" +
+                $"[INSTRUCTION] ⚠️ IMPORTANT: Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'. " +
+                $"Present the booking summary and fare NOW:\n" +
                 $"- Name: {booking.CallerName}\n" +
                 $"- Pickup: {fareResult.Pickup.Address}\n" +
                 $"- Destination: {fareResult.Destination.Address}\n" +
@@ -140,8 +146,9 @@ public static class PromptBuilder
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
                 $"- Driver ETA: {fareResult.BusyMessage}\n" +
-                "Read the fare naturally (e.g. \"that'll be around twelve pounds fifty\"). " +
-                "Ask if they'd like to proceed or change anything.",
+                "Say something like: \"So {booking.CallerName}, that's from {fareResult.Pickup.Address} to {fareResult.Destination.Address}, " +
+                "the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. " +
+                "Would you like to go ahead with this booking?\"",
 
             CollectionState.PresentingFare when booking != null =>
                 $"[INSTRUCTION] Present the booking summary to the caller:\n" +
