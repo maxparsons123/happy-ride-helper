@@ -7,7 +7,7 @@ namespace AdaCleanVersion.Services;
 /// <summary>
 /// Parsed components of a UK address string.
 /// </summary>
-public class AddressComponents
+public class ParsedAddressComponents
 {
     public string FlatOrUnit { get; set; } = "";
     public string HouseNumber { get; set; } = "";
@@ -62,9 +62,9 @@ public static class AddressParser
     /// Parse a UK address string into its components.
     /// House number "0" means not found.
     /// </summary>
-    public static AddressComponents ParseAddress(string address)
+    public static ParsedAddressComponents ParseAddress(string address)
     {
-        var components = new AddressComponents();
+        var components = new ParsedAddressComponents();
 
         if (string.IsNullOrWhiteSpace(address))
             return components;
