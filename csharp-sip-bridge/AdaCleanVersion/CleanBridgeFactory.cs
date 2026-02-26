@@ -61,8 +61,8 @@ public static class CleanBridgeFactory
         // SIP is forced to PCMA-only — always use PCMA for OpenAI too
         var codec = G711CodecType.PCMA;
 
-        // VoIPMediaSession wraps RTPSession internally — extract it for raw RTP access.
-        var rtpSession = mediaSession.RtpSession;
+        // VoIPMediaSession extends RTPSession — cast to base for OpenAiRealtimeClient.
+        RTPSession rtpSession = mediaSession;
 
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,
