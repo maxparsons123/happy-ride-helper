@@ -69,9 +69,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private volatile int _drainGateTaskId;
 
-    // Echo-tail buffer: stores audio received while mic is gated
-    private readonly List<byte[]> _micGateBuffer = new();
-    private readonly object _micGateLock = new();
+    // Ring buffer mic tail: keeps only last 10 frames (200ms) while mic is gated
+    private const int MicTailMaxFrames = 10;
+    private readonly byte[][] _micTail = new byte[MicTailMaxFrames][];
+    private int _micTailIndex;
+    private int _micTailCount;
+    private readonly object _micTailLock = new();
 
     public event Action<string>? OnLog;
 
@@ -161,7 +164,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Still the latest — ungate
         _micGated = false;
         Log("🔓 Mic ungated (dual-latch + echo guard)");
-        FlushMicGateBuffer();
+        FlushMicTail();
     }
 
     /// <summary>
@@ -330,16 +333,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         var payload = rtpPacket.Payload;
 
-        // Echo-tail: buffer audio while mic is gated
+        // Ring-buffer mic tail: keep only last 200ms while mic is gated
         if (_micGated)
         {
-            lock (_micGateLock)
+            lock (_micTailLock)
             {
-                if (_micGated) // double-check under lock
+                if (_micGated)
                 {
                     var copy = new byte[payload.Length];
                     Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
-                    _micGateBuffer.Add(copy);
+                    _micTail[_micTailIndex] = copy;
+                    _micTailIndex = (_micTailIndex + 1) % MicTailMaxFrames;
+                    if (_micTailCount < MicTailMaxFrames) _micTailCount++;
                     return;
                 }
             }
@@ -364,22 +369,38 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Flush echo-tail buffer: sends any audio captured while mic was gated.
-    /// Preserves initial syllables that would otherwise be clipped.
+    /// Flush the ring-buffer mic tail (max 10 frames / 200ms).
+    /// Preserves initial syllables without flooding OpenAI.
     /// </summary>
-    private void FlushMicGateBuffer()
+    private void FlushMicTail()
     {
-        List<byte[]> buffered;
-        lock (_micGateLock)
+        byte[][] frames;
+        int count;
+
+        lock (_micTailLock)
         {
-            if (_micGateBuffer.Count == 0) return;
-            buffered = new List<byte[]>(_micGateBuffer);
-            _micGateBuffer.Clear();
+            if (_micTailCount == 0) return;
+            count = _micTailCount;
+            frames = new byte[count][];
+            int start = (_micTailIndex - count + MicTailMaxFrames) % MicTailMaxFrames;
+            for (int i = 0; i < count; i++)
+                frames[i] = _micTail[(start + i) % MicTailMaxFrames];
+            _micTailCount = 0;
         }
 
-        Log($"🎤 Flushing {buffered.Count} echo-tail frames");
-        foreach (var chunk in buffered)
-            ForwardToOpenAi(chunk);
+        Log($"🎤 Flushing {count} mic tail frames");
+        foreach (var f in frames)
+            ForwardToOpenAi(f);
+    }
+
+    /// <summary>Clear the ring buffer (used on barge-in).</summary>
+    private void ClearMicTail()
+    {
+        lock (_micTailLock)
+        {
+            _micTailCount = 0;
+            _micTailIndex = 0;
+        }
     }
 
     // ─── OpenAI → RTP (AI Audio Out via Playout) ────────────
@@ -457,7 +478,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 Interlocked.Increment(ref _drainGateTaskId); // kill pending echo guard
                 _micGated = false;
                 _playout.Clear();
-                lock (_micGateLock) _micGateBuffer.Clear();
+                ClearMicTail();
                 Log("🎤 Barge-in — playout cleared, mic ungated immediately");
                 OnBargeIn?.Invoke();
                 break;
