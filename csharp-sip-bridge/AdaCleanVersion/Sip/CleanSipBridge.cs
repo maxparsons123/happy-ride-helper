@@ -36,6 +36,7 @@ public class CleanSipBridge : IDisposable
     private readonly IExtractionService _extractionService;
     private readonly FareGeocodingService _fareService;
     private readonly CallerLookupService _callerLookup;
+    private readonly IcabbiBookingService? _icabbiService;
     private readonly ConcurrentDictionary<string, ActiveCall> _activeCalls = new();
 
     private SIPTransport? _sipTransport;
@@ -74,6 +75,15 @@ public class CleanSipBridge : IDisposable
         _fareService = fareService;
         _callerLookup = callerLookup;
         _circuitBreakerThreshold = Math.Max(1, settings.Rtp.CircuitBreakerThreshold);
+
+        // Wire iCabbi if enabled and keys are present
+        if (settings.Icabbi.Enabled && !string.IsNullOrWhiteSpace(settings.Icabbi.AppKey))
+        {
+            var icabbiLogger = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Debug))
+                .CreateLogger<IcabbiBookingService>();
+            _icabbiService = new IcabbiBookingService(icabbiLogger, settings.Icabbi, settings.Supabase);
+            Log("🚕 iCabbi dispatch integration enabled");
+        }
     }
 
     /// <summary>Internal: called by factory to proxy audio events from OpenAiRealtimeClient.</summary>
@@ -265,7 +275,8 @@ public class CleanSipBridge : IDisposable
             companyName: _settings.Taxi.CompanyName,
             extractionService: _extractionService,
             fareService: _fareService,
-            callerContext: context
+            callerContext: context,
+            icabbiService: _icabbiService
         );
 
         session.OnLog += msg => Log(msg);
