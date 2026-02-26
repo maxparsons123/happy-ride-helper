@@ -141,18 +141,32 @@ public static class PromptBuilder
             return state switch
             {
                 CollectionState.CollectingPassengers =>
-                    "[INSTRUCTION] I didn't catch the number of passengers. Ask again: \"Sorry, how many passengers will there be?\"",
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the number of passengers. You MUST ask again: " +
+                    "\"Sorry, how many passengers will there be?\" Do NOT say anything else. Do NOT offer assistance. " +
+                    "Do NOT say goodbye. ONLY ask for the passenger count.",
                 CollectionState.CollectingName =>
-                    "[INSTRUCTION] I didn't catch the name. Ask again: \"Sorry, could I have your name for the booking?\"",
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the name. You MUST ask again: " +
+                    "\"Sorry, could I have your name for the booking?\" Do NOT say anything else.",
                 CollectionState.CollectingPickup =>
-                    "[INSTRUCTION] I didn't catch the pickup address. Ask again: \"Sorry, could you repeat your pickup address please?\"",
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the pickup address. You MUST ask again: " +
+                    "\"Sorry, could you repeat your pickup address please?\" Do NOT say anything else.",
                 CollectionState.CollectingDestination =>
-                    "[INSTRUCTION] I didn't catch the destination. Ask again: \"Sorry, could you repeat your destination please?\"",
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the destination. You MUST ask again: " +
+                    "\"Sorry, could you repeat your destination please?\" Do NOT say anything else.",
                 CollectionState.CollectingPickupTime =>
-                    "[INSTRUCTION] I didn't catch when you need the taxi. Ask again: \"Sorry, when do you need the taxi — now or at a specific time?\"",
-                _ => $"[INSTRUCTION] I didn't catch that. Please ask the caller to repeat."
+                    "[INSTRUCTION] ⛔ MANDATORY: I didn't catch when you need the taxi. You MUST ask again: " +
+                    "\"Sorry, when do you need the taxi — now or at a specific time?\" Do NOT say anything else.",
+                _ => $"[INSTRUCTION] ⛔ MANDATORY: I didn't catch that. Ask the caller to repeat. Do NOT say anything else."
             };
         }
+
+        // Hard enforcement prefix — injected into every collecting state
+        const string SLOT_GUARD =
+            "⛔ CRITICAL: You are collecting booking details. The booking is NOT complete. " +
+            "Do NOT say 'if you need any more assistance', 'is there anything else', 'have a good day', " +
+            "'I've noted that', 'safe travels', or ANY closing/farewell phrase. " +
+            "Do NOT offer general assistance. Do NOT say the booking is confirmed. " +
+            "You MUST ask ONLY for the specific field described below. NOTHING ELSE. ";
 
         return state switch
         {
@@ -165,16 +179,19 @@ public static class PromptBuilder
                 "[INSTRUCTION] Greet the caller warmly and ask for their name.",
 
             CollectionState.CollectingName =>
-                "[INSTRUCTION] Ask the caller for their name.",
+                $"[INSTRUCTION] {SLOT_GUARD}Ask the caller for their name. " +
+                "REQUIRED FIELDS REMAINING: name, pickup, destination, passengers, pickup time.",
 
             CollectionState.CollectingPickup when context?.IsReturningCaller == true && context.LastPickup != null =>
-                $"[INSTRUCTION] Ask for their PICKUP address. " +
+                $"[INSTRUCTION] {SLOT_GUARD}{NameAck(rawData)} Ask for their PICKUP address. " +
                 $"Their last pickup was \"{context.LastPickup}\" — you can offer it as a suggestion. " +
-                "They must include a house number if it's a street address.",
+                "They must include a house number if it's a street address. " +
+                "REQUIRED FIELDS REMAINING: pickup, destination, passengers, pickup time.",
 
             CollectionState.CollectingPickup =>
-                $"[INSTRUCTION] {NameAck(rawData)} Ask for their PICKUP address. " +
-                "They must include a house number if it's a street address.",
+                $"[INSTRUCTION] {SLOT_GUARD}{NameAck(rawData)} Ask for their PICKUP address. " +
+                "They must include a house number if it's a street address. " +
+                "REQUIRED FIELDS REMAINING: pickup, destination, passengers, pickup time.",
 
             CollectionState.VerifyingPickup =>
                 $"[INSTRUCTION] Read back the pickup address as \"{rawData.PickupRaw}\" and say " +
@@ -184,13 +201,15 @@ public static class PromptBuilder
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
-                $"[INSTRUCTION] Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
-                "Now ask for their DESTINATION address.",
+                "Now ask for their DESTINATION address. " +
+                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.CollectingDestination =>
-                $"[INSTRUCTION] Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
-                "Now ask for their DESTINATION address.",
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
+                "Now ask for their DESTINATION address. " +
+                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
 
             CollectionState.VerifyingDestination =>
                 $"[INSTRUCTION] Read back the destination address as \"{rawData.DestinationRaw}\" and say " +
@@ -200,13 +219,15 @@ public static class PromptBuilder
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingPassengers =>
-                $"[INSTRUCTION] Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
+                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
                 "Ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
-                "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\").",
+                "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
+                "REQUIRED FIELDS REMAINING: passengers, pickup time.",
 
             CollectionState.CollectingPickupTime =>
-                $"[INSTRUCTION] {rawData.PassengersRaw} passenger(s). " +
-                "Ask when they need the taxi — now (ASAP) or a specific time?",
+                $"[INSTRUCTION] {SLOT_GUARD}{rawData.PassengersRaw} passenger(s) confirmed. " +
+                "Ask when they need the taxi — now (ASAP) or a specific time? " +
+                "REQUIRED FIELD REMAINING: pickup time. This is the LAST field before we can check availability.",
 
             CollectionState.ReadyForExtraction =>
                 "[INSTRUCTION] All details collected. Say ONLY: \"Just checking availability for you, one moment please.\" " +
@@ -224,7 +245,7 @@ public static class PromptBuilder
                 BuildClarificationInstruction(rawData, clarification),
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
-                $"[INSTRUCTION] ⚠️ IMPORTANT: Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'. " +
+                $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'. " +
                 $"Present the booking summary and fare NOW:\n" +
                 $"- Name: {booking.CallerName}\n" +
                 $"- Pickup: {fareResult.Pickup.Address}\n" +
@@ -275,7 +296,8 @@ public static class PromptBuilder
             CollectionState.Ending =>
                 "[INSTRUCTION] Say goodbye warmly and end the conversation.",
 
-            _ => "[INSTRUCTION] Continue the conversation naturally."
+            _ => "[INSTRUCTION] ⛔ MANDATORY: The booking is NOT complete. Do NOT offer general assistance. " +
+                 "Do NOT say goodbye. Ask the caller what information they'd like to provide next."
         };
     }
 
