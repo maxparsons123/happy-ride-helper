@@ -58,6 +58,11 @@ public static class SlotValidator
         };
     }
 
+    // Patterns that are not names — sentences, phrases starting with common words
+    private static readonly Regex SentencePattern = new(
+        @"^(it'?s|that'?s|i'?m|my name|i am|i need|i want|can i|could you|i'd like)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private static string? ValidateName(string lower)
     {
         // Reject greetings used as names
@@ -67,6 +72,10 @@ public static class SlotValidator
         // Reject if it's a non-address conversational filler
         if (NonAddressPattern.IsMatch(lower))
             return "conversational_not_name";
+
+        // Reject sentences/phrases (real names don't start with "it's", "that's", etc.)
+        if (SentencePattern.IsMatch(lower))
+            return "sentence_not_name";
 
         // Must be at least 2 chars
         if (lower.Length < 2)
