@@ -625,6 +625,32 @@ public class CleanCallSession
                 }
                 break;
 
+            case CollectionState.PresentingFare:
+                if (lower.Contains("yes") || lower.Contains("please") || lower.Contains("go ahead") ||
+                    lower.Contains("confirm") || lower.Contains("book") || lower.Contains("sure") ||
+                    lower.Contains("yeah") || lower.Contains("yep"))
+                {
+                    Log($"Fare accepted — confirming booking");
+                    ConfirmBooking();
+                }
+                else if (lower.Contains("no") || lower.Contains("cancel") || lower.Contains("don't") ||
+                         lower.Contains("never mind"))
+                {
+                    Log($"Fare rejected — ending call");
+                    EndCall();
+                }
+                else if (lower.Contains("change") || lower.Contains("wrong") || lower.Contains("actually") ||
+                         lower.Contains("different"))
+                {
+                    Log($"Caller wants to change something");
+                    EmitCurrentInstruction(); // Let AI ask what they want to change
+                }
+                else
+                {
+                    EmitCurrentInstruction();
+                }
+                break;
+
             case CollectionState.AwaitingPaymentChoice:
                 if (lower.Contains("card")) AcceptPayment("card");
                 else if (lower.Contains("cash") || lower.Contains("meter")) AcceptPayment("meter");
