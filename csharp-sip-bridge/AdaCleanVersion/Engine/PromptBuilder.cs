@@ -117,7 +117,9 @@ public static class PromptBuilder
             CollectionState.VerifyingPickup =>
                 $"[INSTRUCTION] Read back the pickup address as \"{rawData.PickupRaw}\" and say " +
                 "\"let me just confirm that for you\". Then STOP and wait silently. " +
-                "Do NOT alter or normalize the address — read it back exactly as shown.",
+                "Do NOT alter or normalize the address — read it back exactly as shown. " +
+                "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
+                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
                 $"[INSTRUCTION] Pickup confirmed as \"{verifiedPickup?.Address ?? rawData.PickupRaw}\". " +
@@ -131,7 +133,9 @@ public static class PromptBuilder
             CollectionState.VerifyingDestination =>
                 $"[INSTRUCTION] Read back the destination address as \"{rawData.DestinationRaw}\" and say " +
                 "\"let me just confirm that for you\". Then STOP and wait silently. " +
-                "Do NOT alter or normalize the address — read it back exactly as shown.",
+                "Do NOT alter or normalize the address — read it back exactly as shown. " +
+                "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
+                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingPassengers =>
                 $"[INSTRUCTION] Destination confirmed as \"{verifiedDestination?.Address ?? rawData.DestinationRaw}\". " +
