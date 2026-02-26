@@ -202,6 +202,19 @@ public static class PromptBuilder
             "Do NOT offer general assistance. Do NOT say the booking is confirmed. " +
             "You MUST ask ONLY for the specific field described below. NOTHING ELSE. ";
 
+        // Build dynamic remaining fields based on what's actually missing
+        string RemainingFields()
+        {
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(rawData.PickupRaw)) missing.Add("pickup");
+            if (string.IsNullOrWhiteSpace(rawData.DestinationRaw)) missing.Add("destination");
+            if (string.IsNullOrWhiteSpace(rawData.PassengersRaw)) missing.Add("passengers");
+            if (string.IsNullOrWhiteSpace(rawData.PickupTimeRaw)) missing.Add("pickup time");
+            return missing.Count > 0
+                ? $"REQUIRED FIELDS REMAINING: {string.Join(", ", missing)}."
+                : "All fields collected.";
+        }
+
         return state switch
         {
             // Greeting states are now handled via BuildGreetingMessage — these are fallbacks
@@ -214,18 +227,18 @@ public static class PromptBuilder
 
             CollectionState.CollectingName =>
                 $"[INSTRUCTION] {SLOT_GUARD}Ask the caller for their name. " +
-                "REQUIRED FIELDS REMAINING: name, pickup, destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingPickup when context?.IsReturningCaller == true && context.LastPickup != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}{NameAck(rawData)} Ask for their PICKUP address. " +
                 $"Their last pickup was \"{context.LastPickup}\" — you can offer it as a suggestion. " +
                 "They must include a house number if it's a street address. " +
-                "REQUIRED FIELDS REMAINING: pickup, destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingPickup =>
                 $"[INSTRUCTION] {SLOT_GUARD}{NameAck(rawData)} Ask for their PICKUP address. " +
                 "They must include a house number if it's a street address. " +
-                "REQUIRED FIELDS REMAINING: pickup, destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.VerifyingPickup when isRecalculating =>
                 "[INSTRUCTION] The caller just changed their pickup address. " +
@@ -271,25 +284,25 @@ public static class PromptBuilder
                 $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
                 "Ask for their DESTINATION address. Do NOT repeat the pickup address again — it was already confirmed. " +
-                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingDestination when verifiedPickup != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed. " +
                 "Ask for their DESTINATION address. Do NOT repeat the pickup address again — it was already confirmed. " +
-                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}Pickup address verified. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
                 "Then ask for their DESTINATION address. " +
                 "Do NOT read any raw transcript text back to the caller. " +
-                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingDestination =>
                 $"[INSTRUCTION] {SLOT_GUARD}Pickup address verified. " +
                 "Ask for their DESTINATION address. " +
                 "Do NOT read any raw transcript text back to the caller. " +
-                "REQUIRED FIELDS REMAINING: destination, passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.VerifyingDestination when isRecalculating =>
                 "[INSTRUCTION] The caller just changed their destination address. " +
@@ -335,19 +348,19 @@ public static class PromptBuilder
                 "Ask how many passengers. Do NOT repeat the destination address again — it was already confirmed. " +
                 "IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
-                "REQUIRED FIELDS REMAINING: passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingPassengers =>
                 $"[INSTRUCTION] {SLOT_GUARD}Destination address verified. " +
                 "Ask how many passengers. IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
                 "Do NOT read any raw transcript text back to the caller. " +
-                "REQUIRED FIELDS REMAINING: passengers, pickup time.",
+                $"{RemainingFields()}",
 
             CollectionState.CollectingPickupTime =>
                 $"[INSTRUCTION] {SLOT_GUARD}{rawData.PassengersRaw} passenger(s) confirmed. " +
                 "Ask when they need the taxi — now (ASAP) or a specific time? " +
-                "REQUIRED FIELD REMAINING: pickup time. This is the LAST field before we can check availability.",
+                $"{RemainingFields()} This is the LAST field before we can check availability.",
 
             CollectionState.ReadyForExtraction =>
                 "[INSTRUCTION] All details collected. Say ONLY: \"Just checking availability for you, one moment please.\" " +
