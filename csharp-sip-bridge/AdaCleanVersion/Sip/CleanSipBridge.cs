@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 
 namespace AdaCleanVersion.Sip;
 
@@ -122,7 +123,7 @@ public class CleanSipBridge : IDisposable
 
         foreach (var call in _activeCalls.Values)
         {
-            try { call.UserAgent?.Hangup(); }
+            try { call.UserAgent?.Hangup(false); }
             catch { /* best effort */ }
         }
         _activeCalls.Clear();
@@ -183,16 +184,16 @@ public class CleanSipBridge : IDisposable
         string callerName)
     {
         // Create SIPSorcery user agent for this call
-        var uas = new SIPServerUserAgent(_sipTransport, null, inviteRequest, null, null);
+        var uasTx = new UASInviteTransaction(_sipTransport, inviteRequest, null);
+        var uas = new SIPServerUserAgent(_sipTransport, null, uasTx, null);
 
         // Create RTP session with configured G.711 codec
         var codec = G711Codec.Parse(_settings.Audio.PreferredCodec);
         var rtpSession = new RTPSession(false, false, false);
         var audioCodecEnum = codec == G711CodecType.PCMA ? AudioCodecsEnum.PCMA : AudioCodecsEnum.PCMU;
         var payloadId = G711Codec.PayloadType(codec);
-        var audioFormat = new SDPAudioVideoMediaFormat(
-            new AudioFormat(audioCodecEnum, payloadId, 8000));
-        var audioTrack = new MediaStreamTrack(audioFormat.ToSdpFormat());
+        var audioFormat = new AudioFormat(audioCodecEnum, payloadId, 8000);
+        var audioTrack = new MediaStreamTrack(audioFormat);
         rtpSession.addTrack(audioTrack);
 
         // Look up returning caller
@@ -253,7 +254,7 @@ public class CleanSipBridge : IDisposable
         _activeCalls[callId] = activeCall;
 
         // Accept the call — sends 200 OK with SDP
-        uas.Answer(SIPResponseStatusCodesEnum.Ok, null, null, rtpSession.CreateAnswer(null));
+        uas.SetResult(SIPResponseStatusCodesEnum.Ok, null, null, null, rtpSession.CreateAnswer(null).ToString());
 
         // Wire RTP lifecycle events
         rtpSession.OnTimeout += (mediaType) =>
@@ -265,11 +266,11 @@ public class CleanSipBridge : IDisposable
                 timedOut.RtpSession?.Close(null);
                 OnCallEnded?.Invoke(callId);
             }
-            try { uas.Hangup(); } catch { }
+            try { uas.Hangup(false); } catch { }
         };
 
-        // Wire BYE / hangup
-        uas.OnCallHungup += (dialogue) =>
+        // Wire BYE / hangup via the transaction
+        uasTx.CDR.Hungup += (cdr) =>
         {
             if (_activeCalls.TryRemove(callId, out var removed))
             {
@@ -338,9 +339,8 @@ public class CleanSipBridge : IDisposable
 
         try
         {
-            call.RtpSession.SendAudioFrame(
+            call.RtpSession.SendAudio(
                 (uint)(duration * 8), // timestamp increment for 8kHz G.711
-                call.PayloadType,
                 g711Payload);
 
             // Reset on success
@@ -361,7 +361,7 @@ public class CleanSipBridge : IDisposable
                     tripped.RtpSession?.Close(null);
                     OnCallEnded?.Invoke(callId);
                 }
-                try { call.UserAgent?.Hangup(); } catch { }
+                try { call.UserAgent?.Hangup(false); } catch { }
             }
         }
     }
@@ -373,7 +373,7 @@ public class CleanSipBridge : IDisposable
     {
         if (_activeCalls.TryGetValue(callId, out var call))
         {
-            call.UserAgent?.Hangup();
+            call.UserAgent?.Hangup(false);
         }
     }
 }
