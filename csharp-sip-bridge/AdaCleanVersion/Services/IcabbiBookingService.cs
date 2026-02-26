@@ -62,6 +62,119 @@ public sealed class IcabbiBookingService : IDisposable
         => $"{_settings.TenantBase.TrimEnd('/')}/passenger/tracking/{journeyId}";
 
     // ═══════════════════════════════════════════
+    //  GET FARE QUOTE
+    // ═══════════════════════════════════════════
+
+    /// <summary>
+    /// Get a fare quote from iCabbi for the given pickup/destination coordinates.
+    /// Returns the quoted fare string (e.g. "£12.50") or null if unavailable.
+    /// </summary>
+    public async Task<IcabbiFareQuote?> GetFareQuoteAsync(
+        FareResult fareData,
+        int passengers = 1,
+        CancellationToken ct = default)
+    {
+        if (!_settings.Enabled)
+        {
+            _logger.LogInformation("[iCabbi] Disabled — skipping fare quote");
+            return null;
+        }
+
+        try
+        {
+            _logger.LogInformation("[iCabbi] Requesting fare quote...");
+
+            var payload = new
+            {
+                site_id = _settings.SiteId > 0 ? _settings.SiteId : 1039,
+                pickup_location = new
+                {
+                    lat = fareData.Pickup.Lat,
+                    lng = fareData.Pickup.Lon,
+                    address = fareData.Pickup.Address
+                },
+                destination_location = new
+                {
+                    lat = fareData.Destination.Lat,
+                    lng = fareData.Destination.Lon,
+                    address = fareData.Destination.Address
+                },
+                passenger_count = passengers,
+                vehicle_group = passengers switch
+                {
+                    <= 4 => "Taxi",
+                    <= 6 => "Estate",
+                    _ => "MPV"
+                }
+            };
+
+            var json = JsonSerializer.Serialize(payload, JsonOpts);
+            _logger.LogInformation("[iCabbi] Fare quote payload: {Json}", Truncate(json));
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{BaseUrl}v2/fare-estimate")
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+            AddAuthHeaders(req);
+
+            var resp = await _client.SendAsync(req, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            _logger.LogInformation("[iCabbi] Fare quote response {Status}: {Body}", resp.StatusCode, Truncate(body));
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[iCabbi] Fare quote failed ({Status}), falling back to local fare", resp.StatusCode);
+                return null;
+            }
+
+            var root = JsonNode.Parse(body);
+            if (root == null) return null;
+
+            // iCabbi fare response parsing — adapt to actual API shape
+            var fareNode = root["body"]?["fare"] ?? root["fare"] ?? root["body"];
+            if (fareNode == null) return null;
+
+            var amount = fareNode["amount"]?.GetValue<decimal>()
+                      ?? fareNode["total"]?.GetValue<decimal>()
+                      ?? fareNode["fare"]?.GetValue<decimal>();
+
+            var currency = fareNode["currency"]?.GetValue<string>() ?? "GBP";
+            var eta = fareNode["eta"]?.GetValue<int>()
+                   ?? fareNode["eta_minutes"]?.GetValue<int>();
+            var distance = fareNode["distance"]?.GetValue<double>()
+                        ?? fareNode["distance_miles"]?.GetValue<double>();
+
+            if (amount == null)
+            {
+                _logger.LogWarning("[iCabbi] No fare amount in response");
+                return null;
+            }
+
+            var quote = new IcabbiFareQuote
+            {
+                Amount = amount.Value,
+                Currency = currency,
+                FareDisplay = $"£{amount.Value:F2}",
+                FareSpoken = $"{amount.Value:F2} pounds",
+                EtaMinutes = eta,
+                DistanceMiles = distance,
+                VehicleGroup = payload.vehicle_group,
+                Source = "icabbi"
+            };
+
+            _logger.LogInformation("[iCabbi] ✅ Fare quote: {Fare}, ETA: {Eta}min",
+                quote.FareDisplay, quote.EtaMinutes);
+
+            return quote;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[iCabbi] GetFareQuoteAsync error");
+            return null;
+        }
+    }
+
+    // ═══════════════════════════════════════════
     //  CREATE & DISPATCH BOOKING
     // ═══════════════════════════════════════════
 
@@ -302,4 +415,17 @@ public sealed class IcabbiBookingService : IDisposable
 public record IcabbiBookingResult(bool Success, string? JourneyId, string? TrackingUrl, string Message)
 {
     public static IcabbiBookingResult Fail(string message) => new(false, null, null, message);
+}
+
+/// <summary>iCabbi fare quote result.</summary>
+public sealed class IcabbiFareQuote
+{
+    public decimal Amount { get; init; }
+    public string Currency { get; init; } = "GBP";
+    public string FareDisplay { get; init; } = "";
+    public string FareSpoken { get; init; } = "";
+    public int? EtaMinutes { get; init; }
+    public double? DistanceMiles { get; init; }
+    public string? VehicleGroup { get; init; }
+    public string Source { get; init; } = "icabbi";
 }

@@ -4,7 +4,7 @@ namespace AdaCleanVersion.Models;
 /// Result from the fare/geocoding pipeline (address-dispatch edge function).
 /// Contains geocoded coordinates, fare, ETA, and zone information.
 /// </summary>
-public sealed class FareResult
+public sealed record FareResult
 {
     public required GeocodedAddress Pickup { get; init; }
     public required GeocodedAddress Destination { get; init; }
