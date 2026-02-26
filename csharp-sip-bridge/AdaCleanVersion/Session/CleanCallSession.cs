@@ -116,6 +116,20 @@ public class CleanCallSession
             return;
         }
 
+        // ── Priority 0.5: If verifying an address and caller speaks, treat as correction ──
+        // When in VerifyingPickup/VerifyingDestination, the caller is hearing Ada's readback.
+        // If they speak, they're correcting the address being verified — NOT providing the next slot.
+        // Without this gate, NextMissingSlot() would return "destination" during VerifyingPickup,
+        // causing the corrected pickup to be stored as destination.
+        if (_engine.State == CollectionState.VerifyingPickup || 
+            _engine.State == CollectionState.VerifyingDestination)
+        {
+            var verifyingSlot = _engine.State == CollectionState.VerifyingPickup ? "pickup" : "destination";
+            Log($"Caller spoke during {_engine.State}: \"{transcript}\" — treating as correction to {verifyingSlot}");
+            await CorrectSlotAsync(verifyingSlot, transcript, ct);
+            return;
+        }
+
         // Step 1: Check for correction intent BEFORE normal slot processing
         // Use AI (Gemini via burst-dispatch) for reliable slot detection,
         // with regex CorrectionDetector as a fast fallback if AI is unavailable.
