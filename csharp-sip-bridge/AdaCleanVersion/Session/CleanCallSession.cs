@@ -150,18 +150,14 @@ public class CleanCallSession
         var nextSlot = _engine.AcceptSlotValue(currentSlot, valueToStore);
 
         // For address slots, AcceptSlotValue transitions to VerifyingPickup/VerifyingDestination.
-        // Trigger inline geocoding before moving to the next question.
-        if (_engine.State == CollectionState.VerifyingPickup)
+        // Emit instruction telling Ada to read back the address — geocoding is triggered
+        // AFTER Ada's readback arrives via ProcessAdaTranscript, giving us both the raw
+        // caller STT and Ada's interpretation to send to address-dispatch.
+        if (_engine.State == CollectionState.VerifyingPickup ||
+            _engine.State == CollectionState.VerifyingDestination)
         {
-            EmitCurrentInstruction(); // "One moment, confirming that address..."
-            await RunInlineGeocodeAsync("pickup", valueToStore, ct);
-            return;
-        }
-        if (_engine.State == CollectionState.VerifyingDestination)
-        {
-            EmitCurrentInstruction(); // "One moment, confirming that address..."
-            await RunInlineGeocodeAsync("destination", valueToStore, ct);
-            return;
+            EmitCurrentInstruction(); // "Read back the address... let me confirm that"
+            return; // Geocoding will be triggered when Ada's readback arrives
         }
 
         if (nextSlot == null && _engine.State == CollectionState.ReadyForExtraction)
@@ -181,22 +177,45 @@ public class CleanCallSession
     /// Called from OpenAiRealtimeClient on response.audio_transcript.done.
     /// 
     /// NOTE: We no longer use AdaSlotRefiner to overwrite raw slot values.
-    /// The refiner was causing slot corruption because:
-    ///   1. Ada's response often mentions the caller's name ("Thank you, Max") which
-    ///      the NamePattern would extract and overwrite the CURRENT slot (e.g., pickup).
-    ///   2. Ada's response wraps addresses in context ("your destination as 7 Russell Street")
-    ///      which the AddressConfirmPattern would extract with the wrapper text.
-    ///   3. With Task.Run decoupling, timing of _lastSlotCollected is unpredictable.
-    /// 
     /// Instead, Ada's transcripts are accumulated and fed to StructureOnlyEngine
     /// as extraction context, which does the proper semantic parsing.
+    /// 
+    /// ADDITIONALLY: When we're in VerifyingPickup/VerifyingDestination, Ada's readback
+    /// triggers inline geocoding with BOTH the raw caller STT and Ada's interpretation.
+    /// This gives the geocoder two signals to reconcile for maximum accuracy.
+    /// </summary>
+    public async Task ProcessAdaTranscriptAsync(string adaText, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(adaText)) return;
+
+        // Store for extraction context
+        _adaTranscripts.Add(adaText);
+
+        // If we're in a verification state, Ada just read back the address.
+        // Now trigger geocoding with both the raw caller STT and Ada's readback.
+        if (_engine.State == CollectionState.VerifyingPickup)
+        {
+            var rawAddress = _engine.RawData.PickupRaw ?? "";
+            Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\")");
+            await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText);
+            return;
+        }
+        if (_engine.State == CollectionState.VerifyingDestination)
+        {
+            var rawAddress = _engine.RawData.DestinationRaw ?? "";
+            Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\")");
+            await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText);
+            return;
+        }
+    }
+
+    /// <summary>
+    /// Synchronous version for backward compatibility — fire-and-forget the async version.
     /// </summary>
     public void ProcessAdaTranscript(string adaText)
     {
         if (string.IsNullOrWhiteSpace(adaText)) return;
-
-        // Store for extraction context only — no slot overwriting
-        _adaTranscripts.Add(adaText);
+        _ = ProcessAdaTranscriptAsync(adaText);
     }
 
     /// <summary>
@@ -273,7 +292,7 @@ public class CleanCallSession
     /// Ada pauses ("one moment, confirming that address"), geocodes, then reads back
     /// the verified address before asking for the next slot.
     /// </summary>
-    private async Task RunInlineGeocodeAsync(string field, string rawAddress, CancellationToken ct)
+    private async Task RunInlineGeocodeAsync(string field, string rawAddress, CancellationToken ct, string? adaReadback = null)
     {
         if (_fareService == null)
         {
@@ -285,8 +304,8 @@ public class CleanCallSession
 
         try
         {
-            Log($"Inline geocoding {field}: \"{rawAddress}\"");
-            var geocoded = await _fareService.GeocodeAddressAsync(rawAddress, field, CallerId, ct);
+            Log($"Inline geocoding {field}: raw=\"{rawAddress}\", adaReadback=\"{adaReadback ?? "none"}\"");
+            var geocoded = await _fareService.GeocodeAddressAsync(rawAddress, field, CallerId, ct, adaReadback);
 
             if (geocoded == null)
             {

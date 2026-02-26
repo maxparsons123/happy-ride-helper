@@ -52,19 +52,21 @@ public class FareGeocodingService
         string address,
         string field, // "pickup" or "destination"
         string? callerPhone = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? adaReadback = null)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(10000); // 10s timeout for single address
 
         try
         {
-            _logger.LogInformation("[FareGeo] Inline geocode ({Field}): \"{Addr}\"", field, address);
+            _logger.LogInformation("[FareGeo] Inline geocode ({Field}): raw=\"{Addr}\", adaReadback=\"{Readback}\"",
+                field, address, adaReadback ?? "none");
 
-            // Use address-dispatch with a dummy for the other field
+            // Build payload with both raw STT and Ada's readback for Gemini reconciliation
             var payload = field == "pickup"
-                ? new { pickup = address, destination = "PLACEHOLDER_SKIP", phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null }
-                : new { pickup = "PLACEHOLDER_SKIP", destination = address, phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null };
+                ? new { pickup = address, destination = "PLACEHOLDER_SKIP", phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null, ada_readback = adaReadback }
+                : new { pickup = "PLACEHOLDER_SKIP", destination = address, phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null, ada_readback = adaReadback };
 
             var url = $"{_supabaseUrl}/functions/v1/address-dispatch";
 
