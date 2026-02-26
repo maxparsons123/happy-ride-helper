@@ -1641,8 +1641,17 @@ public class CleanCallSession
     /// </summary>
     private static bool HasCorrectionSignal(string transcript)
     {
-        var lower = transcript.ToLowerInvariant();
-        return lower.Contains("actually") || lower.Contains("no wait") || lower.Contains("no no") ||
+        // Normalize punctuation so "No, no" matches "no no" patterns
+        var lower = System.Text.RegularExpressions.Regex.Replace(
+            transcript.ToLowerInvariant(), @"[,\.\!\?;:]+", " ").Trim();
+        // Also collapse multiple spaces
+        lower = System.Text.RegularExpressions.Regex.Replace(lower, @"\s+", " ");
+        
+        // Leading "no" is a strong correction signal (e.g., "no Morrison's Supermarket")
+        var startsWithNo = lower.StartsWith("no ") || lower == "no";
+        
+        return startsWithNo ||
+               lower.Contains("actually") || lower.Contains("no wait") || lower.Contains("no no") ||
                lower.Contains("sorry") || lower.Contains("i meant") || lower.Contains("i mean") ||
                lower.Contains("change") || lower.Contains("wrong") || lower.Contains("not that") ||
                lower.Contains("correct") || lower.Contains("instead") || lower.Contains("it's not") ||
