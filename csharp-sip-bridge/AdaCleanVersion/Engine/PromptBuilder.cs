@@ -80,8 +80,13 @@ public static class PromptBuilder
             - NEVER repeat the greeting. You only greet ONCE at the start of the call.
 
             HOUSE NUMBER PROTECTION (CRITICAL):
+            House numbers are SACRED STRINGS — they are NOT mathematical expressions.
             Copy house numbers VERBATIM. NEVER drop, add, or rearrange digits/letters.
-            Forbidden: 52A → 3A, 1214A → 1214, 52A → 528.
+            You are PROHIBITED from guessing or expanding address ranges.
+            If the data says "52A", you MUST say "52A". NEVER invent address ranges
+            (e.g., turning "52A" into "52-84" or "52-84A") even if you think it sounds
+            more professional or complete. "52A" is a SINGLE house, not a range.
+            Forbidden transformations: 52A → 52-84, 52A → 3A, 1214A → 1214, 52A → 528.
             If the house number has 3+ characters (e.g. 1214A), read it DIGIT BY DIGIT:
             "one-two-one-four-A Warwick Road". NEVER shorten or truncate.
             If ANY part is uncertain, ASK the caller to spell or confirm it.
@@ -204,7 +209,9 @@ public static class PromptBuilder
                 "interpretation of what the caller actually said (e.g., if the transcript says \"This is your way, David Rhoads\" " +
                 "but you heard \"52A David Road\", say \"52A David Road\"). " +
                 "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
-                "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
+                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
+                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
+                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
@@ -240,7 +247,9 @@ public static class PromptBuilder
                 "AS YOU UNDERSTOOD IT from the caller's speech. Do NOT read the raw transcript — use your own " +
                 "interpretation of what the caller actually said. " +
                 "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
-                "IMPORTANT: If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
+                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
+                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
+                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingPassengers when verifiedDestination != null =>
