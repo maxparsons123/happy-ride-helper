@@ -214,6 +214,16 @@ public static class PromptBuilder
         var fieldLabel = info.AmbiguousField == "pickup" ? "pickup" : "destination";
         var rawValue = info.AmbiguousField == "pickup" ? data.PickupRaw : data.DestinationRaw;
 
+        // If FareGeo provided a specific clarification message (e.g., "Did you mean David Road?"),
+        // use that instead of the generic "Which area?" question
+        var hasSpecificMessage = !string.IsNullOrWhiteSpace(info.Message)
+            && !info.Message.Equals("Which area is that in?", StringComparison.OrdinalIgnoreCase);
+
+        if (hasSpecificMessage)
+        {
+            return $"[INSTRUCTION] Ask the caller about their {fieldLabel} address: {info.Message}";
+        }
+
         // Attempt 1: just ask "which area?"
         // Attempt 2+: if alternatives available, offer them
         if (info.Attempt <= 1 || info.Alternatives == null || info.Alternatives.Count == 0)

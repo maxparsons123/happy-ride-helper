@@ -227,7 +227,7 @@ public class CallStateEngine
     }
 
     /// <summary>
-    /// Caller provided clarification — update the affected slot and re-run geocoding.
+    /// Caller provided clarification — update the affected slot and re-geocode (NOT re-extract).
     /// </summary>
     public void AcceptClarification(string clarifiedValue)
     {
@@ -252,9 +252,13 @@ public class CallStateEngine
             RawData.SetSlot("destination", $"{existing}, {clarifiedValue}");
         }
 
+        // Transition back to re-verify (re-geocode) the clarified field — NOT to ReadyForExtraction
+        var targetState = field == "pickup"
+            ? CollectionState.VerifyingPickup
+            : CollectionState.VerifyingDestination;
+
         PendingClarification = null;
-        // Go back to ReadyForExtraction → re-extract → re-geocode
-        TransitionTo(CollectionState.ReadyForExtraction);
+        TransitionTo(targetState);
     }
 
     /// <summary>

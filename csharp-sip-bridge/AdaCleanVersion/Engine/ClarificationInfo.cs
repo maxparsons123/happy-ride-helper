@@ -16,4 +16,10 @@ public sealed class ClarificationInfo
 
     /// <summary>How many times we've asked for clarification on this field in this session.</summary>
     public int Attempt { get; set; } = 1;
+
+    /// <summary>
+    /// The state the engine was in when clarification was triggered.
+    /// Used to route back correctly after the caller responds.
+    /// </summary>
+    public CollectionState OriginState { get; init; } = CollectionState.VerifyingPickup;
 }
