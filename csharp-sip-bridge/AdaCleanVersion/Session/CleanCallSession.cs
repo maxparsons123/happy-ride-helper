@@ -590,6 +590,30 @@ public class CleanCallSession
                 return;
             }
 
+            // Clean the geocoded address — strip raw STT prefix if Gemini prepended it
+            var rawSlotValue = field == "pickup" ? _engine.RawData.PickupRaw : _engine.RawData.DestinationRaw;
+            if (!string.IsNullOrEmpty(rawSlotValue) && geocoded.Address.StartsWith(rawSlotValue, StringComparison.OrdinalIgnoreCase))
+            {
+                var cleaned = geocoded.Address[rawSlotValue.Length..].TrimStart(',', ' ');
+                if (!string.IsNullOrWhiteSpace(cleaned))
+                {
+                    Log($"🧹 Stripped raw STT prefix from geocoded address: \"{geocoded.Address}\" → \"{cleaned}\"");
+                    geocoded = new GeocodedAddress
+                    {
+                        Address = cleaned,
+                        Lat = geocoded.Lat,
+                        Lon = geocoded.Lon,
+                        StreetName = geocoded.StreetName,
+                        StreetNumber = geocoded.StreetNumber,
+                        PostalCode = geocoded.PostalCode,
+                        City = geocoded.City,
+                        IsAmbiguous = geocoded.IsAmbiguous,
+                        Alternatives = geocoded.Alternatives,
+                        MatchedFromHistory = geocoded.MatchedFromHistory
+                    };
+                }
+            }
+
             // Success — store verified address and advance
             if (field == "pickup")
             {
