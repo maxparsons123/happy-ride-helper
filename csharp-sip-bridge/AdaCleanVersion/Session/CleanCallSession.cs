@@ -138,7 +138,7 @@ public class CleanCallSession
         {
             // For passengers, try Ada's readback as authoritative source before rejecting.
             // Ada's LLM context understands "four" even when STT hears "poor".
-            if (currentSlot == "passengers" && validationError == "no_number_found")
+            if (currentSlot == "passengers" && (validationError == "no_number_found" || validationError == "bare_passengers_no_number"))
             {
                 var adaVerified = GetVerifiedPassengerCount(transcript);
                 if (adaVerified != null)
@@ -146,6 +146,14 @@ public class CleanCallSession
                     Log($"Passengers recovered from Ada readback: \"{transcript}\" → \"{adaVerified}\"");
                     transcript = adaVerified; // Override with Ada's interpretation
                     validationError = null;   // Clear rejection
+                }
+                else if (validationError == "bare_passengers_no_number")
+                {
+                    // Whisper dropped the number entirely (e.g., "four passengers" → "passengers.")
+                    // Use a specific reprompt that asks Ada to confirm what she heard
+                    Log($"Slot 'passengers' bare word detected: \"{transcript}\" — reprompting with number-specific ask");
+                    EmitRepromptInstruction("bare_passengers_no_number");
+                    return;
                 }
             }
 

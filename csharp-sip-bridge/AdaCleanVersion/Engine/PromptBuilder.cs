@@ -138,22 +138,27 @@ public static class PromptBuilder
         // If a slot was just rejected, generate a specific re-prompt instead of the default
         if (rejectedReason != null)
         {
-            return state switch
+            return (state, rejectedReason) switch
             {
-                CollectionState.CollectingPassengers =>
+                (CollectionState.CollectingPassengers, "bare_passengers_no_number") =>
+                    "[INSTRUCTION] ⛔ MANDATORY: I heard you mention passengers but I didn't catch the number. " +
+                    "You MUST ask: \"Sorry, I didn't quite catch that — how many passengers will there be?\" " +
+                    "Do NOT say anything else. Do NOT say thank you. Do NOT say please hold on. " +
+                    "Do NOT offer assistance. Do NOT say goodbye. ONLY ask for the number.",
+                (CollectionState.CollectingPassengers, _) =>
                     "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the number of passengers. You MUST ask again: " +
                     "\"Sorry, how many passengers will there be?\" Do NOT say anything else. Do NOT offer assistance. " +
-                    "Do NOT say goodbye. ONLY ask for the passenger count.",
-                CollectionState.CollectingName =>
+                    "Do NOT say goodbye. Do NOT say thank you. Do NOT say please hold on. ONLY ask for the passenger count.",
+                (CollectionState.CollectingName, _) =>
                     "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the name. You MUST ask again: " +
                     "\"Sorry, could I have your name for the booking?\" Do NOT say anything else.",
-                CollectionState.CollectingPickup =>
+                (CollectionState.CollectingPickup, _) =>
                     "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the pickup address. You MUST ask again: " +
                     "\"Sorry, could you repeat your pickup address please?\" Do NOT say anything else.",
-                CollectionState.CollectingDestination =>
+                (CollectionState.CollectingDestination, _) =>
                     "[INSTRUCTION] ⛔ MANDATORY: I didn't catch the destination. You MUST ask again: " +
                     "\"Sorry, could you repeat your destination please?\" Do NOT say anything else.",
-                CollectionState.CollectingPickupTime =>
+                (CollectionState.CollectingPickupTime, _) =>
                     "[INSTRUCTION] ⛔ MANDATORY: I didn't catch when you need the taxi. You MUST ask again: " +
                     "\"Sorry, when do you need the taxi — now or at a specific time?\" Do NOT say anything else.",
                 _ => $"[INSTRUCTION] ⛔ MANDATORY: I didn't catch that. Ask the caller to repeat. Do NOT say anything else."

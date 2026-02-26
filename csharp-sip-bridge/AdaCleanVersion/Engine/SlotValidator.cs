@@ -161,6 +161,15 @@ public static class SlotValidator
         if (lower.Contains("just me") || lower == "myself" || lower == "me")
             return null;
 
+        // Accept bare "passenger(s)" — Whisper often drops the number word entirely
+        // (e.g., caller says "four passengers" but STT captures only "passengers.")
+        // This will be resolved via Ada's readback or default to needing Ada interpretation
+        var barePassenger = lower.TrimEnd('.', '!', '?', ',');
+        if (barePassenger == "passenger" || barePassenger == "passengers" ||
+            barePassenger == "passing" || barePassenger == "passing this" ||
+            barePassenger == "for passing this")
+            return "bare_passengers_no_number";
+
         return "no_number_found";
     }
 
