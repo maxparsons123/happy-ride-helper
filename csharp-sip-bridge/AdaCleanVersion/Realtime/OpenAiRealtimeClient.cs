@@ -435,6 +435,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         switch (type)
         {
+            // ── FAST PATH: Audio deltas — must never be blocked ──
             case "response.audio.delta":
                 HandleAudioDelta(doc.RootElement);
                 break;
@@ -451,15 +452,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 break;
 
             case "conversation.item.input_audio_transcription.completed":
-                await HandleCallerTranscript(doc.RootElement);
+                HandleCallerTranscript(doc.RootElement);
                 break;
 
             case "response.audio_transcript.done":
                 var aiText = doc.RootElement.GetProperty("transcript").GetString();
                 Log($"🤖 AI: {aiText}");
-                // Feed Ada's transcript to session — Ada is source of truth
+                // Feed Ada's transcript to session on background task — don't block receive loop
                 if (!string.IsNullOrWhiteSpace(aiText))
-                    _session.ProcessAdaTranscript(aiText);
+                {
+                    var text = aiText; // capture for closure
+                    _ = Task.Run(() => { try { _session.ProcessAdaTranscript(text); } catch { } });
+                }
                 break;
 
             // ── Barge-in: immediately cut everything and ungate ──
@@ -468,12 +472,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 _playout.Clear();
                 ClearMicTail();
                 Log("🎤 Barge-in — playout cleared, mic ungated");
-                OnBargeIn?.Invoke();
+                try { OnBargeIn?.Invoke(); } catch { }
                 break;
 
             // ── Speech ended ──
-            // No manual commit needed — server_vad handles segmentation automatically.
-            // Manual commit was causing "buffer too small" errors and audio glitches.
             case "input_audio_buffer.speech_stopped":
                 break;
 
@@ -486,7 +488,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             case "error":
                 var errMsg = doc.RootElement.GetProperty("error")
                     .GetProperty("message").GetString();
-                // Suppress harmless errors
                 if (errMsg != null && (
                     errMsg.Contains("no active response found") ||
                     errMsg.Contains("buffer too small")))
@@ -515,29 +516,35 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Buffer through playout engine (handles 160-byte framing + 20ms pacing)
         _playout.BufferG711(g711);
 
-        // Fire audio out event for avatar feeding
-        OnAudioOut?.Invoke(g711);
+        // Fire audio out event for avatar feeding — non-blocking
+        try { OnAudioOut?.Invoke(g711); } catch { }
     }
 
-    private async Task HandleCallerTranscript(JsonElement root)
+    private Task HandleCallerTranscript(JsonElement root)
     {
         var transcript = root.GetProperty("transcript").GetString();
-        if (string.IsNullOrWhiteSpace(transcript)) return;
+        if (string.IsNullOrWhiteSpace(transcript)) return Task.CompletedTask;
 
         Log($"👤 Caller: {transcript}");
 
-        // Do NOT clear playout here — the instruction sequence sends response.cancel
-        // which triggers barge-in path (speech_started) for clean audio cutover.
-        // Clearing here was causing jittery audio by hard-cutting mid-sentence.
+        // CRITICAL: Do NOT await transcript processing in the receive loop!
+        // ProcessCallerResponseAsync does slot validation, regex, and potentially GPT extraction
+        // which can take 100-500ms+. Awaiting it here blocks ALL audio delta processing,
+        // causing audible gaps and stuttering. Fire-and-forget on a background task instead.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _session.ProcessCallerResponseAsync(transcript, _cts.Token);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Log($"⚠ Error processing transcript: {ex.Message}");
+            }
+        });
 
-        try
-        {
-            await _session.ProcessCallerResponseAsync(transcript, _cts.Token);
-        }
-        catch (Exception ex)
-        {
-            Log($"⚠ Error processing transcript: {ex.Message}");
-        }
+        return Task.CompletedTask;
     }
 
     // ─── Instruction Updates (Event-Driven v4.0) ────────────
