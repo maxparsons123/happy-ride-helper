@@ -55,8 +55,16 @@ public class EdgeBurstDispatcher
     /// <summary>
     /// Reuse the same burst-detection heuristic from AiFreeFormSplitter.
     /// </summary>
-    public static bool LooksLikeBurst(string transcript) =>
-        AiFreeFormSplitter.LooksLikeBurst(transcript);
+    public static bool LooksLikeBurst(string transcript)
+    {
+        if (string.IsNullOrWhiteSpace(transcript)) return false;
+        var trimmed = transcript.Trim();
+        if (trimmed.Length >= 25) return true;
+        var matches = System.Text.RegularExpressions.Regex.Matches(trimmed,
+            @"\b(?:to|going|heading|from|picking?\s*up|drop(?:ping)?\s*(?:off)?|for|with|passenger|people|person|asap|now|straight\s+away)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return matches.Count >= 2;
+    }
 
     /// <summary>
     /// Send the raw transcript (+ optional Ada readback) to burst-dispatch.
