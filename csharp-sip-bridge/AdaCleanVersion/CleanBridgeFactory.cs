@@ -58,10 +58,10 @@ public static class CleanBridgeFactory
         ILogger logger,
         CleanSipBridge bridge)
     {
-        var codec = G711Codec.Parse(settings.Audio.PreferredCodec);
+        // SIP is forced to PCMA-only — always use PCMA for OpenAI too
+        var codec = G711CodecType.PCMA;
 
         // VoIPMediaSession wraps RTPSession internally — extract it for raw RTP access.
-        // OpenAiRealtimeClient handles G.711 ↔ PCM16 conversion itself.
         var rtpSession = mediaSession.RtpSession;
 
         var client = new OpenAiRealtimeClient(
