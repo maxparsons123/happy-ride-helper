@@ -32,6 +32,9 @@
     <!-- Simli avatar (WebView2) -->
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
 
+    <!-- MQTT for dispatch -->
+    <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
+
     <!-- Hosting / DI -->
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
