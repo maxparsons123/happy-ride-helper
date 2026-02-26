@@ -108,6 +108,18 @@ public static class SlotValidator
         return null;
     }
 
+    // Phonetic homophones that STT commonly mishears for passenger numbers
+    private static readonly Dictionary<string, string> PassengerPhoneticMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "for", "four" }, { "fore", "four" }, { "pour", "four" }, { "poor", "four" },
+        { "tree", "three" }, { "free", "three" },
+        { "to", "two" }, { "too", "two" }, { "tue", "two" },
+        { "won", "one" }, { "wan", "one" },
+        { "sex", "six" }, { "sax", "six" },
+        { "ate", "eight" }, { "ape", "eight" },
+        { "fife", "five" }, { "hive", "five" },
+    };
+
     private static string? ValidatePassengers(string lower)
     {
         // Accept digit strings
@@ -125,7 +137,12 @@ public static class SlotValidator
         var words = lower.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         foreach (var word in words)
         {
-            if (numberWords.Contains(word))
+            var cleaned = word.TrimEnd('.', ',', '!', '?');
+            if (numberWords.Contains(cleaned))
+                return null;
+
+            // Check phonetic homophones (e.g., "for passengers" → "four")
+            if (PassengerPhoneticMap.ContainsKey(cleaned))
                 return null;
         }
 
