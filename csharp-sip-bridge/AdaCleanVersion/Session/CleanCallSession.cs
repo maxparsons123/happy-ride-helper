@@ -280,6 +280,15 @@ public class CleanCallSession
         // Store for extraction context
         _adaTranscripts.Add(adaText);
 
+        // ── Name refinement from Ada's readback ──
+        // When Ada responds after name collection (e.g., "Nice to meet you, Max"),
+        // her LLM interpretation is more accurate than raw Whisper STT ("much", "MUX").
+        // Extract and correct the name if Ada used a different one.
+        if (_engine.State == CollectionState.CollectingPickup && _adaTranscripts.Count <= 3)
+        {
+            TryRefineNameFromAda(adaText);
+        }
+
         // If we're in a verification state, Ada just read back the address.
         // Now trigger geocoding with both the raw caller STT and Ada's readback.
         if (_engine.State == CollectionState.VerifyingPickup)
@@ -295,6 +304,44 @@ public class CleanCallSession
             Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\")");
             await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText);
             return;
+        }
+    }
+
+    /// <summary>
+    /// Extract the name Ada used in her response and correct NameRaw if it differs.
+    /// Ada's LLM interpretation resolves STT garbles like "much" → "Max", "MUX" → "Max".
+    /// Looks for patterns like "Thanks, Max", "Thank you, Max", "Nice to meet you, Max".
+    /// </summary>
+    private void TryRefineNameFromAda(string adaText)
+    {
+        var currentName = _engine.RawData.NameRaw;
+        if (string.IsNullOrWhiteSpace(currentName)) return;
+
+        // Match patterns where Ada addresses the caller by name
+        // e.g., "Thank you, Max.", "Thanks, Max.", "Nice to meet you, Max."
+        // e.g., "Thank you Max. Can I have..."
+        var namePatterns = new[]
+        {
+            @"(?:thank\s+you|thanks|nice\s+to\s+meet\s+you|hi|hello),?\s+([A-Z][a-zA-Z]+)",
+            @"(?:So|OK|Alright|Great),?\s+([A-Z][a-zA-Z]+)[,.]",
+        };
+
+        foreach (var pattern in namePatterns)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(adaText, pattern);
+            if (match.Success)
+            {
+                var adaName = match.Groups[1].Value.Trim().TrimEnd('.', ',', '!');
+                
+                // Only correct if Ada used a different name (case-insensitive compare)
+                if (!string.Equals(adaName, currentName, StringComparison.OrdinalIgnoreCase) && adaName.Length >= 2)
+                {
+                    Log($"📝 Name refined from Ada: \"{currentName}\" → \"{adaName}\"");
+                    _engine.RawData.NameRaw = adaName;
+                    return;
+                }
+                return; // Ada confirmed the same name, no change needed
+            }
         }
     }
 
