@@ -336,15 +336,46 @@ public partial class MainForm : Form
 
     private void btnDisconnect_Click(object? sender, EventArgs e)
     {
+        DisconnectSip();
+    }
+
+    /// <summary>
+    /// Cleanly disconnects SIP: hangs up active calls, unregisters from the registrar, and disposes the bridge.
+    /// </summary>
+    private void DisconnectSip()
+    {
+        if (_bridge == null) return;
+
         Log("📞 Disconnecting SIP…");
+
+        // 1. Hang up any active calls first
         try
         {
-            _bridge?.Stop();
-            _bridge = null;
+            foreach (var callId in GetActiveCallIds())
+            {
+                Log($"📴 Hanging up call [{callId}]");
+                _bridge.HangupCall(callId);
+            }
+        }
+        catch (Exception ex) { Log($"⚠ Error hanging up calls: {ex.Message}"); }
+
+        // 2. Stop bridge (unregisters SIP + shuts down transport)
+        try
+        {
+            _bridge.Stop();
+            Log("✅ SIP unregistered and disconnected");
         }
         catch (Exception ex) { Log($"⚠ Disconnect error: {ex.Message}"); }
+
+        // 3. Dispose
+        try { _bridge.Dispose(); } catch { }
+        _bridge = null;
+
         SetSipConnected(false);
         SetInCall(false);
+        lblSipStatus.Text = "● Disconnected";
+        lblSipStatus.ForeColor = Color.Gray;
+        statusLabel.Text = "Ready";
     }
 
     // ══════════════════════════════════════
@@ -773,8 +804,15 @@ public partial class MainForm : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        Log("🛑 Application closing — cleaning up…");
+
+        // Stop audio monitor
         StopAudioMonitor();
+
+        // Stop Simli avatar feeder
         StopSimliFeeder();
+
+        // Disconnect Simli avatar
         try
         {
             var avatar = _simliAvatar;
@@ -786,10 +824,15 @@ public partial class MainForm : Form
             }
         }
         catch { }
-        try { _bridge?.Dispose(); } catch { }
-        _bridge = null;
+
+        // Properly disconnect SIP (hang up calls, unregister, dispose)
+        DisconnectSip();
+
+        // Dispose logger
         try { _loggerFactory?.Dispose(); } catch { }
         _loggerFactory = null;
+
+        Log("✅ Cleanup complete");
         base.OnFormClosing(e);
     }
 }
