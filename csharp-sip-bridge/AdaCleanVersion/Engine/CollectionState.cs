@@ -15,8 +15,14 @@ public enum CollectionState
     /// <summary>Collecting pickup address.</summary>
     CollectingPickup,
 
+    /// <summary>Verifying pickup address via geocoding (inline pause).</summary>
+    VerifyingPickup,
+
     /// <summary>Collecting destination address.</summary>
     CollectingDestination,
+
+    /// <summary>Verifying destination address via geocoding (inline pause).</summary>
+    VerifyingDestination,
 
     /// <summary>Collecting passenger count.</summary>
     CollectingPassengers,

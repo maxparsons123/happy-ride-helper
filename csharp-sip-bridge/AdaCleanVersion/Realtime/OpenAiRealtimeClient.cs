@@ -79,6 +79,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             Engine.CollectionState.CollectingPickup => true,
             Engine.CollectionState.CollectingDestination => true,
             Engine.CollectionState.AwaitingClarification => true,
+            Engine.CollectionState.VerifyingPickup => false,    // silence during geocoding
+            Engine.CollectionState.VerifyingDestination => false, // silence during geocoding
             _ => false
         };
 
