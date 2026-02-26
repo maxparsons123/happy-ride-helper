@@ -1015,15 +1015,18 @@ public class CleanCallSession
             // still contains a street name (i.e., Gemini duplicated the raw input as a prefix).
             // If the geocoded address IS "raw + city/postcode", stripping would lose the street.
             var rawSlotValue = field == "pickup" ? _engine.RawData.PickupRaw : _engine.RawData.DestinationRaw;
-            if (!string.IsNullOrEmpty(rawSlotValue) && geocoded.Address.StartsWith(rawSlotValue, StringComparison.OrdinalIgnoreCase))
+            var streetTokenPattern = @"\b(Road|Street|Avenue|Lane|Drive|Close|Way|Place|Crescent|Court|Terrace|Grove|Hill|Gardens|Square|Parade|Row|Walk|Rise|Mews)\b";
+            // Only attempt prefix stripping if the raw input is a POI/landmark (no street token).
+            // If the raw input already contains a street name (e.g., "52A David Road, Coventry"),
+            // stripping would remove the street and leave just the postcode.
+            var rawHasStreetToken = !string.IsNullOrEmpty(rawSlotValue) &&
+                System.Text.RegularExpressions.Regex.IsMatch(rawSlotValue, streetTokenPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (!rawHasStreetToken && !string.IsNullOrEmpty(rawSlotValue) && geocoded.Address.StartsWith(rawSlotValue, StringComparison.OrdinalIgnoreCase))
             {
                 var cleaned = geocoded.Address[rawSlotValue.Length..].TrimStart(',', ' ');
                 // Only strip if the remainder still contains a street-like token (Road, Street, etc.)
-                // Otherwise we'd be removing the actual street name and leaving just "City, Postcode"
                 var hasStreetToken = System.Text.RegularExpressions.Regex.IsMatch(
-                    cleaned,
-                    @"\b(Road|Street|Avenue|Lane|Drive|Close|Way|Place|Crescent|Court|Terrace|Grove|Hill|Gardens|Square|Parade|Row|Walk|Rise|Mews)\b",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    cleaned, streetTokenPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (!string.IsNullOrWhiteSpace(cleaned) && hasStreetToken)
                 {
                     Log($"🧹 Stripped raw STT prefix from geocoded address: \"{geocoded.Address}\" → \"{cleaned}\"");
@@ -1045,6 +1048,10 @@ public class CleanCallSession
                 {
                     Log($"🧹 Prefix strip skipped — remainder \"{cleaned}\" has no street token, keeping full address");
                 }
+            }
+            else if (rawHasStreetToken)
+            {
+                Log($"🧹 Prefix strip skipped — raw input \"{rawSlotValue}\" already contains street token, keeping full geocoded address");
             }
 
             // Success — store verified address and advance
