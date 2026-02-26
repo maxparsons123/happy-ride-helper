@@ -45,6 +45,7 @@ public class CleanCallSession
     public event Action<string, bool>? OnAiInstruction; // (instruction, isReprompt)
     public event Action<StructuredBooking>? OnBookingReady;
     public event Action<FareResult>? OnFareReady;
+    public event Action<bool>? OnTypingSoundsChanged; // enable/disable typing sounds during recalculation
 
     public CleanCallSession(
         string sessionId,
@@ -403,6 +404,14 @@ public class CleanCallSession
         if (slotName is "pickup" or "destination")
         {
             Log($"Address correction for {slotName}: \"{oldValue}\" → \"{newValue}\" — routing through verification");
+
+            // Clear stale fare and verified address for this slot
+            _engine.ClearFareResult();
+            _engine.ClearVerifiedAddress(slotName);
+            _engine.IsRecalculating = true;
+
+            // Enable typing sounds to keep the line alive during recalculation
+            OnTypingSoundsChanged?.Invoke(true);
 
             // Transition engine to the appropriate verifying state
             if (slotName == "pickup")
@@ -868,6 +877,14 @@ public class CleanCallSession
             _engine.CompleteGeocoding(fareResult);
             OnFareReady?.Invoke(fareResult);
 
+            // Disable typing sounds and clear recalculation flag now that fare is ready
+            if (_engine.IsRecalculating)
+            {
+                _engine.IsRecalculating = false;
+                OnTypingSoundsChanged?.Invoke(false);
+                Log("Recalculation complete — typing sounds disabled");
+            }
+
             Log($"🚕 Fare ready: {fareResult.Fare} ({fareResult.DistanceMiles:F1}mi), " +
                 $"ETA: {fareResult.DriverEta}, zone: {fareResult.ZoneName ?? "none"}");
 
@@ -1000,7 +1017,8 @@ public class CleanCallSession
             _engine.State, _engine.RawData, _callerContext,
             _engine.StructuredResult, _engine.FareResult,
             _engine.PendingClarification,
-            _engine.VerifiedPickup, _engine.VerifiedDestination);
+            _engine.VerifiedPickup, _engine.VerifiedDestination,
+            isRecalculating: _engine.IsRecalculating);
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, false);
     }

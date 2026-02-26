@@ -364,6 +364,37 @@ public class CallStateEngine
         TransitionTo(newState);
     }
 
+    /// <summary>
+    /// Clear fare result for recalculation after address correction.
+    /// </summary>
+    public void ClearFareResult()
+    {
+        FareResult = null;
+        Log("Fare result cleared for recalculation");
+    }
+
+    /// <summary>
+    /// Clear a verified address so it can be re-verified after correction.
+    /// </summary>
+    public void ClearVerifiedAddress(string field)
+    {
+        if (field == "pickup")
+        {
+            VerifiedPickup = null;
+            Log("Verified pickup cleared for re-verification");
+        }
+        else if (field == "destination")
+        {
+            VerifiedDestination = null;
+            Log("Verified destination cleared for re-verification");
+        }
+    }
+
+    /// <summary>
+    /// Whether we're in a recalculation flow (address corrected after fare was presented).
+    /// </summary>
+    public bool IsRecalculating { get; set; }
+
     private void TransitionTo(CollectionState newState)
     {
         var old = State;
