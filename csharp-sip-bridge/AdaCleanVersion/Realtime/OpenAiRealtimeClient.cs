@@ -171,37 +171,16 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _g711SilenceByte = G711Codec.SilenceByte(codec);
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
-        _playout.OnQueueEmpty += OnPlayoutQueueEmpty;
     }
 
     // ─── Mic Gate Logic (v4.5 — buffer-all, flush tail, playout-driven ungate) ─────
-
-    /// <summary>Called when playout queue drains.</summary>
-    private void OnPlayoutQueueEmpty()
-    {
-        if (!_responseCompleted)
-            return; // AI still streaming audio — wait
-
-        if (!_micGated)
-            return; // already ungated
-
-        UngateMic();
-    }
 
     /// <summary>Called when response.audio.done arrives.</summary>
     private void OnResponseAudioDone()
     {
         _responseCompleted = true;
-        _playout.Flush();
-        var queued = _playout.QueuedFrames;
-        Log($"🔊 response.audio.done — queued={queued}");
-
-        if (queued == 0)
-        {
-            UngateMic();
-        }
-        // else: OnPlayoutQueueEmpty will fire when the queue drains naturally.
-        // No aggressive fallback — let playout finish to avoid stuttering.
+        Log($"🔊 response.audio.done");
+        UngateMic();
     }
 
     private void UngateMic()
@@ -243,11 +222,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Wire session instructions → OpenAI session.update
         _session.OnAiInstruction += OnSessionAiInstruction;
 
-        // Wire typing sounds control for recalculation bridge
+        // Typing sounds removed in v13 — log only
         _session.OnTypingSoundsChanged += enabled =>
         {
-            _playout.TypingSoundsEnabled = enabled;
-            Log(enabled ? "🔊 Typing sounds enabled (recalculation)" : "🔇 Typing sounds disabled (fare ready)");
+            Log(enabled ? "🔊 Typing sounds signal (recalculation)" : "🔇 Typing sounds signal (fare ready)");
         };
 
         // Wire mic ungate → session no-reply watchdog
