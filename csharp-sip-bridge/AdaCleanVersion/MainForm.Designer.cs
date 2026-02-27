@@ -40,9 +40,11 @@ partial class MainForm
         mnuFile.DropDownItems.AddRange(new ToolStripItem[] { mnuSettings, new ToolStripSeparator(), mnuExit });
 
         var mnuTools = new ToolStripMenuItem("&Tools");
+        mnuNewBooking = new ToolStripMenuItem("📋 &New Booking…");
+        mnuNewBooking.Click += mnuNewBooking_Click;
         mnuViewConfig = new ToolStripMenuItem("📄 View Config File");
         mnuViewConfig.Click += mnuViewConfig_Click;
-        mnuTools.DropDownItems.Add(mnuViewConfig);
+        mnuTools.DropDownItems.AddRange(new ToolStripItem[] { mnuNewBooking, new ToolStripSeparator(), mnuViewConfig });
 
         var mnuHelp = new ToolStripMenuItem("&Help");
         var mnuAbout = new ToolStripMenuItem("About");
@@ -326,7 +328,7 @@ partial class MainForm
 
     // ── Field declarations ──
     private MenuStrip menuStrip;
-    private ToolStripMenuItem mnuSettings, mnuExit, mnuViewConfig;
+    private ToolStripMenuItem mnuSettings, mnuExit, mnuViewConfig, mnuNewBooking;
 
     // SIP Registration
     private GroupBox grpSip;

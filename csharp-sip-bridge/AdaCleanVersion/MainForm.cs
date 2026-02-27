@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
+using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
 using AdaCleanVersion.Sip;
 using AdaCleanVersion.Avatar;
@@ -510,6 +511,44 @@ public partial class MainForm : Form
             _settings = dlg.Settings;
             SaveSettings();
             Log("⚙ Settings saved.");
+        }
+    }
+
+    private void mnuNewBooking_Click(object? sender, EventArgs e) => OpenBookingForm(null, null);
+
+    private void OpenBookingForm(string? callerPhone, string? callerName)
+    {
+        var factory = GetLoggerFactory();
+        var fareService = new FareGeocodingService(
+            _settings.SupabaseUrl,
+            _settings.SupabaseServiceRoleKey,
+            factory.CreateLogger<FareGeocodingService>());
+
+        var dispatcher = new BsqdDispatcher(
+            factory.CreateLogger<BsqdDispatcher>(),
+            _settings.Dispatch);
+
+        IcabbiBookingService? icabbiService = null;
+        if (_settings.Icabbi.Enabled)
+        {
+            icabbiService = new IcabbiBookingService(
+                factory.CreateLogger<IcabbiBookingService>(),
+                _settings.Icabbi,
+                _settings.Supabase);
+        }
+
+        using var dlg = new BookingForm(
+            fareService, dispatcher,
+            factory.CreateLogger<BookingForm>(),
+            _settings.Supabase,
+            icabbiService,
+            callerPhone, callerName);
+
+        var result = dlg.ShowDialog(this);
+        if (result == DialogResult.OK && dlg.CompletedBooking != null)
+        {
+            Log($"✅ Manual booking completed: {dlg.CompletedBooking.CallerName} | " +
+                $"{dlg.CompletedBooking.Pickup.DisplayName} → {dlg.CompletedBooking.Destination.DisplayName}");
         }
     }
 
