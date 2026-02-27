@@ -1,72 +1,76 @@
 using System.Text.Json;
-using AdaCleanVersion.Session;
+using TaxiBot.Deterministic;
 
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// Simplified tool router (v6 — boring architecture).
+/// v7 — Deterministic engine wiring.
 /// 
-/// Single path: parse → session.HandleToolCallAsync → send result → done.
-/// Model auto-responds after receiving function_call_output.
+/// Single path: parse tool args → engine.Step(ToolSyncEvent) → execute NextAction → done.
+/// Backend results (geocode, dispatch) feed back via engine.Step(BackendResultEvent).
+/// Model auto-responds after receiving function_call_output for Ask/Hangup actions.
 /// 
-/// REMOVED (v5 → v6):
-/// - Slot locking
-/// - Pacer timer (2.5s race with geocoder)
-/// - Pre-tool instruction application (ConsumeAndApplyAsync)
-/// - Post-tool manual response.create
-/// - VAD re-shielding for readback
-/// - InstructionCoordinator dependency
-/// 
-/// KEPT:
-/// - Debounce (200ms)
-/// - Transcript injection (whisper + ada) for session context
-/// - Turn tracking (ToolCalledInResponse)
+/// NO transcript fallback. NO slot locking. NO pacer. NO manual response.create.
+/// The engine is the single authority.
 /// </summary>
 public sealed class RealtimeToolRouter
 {
-    private readonly CleanCallSession _session;
+    private readonly DeterministicBookingEngine _engine;
     private readonly IRealtimeTransport _transport;
+    private readonly Func<string, Task<GeocodeResult>> _geocode;
+    private readonly Func<BookingSlots, Task<DispatchResult>> _dispatch;
     private readonly CancellationToken _ct;
 
     private long _lastToolCallTick;
     private volatile bool _toolCalledInResponse;
-    private volatile string? _lastWhisperTranscript;
-    private volatile string? _lastAdaTranscript;
 
     /// <summary>True if a tool call was processed for the current turn.</summary>
     public bool ToolCalledInResponse => _toolCalledInResponse;
 
+    /// <summary>Current engine state for external inspection.</summary>
+    public Stage CurrentStage => _engine.State.Stage;
+
     /// <summary>Diagnostic logging.</summary>
     public event Action<string>? OnLog;
 
+    /// <summary>Raised when the engine produces an instruction for the model.</summary>
+    public event Action<string>? OnInstruction;
+
+    /// <summary>Raised when the engine says to transfer to human.</summary>
+    public event Action<string>? OnTransfer;
+
+    /// <summary>Raised when the engine says to hang up.</summary>
+    public event Action<string>? OnHangup;
+
     public RealtimeToolRouter(
-        CleanCallSession session,
+        DeterministicBookingEngine engine,
         IRealtimeTransport transport,
+        Func<string, Task<GeocodeResult>> geocode,
+        Func<BookingSlots, Task<DispatchResult>> dispatch,
         CancellationToken ct)
     {
-        _session = session;
+        _engine = engine;
         _transport = transport;
+        _geocode = geocode;
+        _dispatch = dispatch;
         _ct = ct;
     }
 
     /// <summary>Reset per-turn state on new speech_started.</summary>
-    public void ResetTurn()
+    public void ResetTurn() => _toolCalledInResponse = false;
+
+    /// <summary>
+    /// Call once at session start to get the greeting instruction.
+    /// </summary>
+    public async Task StartAsync()
     {
-        _toolCalledInResponse = false;
-        _lastWhisperTranscript = null;
-        _lastAdaTranscript = null;
+        var action = _engine.Start();
+        await ExecuteActionAsync(action, toolCallId: null);
     }
-
-    /// <summary>Capture raw Whisper transcript for injection into tool args.</summary>
-    public void SetWhisperTranscript(string transcript) => _lastWhisperTranscript = transcript;
-
-    /// <summary>Capture Ada's spoken transcript for injection into tool args.</summary>
-    public void SetAdaTranscript(string transcript) => _lastAdaTranscript = transcript;
 
     /// <summary>
     /// Handle response.function_call_arguments.done from OpenAI Realtime.
-    /// Simple pipeline: debounce → parse → session → send result → done.
-    /// Model auto-responds after receiving the tool result.
+    /// Parse → engine.Step(ToolSyncEvent) → execute action chain → done.
     /// </summary>
     public async Task HandleToolCallAsync(RealtimeEvent evt)
     {
@@ -99,43 +103,230 @@ public sealed class RealtimeToolRouter
             args = new();
         }
 
-        // ── Inject raw transcripts for session context ──
-        if (_lastWhisperTranscript != null)
-            args["whisper_transcript"] = _lastWhisperTranscript;
-        if (_lastAdaTranscript != null)
-            args["ada_transcript"] = _lastAdaTranscript;
+        // ── Convert to ToolSyncEvent ──
+        var toolEvent = ToolSyncMapper.FromToolArgs(evt.ToolCallId, args);
 
-        // ── Call session handler ──
-        object result;
+        // ── Step the engine ──
+        var action = _engine.Step(toolEvent);
+        Log($"⚙️ Engine: {_engine.State.Stage} → {action.Kind}");
+
+        // ── Execute the action (may chain for geocode/dispatch) ──
+        await ExecuteActionAsync(action, evt.ToolCallId);
+    }
+
+    /// <summary>
+    /// Execute a NextAction. For backend actions (geocode, dispatch),
+    /// this calls the backend, feeds the result back into engine.Step(),
+    /// and recurses on the resulting action.
+    /// </summary>
+    private async Task ExecuteActionAsync(NextAction action, string? toolCallId)
+    {
+        switch (action)
+        {
+            case AskAction ask:
+                Log($"💬 Ask: {ask.Text}");
+                OnInstruction?.Invoke(ask.Text);
+                await SendToolResultAsync(toolCallId, new { status = "ok", instruction = ask.Text, stage = _engine.State.Stage.ToString() });
+                break;
+
+            case HangupAction hangup:
+                Log($"📴 Hangup: {hangup.Text}");
+                OnInstruction?.Invoke(hangup.Text);
+                await SendToolResultAsync(toolCallId, new { status = "hangup", instruction = hangup.Text });
+                OnHangup?.Invoke(hangup.Text);
+                break;
+
+            case TransferAction transfer:
+                Log($"🔀 Transfer: {transfer.Why}");
+                await SendToolResultAsync(toolCallId, new { status = "transfer", reason = transfer.Why });
+                OnTransfer?.Invoke(transfer.Why);
+                break;
+
+            case GeocodePickupAction geo:
+                Log($"📍 Geocoding pickup: {geo.RawAddress}");
+                await SendToolResultAsync(toolCallId, new { status = "geocoding", address = geo.RawAddress, stage = _engine.State.Stage.ToString() });
+                await ExecuteGeocodeAsync(BackendResultType.GeocodePickup, geo.RawAddress);
+                break;
+
+            case GeocodeDropoffAction geo:
+                Log($"📍 Geocoding dropoff: {geo.RawAddress}");
+                await SendToolResultAsync(toolCallId, new { status = "geocoding", address = geo.RawAddress, stage = _engine.State.Stage.ToString() });
+                await ExecuteGeocodeAsync(BackendResultType.GeocodeDropoff, geo.RawAddress);
+                break;
+
+            case DispatchAction disp:
+                Log($"🚕 Dispatching...");
+                await SendToolResultAsync(toolCallId, new { status = "dispatching", stage = _engine.State.Stage.ToString() });
+                await ExecuteDispatchAsync(disp.Slots);
+                break;
+
+            case NoneAction none:
+                Log($"⏭ None: {none.Why}");
+                await SendToolResultAsync(toolCallId, new { status = "no_op", reason = none.Why });
+                break;
+
+            case SilenceAction silence:
+                Log($"🤫 Silence: {silence.Why}");
+                // Don't send tool result — let model stay quiet
+                break;
+
+            default:
+                Log($"⚠ Unknown action type: {action.GetType().Name}");
+                await SendToolResultAsync(toolCallId, new { status = "error", reason = "unknown action" });
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Call geocode backend, feed result back into engine, execute resulting action.
+    /// </summary>
+    private async Task ExecuteGeocodeAsync(BackendResultType type, string rawAddress)
+    {
         try
         {
-            result = await _session.HandleToolCallAsync(evt.ToolName, args, _ct);
+            var result = await _geocode(rawAddress);
+            var backendEvent = new BackendResultEvent(
+                Type: type,
+                Ok: result.Ok,
+                NormalizedAddress: result.NormalizedAddress,
+                Error: result.Error);
+
+            var nextAction = _engine.Step(backendEvent);
+            Log($"⚙️ Post-geocode: {_engine.State.Stage} → {nextAction.Kind}");
+
+            // Execute the follow-up action (Ask for next field, or escalate, etc.)
+            await ExecuteFollowUpAsync(nextAction);
         }
         catch (Exception ex)
         {
-            Log($"⚠ Tool handler error: {ex.Message}");
-            result = new { error = ex.Message };
+            Log($"⚠ Geocode error: {ex.Message}");
+            var failEvent = new BackendResultEvent(type, Ok: false, Error: ex.Message);
+            var nextAction = _engine.Step(failEvent);
+            await ExecuteFollowUpAsync(nextAction);
         }
+    }
 
-        var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
+    /// <summary>
+    /// Call dispatch backend, feed result back into engine, execute resulting action.
+    /// </summary>
+    private async Task ExecuteDispatchAsync(BookingSlots slots)
+    {
+        try
+        {
+            var result = await _dispatch(slots);
+            var backendEvent = new BackendResultEvent(
+                Type: BackendResultType.Dispatch,
+                Ok: result.Ok,
+                BookingId: result.BookingId,
+                Error: result.Error);
+
+            var nextAction = _engine.Step(backendEvent);
+            Log($"⚙️ Post-dispatch: {_engine.State.Stage} → {nextAction.Kind}");
+            await ExecuteFollowUpAsync(nextAction);
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Dispatch error: {ex.Message}");
+            var failEvent = new BackendResultEvent(BackendResultType.Dispatch, Ok: false, Error: ex.Message);
+            var nextAction = _engine.Step(failEvent);
+            await ExecuteFollowUpAsync(nextAction);
+        }
+    }
+
+    /// <summary>
+    /// Execute a follow-up action from a backend result.
+    /// These are NOT tool results — they update session instructions + trigger response.create.
+    /// </summary>
+    private async Task ExecuteFollowUpAsync(NextAction action)
+    {
+        switch (action)
+        {
+            case AskAction ask:
+                Log($"💬 Follow-up ask: {ask.Text}");
+                OnInstruction?.Invoke(ask.Text);
+                // Update session instructions and trigger model to speak
+                await UpdateInstructionAndRespond(ask.Text);
+                break;
+
+            case HangupAction hangup:
+                Log($"📴 Follow-up hangup: {hangup.Text}");
+                OnInstruction?.Invoke(hangup.Text);
+                await UpdateInstructionAndRespond(hangup.Text);
+                OnHangup?.Invoke(hangup.Text);
+                break;
+
+            case TransferAction transfer:
+                Log($"🔀 Follow-up transfer: {transfer.Why}");
+                OnTransfer?.Invoke(transfer.Why);
+                break;
+
+            case GeocodePickupAction geo:
+                // Chain: geocode result led to another geocode (e.g., amend)
+                await ExecuteGeocodeAsync(BackendResultType.GeocodePickup, geo.RawAddress);
+                break;
+
+            case GeocodeDropoffAction geo:
+                await ExecuteGeocodeAsync(BackendResultType.GeocodeDropoff, geo.RawAddress);
+                break;
+
+            case DispatchAction disp:
+                await ExecuteDispatchAsync(disp.Slots);
+                break;
+
+            default:
+                Log($"⏭ Follow-up no-op: {action.Kind}");
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Send session.update with new instruction + response.create to make model speak.
+    /// Used for backend-driven state changes (post-geocode, post-dispatch).
+    /// </summary>
+    private async Task UpdateInstructionAndRespond(string instruction)
+    {
+        await _transport.SendAsync(new
+        {
+            type = "session.update",
+            session = new
+            {
+                instructions = $"[INSTRUCTION] {instruction}"
+            }
+        }, _ct);
+
+        await _transport.SendAsync(new
+        {
+            type = "response.create",
+            response = new { modalities = new[] { "audio", "text" } }
+        }, _ct);
+    }
+
+    /// <summary>
+    /// Send tool result back to OpenAI. Model auto-responds.
+    /// </summary>
+    private async Task SendToolResultAsync(string? toolCallId, object result)
+    {
+        if (string.IsNullOrEmpty(toolCallId)) return;
+
+        var resultJson = JsonSerializer.Serialize(result);
         Log($"✅ Tool result: {(resultJson.Length > 200 ? resultJson[..200] + "..." : resultJson)}");
 
-        // ── Send tool result — model auto-responds ──
         await _transport.SendAsync(new
         {
             type = "conversation.item.create",
             item = new
             {
                 type = "function_call_output",
-                call_id = evt.ToolCallId,
+                call_id = toolCallId,
                 output = resultJson
             }
         }, _ct);
-
-        // No response.create. No instruction pre-application.
-        // The model reads the tool result and auto-generates the next response
-        // using the session instructions already set via session.update.
     }
 
     private void Log(string msg) => OnLog?.Invoke(msg);
 }
+
+// ── Simple result types for backend callbacks ──
+
+public sealed record GeocodeResult(bool Ok, string? NormalizedAddress = null, string? Error = null);
+public sealed record DispatchResult(bool Ok, string? BookingId = null, string? Error = null);
