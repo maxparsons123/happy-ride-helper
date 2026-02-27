@@ -149,6 +149,18 @@ public class CleanCallSession
         CancelNoReplyWatchdog();
         _noReplyCount = 0;
 
+        // ── Priority -1: DETERMINISTIC INTENT GUARD ──
+        // Fires BEFORE any AI processing. If IntentGuard resolves an intent,
+        // we handle it instantly without consulting the AI model.
+        // This eliminates the class of bugs where the AI "understands" but skips the action.
+        var intent = IntentGuard.Resolve(_engine.State, transcript);
+        if (intent != IntentGuard.ResolvedIntent.None)
+        {
+            Log($"🛡️ IntentGuard resolved: {intent} (state: {_engine.State}, transcript: \"{transcript}\")");
+            await HandleDeterministicIntent(intent, transcript, ct);
+            return;
+        }
+
         // ── Priority 0: If awaiting clarification, route directly — do NOT treat as a new slot ──
         if (_engine.State == CollectionState.AwaitingClarification)
         {
@@ -2548,6 +2560,92 @@ public class CleanCallSession
             StreetName = address,
             RawDisplayName = address
         };
+    }
+
+    /// <summary>
+    /// Handle a deterministically resolved intent — no AI involvement.
+    /// Called when IntentGuard.Resolve() returns a non-None intent.
+    /// </summary>
+    private async Task HandleDeterministicIntent(IntentGuard.ResolvedIntent intent, string transcript, CancellationToken ct)
+    {
+        switch (intent)
+        {
+            case IntentGuard.ResolvedIntent.ConfirmBooking:
+                Log($"🛡️ Deterministic: ConfirmBooking");
+                await ConfirmBookingAsync(ct);
+                break;
+
+            case IntentGuard.ResolvedIntent.RejectFare:
+                Log($"🛡️ Deterministic: RejectFare — ending call");
+                EndCall(force: true);
+                break;
+
+            case IntentGuard.ResolvedIntent.WantsToChange:
+                Log($"🛡️ Deterministic: WantsToChange — letting AI ask what to change");
+                // Don't end the call — emit instruction so AI asks "what would you like to change?"
+                EmitCurrentInstruction();
+                break;
+
+            case IntentGuard.ResolvedIntent.EndCall:
+                Log($"🛡️ Deterministic: EndCall");
+                EndCall(force: true);
+                break;
+
+            case IntentGuard.ResolvedIntent.NewBooking:
+                Log($"🛡️ Deterministic: NewBooking — resetting for new booking");
+                // TODO: Reset engine state for a fresh booking
+                _engine.ForceState(CollectionState.CollectingName);
+                EmitCurrentInstruction();
+                break;
+
+            case IntentGuard.ResolvedIntent.CancelBooking:
+                if (_engine.State == CollectionState.AwaitingCancelConfirmation)
+                {
+                    Log($"🛡️ Deterministic: CancelBooking confirmed");
+                    // Caller confirmed cancellation — execute it
+                    await HandleCancelConfirmedAsync(ct);
+                }
+                else
+                {
+                    Log($"🛡️ Deterministic: CancelBooking — moving to cancel confirmation");
+                    _engine.ForceState(CollectionState.AwaitingCancelConfirmation);
+                    EmitCurrentInstruction();
+                }
+                break;
+
+            case IntentGuard.ResolvedIntent.AmendBooking:
+                Log($"🛡️ Deterministic: AmendBooking");
+                // Start a new booking flow (amendment = new booking with same caller context)
+                _engine.ForceState(CollectionState.CollectingPickup);
+                EmitCurrentInstruction();
+                break;
+
+            case IntentGuard.ResolvedIntent.CheckStatus:
+                Log($"🛡️ Deterministic: CheckStatus");
+                // Let AI handle status check with current instruction
+                EmitCurrentInstruction();
+                break;
+
+            case IntentGuard.ResolvedIntent.SelectOption:
+                // Disambiguation — route to clarification handler
+                await HandlePostCollectionInput(transcript, ct);
+                break;
+
+            default:
+                EmitCurrentInstruction();
+                break;
+        }
+    }
+
+    private async Task HandleCancelConfirmedAsync(CancellationToken ct)
+    {
+        // If we have an existing booking ID, attempt cancellation
+        if (!string.IsNullOrWhiteSpace(_engine.ExistingBookingId))
+        {
+            Log($"Cancelling booking {_engine.ExistingBookingId}");
+            // TODO: Wire to actual cancellation service (iCabbi, Supabase)
+        }
+        EndCall(force: true);
     }
 
     private async Task HandlePostCollectionInput(string transcript, CancellationToken ct)
