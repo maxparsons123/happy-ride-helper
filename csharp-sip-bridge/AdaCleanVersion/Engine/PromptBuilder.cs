@@ -638,29 +638,43 @@ public static class PromptBuilder
         // No house number found — return as-is
         if (!parsed.HasHouseNumber) return address;
 
-        var houseNum = parsed.HouseNumber; // e.g. "52A", "1214A", "3B", "43"
+        var houseNum = parsed.HouseNumber; // e.g. "52A", "1214A", "3B", "43", "12-14A"
 
-        // Check if house number contains letters (alphanumeric)
+        // Check if house number contains letters or hyphens (needs TTS help)
         bool hasLetters = houseNum.Any(char.IsLetter);
+        bool hasHyphen = houseNum.Contains('-');
 
-        string spoken;
-        if (hasLetters)
-        {
-            // For 3+ character alphanumeric house numbers, read digit-by-digit
-            if (houseNum.Length >= 3)
-            {
-                spoken = string.Join(" ", houseNum.ToUpperInvariant().ToCharArray());
-            }
-            else
-            {
-                // Short like "3B" — just space the letter away
-                spoken = string.Join(" ", houseNum.ToUpperInvariant().ToCharArray());
-            }
-        }
-        else
+        if (!hasLetters && !hasHyphen)
         {
             // Pure numeric house number — no mangling risk, keep as-is
             return address;
+        }
+
+        string spoken;
+        if (hasHyphen)
+        {
+            // Hyphenated range like "12-14A" → split on hyphen, keep numeric groups intact,
+            // space out trailing letters: "12-14A" → "12 14 A"
+            var parts = houseNum.Split('-');
+            var spokenParts = parts.Select(part =>
+            {
+                // Separate trailing letter from digits: "14A" → "14 A"
+                var m = System.Text.RegularExpressions.Regex.Match(part, @"^(\d+)([A-Za-z])?$");
+                if (m.Success && m.Groups[2].Success)
+                    return $"{m.Groups[1].Value} {m.Groups[2].Value.ToUpperInvariant()}";
+                return part;
+            });
+            spoken = string.Join(" ", spokenParts);
+        }
+        else if (houseNum.Length >= 3)
+        {
+            // For 3+ character alphanumeric house numbers, read digit-by-digit
+            spoken = string.Join(" ", houseNum.ToUpperInvariant().ToCharArray());
+        }
+        else
+        {
+            // Short like "3B" — just space the letter away
+            spoken = string.Join(" ", houseNum.ToUpperInvariant().ToCharArray());
         }
 
         // Rebuild: replace the original house number with the spaced version
