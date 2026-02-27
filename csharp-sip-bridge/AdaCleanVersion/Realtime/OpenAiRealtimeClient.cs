@@ -65,6 +65,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>Pending instruction to send after response.canceled arrives.</summary>
     private PendingInstruction? _pendingInstruction;
 
+    /// <summary>
+    /// Set when a tool call was processed for the current turn.
+    /// Prevents the transcript handler from redundantly processing the same input.
+    /// Reset on each new speech_started event.
+    /// </summary>
+    private volatile bool _toolCalledInResponse;
+
     // Mic gate buffer: stores ALL gated audio; only trailing speech frames are flushed
     private readonly List<byte[]> _micGateBuffer = new();
     private readonly bool[] _micGateEnergy = new bool[0]; // resized dynamically
@@ -324,6 +331,37 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Use native G.711 passthrough — no PCM16 conversion needed
         var audioFormat = _codec == G711CodecType.PCMU ? "g711_ulaw" : "g711_alaw";
 
+        var tools = new object[]
+        {
+            new
+            {
+                type = "function",
+                name = "sync_booking_data",
+                description = "MANDATORY: Persist booking data as collected from the caller. " +
+                    "Must be called BEFORE generating any text response when user provides or amends booking details. " +
+                    "CRITICAL: Include ALL fields the caller mentioned in their utterance — if they say " +
+                    "'from X going to Y with 3 passengers', set pickup, destination, AND passengers in ONE call. " +
+                    "NEVER split a compound utterance into multiple calls or ignore mentioned fields. " +
+                    "CHANGE DETECTION: If the caller corrects ANY previously provided detail, you MUST call this tool " +
+                    "IMMEDIATELY with the corrected value AND explain what changed in the 'interpretation' field.",
+                parameters = new
+                {
+                    type = "object",
+                    properties = new Dictionary<string, object>
+                    {
+                        ["caller_name"] = new { type = "string", description = "Caller's name" },
+                        ["caller_area"] = new { type = "string", description = "Caller's self-reported area/district (e.g. 'Earlsdon', 'Tile Hill'). Used as location bias for address resolution." },
+                        ["pickup"] = new { type = "string", description = "Pickup address VERBATIM from caller's speech. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
+                        ["destination"] = new { type = "string", description = "Destination address VERBATIM from caller's speech. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
+                        ["passengers"] = new { type = "integer", description = "Number of passengers" },
+                        ["pickup_time"] = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. Use REFERENCE_DATETIME to resolve relative times." },
+                        ["interpretation"] = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed." },
+                        ["special_instructions"] = new { type = "string", description = "Any special requests or notes the caller wants to add." }
+                    }
+                }
+            }
+        };
+
         var config = new
         {
             type = "session.update",
@@ -342,12 +380,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     prefix_padding_ms = 300,
                     silence_duration_ms = 500
                 },
-                tools = Array.Empty<object>()
+                tools,
+                tool_choice = "auto"
             }
         };
 
         await SendJsonAsync(config);
-        Log($"📋 Session configured: {audioFormat} passthrough, VAD + whisper, no tools");
+        Log($"📋 Session configured: {audioFormat} passthrough, VAD + whisper, sync_booking_data tool");
         Log($"🔊 Realtime configured codec: {_codec} (format={audioFormat}, PT={G711Codec.PayloadType(_codec)})");
     }
 
@@ -520,6 +559,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 HandleCallerTranscript(doc.RootElement);
                 break;
 
+            // ── Tool calls: sync_booking_data for freeform/burst extraction ──
+            case "response.function_call_arguments.done":
+                await HandleToolCallAsync(doc.RootElement);
+                break;
+
             case "response.audio_transcript.done":
                 var aiText = doc.RootElement.GetProperty("transcript").GetString();
                 // Strip [CORRECTION:xxx] tags from the transcript before logging/processing
@@ -539,6 +583,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             // ── Barge-in: immediately cut everything and ungate (with debounce) ──
             case "input_audio_buffer.speech_started":
+                _toolCalledInResponse = false; // Reset for new turn
                 var now = Environment.TickCount64;
                 var elapsed = now - _lastBargeInTick;
                 if (elapsed < 250)
@@ -563,13 +608,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 try { OnBargeIn?.Invoke(); } catch { }
                 break;
 
-            // ── Speech ended → proactively cancel auto-response ──
-            // With VAD enabled, OpenAI auto-generates a response when speech ends.
-            // We MUST cancel it immediately because our deterministic engine drives
-            // all responses via [INSTRUCTION] session.update + response.create.
-            // If we wait for the transcript, the auto-response has already started speaking.
+            // ── Speech ended → commit audio buffer ──
+            // With tools enabled, we let the AI auto-respond so it can call sync_booking_data.
+            // The tool call handler processes freeform input and drives state via the engine.
+            // If the AI doesn't call a tool, the transcript handler serves as fallback.
             case "input_audio_buffer.speech_stopped":
-                await SendJsonAsync(new { type = "response.cancel" });
+                // Do NOT cancel — let the AI process and potentially call sync_booking_data
                 break;
 
             // ── Cancel confirmed: now safe to send pending instruction ──
@@ -634,14 +678,19 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
-        // Proactively cancel any in-flight/stale AI response as soon as a valid caller
-        // transcript lands. This prevents late reprompt audio from leaking into the
-        // next deterministic state turn.
+        // If a tool call already handled this turn's data, skip transcript processing
+        // to avoid redundant slot updates. The tool call is the authoritative source.
+        if (_toolCalledInResponse)
+        {
+            Log("📋 Transcript skipped — sync_booking_data already processed this turn");
+            return Task.CompletedTask;
+        }
+
+        // No tool call for this turn — use transcript handler as fallback.
+        // Cancel any in-flight AI response and let the engine drive the next instruction.
         _ = SendJsonAsync(new { type = "response.cancel" });
 
         // Process transcript on background task to avoid blocking audio delta receive loop.
-        // The auto-response was already canceled on speech_stopped (above).
-        // ProcessCallerResponseAsync → engine → emits instruction → session.update + response.create.
         _ = Task.Run(async () =>
         {
             try
@@ -656,6 +705,85 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         });
 
         return Task.CompletedTask;
+    }
+
+    // ─── Tool Call Handling (sync_booking_data) ─────────────
+
+    /// <summary>
+    /// Debounce guard for rapid-fire tool calls (ms tick).
+    /// </summary>
+    private long _lastToolCallTick;
+
+    /// <summary>
+    /// Handle response.function_call_arguments.done from OpenAI Realtime.
+    /// Parses the tool call, routes to CleanCallSession, sends result back, triggers follow-up response.
+    /// </summary>
+    private async Task HandleToolCallAsync(JsonElement root)
+    {
+        _toolCalledInResponse = true; // Prevent transcript handler from redundant processing
+
+        var now = Environment.TickCount64;
+        if (now - Volatile.Read(ref _lastToolCallTick) < 200) return;
+        Volatile.Write(ref _lastToolCallTick, now);
+
+        var callId = root.TryGetProperty("call_id", out var c) ? c.GetString() : "";
+        var name = root.TryGetProperty("name", out var n) ? n.GetString() : "";
+        var argsStr = root.TryGetProperty("arguments", out var a) ? a.GetString() : "{}";
+
+        if (string.IsNullOrEmpty(callId) || string.IsNullOrEmpty(name))
+        {
+            Log("⚠ Tool call missing call_id or name — ignoring");
+            return;
+        }
+
+        Log($"🔧 Tool call: {name}");
+
+        Dictionary<string, object?> args;
+        try
+        {
+            args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsStr ?? "{}",
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Tool args parse error: {ex.Message}");
+            args = new();
+        }
+
+        // Route to session for processing
+        object result;
+        try
+        {
+            result = await _session.HandleToolCallAsync(name, args, _cts.Token);
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Tool handler error: {ex.Message}");
+            result = new { error = ex.Message };
+        }
+
+        var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
+        Log($"✅ Tool result: {(resultJson.Length > 200 ? resultJson[..200] + "..." : resultJson)}");
+
+        // Send tool result back to OpenAI
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "function_call_output",
+                call_id = callId,
+                output = resultJson
+            }
+        });
+
+        // Trigger a follow-up response so the AI speaks after processing the tool result
+        // The deterministic engine may have already queued an instruction via OnAiInstruction,
+        // in which case this response.create will be superseded by the instruction sequence.
+        if (_ws?.State == WebSocketState.Open)
+        {
+            await SendJsonAsync(new { type = "response.create" });
+        }
     }
 
     // ─── Instruction Updates (Event-Driven v4.1) ────────────

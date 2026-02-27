@@ -1,3 +1,4 @@
+using System.Text.Json;
 using AdaCleanVersion.Engine;
 using AdaCleanVersion.Models;
 using AdaCleanVersion.Services;
@@ -984,6 +985,189 @@ public class CleanCallSession
     /// Get the system prompt for the AI voice interface.
     /// </summary>
     public string GetSystemPrompt() => PromptBuilder.BuildSystemPrompt(_companyName, _callerContext);
+
+    // ─── Tool Call Handling (Hybrid Freeform Extraction) ────
+
+    /// <summary>
+    /// Handle a tool call from the Realtime API.
+    /// Currently supports sync_booking_data for freeform/burst extraction.
+    /// The deterministic engine remains the authority for state transitions.
+    /// </summary>
+    public async Task<object> HandleToolCallAsync(string toolName, Dictionary<string, object?> args, CancellationToken ct = default)
+    {
+        Log($"🔧 HandleToolCallAsync: {toolName} ({args.Count} args)");
+
+        return toolName switch
+        {
+            "sync_booking_data" => await HandleSyncBookingDataAsync(args, ct),
+            _ => new { status = "error", message = $"Unknown tool: {toolName}" }
+        };
+    }
+
+    /// <summary>
+    /// Process sync_booking_data tool call from the Realtime API.
+    /// Routes extracted fields to the engine, replacing burst-dispatch for freeform input.
+    /// The engine remains the authority — this just populates raw slots.
+    /// </summary>
+    private async Task<object> HandleSyncBookingDataAsync(Dictionary<string, object?> args, CancellationToken ct)
+    {
+        // Cancel no-reply watchdog — the AI just processed caller input
+        CancelNoReplyWatchdog();
+        _noReplyCount = 0;
+
+        var slotsUpdated = new List<string>();
+        var currentState = _engine.State;
+
+        // Extract and store each provided field
+        if (TryGetArg(args, "caller_name", out var name) && !string.IsNullOrWhiteSpace(name))
+        {
+            // Strip conversational filler (same as ProcessCallerResponseAsync)
+            name = System.Text.RegularExpressions.Regex.Replace(name,
+                @"^(it'?s\s+|that'?s\s+|i'?m\s+|my\s+name\s+is\s+|call\s+me\s+|this\s+is\s+)",
+                "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim().TrimEnd('.', '!', ',');
+
+            if (string.IsNullOrWhiteSpace(_engine.RawData.NameRaw) || !string.Equals(_engine.RawData.NameRaw, name, StringComparison.OrdinalIgnoreCase))
+            {
+                _engine.RawData.SetSlot("name", name);
+                slotsUpdated.Add("name");
+                Log($"[SyncTool] name=\"{name}\"");
+            }
+        }
+
+        if (TryGetArg(args, "pickup", out var pickup) && !string.IsNullOrWhiteSpace(pickup))
+        {
+            _engine.RawData.SetSlot("pickup", pickup);
+            slotsUpdated.Add("pickup");
+            Log($"[SyncTool] pickup=\"{pickup}\"");
+        }
+
+        if (TryGetArg(args, "destination", out var dest) && !string.IsNullOrWhiteSpace(dest))
+        {
+            _engine.RawData.SetSlot("destination", dest);
+            slotsUpdated.Add("destination");
+            Log($"[SyncTool] destination=\"{dest}\"");
+        }
+
+        if (TryGetArg(args, "passengers", out var paxStr) && int.TryParse(paxStr, out var pax))
+        {
+            _engine.RawData.SetSlot("passengers", pax.ToString());
+            slotsUpdated.Add("passengers");
+            Log($"[SyncTool] passengers={pax}");
+        }
+
+        if (TryGetArg(args, "pickup_time", out var time) && !string.IsNullOrWhiteSpace(time))
+        {
+            // Quick ASAP detection
+            var lower = time.ToLowerInvariant();
+            if (lower.Contains("now") || lower.Contains("asap") || lower.Contains("straight away") ||
+                lower.Contains("right away") || lower.Contains("immediately"))
+                time = "ASAP";
+
+            _engine.RawData.SetSlot("pickup_time", time);
+            slotsUpdated.Add("pickup_time");
+            Log($"[SyncTool] pickup_time=\"{time}\"");
+        }
+
+        if (TryGetArg(args, "caller_area", out var area) && !string.IsNullOrWhiteSpace(area))
+        {
+            Log($"[SyncTool] caller_area=\"{area}\" (stored as context)");
+            // caller_area is informational — no raw slot, but could be used for geocoding bias
+        }
+
+        if (TryGetArg(args, "interpretation", out var interp) && !string.IsNullOrWhiteSpace(interp))
+        {
+            Log($"[SyncTool] interpretation=\"{interp}\"");
+        }
+
+        if (slotsUpdated.Count == 0)
+        {
+            Log("[SyncTool] No slots updated — returning current state");
+            return BuildSyncResponse("no_change");
+        }
+
+        // Mark as multi-slot burst if >1 field extracted
+        if (slotsUpdated.Count > 1)
+        {
+            _engine.RawData.IsMultiSlotBurst = true;
+            Log($"[SyncTool] Multi-slot burst: {string.Join(", ", slotsUpdated)}");
+        }
+
+        // ── State progression: advance engine based on what was filled ──
+        // If addresses were provided, route to verification
+        if (slotsUpdated.Contains("pickup") && currentState <= CollectionState.CollectingPickup)
+        {
+            // Advance engine past any earlier collection states
+            _engine.AcceptSlotValue("name", _engine.RawData.NameRaw ?? "");
+
+            _engine.ForceState(CollectionState.VerifyingPickup);
+            EmitCurrentInstruction();
+            return BuildSyncResponse("ok", slotsUpdated);
+        }
+
+        if (slotsUpdated.Contains("destination") && !slotsUpdated.Contains("pickup") &&
+            currentState <= CollectionState.CollectingDestination)
+        {
+            _engine.ForceState(CollectionState.VerifyingDestination);
+            EmitCurrentInstruction();
+            return BuildSyncResponse("ok", slotsUpdated);
+        }
+
+        // For non-address fields, let the engine figure out the next state
+        var nextSlot = _engine.RawData.NextMissingSlot();
+        if (nextSlot == null && _engine.State < CollectionState.ReadyForExtraction)
+        {
+            // All slots filled — trigger extraction
+            await RunExtractionAsync(ct);
+        }
+        else if (nextSlot != null)
+        {
+            // Advance to next missing slot
+            _engine.AdvanceToSlot(nextSlot);
+            EmitCurrentInstruction();
+        }
+
+        return BuildSyncResponse("ok", slotsUpdated);
+    }
+
+    /// <summary>Build the tool result response for sync_booking_data.</summary>
+    private object BuildSyncResponse(string status, List<string>? updatedSlots = null)
+    {
+        var state = new Dictionary<string, string?>();
+        if (!string.IsNullOrWhiteSpace(_engine.RawData.NameRaw)) state["name"] = _engine.RawData.NameRaw;
+        if (!string.IsNullOrWhiteSpace(_engine.RawData.PickupRaw)) state["pickup"] = _engine.RawData.PickupRaw;
+        if (!string.IsNullOrWhiteSpace(_engine.RawData.DestinationRaw)) state["destination"] = _engine.RawData.DestinationRaw;
+        if (!string.IsNullOrWhiteSpace(_engine.RawData.PassengersRaw)) state["passengers"] = _engine.RawData.PassengersRaw;
+        if (!string.IsNullOrWhiteSpace(_engine.RawData.PickupTimeRaw)) state["pickup_time"] = _engine.RawData.PickupTimeRaw;
+
+        var next = _engine.RawData.NextMissingSlot();
+
+        return new
+        {
+            status,
+            updated = updatedSlots ?? new List<string>(),
+            booking_state = state,
+            next_required = next ?? "all_collected",
+            engine_state = _engine.State.ToString()
+        };
+    }
+
+    /// <summary>Extract a string arg from tool call arguments (handles JsonElement).</summary>
+    private static bool TryGetArg(Dictionary<string, object?> args, string key, out string value)
+    {
+        value = "";
+        if (!args.TryGetValue(key, out var raw) || raw == null) return false;
+
+        if (raw is JsonElement je)
+        {
+            value = je.ValueKind == JsonValueKind.String ? je.GetString() ?? "" : je.GetRawText();
+        }
+        else
+        {
+            value = raw.ToString() ?? "";
+        }
+
+        return !string.IsNullOrWhiteSpace(value);
+    }
 
     // ─── Inline Address Verification ────────────────────────
 
