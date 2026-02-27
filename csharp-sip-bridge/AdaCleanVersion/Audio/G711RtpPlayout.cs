@@ -3,7 +3,9 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using SIPSorcery.Media;
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 
 namespace AdaCleanVersion.Audio;
 
@@ -28,15 +30,13 @@ public sealed class G711RtpPlayout : IDisposable
 
     private const int FrameSize = 160; // 20ms @ 8kHz
 
-    private readonly RTPSession _rtpSession;
+    private readonly VoIPMediaSession _mediaSession;
     private readonly int _payloadType;
-    private readonly uint _ssrc;
     private readonly byte[] _silence = new byte[FrameSize];
     private readonly ConcurrentQueue<byte[]> _queue = new();
 
     private Thread? _thread;
     private volatile bool _running;
-    private ushort _sequence;
     private uint _timestamp;
     private IntPtr _timer;
     private bool _useTimer;
@@ -46,12 +46,10 @@ public sealed class G711RtpPlayout : IDisposable
 
     public event Action<string>? OnLog;
 
-    public G711RtpPlayout(RTPSession session, G711CodecType codec)
+    public G711RtpPlayout(VoIPMediaSession session, G711CodecType codec)
     {
-        _rtpSession = session;
+        _mediaSession = session;
         _payloadType = G711Codec.PayloadType(codec);
-        _ssrc = session.GetRtpChannel().Ssrc;
-        _sequence = (ushort)Random.Shared.Next(ushort.MaxValue);
         _timestamp = (uint)Random.Shared.Next();
         Array.Fill(_silence, G711Codec.SilenceByte(codec));
     }
@@ -78,7 +76,7 @@ public sealed class G711RtpPlayout : IDisposable
             Priority = ThreadPriority.AboveNormal
         };
         _thread.Start();
-        Log("RTP v13 started (manual timestamp control)");
+        Log("RTP v13 started (SendRtpRaw, manual timestamp)");
     }
 
     public void Stop()
@@ -165,16 +163,14 @@ public sealed class G711RtpPlayout : IDisposable
     {
         try
         {
-            var header = new RTPHeader(
-                _payloadType,
-                _sequence++,
+            _mediaSession.SendRtpRaw(
+                SDPMediaTypesEnum.audio,
+                payload,
                 _timestamp,
-                _ssrc);
+                0,
+                _payloadType);
 
             _timestamp += FrameSize; // +160 samples
-
-            var packet = new RTPPacket(header, payload);
-            _rtpSession.SendRtpPacket(packet);
         }
         catch (Exception ex)
         {

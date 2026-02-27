@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net;
 using AdaCleanVersion.Audio;
+using SIPSorcery.Media;
 using SIPSorcery.Net;
 
 namespace AdaCleanVersion.Realtime;
@@ -36,13 +37,16 @@ public sealed class RealtimeAudioBridge : IDisposable
         IRealtimeTransport transport,
         G711CodecType codec,
         MicGateController micGate,
-        CancellationToken ct)
+        CancellationToken ct,
+        VoIPMediaSession? mediaSession = null)
     {
         _rtpSession = rtpSession;
         _transport = transport;
         _ct = ct;
         MicGate = micGate;
-        _playout = new G711RtpPlayout(rtpSession, codec);
+        var session = mediaSession ?? (rtpSession as VoIPMediaSession)
+            ?? throw new ArgumentException("A VoIPMediaSession is required for RTP playout");
+        _playout = new G711RtpPlayout(session, codec);
         _playout.OnLog += msg => OnLog?.Invoke(msg);
     }
 

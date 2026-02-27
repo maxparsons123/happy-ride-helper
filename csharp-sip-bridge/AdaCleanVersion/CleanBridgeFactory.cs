@@ -35,13 +35,13 @@ public static class CleanBridgeFactory
 
         // IcabbiBookingService (if configured)
         IcabbiBookingService? icabbiService = null;
-        if (!string.IsNullOrWhiteSpace(settings.IcabbiTenantBase))
+        if (!string.IsNullOrWhiteSpace(settings.Icabbi.TenantBase))
         {
             icabbiService = new IcabbiBookingService(
-                tenantBase: settings.IcabbiTenantBase,
-                appKey: settings.IcabbiAppKey,
-                secretKey: settings.IcabbiSecretKey,
-                siteId: settings.IcabbiSiteId,
+                tenantBase: settings.Icabbi.TenantBase,
+                appKey: settings.Icabbi.AppKey,
+                secretKey: settings.Icabbi.SecretKey,
+                siteId: settings.Icabbi.SiteId,
                 supabaseUrl: settings.SupabaseUrl,
                 supabaseKey: settings.SupabaseServiceRoleKey,
                 logger: logger);
@@ -68,7 +68,6 @@ public static class CleanBridgeFactory
         IcabbiBookingService? icabbiService)
     {
         var codec = G711CodecType.PCMA;
-        RTPSession rtpSession = mediaSession;
 
         // v8: Pure transport bridge — pass systemPrompt + callerPhone, not session
         var client = new OpenAiRealtimeClient(
@@ -77,12 +76,13 @@ public static class CleanBridgeFactory
             voice: settings.OpenAi.Voice,
             callId: callId,
             systemPrompt: session.GetSystemPrompt(),
-            rtpSession: rtpSession,
+            rtpSession: mediaSession,
             logger: logger,
             fareService: fareService,
             icabbiService: icabbiService,
             callerPhone: session.CallerId,
-            codec: codec);
+            codec: codec,
+            mediaSession: mediaSession);
 
         client.OnLog += msg => logger.LogInformation(msg);
         client.OnAudioOut += frame => bridge.RaiseAudioOut(frame);
@@ -98,7 +98,7 @@ public static class CleanBridgeFactory
         {
             await client.ConnectAsync();
 
-            rtpSession.OnRtpClosed += async (reason) =>
+            mediaSession.OnRtpClosed += async (reason) =>
             {
                 logger.LogInformation($"[RT:{callId}] RTP closed — disposing Realtime client");
                 await client.DisposeAsync();
