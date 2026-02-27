@@ -114,11 +114,81 @@ public class CallStateEngine
 
     /// <summary>
     /// Store the structured result from AI extraction and advance to fare presentation.
+    /// Post-extraction guard: if verified addresses exist, override any LLM drift
+    /// (e.g., LLM normalizing "7 Russell Street" back to "7 Brent Russell Street"
+    /// because the raw conversation context contained the garbled version).
     /// </summary>
     public void CompleteExtraction(StructuredBooking booking)
     {
         StructuredResult = booking;
+
+        // Override LLM-normalized addresses with verified geocoded ground truth
+        if (VerifiedPickup != null && !string.IsNullOrEmpty(VerifiedPickup.Address))
+        {
+            var overridden = BuildOverrideAddress(VerifiedPickup.Address, booking.Pickup);
+            if (overridden != null)
+            {
+                StructuredResult = new StructuredBooking
+                {
+                    CallerName = booking.CallerName,
+                    Pickup = overridden,
+                    Destination = booking.Destination,
+                    Passengers = booking.Passengers,
+                    PickupTime = booking.PickupTime,
+                    PickupDateTime = booking.PickupDateTime
+                };
+                Log($"Post-extraction pickup override: \"{booking.Pickup.DisplayName}\" → \"{overridden.DisplayName}\"");
+            }
+        }
+
+        if (VerifiedDestination != null && !string.IsNullOrEmpty(VerifiedDestination.Address))
+        {
+            var overridden = BuildOverrideAddress(VerifiedDestination.Address, StructuredResult.Destination);
+            if (overridden != null)
+            {
+                StructuredResult = new StructuredBooking
+                {
+                    CallerName = StructuredResult.CallerName,
+                    Pickup = StructuredResult.Pickup,
+                    Destination = overridden,
+                    Passengers = StructuredResult.Passengers,
+                    PickupTime = StructuredResult.PickupTime,
+                    PickupDateTime = StructuredResult.PickupDateTime
+                };
+                Log($"Post-extraction destination override: \"{booking.Destination.DisplayName}\" → \"{overridden.DisplayName}\"");
+            }
+        }
+
         TransitionTo(CollectionState.Geocoding);
+    }
+
+    /// <summary>
+    /// Build an override StructuredAddress from a verified geocoded address string.
+    /// Uses AddressParser for house/street and regex for postcode extraction.
+    /// Returns null if parsing yields nothing useful.
+    /// </summary>
+    private static StructuredAddress? BuildOverrideAddress(string verifiedAddress, StructuredAddress fallback)
+    {
+        var parsed = Services.AddressParser.ParseAddress(verifiedAddress);
+        
+        // Extract postcode from verified address (e.g., "CV1 2BW")
+        var postcodeMatch = System.Text.RegularExpressions.Regex.Match(
+            verifiedAddress, @"[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}", 
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var postcode = postcodeMatch.Success ? postcodeMatch.Value : fallback.Postcode;
+
+        var houseNum = parsed.HasHouseNumber ? parsed.HouseNumber : fallback.HouseNumber;
+        var street = !string.IsNullOrEmpty(parsed.StreetName) ? parsed.StreetName : fallback.StreetName;
+        var area = !string.IsNullOrEmpty(parsed.TownOrArea) ? parsed.TownOrArea : fallback.Area;
+
+        return new StructuredAddress
+        {
+            HouseNumber = houseNum,
+            StreetName = street,
+            Area = fallback.Area ?? area,
+            City = fallback.City ?? area,
+            Postcode = postcode
+        };
     }
 
     /// <summary>
