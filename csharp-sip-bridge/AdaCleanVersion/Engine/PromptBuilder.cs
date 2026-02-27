@@ -314,14 +314,16 @@ public static class PromptBuilder
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed. " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{FormatAddressForSpeech(verifiedPickup.Address)}\". " +
+                "Say this confirmed address to the caller so they know it's correct. " +
                 $"Their last destination was \"{context.LastDestination}\" — you can offer it. " +
-                "Ask for their DESTINATION address. Do NOT repeat the pickup address again — it was already confirmed. " +
+                "Then ask for their DESTINATION address. " +
                 $"{RemainingFields()}",
 
             CollectionState.CollectingDestination when verifiedPickup != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed. " +
-                "Ask for their DESTINATION address. Do NOT repeat the pickup address again — it was already confirmed. " +
+                $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{FormatAddressForSpeech(verifiedPickup.Address)}\". " +
+                "Say this confirmed address to the caller so they know it's correct. " +
+                "Then ask for their DESTINATION address. " +
                 $"{RemainingFields()}",
 
             CollectionState.CollectingDestination when context?.LastDestination != null =>
@@ -377,8 +379,9 @@ public static class PromptBuilder
                 "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
 
             CollectionState.CollectingPassengers when verifiedDestination != null =>
-                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed. " +
-                "Ask how many passengers. Do NOT repeat the destination address again — it was already confirmed. " +
+                $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed as \"{FormatAddressForSpeech(verifiedDestination.Address)}\". " +
+                "Say this confirmed address to the caller so they know it's correct. " +
+                "Then ask how many passengers. " +
                 "IMPORTANT: When confirming the count, always repeat the number clearly " +
                 "(e.g., \"Great, four passengers\" or \"Got it, that's for 3 people\"). " +
                 $"{RemainingFields()}",
