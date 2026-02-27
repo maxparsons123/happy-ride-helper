@@ -1,23 +1,25 @@
 using System.Text.RegularExpressions;
 using AdaCleanVersion.Audio;
+using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
+using TaxiBot.Deterministic;
 
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// v5 Orchestrator: thin top-level class that wires components and routes events.
+/// v7 Orchestrator: thin top-level class that wires components and routes events.
 /// 
 /// Components:
-///   RealtimeAudioBridge  — RTP ↔ OpenAI audio (G.711 passthrough + playout)
-///   MicGateController    — deterministic mic gating (buffer-all, flush-tail)
-///   RealtimeToolRouter   — sync_booking_data handling (pacer, slot lock, transcript injection)
-///   InstructionCoordinator — cancel → update → response.create sequencing
-///   IRealtimeTransport   — raw WebSocket protocol (swappable)
+///   RealtimeAudioBridge       — RTP ↔ OpenAI audio (G.711 passthrough + playout)
+///   MicGateController         — deterministic mic gating (buffer-all, flush-tail)
+///   DeterministicBookingEngine — single-authority state machine (no AI state)
+///   RealtimeToolRouter        — tool call → engine.Step() → action execution
+///   InstructionCoordinator    — session.update sequencing (reprompts only)
+///   IRealtimeTransport        — raw WebSocket protocol (swappable)
 ///
-/// All business logic lives in CleanCallSession (session layer).
-/// This class contains NO booking logic — only media/protocol orchestration.
+/// Engine drives ALL state. AI is voice-only. No transcript fallback.
 /// </summary>
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
 {
@@ -34,12 +36,15 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private readonly RealtimeAudioBridge _audio;
     private readonly RealtimeToolRouter _tools;
     private readonly InstructionCoordinator _instructions;
+    private readonly DeterministicBookingEngine _engine;
 
     // ── Events ──
     public event Action<string>? OnLog;
     public event Action<byte[]>? OnAudioOut;
     public event Action? OnBargeIn;
     public event Action? OnMicUngated;
+    public event Action<string>? OnTransfer;
+    public event Action<string>? OnHangup;
 
     public OpenAiRealtimeClient(
         string apiKey,
@@ -49,6 +54,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         RTPSession rtpSession,
         CleanCallSession session,
         ILogger logger,
+        FareGeocodingService? fareService = null,
+        IcabbiBookingService? icabbiService = null,
         G711CodecType codec = G711CodecType.PCMU,
         IRealtimeTransport? transport = null)
     {
@@ -79,8 +86,74 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             _cts.Token);
         _instructions.OnLog += Log;
 
-        _tools = new RealtimeToolRouter(session, _transport, _cts.Token);
+        // ── Deterministic engine + tool router ──
+        _engine = new DeterministicBookingEngine();
+
+        // Geocode lambda: wraps FareGeocodingService → GeocodeResult
+        Func<string, Task<GeocodeResult>> geocodeFn = async (rawAddress) =>
+        {
+            if (fareService == null)
+                return new GeocodeResult(Ok: false, Error: "No geocode service configured");
+
+            try
+            {
+                var geocoded = await fareService.GeocodeAddressAsync(
+                    rawAddress, "address", session.CallerId, _cts.Token);
+
+                if (geocoded == null)
+                    return new GeocodeResult(Ok: false, Error: "Geocode returned null");
+
+                if (geocoded.IsAmbiguous)
+                    return new GeocodeResult(Ok: false, Error: "Address is ambiguous");
+
+                return new GeocodeResult(
+                    Ok: true,
+                    NormalizedAddress: geocoded.Address);
+            }
+            catch (Exception ex)
+            {
+                return new GeocodeResult(Ok: false, Error: ex.Message);
+            }
+        };
+
+        // Dispatch lambda: wraps IcabbiBookingService → DispatchResult
+        Func<BookingSlots, Task<DispatchResult>> dispatchFn = async (slots) =>
+        {
+            if (icabbiService == null)
+                return new DispatchResult(Ok: false, Error: "No dispatch service configured");
+
+            try
+            {
+                // Build a minimal StructuredBooking from engine slots
+                var booking = new AdaCleanVersion.Models.StructuredBooking
+                {
+                    Pickup = slots.Pickup.Normalized ?? slots.Pickup.Raw ?? "",
+                    Destination = slots.Dropoff.Normalized ?? slots.Dropoff.Raw ?? "",
+                    Passengers = slots.Passengers ?? 1,
+                    PickupTime = slots.PickupTime?.Raw ?? "ASAP",
+                };
+
+                var result = await icabbiService.CreateAndDispatchAsync(
+                    booking,
+                    session.Engine.FareResult,
+                    session.CallerId,
+                    _cts.Token);
+
+                return result.Success
+                    ? new DispatchResult(Ok: true, BookingId: result.BookingRef)
+                    : new DispatchResult(Ok: false, Error: result.Error);
+            }
+            catch (Exception ex)
+            {
+                return new DispatchResult(Ok: false, Error: ex.Message);
+            }
+        };
+
+        _tools = new RealtimeToolRouter(_engine, _transport, geocodeFn, dispatchFn, _cts.Token);
         _tools.OnLog += Log;
+        _tools.OnInstruction += instruction => Log($"📋 Engine instruction: {instruction}");
+        _tools.OnTransfer += reason => { try { OnTransfer?.Invoke(reason); } catch { } };
+        _tools.OnHangup += reason => { try { OnHangup?.Invoke(reason); } catch { } };
 
         // ── Wire transport events ──
         _transport.OnMessage += HandleServerMessageAsync;
@@ -116,26 +189,19 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         var audioFormat = _codec == G711CodecType.PCMU ? "g711_ulaw" : "g711_alaw";
         Log($"📋 Session configured: {audioFormat} passthrough, sync_booking_data tool");
 
-        // Wire session layer events → instruction coordinator
-        _session.OnAiInstruction += _instructions.OnSessionInstruction;
-        _session.OnTruncateConversation += () => _ = _instructions.TruncateConversationAsync();
-        _session.OnTypingSoundsChanged += enabled =>
-            Log(enabled ? "🔊 Typing sounds signal (recalculation)" : "🔇 Typing sounds signal (fare ready)");
-
         // Start audio bridge
         _audio.Start();
 
-        Log("✅ Bidirectional audio bridge active (v5 architecture)");
+        Log("✅ Bidirectional audio bridge active (v7 deterministic engine)");
 
-        // Send greeting
-        await SendGreetingAsync();
+        // Start deterministic engine — sends greeting via tool router
+        await _tools.StartAsync();
+        Log("📢 Engine started — greeting sent");
     }
 
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-
-        _session.OnAiInstruction -= _instructions.OnSessionInstruction;
 
         _audio.Dispose();
         await _transport.DisposeAsync();
@@ -236,66 +302,26 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private void HandleCallerTranscript(string? transcript)
     {
         if (string.IsNullOrWhiteSpace(transcript)) return;
-
-        // Store raw Whisper transcript for tool context injection
-        _tools.SetWhisperTranscript(transcript);
         Log($"👤 Caller: {transcript}");
-
-        // Tool call is the single authority.
-        // If the model called sync_booking_data → it handled the data.
-        // If it didn't → the transcript is conversational noise. Ignore it.
-        // No fallback. No dual processing. No race conditions.
+        // Tool call is the single authority. No transcript fallback.
     }
 
     private void HandleAdaTranscript(string? rawText)
     {
         if (string.IsNullOrWhiteSpace(rawText)) return;
-
-        // Strip [CORRECTION:xxx] tags — metadata for session layer, not spoken content
         var cleanText = Regex.Replace(rawText, @"^\[CORRECTION:\w+\]\s*", "").Trim();
         Log($"🤖 AI: {cleanText}");
-
-        // Store for injection into subsequent tool calls
-        _tools.SetAdaTranscript(cleanText);
-
-        // Feed to session on background task — don't block receive loop
-        // Pass ORIGINAL text (with tags) so session can detect corrections
-        var text = rawText;
-        _ = Task.Run(async () =>
-        {
-            try { await _session.ProcessAdaTranscriptAsync(text); }
-            catch (Exception ex) { Log($"⚠️ Ada transcript processing error: {ex.Message}"); }
-        });
+        // No session processing — engine drives all state transitions via tool calls.
     }
 
     private void HandleError(string? errMsg)
     {
-        // Ignore benign errors
         if (errMsg != null && (
             errMsg.Contains("no active response found") ||
             errMsg.Contains("buffer too small")))
             return;
 
         Log($"⚠ OpenAI error: {errMsg}");
-    }
-
-    // ─── Greeting ───────────────────────────────────────────
-
-    private async Task SendGreetingAsync()
-    {
-        try
-        {
-            var greetingMessage = _session.BuildGreetingMessage();
-            await _transport.SendAsync(
-                RealtimeSessionConfig.BuildGreetingItem(greetingMessage), _cts.Token);
-            await _transport.SendAsync(
-                RealtimeSessionConfig.BuildGreetingResponse(), _cts.Token);
-            Log("📢 Greeting sent via conversation item");
-        }
-        catch (Exception ex)
-        {
-            Log($"⚠ Greeting send error: {ex.Message}");
-        }
     }
 
     // ─── Logging ────────────────────────────────────────────
