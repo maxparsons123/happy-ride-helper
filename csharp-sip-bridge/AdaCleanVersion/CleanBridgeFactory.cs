@@ -90,6 +90,16 @@ public static class CleanBridgeFactory
             logger.LogInformation($"[RT:{callId}] Engine hangup: {reason}");
             // Trigger SIP BYE via bridge if needed
         };
+        client.OnStageChanged += stage =>
+        {
+            // Sync RT engine stage → session engine state
+            var mapped = MapStageToCollectionState(stage);
+            if (mapped.HasValue)
+            {
+                session.Engine.ForceState(mapped.Value);
+                logger.LogInformation($"[RT:{callId}] Session synced: {stage} → {mapped.Value}");
+            }
+        };
 
         try
         {
