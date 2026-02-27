@@ -1114,7 +1114,10 @@ public class CleanCallSession
 
         // For non-address fields, let the engine figure out the next state
         var nextSlot = _engine.RawData.NextMissingSlot();
-        if (nextSlot == null && _engine.State < CollectionState.ReadyForExtraction)
+        var stateNow = _engine.State;
+        if (nextSlot == null && stateNow < CollectionState.ReadyForExtraction
+            && stateNow != CollectionState.VerifyingPickup
+            && stateNow != CollectionState.VerifyingDestination)
         {
             // All slots filled — trigger extraction
             await RunExtractionAsync(ct);
