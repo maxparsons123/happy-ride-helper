@@ -133,6 +133,7 @@ public sealed class RealtimeToolRouter
         // ── Step the engine ──
         var action = _engine.Step(toolEvent);
         Log($"⚙️ Engine: {_engine.State.Stage} → {action.Kind}");
+        OnStageChanged?.Invoke(_engine.State.Stage);
 
         // ── Execute the action (may chain for geocode/dispatch) ──
         await ExecuteActionAsync(action, evt.ToolCallId);
