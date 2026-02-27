@@ -265,7 +265,7 @@ public sealed class BsqdDispatcher : IDispatcher
         catch { return false; }
     }
 
-    private static string FormatE164(string? phone)
+    internal static string FormatE164(string? phone)
     {
         if (string.IsNullOrWhiteSpace(phone)) return "+31000000000";
         var clean = new string(phone.Where(c => char.IsDigit(c) || c == '+').ToArray());

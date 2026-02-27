@@ -558,7 +558,7 @@ public sealed class IcabbiBookingService : IDisposable
         if (string.IsNullOrWhiteSpace(phoneNumber))
             return null;
 
-        var e164 = FormatE164(phoneNumber);
+        var e164 = BsqdDispatcher.FormatE164(phoneNumber);
         _logger.LogInformation("[iCabbi] 🔍 Looking up customer by phone: {Phone}", e164);
 
         try
