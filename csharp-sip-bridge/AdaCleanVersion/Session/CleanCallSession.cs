@@ -1574,16 +1574,20 @@ public class CleanCallSession
         }
 
         // ── PROACTIVE TOOL-TRANSCRIPT COHERENCE CHECK ──────────────────
-        // Verify that tool argument values actually match the transcript that triggered them.
-        // Catches the case where AI reuses a stale slot value despite the caller saying something new.
-        if (!string.IsNullOrWhiteSpace(lastUtterance))
+        // Verify tool argument values against the transcript that triggered them.
+        // IMPORTANT: prefer Whisper transcript over AI last_utterance because
+        // last_utterance can be paraphrased/hallucinated by the model.
+        var coherenceTranscript = whisperTranscript ?? lastUtterance;
+        var coherenceSource = whisperTranscript != null ? "whisper_transcript" : "last_utterance";
+
+        if (!string.IsNullOrWhiteSpace(coherenceTranscript))
         {
             if (slotsUpdated.Contains("pickup"))
             {
                 var pickupVal = _engine.RawData.PickupRaw ?? "";
-                if (!ToolAddressMatchesTranscript(pickupVal, lastUtterance))
+                if (!ToolAddressMatchesTranscript(pickupVal, coherenceTranscript))
                 {
-                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (pickup) — tool=\"{pickupVal}\" transcript=\"{lastUtterance}\"");
+                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (pickup) [{coherenceSource}] — tool=\"{pickupVal}\" transcript=\"{coherenceTranscript}\"");
                     _engine.HardClearVerifiedAddress("pickup");
                     _engine.ClearFareResult();
                     _engine.RawData.SetSlot("pickup", null!); // Clear stale value
@@ -1596,9 +1600,9 @@ public class CleanCallSession
             if (slotsUpdated.Contains("destination"))
             {
                 var destVal = _engine.RawData.DestinationRaw ?? "";
-                if (!ToolAddressMatchesTranscript(destVal, lastUtterance))
+                if (!ToolAddressMatchesTranscript(destVal, coherenceTranscript))
                 {
-                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (destination) — tool=\"{destVal}\" transcript=\"{lastUtterance}\"");
+                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (destination) [{coherenceSource}] — tool=\"{destVal}\" transcript=\"{coherenceTranscript}\"");
                     _engine.HardClearVerifiedAddress("destination");
                     _engine.ClearFareResult();
                     _engine.RawData.SetSlot("destination", null!); // Clear stale value
