@@ -82,7 +82,7 @@ public static class AddressParser
             remaining = remaining[unitMatch.Length..];
         }
 
-        var numberMatch = Regex.Match(remaining, @"^(\d+(?:-?[A-Za-z]\d*|-\d+)?)\s+(.+)");
+        var numberMatch = Regex.Match(remaining, @"^(\d+(?:-\d+)?[A-Za-z]?)\s+(.+)");
         if (numberMatch.Success)
         {
             houseNumber = numberMatch.Groups[1].Value;
