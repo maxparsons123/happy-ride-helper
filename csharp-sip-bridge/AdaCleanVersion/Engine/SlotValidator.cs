@@ -28,7 +28,7 @@ public static class SlotValidator
 
     // Patterns that are clearly not addresses (supports multi-word combos like "correct, yeah")
     private static readonly Regex NonAddressPattern = new(
-        @"^(yes|no|yeah|yep|nah|sure|please|thanks|thank you|cheers|ta|bye|goodbye|correct|right|that'?s right|that'?s correct|correct\s*,?\s*yeah|yeah\s*,?\s*correct|yes\s*,?\s*correct|correct\s*,?\s*yes|yeah\s*,?\s*that'?s\s*(right|correct|it)|yep\s*,?\s*that'?s\s*(right|it))$",
+        @"^(yes|no|yeah|yep|nah|sure|please|thanks|thank you|cheers|ta|bye|goodbye|correct|right|that'?s right|that'?s correct|correct\s*,?\s*yeah|yeah\s*,?\s*correct|yes\s*,?\s*correct|correct\s*,?\s*yes|yeah\s*,?\s*that'?s\s*(right|correct|it)|yep\s*,?\s*that'?s\s*(right|it)|good\s*(luck|morning|afternoon|evening|night|day|one)|have\s+a\s+good|nice\s+to|lovely|brilliant|perfect|wonderful|great|awesome|fantastic|amazing|cool|alright\s*then|see\s+you|take\s+care|all\s+the\s+best|no\s+worries|no\s+problem|fair\s+enough|sounds\s+good|that'?s\s+great|that'?s\s+fine|that'?s\s+good|that'?s\s+lovely|of\s+course|absolutely|definitely|certainly|indeed|exactly)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
