@@ -596,7 +596,7 @@ public class CleanCallSession
         {
             // During recalculation, skip readback check — we already have the address,
             // just need to re-geocode it. Any AI response (even "[Silence]") triggers geocoding.
-            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "pickup"))
+            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "pickup", _engine.RawData.PickupRaw))
             {
                 Log($"⚠️ Ignoring non-readback AI transcript in VerifyingPickup: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
                 EmitCurrentInstruction();
@@ -622,7 +622,7 @@ public class CleanCallSession
         {
             // During recalculation, skip readback check — we already have the address,
             // just need to re-geocode it. Any AI response (even "[Silence]") triggers geocoding.
-            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "destination"))
+            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "destination", _engine.RawData.DestinationRaw))
             {
                 Log($"⚠️ Ignoring non-readback AI transcript in VerifyingDestination: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
                 EmitCurrentInstruction();
@@ -650,7 +650,7 @@ public class CleanCallSession
     /// Detect whether Ada's transcript looks like an address readback (not a stale reprompt).
     /// Prevents stale "repeat your pickup" prompts from triggering verification geocoding.
     /// </summary>
-    private static bool LooksLikeAddressReadback(string text, string field)
+    private static bool LooksLikeAddressReadback(string text, string field, string? rawAddress = null)
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
 
@@ -675,9 +675,28 @@ public class CleanCallSession
 
         // Positive readback cues
         if (lower.Contains("let me just confirm")) return true;
+        if (lower.Contains("let me confirm")) return true;
+        if (lower.Contains("confirm the pickup")) return true;
+        if (lower.Contains("confirm the destination")) return true;
+        if (lower.Contains("confirm if the")) return true;
         if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b(road|street|lane|avenue|drive|close|way|crescent|court|place|grove|terrace)\b")) return true;
         if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b[a-z]{1,2}\d{1,2}\s*\d[a-z]{2}\b")) return true; // UK postcode
         if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b\d{1,5}[a-z]?\b")) return true; // house number
+
+        // POI readback: if the raw address has no street tokens (it's a POI like "Sweet Spot"),
+        // accept any transcript that contains the POI name — that IS the readback.
+        if (!string.IsNullOrWhiteSpace(rawAddress))
+        {
+            var rawLower = rawAddress.ToLowerInvariant();
+            var streetPattern = new System.Text.RegularExpressions.Regex(@"\b(road|rd|street|st|lane|ln|avenue|ave|drive|dr|close|way|crescent|court|place|grove|terrace|boulevard|blvd)\b");
+            if (!streetPattern.IsMatch(rawLower))
+            {
+                // It's a POI — check if Ada mentioned the POI name in her readback
+                var poiName = rawLower.Split(',')[0].Trim();
+                if (poiName.Length >= 3 && lower.Contains(poiName))
+                    return true;
+            }
+        }
 
         return false;
     }
@@ -1098,6 +1117,21 @@ public class CleanCallSession
 
         if (slotsUpdated.Count == 0)
         {
+            // ── CONFIRMATION VIA TOOL CALL ──────────────────────────────
+            // The AI sometimes calls sync_booking_data with interpretation="Customer confirmed"
+            // but no actual slot fields. Detect confirmation intent and dispatch.
+            if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
+            {
+                var interpLower = (interp ?? "").ToLowerInvariant();
+                if (interpLower.Contains("confirm") || interpLower.Contains("yes") || interpLower.Contains("go ahead") ||
+                    interpLower.Contains("book") || interpLower.Contains("agreed"))
+                {
+                    Log($"[SyncTool] Confirmation detected via interpretation in {_engine.State} — dispatching");
+                    await ConfirmBookingAsync(ct);
+                    return BuildSyncResponse("confirmed");
+                }
+            }
+
             Log("[SyncTool] No slots updated — returning current state");
             return BuildSyncResponse("no_change");
         }
