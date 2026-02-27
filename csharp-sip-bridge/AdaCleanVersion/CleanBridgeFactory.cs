@@ -92,13 +92,23 @@ public static class CleanBridgeFactory
         };
         client.OnStageChanged += stage =>
         {
-            // Sync RT engine stage → session engine state
-            var mapped = MapStageToCollectionState(stage);
-            if (mapped.HasValue)
+            // Fire-and-forget on thread pool — never block WebSocket receive thread
+            ThreadPool.QueueUserWorkItem(_ =>
             {
-                session.Engine.ForceState(mapped.Value);
-                logger.LogInformation($"[RT:{callId}] Session synced: {stage} → {mapped.Value}");
-            }
+                try
+                {
+                    var mapped = MapStageToCollectionState(stage);
+                    if (mapped.HasValue)
+                    {
+                        session.Engine.ForceState(mapped.Value);
+                        logger.LogInformation($"[RT:{callId}] Session synced: {stage} → {mapped.Value}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning($"[RT:{callId}] Stage sync error: {ex.Message}");
+                }
+            });
         };
 
         try
