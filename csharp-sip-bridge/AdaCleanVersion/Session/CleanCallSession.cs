@@ -594,9 +594,10 @@ public class CleanCallSession
         // Only the FIRST call should proceed; subsequent ones are no-ops.
         if (_engine.State == CollectionState.VerifyingPickup)
         {
-            // During recalculation, skip readback check — we already have the address,
-            // just need to re-geocode it. Any AI response (even "[Silence]") triggers geocoding.
-            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "pickup", _engine.RawData.PickupRaw))
+            // Always require an address-like readback before geocoding.
+            // This prevents accidental fast-forward when Ada asks an unrelated question
+            // (e.g., "What is your destination address?") during pickup re-verification.
+            if (!LooksLikeAddressReadback(adaText, "pickup", _engine.RawData.PickupRaw))
             {
                 Log($"⚠️ Ignoring non-readback AI transcript in VerifyingPickup: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
                 EmitCurrentInstruction();
@@ -613,7 +614,7 @@ public class CleanCallSession
             {
                 var rawAddress = _engine.RawData.PickupRaw ?? "";
                 var rawTranscript = _engine.RawData.GetLastUtterance("pickup");
-                Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
+                Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\")");
                 await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText, rawTranscript: rawTranscript);
             }
             finally { _geocodeInFlight = false; }
@@ -621,9 +622,9 @@ public class CleanCallSession
         }
         if (_engine.State == CollectionState.VerifyingDestination)
         {
-            // During recalculation, skip readback check — we already have the address,
-            // just need to re-geocode it. Any AI response (even "[Silence]") triggers geocoding.
-            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "destination", _engine.RawData.DestinationRaw))
+            // Always require an address-like readback before geocoding.
+            // This prevents accidental fast-forward when Ada asks an unrelated question.
+            if (!LooksLikeAddressReadback(adaText, "destination", _engine.RawData.DestinationRaw))
             {
                 Log($"⚠️ Ignoring non-readback AI transcript in VerifyingDestination: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
                 EmitCurrentInstruction();
@@ -640,7 +641,7 @@ public class CleanCallSession
             {
                 var rawAddress = _engine.RawData.DestinationRaw ?? "";
                 var rawTranscript = _engine.RawData.GetLastUtterance("destination");
-                Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
+                Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\")");
                 await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText, rawTranscript: rawTranscript);
             }
             finally { _geocodeInFlight = false; }
