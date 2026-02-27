@@ -30,7 +30,7 @@ public record CorrectionResult(string SlotName, string NewValue);
 /// collapsing 3+ HTTP round-trips into one.
 /// 
 /// Falls back gracefully (returns null) on timeout/error so the caller can
-/// use the deterministic regex-based FreeFormSplitter as a safety net.
+/// skip burst processing and handle the input slot-by-slot.
 /// </summary>
 public class EdgeBurstDispatcher
 {
@@ -88,7 +88,7 @@ public class EdgeBurstDispatcher
     /// <summary>
     /// Send the raw transcript (+ optional Ada readback) to burst-dispatch.
     /// Returns extracted slots + geocoded result in one call.
-    /// Returns null on failure — caller should fall back to regex FreeFormSplitter.
+    /// Returns null on failure — caller should handle input slot-by-slot.
     /// </summary>
     public async Task<BurstResult?> DispatchAsync(
         string transcript,

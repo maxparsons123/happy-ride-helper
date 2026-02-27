@@ -204,7 +204,7 @@ public class CleanCallSession
         // ── Freeform Burst Detection + Edge Burst Dispatch ──
         // If the transcript looks "dense" (multiple keywords, long sentence), try burst-dispatch.
         // This splits ALL fields AND geocodes addresses in a single round-trip.
-        // Falls back to deterministic regex FreeFormSplitter on timeout/error.
+        // Falls back to slot-by-slot processing on timeout/error.
         var aiHandled = false;
         if (_burstDispatcher != null && EdgeBurstDispatcher.LooksLikeBurst(transcript))
         {
@@ -301,54 +301,7 @@ public class CleanCallSession
             }
         }
 
-        // ── Regex fallback (deterministic) ──
-        if (!aiHandled)
-        {
-            if (currentSlot != "name")
-            {
-                var split = FreeFormSplitter.Analyze(transcript, currentSlot);
-                if (split.WasSplit)
-                {
-                    if (split.RerouteToSlot != null)
-                    {
-                        Log($"Cross-slot reroute: '{currentSlot}' input \"{transcript}\" → slot '{split.RerouteToSlot}'");
-                        var rerouteValue = split.OverflowSlots[split.RerouteToSlot];
-                        _engine.AcceptSlotValue(split.RerouteToSlot, rerouteValue);
-                        EmitCurrentInstruction();
-                        return;
-                    }
-
-                    if (split.PrimaryValue != null && split.OverflowSlots.Count > 0)
-                    {
-                        Log($"Free-form split: primary '{currentSlot}'=\"{split.PrimaryValue}\"");
-                        transcript = split.PrimaryValue;
-                        _engine.RawData.IsMultiSlotBurst = true;
-
-                        foreach (var (overflowSlot, overflowValue) in split.OverflowSlots)
-                        {
-                            Log($"Free-form overflow: '{overflowSlot}'=\"{overflowValue}\"");
-                            _engine.RawData.SetSlot(overflowSlot, overflowValue);
-                        }
-                    }
-                }
-            }
-            else
-            {
-                var nameBurst = FreeFormSplitter.AnalyzeNameBurst(transcript);
-                if (nameBurst != null)
-                {
-                    Log($"Name burst detected: name=\"{nameBurst.Name}\", overflow slots={nameBurst.OverflowSlots.Count}");
-                    transcript = nameBurst.Name;
-                    _engine.RawData.IsMultiSlotBurst = true;
-
-                    foreach (var (overflowSlot, overflowValue) in nameBurst.OverflowSlots)
-                    {
-                        Log($"Name burst overflow: '{overflowSlot}'=\"{overflowValue}\"");
-                        _engine.RawData.SetSlot(overflowSlot, overflowValue);
-                    }
-                }
-            }
-        }
+        // AI burst dispatch handles all splitting — no regex fallback needed.
 
         // Validate the input before accepting it as a slot value
         var validationError = SlotValidator.Validate(currentSlot, transcript);
