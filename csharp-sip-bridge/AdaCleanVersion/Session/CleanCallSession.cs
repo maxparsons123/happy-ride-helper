@@ -304,6 +304,49 @@ public class CleanCallSession
 
         // AI burst dispatch handles all splitting — no regex fallback needed.
 
+        // ── Cross-Slot Reference Detection ──
+        // If the caller explicitly mentions a DIFFERENT slot (e.g., "the pickup is X" while
+        // we're collecting destination), route to that slot instead of blindly storing as current.
+        // This prevents garbage like "Right, the pick-up is dig in the middle" being stored as destination.
+        if (!aiHandled)
+        {
+            var crossSlotTarget = DetectCrossSlotReference(transcript, currentSlot);
+            if (crossSlotTarget != null)
+            {
+                var extractedValue = ExtractValueAfterSlotReference(transcript, crossSlotTarget);
+                Log($"[CrossSlot] Caller referenced '{crossSlotTarget}' while collecting '{currentSlot}': \"{transcript}\" → value=\"{extractedValue}\"");
+                
+                if (!string.IsNullOrWhiteSpace(extractedValue))
+                {
+                    // Store in the correct slot and re-verify if it's an address
+                    _engine.RawData.SetSlot(crossSlotTarget, extractedValue);
+                    if (crossSlotTarget == "pickup")
+                    {
+                        _engine.ForceState(CollectionState.VerifyingPickup);
+                    }
+                    else if (crossSlotTarget == "destination")
+                    {
+                        _engine.ForceState(CollectionState.VerifyingDestination);
+                    }
+                    else
+                    {
+                        // Non-address slot — just advance normally
+                        _engine.AdvanceToSlot(currentSlot);
+                    }
+                    EmitCurrentInstruction();
+                    return;
+                }
+                else
+                {
+                    // Caller mentioned the slot but didn't provide a value — re-ask for it
+                    Log($"[CrossSlot] No value extracted for '{crossSlotTarget}', re-asking");
+                    _engine.ForceState(CallStateEngine.SlotToState(crossSlotTarget));
+                    EmitCurrentInstruction();
+                    return;
+                }
+            }
+        }
+
         // Validate the input before accepting it as a slot value
         var validationError = SlotValidator.Validate(currentSlot, transcript);
         if (validationError != null)
@@ -2363,5 +2406,75 @@ public class CleanCallSession
             "yes" or "and" or "or" or "on" or "in" or "at" or "of" or "for" or "it's" or
             "i" or "i'm" or "that" or "that's" or "this" or "sorry" or "actually" or
             "please" or "can" or "you" or "we" or "going" or "take" or "me" or "want";
+    }
+
+    /// <summary>
+    /// Detects when the caller explicitly references a DIFFERENT slot than the one being collected.
+    /// e.g., "the pick-up is Pig in the Middle" while collecting destination.
+    /// Returns the slot name being referenced, or null if no cross-slot reference detected.
+    /// </summary>
+    private static string? DetectCrossSlotReference(string transcript, string currentSlot)
+    {
+        var lower = System.Text.RegularExpressions.Regex.Replace(
+            transcript.ToLowerInvariant(), @"[,\.\!\?;:]+", " ").Trim();
+        lower = System.Text.RegularExpressions.Regex.Replace(lower, @"\s+", " ");
+
+        // Map of slot-reference patterns → slot name
+        // Only match if the referenced slot is DIFFERENT from what we're collecting
+        var slotPatterns = new Dictionary<string, string[]>
+        {
+            ["pickup"] = new[] { "the pick-up is", "the pickup is", "pick-up is", "pickup is", 
+                                  "the pick up is", "pick up is", "picking up from" },
+            ["destination"] = new[] { "the destination is", "destination is", "going to", 
+                                      "heading to", "drop off at", "drop-off is", "dropoff is" },
+            ["passengers"] = new[] { "passengers", "people traveling" },
+            ["pickup_time"] = new[] { "the time is", "pick up time is", "pickup time is" },
+        };
+
+        foreach (var (slot, patterns) in slotPatterns)
+        {
+            if (slot == currentSlot) continue; // Only detect CROSS-slot references
+
+            foreach (var pattern in patterns)
+            {
+                if (lower.Contains(pattern))
+                    return slot;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Extract the value portion after a slot reference keyword.
+    /// e.g., "Right, the pick-up is Pig in the Middle" → "Pig in the Middle"
+    /// </summary>
+    private static string ExtractValueAfterSlotReference(string transcript, string slotName)
+    {
+        var lower = transcript.ToLowerInvariant();
+
+        // Patterns ordered by specificity (longest first)
+        var extractPatterns = slotName switch
+        {
+            "pickup" => new[] { @"the\s+pick[\s-]?up\s+is\s+", @"pick[\s-]?up\s+is\s+", 
+                                @"picking\s+up\s+from\s+", @"\bfrom\s+" },
+            "destination" => new[] { @"the\s+destination\s+is\s+", @"destination\s+is\s+",
+                                     @"going\s+to\s+", @"heading\s+to\s+", @"drop[\s-]?off\s+(?:at|is)\s+" },
+            _ => Array.Empty<string>()
+        };
+
+        foreach (var pattern in extractPatterns)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                transcript, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                var value = transcript[(match.Index + match.Length)..].Trim().TrimEnd('.', ',', '!', '?');
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value;
+            }
+        }
+
+        return "";
     }
 }

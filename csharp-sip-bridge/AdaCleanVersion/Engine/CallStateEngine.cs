@@ -453,7 +453,7 @@ public class CallStateEngine
         OnStateChanged?.Invoke(old, newState);
     }
 
-    private static CollectionState SlotToState(string slotName) => slotName.ToLowerInvariant() switch
+    public static CollectionState SlotToState(string slotName) => slotName.ToLowerInvariant() switch
     {
         "name" => CollectionState.CollectingName,
         "pickup" => CollectionState.CollectingPickup,
