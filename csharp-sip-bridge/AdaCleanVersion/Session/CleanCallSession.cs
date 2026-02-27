@@ -1113,14 +1113,25 @@ public class CleanCallSession
         // If pickup and destination end up identical after this sync, the AI
         // likely cross-contaminated the slots (e.g. put a pickup correction
         // into the destination field). Detect and recover.
+        // SKIP if both were provided in a burst — caller genuinely said the same thing twice,
+        // which is their mistake and we should ask for clarification on the destination.
         {
             var currentPickup = (_engine.RawData.PickupRaw ?? "").Trim();
             var currentDest = (_engine.RawData.DestinationRaw ?? "").Trim();
             if (!string.IsNullOrEmpty(currentPickup) && !string.IsNullOrEmpty(currentDest) &&
                 string.Equals(currentPickup, currentDest, StringComparison.OrdinalIgnoreCase))
             {
-                // Determine which slot was just updated — that's the one the AI wrote incorrectly
-                var contaminatedSlot = slotsUpdated.Contains("destination") ? "destination" : "pickup";
+                // Determine which slot was just updated — that's the contaminated one.
+                // If both were updated in same burst, clear destination (more likely error).
+                // If only one was updated, clear that one (it was written to match the other).
+                string contaminatedSlot;
+                if (slotsUpdated.Contains("pickup") && slotsUpdated.Contains("destination"))
+                    contaminatedSlot = "destination"; // burst: clear dest, keep pickup
+                else if (slotsUpdated.Contains("destination"))
+                    contaminatedSlot = "destination";
+                else
+                    contaminatedSlot = "pickup";
+
                 var keepSlot = contaminatedSlot == "destination" ? "pickup" : "destination";
                 Log($"⚠ [SyncTool] SAME-ADDRESS GUARD — pickup and destination are identical (\"{currentPickup}\"). " +
                     $"Clearing {contaminatedSlot} (keeping {keepSlot}). Transcript: \"{lastUtterance}\"");
