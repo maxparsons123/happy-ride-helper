@@ -478,6 +478,12 @@ public class CallStateEngine
         ForceState(targetState);
     }
 
+    /// <summary>Clears clarification state without transitioning — used when caller rejects options.</summary>
+    public void ClearPendingClarification()
+    {
+        PendingClarification = null;
+    }
+
     /// <summary>
     /// Extraction failed — go back to collection to fix issues.
     /// </summary>
