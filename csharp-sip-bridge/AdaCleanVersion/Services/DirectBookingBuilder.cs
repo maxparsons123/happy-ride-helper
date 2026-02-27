@@ -90,8 +90,12 @@ public class DirectBookingBuilder : IExtractionService
         var warnings = new List<string>();
 
         // 1. Parse addresses (already verified/geocoded — just structure them)
+        // CRITICAL: Preserve the raw verified string verbatim as RawDisplayName.
+        // The verified string is sacred — no reformatting, no comma insertion.
         var pickup = ParseAddress(slots.Pickup);
+        pickup = pickup with { RawDisplayName = string.IsNullOrWhiteSpace(slots.Pickup) ? null : slots.Pickup.Trim() };
         var destination = ParseAddress(slots.Destination);
+        destination = destination with { RawDisplayName = string.IsNullOrWhiteSpace(slots.Destination) ? null : slots.Destination.Trim() };
 
         if (string.IsNullOrWhiteSpace(slots.Pickup))
             warnings.Add("Pickup address is missing");

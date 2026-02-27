@@ -1813,14 +1813,19 @@ public class CleanCallSession
             return BuildSyncResponse("ok", slotsUpdated);
         }
 
-        // For non-address fields, let the engine figure out the next state
+        // For non-address fields, let the engine figure out the next state.
+        // CRITICAL: Transition state FIRST, then build instruction for new state.
+        // This prevents the instruction race where CollectingPickupTime instruction
+        // is emitted then immediately overridden by ReadyForExtraction/Geocoding silence.
         var nextSlot = _engine.RawData.NextMissingSlot();
         var stateNow = _engine.State;
         if (nextSlot == null && stateNow < CollectionState.ReadyForExtraction
             && stateNow != CollectionState.VerifyingPickup
             && stateNow != CollectionState.VerifyingDestination)
         {
-            // All slots filled — trigger extraction
+            // All slots filled — transition state BEFORE extraction (atomic)
+            // Do NOT emit instruction for old state — go straight to extraction
+            _engine.ForceState(CollectionState.ReadyForExtraction);
             await RunExtractionAsync(ct);
         }
         else if (nextSlot != null)
@@ -2468,10 +2473,12 @@ public class CleanCallSession
     private static StructuredAddress? ParseVerifiedAddress(string? address)
     {
         if (string.IsNullOrWhiteSpace(address)) return null;
-        // Put the entire verified address as the display — the fare service sends DisplayName to the edge function
+        // Preserve the verified address verbatim — no reformatting allowed.
+        // RawDisplayName ensures DisplayName returns the sacred string as-is.
         return new StructuredAddress
         {
-            StreetName = address
+            StreetName = address,
+            RawDisplayName = address
         };
     }
 
