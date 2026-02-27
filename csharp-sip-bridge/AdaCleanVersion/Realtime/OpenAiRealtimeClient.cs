@@ -133,6 +133,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>Fires when barge-in (speech_started) occurs.</summary>
     public event Action? OnBargeIn;
 
+    /// <summary>Fires when mic is ungated (playout drained, caller can speak).</summary>
+    public event Action? OnMicUngated;
+
     public OpenAiRealtimeClient(
         string apiKey,
         string model,
@@ -195,6 +198,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Only barge-in should flush tail frames to OpenAI.
         ClearMicGateBuffer();
         Log("🔓 Mic ungated (audio done + playout drained) — buffer discarded (echo)");
+        try { OnMicUngated?.Invoke(); } catch { }
     }
 
     /// <summary>Gate mic when AI starts responding.</summary>
@@ -231,6 +235,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             _playout.TypingSoundsEnabled = enabled;
             Log(enabled ? "🔊 Typing sounds enabled (recalculation)" : "🔇 Typing sounds disabled (fare ready)");
         };
+
+        // Wire mic ungate → session no-reply watchdog
+        // Watchdog starts AFTER playout drains, not when instruction is sent.
+        // This prevents the 12s timer from eating into Ada's speaking time.
+        OnMicUngated += () => _session.NotifyMicUngated();
 
         // Start playout engine
         _playout.Start();

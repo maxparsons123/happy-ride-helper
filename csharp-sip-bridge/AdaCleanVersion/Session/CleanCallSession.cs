@@ -1769,6 +1769,15 @@ public class CleanCallSession
         _ => false
     };
 
+    /// <summary>
+    /// Called by the realtime client when the mic is ungated (playout drained).
+    /// Arms the no-reply watchdog NOW — the caller can actually speak at this point.
+    /// </summary>
+    public void NotifyMicUngated()
+    {
+        ArmNoReplyWatchdog();
+    }
+
     private void ArmNoReplyWatchdog()
     {
         CancelNoReplyWatchdog();
@@ -1845,7 +1854,8 @@ public class CleanCallSession
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, false);
 
-        ArmNoReplyWatchdog();
+        // Watchdog is now armed by NotifyMicUngated() — not here.
+        // This prevents the timer from counting down while Ada is still speaking.
     }
 
     private void EmitRepromptInstruction(string rejectedReason)
@@ -1870,7 +1880,7 @@ public class CleanCallSession
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, true); // isReprompt = true
 
-        ArmNoReplyWatchdog();
+        // Watchdog is now armed by NotifyMicUngated() — not here.
     }
 
     private void OnEngineStateChanged(CollectionState from, CollectionState to)
