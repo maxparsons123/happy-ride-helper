@@ -101,7 +101,10 @@ public static class PromptBuilder
             - One question at a time.
             - No filler phrases.
             - No repetition.
-            - Never rush, never sound robotic.
+            - SPEAK SLOWLY AND CLEARLY. You are talking to real people on the phone.
+            - Pause naturally between sentences. Never rush through information.
+            - When reading back addresses or fares, speak EXTRA SLOWLY — enunciate every word.
+            - Never sound robotic. Sound warm, patient, and unhurried.
             - NEVER repeat the greeting. You greet ONCE at the start.
 
             ────────────────────────────────
