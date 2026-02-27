@@ -424,7 +424,7 @@ public static class PromptBuilder
                 BuildClarificationInstruction(rawData, clarification),
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
-                $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'.\n" +
+                $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to...' or re-introduce yourself.\n" +
                 "⛔ TRUTH OVERRIDE: The caller may have mispronounced or misspelled addresses. " +
                 "You MUST NOT repeat the caller's words for addresses. You MUST ONLY use the VERIFIED addresses " +
                 "provided in the bullet points below. These are the geocode-confirmed ground truth. " +
