@@ -634,6 +634,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         Log($"👤 Caller: {transcript}");
 
+        // Proactively cancel any in-flight/stale AI response as soon as a valid caller
+        // transcript lands. This prevents late reprompt audio from leaking into the
+        // next deterministic state turn.
+        _ = SendJsonAsync(new { type = "response.cancel" });
+
         // Process transcript on background task to avoid blocking audio delta receive loop.
         // The auto-response was already canceled on speech_stopped (above).
         // ProcessCallerResponseAsync → engine → emits instruction → session.update + response.create.
