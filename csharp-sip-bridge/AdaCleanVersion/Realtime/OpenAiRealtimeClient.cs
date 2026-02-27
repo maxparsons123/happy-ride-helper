@@ -1085,10 +1085,21 @@ Never assume previous values remain valid.
 
             if (pending.IsReprompt)
             {
-                // HARDENED: For reprompts, also clear the input audio buffer to prevent
-                // the AI from using stale audio context to generate a rogue response
-                await SendJsonAsync(new { type = "input_audio_buffer.clear" });
-                Log("🔒 Reprompt: cleared input audio buffer");
+                // HARDENED: For reprompts, clear input audio buffer ONLY if mic is gated.
+                // If mic is ungated, the caller may have already spoken (e.g., "three passengers")
+                // and clearing would wipe their answer before OpenAI processes it.
+                if (_micGated)
+                {
+                    await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+                    Log("🔒 Reprompt: cleared input audio buffer");
+                }
+                else
+                {
+                    // Mic is open — caller audio is already flowing to OpenAI.
+                    // Commit the buffer instead of clearing, so any pending speech is processed.
+                    await SendJsonAsync(new { type = "input_audio_buffer.commit" });
+                    Log("🔒 Reprompt: committed input audio buffer (mic was ungated — preserving caller speech)");
+                }
             }
 
             // Fallback: if no response was active, response.canceled won't fire.
