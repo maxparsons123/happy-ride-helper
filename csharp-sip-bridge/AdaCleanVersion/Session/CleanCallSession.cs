@@ -967,6 +967,18 @@ public class CleanCallSession
             return;
         }
 
+        // Non-address correction during/after fare presentation (e.g. passengers changed
+        // while PresentingFare) — must re-extract → re-geocode → re-present fare → await confirmation.
+        // Without this, the AI generates from stale context and says "taxi on the way" without confirmation.
+        if (_engine.State >= CollectionState.ReadyForExtraction &&
+            _engine.State < CollectionState.Dispatched)
+        {
+            Log($"Non-address correction ({slotName}) during fare flow (state={_engine.State}) — re-extracting");
+            _engine.ClearFareResult();
+            await RunExtractionAsync(ct);
+            return;
+        }
+
         var instruction = PromptBuilder.BuildCorrectionInstruction(
             slotName, oldValue ?? "", newValue);
         OnAiInstruction?.Invoke(instruction, false, false);
