@@ -802,13 +802,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             }
         });
 
-        // Trigger a follow-up response so the AI speaks after processing the tool result
-        // The deterministic engine may have already queued an instruction via OnAiInstruction,
-        // in which case this response.create will be superseded by the instruction sequence.
-        if (_ws?.State == WebSocketState.Open)
-        {
-            await SendJsonAsync(new { type = "response.create" });
-        }
+        // DO NOT send response.create here.
+        // The deterministic engine has already queued an instruction via OnAiInstruction
+        // (which triggers StartInstructionSequenceAsync → session.update → response.create).
+        // Sending response.create here causes:
+        // 1) AI freestyling ("Where would you like to go?") before the instruction arrives
+        // 2) "Conversation already has an active response" errors when the instruction fires
+        // 3) Verification bypass — AI skips readback and hallucinates next steps
     }
 
     // ─── Instruction Updates (Event-Driven v4.1) ────────────
