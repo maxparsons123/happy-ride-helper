@@ -87,7 +87,7 @@ public class AudioSettings
 
 public class TaxiSettings
 {
-    public string CompanyName { get; set; } = "Ada Taxi";
+    public string CompanyName { get; set; } = "247 Radio Carz";
 }
 
 public class DispatchSettings

@@ -260,6 +260,14 @@ public static class PromptBuilder
             CollectionState.Greeting =>
                 "[INSTRUCTION] Greet the caller warmly and ask for their name.",
 
+            CollectionState.ManagingExistingBooking =>
+                "[INSTRUCTION] The caller has an active booking. Ask: would you like to cancel, make changes, or check on your driver? " +
+                "Wait for their response. Do NOT start a new booking unless they explicitly ask for one.",
+
+            CollectionState.AwaitingCancelConfirmation =>
+                "[INSTRUCTION] The caller wants to cancel their booking. Ask them to confirm: \"Are you sure you'd like to cancel your booking?\" " +
+                "Wait for a clear yes or no.",
+
             CollectionState.CollectingName =>
                 $"[INSTRUCTION] {SLOT_GUARD}Ask the caller for their name. " +
                 $"{RemainingFields()}",
@@ -548,11 +556,25 @@ public static class PromptBuilder
     /// Build the greeting message to inject as a conversation item (like AdaSdkModel).
     /// This is sent as a user message that the AI responds to naturally.
     /// </summary>
-    public static string BuildGreetingMessage(string companyName, CallerContext? context, CollectionState currentState)
+    public static string BuildGreetingMessage(string companyName, CallerContext? context, CollectionState currentState, ActiveBookingInfo? activeBooking = null)
     {
+        // Returning caller with active booking — greet and offer manage options
+        if (activeBooking != null && context?.IsReturningCaller == true && !string.IsNullOrWhiteSpace(context.CallerName))
+        {
+            var pickup = activeBooking.Pickup ?? "unknown";
+            var destination = activeBooking.Destination ?? "unknown";
+
+            return $"[SYSTEM] A returning caller named {context.CallerName} has connected. " +
+                   $"They have an ACTIVE BOOKING from {pickup} to {destination}. " +
+                   $"Greet them BY NAME, then tell them about their existing booking. Say something like: " +
+                   $"\"Welcome back to {companyName}, {context.CallerName}. I can see you have an active booking " +
+                   $"from {pickup} to {destination}. Would you like to cancel it, make any changes, or check on your driver?\" " +
+                   $"Wait for their response before proceeding.";
+        }
+
         if (context?.IsReturningCaller == true && !string.IsNullOrWhiteSpace(context.CallerName))
         {
-            // Returning caller — greet by name and ask whereabouts (skip name collection)
+            // Returning caller without active booking — greet by name and ask whereabouts (skip name collection)
             var lastPickupHint = !string.IsNullOrWhiteSpace(context.LastPickup)
                 ? $" Their last pickup was \"{context.LastPickup}\" — you may offer it as a suggestion."
                 : "";

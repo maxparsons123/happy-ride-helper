@@ -25,6 +25,7 @@ public class CleanCallSession
     private readonly IcabbiBookingService? _icabbiService;
     private readonly string _companyName;
     private readonly CallerContext? _callerContext;
+    private readonly ActiveBookingInfo? _activeBooking;
     private readonly HashSet<string> _changedSlots = new();
     private int _clarificationAttempts; // loop-breaker counter
 
@@ -75,7 +76,8 @@ public class CleanCallSession
         CallerContext? callerContext = null,
         LocalGeminiReconciler? reconciler = null,
         EdgeBurstDispatcher? burstDispatcher = null,
-        IcabbiBookingService? icabbiService = null)
+        IcabbiBookingService? icabbiService = null,
+        ActiveBookingInfo? activeBooking = null)
     {
         SessionId = sessionId;
         CallerId = callerId;
@@ -86,6 +88,7 @@ public class CleanCallSession
         _reconciler = reconciler;
         _burstDispatcher = burstDispatcher;
         _icabbiService = icabbiService;
+        _activeBooking = activeBooking;
 
         _engine.OnLog += msg => OnLog?.Invoke(msg);
         _engine.OnStateChanged += OnEngineStateChanged;
@@ -98,6 +101,17 @@ public class CleanCallSession
     public void Start()
     {
         Log($"Call started: {CallerId}");
+
+        // If returning caller has an active booking, go to ManagingExistingBooking state
+        if (_activeBooking != null)
+        {
+            _engine.HasActiveBooking = true;
+            _engine.ExistingBookingId = _activeBooking.BookingId;
+            _engine.ExistingIcabbiJourneyId = _activeBooking.IcabbiJourneyId;
+            _engine.ForceState(CollectionState.ManagingExistingBooking);
+            Log($"📋 Active booking loaded: {_activeBooking.BookingId} ({_activeBooking.Pickup} → {_activeBooking.Destination})");
+            return; // Don't begin normal collection — greeting will handle the active booking flow
+        }
 
         // Auto-fill name for returning callers (so BeginCollection skips to pickup)
         if (_callerContext?.IsReturningCaller == true && !string.IsNullOrWhiteSpace(_callerContext.CallerName))
@@ -118,13 +132,17 @@ public class CleanCallSession
     /// </summary>
     public string BuildGreetingMessage()
     {
-        return PromptBuilder.BuildGreetingMessage(_companyName, _callerContext, _engine.State);
+        return PromptBuilder.BuildGreetingMessage(_companyName, _callerContext, _engine.State, _activeBooking);
     }
 
     /// <summary>
-    /// Process caller's spoken response for the current slot.
-    /// The SIP bridge's transcript handler calls this with the raw text.
+    /// Get the active booking system injection message (if any).
+    /// This should be injected before the greeting so the AI has context.
     /// </summary>
+    public string? BuildActiveBookingInjection()
+    {
+        return _activeBooking?.BuildSystemMessage();
+    }
     public async Task ProcessCallerResponseAsync(string transcript, CancellationToken ct = default)
     {
         // Any caller transcript means they did respond — stop no-reply watchdog.
@@ -1141,6 +1159,142 @@ public class CleanCallSession
             Log($"[SyncTool] intent=\"{intent}\"");
         }
 
+        // ── EXISTING BOOKING MANAGEMENT ──────────────────────────────
+        // When in ManagingExistingBooking or AwaitingCancelConfirmation, route intents accordingly.
+        if (_engine.State == CollectionState.ManagingExistingBooking)
+        {
+            var interpLower = "";
+            if (TryGetArg(args, "interpretation", out var interpVal))
+                interpLower = interpVal.ToLowerInvariant();
+            var lastUttLower = "";
+            if (TryGetArg(args, "last_utterance", out var luVal))
+                lastUttLower = luVal.ToLowerInvariant();
+
+            var combined = interpLower + " " + lastUttLower;
+
+            if (intent == "cancel_booking" || combined.Contains("cancel") || combined.Contains("get rid"))
+            {
+                Log("[SyncTool] ManagingExistingBooking → requesting cancel confirmation");
+                _engine.RequestCancelConfirmation();
+                EmitCurrentInstruction();
+                return BuildSyncResponse("ok", managingBooking: true);
+            }
+
+            if (combined.Contains("status") || combined.Contains("where is") || combined.Contains("how long") ||
+                combined.Contains("driver") || combined.Contains("eta"))
+            {
+                Log("[SyncTool] ManagingExistingBooking → status query");
+                var statusMsg = $"[INSTRUCTION] The booking status is: {_activeBooking?.Status ?? "active"}. " +
+                    $"Pickup: {_activeBooking?.Pickup}, Destination: {_activeBooking?.Destination}. " +
+                    "Ask if they need anything else.";
+                OnAiInstruction?.Invoke(statusMsg, false, false);
+                return BuildSyncResponse("ok", managingBooking: true);
+            }
+
+            if (combined.Contains("change") || combined.Contains("amend") || combined.Contains("update") ||
+                combined.Contains("different"))
+            {
+                Log("[SyncTool] ManagingExistingBooking → amend flow (starting new booking with current data)");
+                // Pre-fill from existing booking then start collection
+                if (_activeBooking != null)
+                {
+                    if (!string.IsNullOrEmpty(_callerContext?.CallerName))
+                        _engine.RawData.SetSlot("name", _callerContext.CallerName);
+                }
+                _engine.StartNewBookingFromManaging();
+                var instruction = "[INSTRUCTION] The caller wants to make changes to their booking. " +
+                    "Ask what they'd like to change: pickup, destination, passengers, or time.";
+                OnAiInstruction?.Invoke(instruction, false, false);
+                return BuildSyncResponse("ok");
+            }
+
+            if (combined.Contains("new") || combined.Contains("fresh") || combined.Contains("another"))
+            {
+                Log("[SyncTool] ManagingExistingBooking → new booking");
+                if (!string.IsNullOrEmpty(_callerContext?.CallerName))
+                    _engine.RawData.SetSlot("name", _callerContext.CallerName);
+                _engine.StartNewBookingFromManaging();
+                EmitCurrentInstruction();
+                return BuildSyncResponse("ok");
+            }
+
+            // Unrecognized — re-prompt
+            Log("[SyncTool] ManagingExistingBooking → unrecognized intent, re-prompting");
+            EmitCurrentInstruction();
+            return BuildSyncResponse("ok", managingBooking: true);
+        }
+
+        if (_engine.State == CollectionState.AwaitingCancelConfirmation)
+        {
+            var interpLower = "";
+            if (TryGetArg(args, "interpretation", out var interpVal2))
+                interpLower = interpVal2.ToLowerInvariant();
+            var lastUttLower = "";
+            if (TryGetArg(args, "last_utterance", out var luVal2))
+                lastUttLower = luVal2.ToLowerInvariant();
+
+            var combined = interpLower + " " + lastUttLower;
+
+            if (_engine.IsCancelConfirmationExpired())
+            {
+                Log("[SyncTool] Cancel confirmation EXPIRED — returning to managing");
+                _engine.ClearCancelConfirmation();
+                _engine.ForceState(CollectionState.ManagingExistingBooking);
+                OnAiInstruction?.Invoke("[INSTRUCTION] The confirmation timed out. Ask the caller again what they'd like to do.", false, false);
+                return BuildSyncResponse("ok", managingBooking: true);
+            }
+
+            bool hasYes = combined.Contains("yes") || combined.Contains("confirm") || combined.Contains("go ahead") ||
+                combined.Contains("sure") || combined.Contains("definitely");
+            bool hasNo = combined.Contains("no") || combined.Contains("never mind") || combined.Contains("keep") ||
+                combined.Contains("don't cancel") || combined.Contains("changed my mind");
+
+            if (hasYes && !hasNo)
+            {
+                Log("[SyncTool] Cancel confirmed — cancelling booking");
+                _engine.ClearCancelConfirmation();
+
+                // Cancel iCabbi journey if available
+                if (!string.IsNullOrEmpty(_engine.ExistingIcabbiJourneyId) && _icabbiService != null)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var (ok, msg) = await _icabbiService.CancelBookingAsync(_engine.ExistingIcabbiJourneyId);
+                            Log(ok ? $"✅ iCabbi journey {_engine.ExistingIcabbiJourneyId} cancelled"
+                                   : $"⚠️ iCabbi cancel failed: {msg}");
+                        }
+                        catch (Exception ex) { Log($"❌ iCabbi cancel error: {ex.Message}"); }
+                    });
+                }
+
+                // Update booking status in Supabase (fire-and-forget)
+                if (!string.IsNullOrEmpty(_engine.ExistingBookingId))
+                {
+                    Log($"📋 Booking {_engine.ExistingBookingId} cancelled");
+                }
+
+                _engine.HasActiveBooking = false;
+                var instruction = "[INSTRUCTION] Tell the caller their booking has been cancelled. Ask if they'd like to make a new booking.";
+                OnAiInstruction?.Invoke(instruction, false, false);
+                return BuildSyncResponse("cancelled");
+            }
+
+            if (hasNo)
+            {
+                Log("[SyncTool] Cancel rejected — returning to managing");
+                _engine.ClearCancelConfirmation();
+                _engine.ForceState(CollectionState.ManagingExistingBooking);
+                OnAiInstruction?.Invoke("[INSTRUCTION] The caller decided not to cancel. Ask what else they'd like to do.", false, false);
+                return BuildSyncResponse("ok", managingBooking: true);
+            }
+
+            // Re-prompt for confirmation
+            EmitCurrentInstruction();
+            return BuildSyncResponse("ok", managingBooking: true);
+        }
+
         // Handle explicit confirmation intent
         if (intent == "confirm_booking")
         {
@@ -1610,7 +1764,7 @@ public class CleanCallSession
     }
 
     /// <summary>Build the tool result response for sync_booking_data.</summary>
-    private object BuildSyncResponse(string status, List<string>? updatedSlots = null)
+    private object BuildSyncResponse(string status, List<string>? updatedSlots = null, bool managingBooking = false)
     {
         var state = new Dictionary<string, string?>();
         if (!string.IsNullOrWhiteSpace(_engine.RawData.NameRaw)) state["name"] = _engine.RawData.NameRaw;

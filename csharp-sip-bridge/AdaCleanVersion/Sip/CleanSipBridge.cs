@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
+using AdaCleanVersion.Models;
 using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
 using Microsoft.Extensions.Logging;
@@ -320,6 +321,22 @@ public class CleanSipBridge : IDisposable
         if (_burstDispatcher != null)
             _ = _burstDispatcher.WarmUpAsync();
 
+        // Check for active bookings for this returning caller
+        ActiveBookingInfo? activeBooking = null;
+        if (context.IsReturningCaller)
+        {
+            try
+            {
+                activeBooking = await LoadActiveBookingAsync(callerId);
+                if (activeBooking != null)
+                    Log($"📋 Active booking found for {callerId}: {activeBooking.BookingId} ({activeBooking.Pickup} → {activeBooking.Destination})");
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Active booking lookup failed (non-fatal): {ex.Message}");
+            }
+        }
+
         // Create clean session
         // callId already extracted above for codec negotiation handler
         var session = new CleanCallSession(
@@ -330,7 +347,8 @@ public class CleanSipBridge : IDisposable
             fareService: _fareService,
             callerContext: context,
             burstDispatcher: _burstDispatcher,
-            icabbiService: _icabbiService
+            icabbiService: _icabbiService,
+            activeBooking: activeBooking
         );
 
         session.OnLog += msg => Log(msg);
@@ -536,6 +554,59 @@ public class CleanSipBridge : IDisposable
         if (_activeCalls.TryGetValue(callId, out var call))
         {
             call.CallAgent?.Hangup();
+        }
+    }
+
+    /// <summary>
+    /// Check the bookings table for any active/confirmed booking for this caller.
+    /// Mirrors AdaSdkModel's LoadActiveBookingAsync.
+    /// </summary>
+    private async Task<ActiveBookingInfo?> LoadActiveBookingAsync(string phone)
+    {
+        try
+        {
+            var normalized = phone.Trim().Replace(" ", "");
+            var phoneVariants = new[] { phone, normalized, $"+{normalized}" };
+            var orFilter = string.Join(",", phoneVariants.Select(p => $"caller_phone.eq.{Uri.EscapeDataString(p)}"));
+            var url = $"{_settings.Supabase.Url}/rest/v1/bookings?or=({orFilter})&status=in.(active,confirmed)&order=booked_at.desc&limit=1&select=id,pickup,destination,passengers,fare,eta,status,caller_name,scheduled_for,booking_details";
+
+            using var http = new HttpClient();
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("apikey", _settings.Supabase.AnonKey);
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            var response = await http.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var arr = doc.RootElement;
+            if (arr.GetArrayLength() == 0) return null;
+            var b = arr[0];
+
+            string? icabbiJourneyId = null;
+            if (b.TryGetProperty("booking_details", out var bd) && bd.ValueKind == System.Text.Json.JsonValueKind.Object
+                && bd.TryGetProperty("icabbi_journey_id", out var jid) && jid.ValueKind == System.Text.Json.JsonValueKind.String)
+                icabbiJourneyId = jid.GetString();
+
+            return new ActiveBookingInfo
+            {
+                BookingId = b.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                Pickup = b.TryGetProperty("pickup", out var pu) && pu.ValueKind == System.Text.Json.JsonValueKind.String ? pu.GetString() : null,
+                Destination = b.TryGetProperty("destination", out var de) && de.ValueKind == System.Text.Json.JsonValueKind.String ? de.GetString() : null,
+                Passengers = b.TryGetProperty("passengers", out var px) && px.ValueKind == System.Text.Json.JsonValueKind.Number ? px.GetInt32() : null,
+                Fare = b.TryGetProperty("fare", out var fa) && fa.ValueKind == System.Text.Json.JsonValueKind.String ? fa.GetString() : null,
+                Eta = b.TryGetProperty("eta", out var et) && et.ValueKind == System.Text.Json.JsonValueKind.String ? et.GetString() : null,
+                Status = b.TryGetProperty("status", out var st) && st.ValueKind == System.Text.Json.JsonValueKind.String ? st.GetString() : null,
+                ScheduledFor = b.TryGetProperty("scheduled_for", out var sf) && sf.ValueKind == System.Text.Json.JsonValueKind.String ? sf.GetString() : null,
+                CallerName = b.TryGetProperty("caller_name", out var cn) && cn.ValueKind == System.Text.Json.JsonValueKind.String ? cn.GetString() : null,
+                IcabbiJourneyId = icabbiJourneyId
+            };
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Active booking lookup failed: {ex.Message}");
+            return null;
         }
     }
 }
