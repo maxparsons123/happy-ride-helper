@@ -363,7 +363,7 @@ serve(async (req) => {
       return new Response(JSON.stringify({ status: "warm" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
     
-    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode, caller_area, ada_readback, ada_question } = body;
+    const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode, caller_area, ada_readback, ada_question, raw_transcript } = body;
     
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) {
@@ -611,6 +611,70 @@ serve(async (req) => {
       }
     }
 
+    // ── PRE-GEMINI: zone_pois fuzzy check on raw_transcript ──
+    // The AI interpretation (pickup/destination fields) may have garbled POI names
+    // (e.g., "Akis" → "Arcades"). Check the raw STT transcript against zone_pois
+    // BEFORE Gemini processes it, so known POIs resolve correctly.
+    let rawTranscriptPoiHint = '';
+    if (raw_transcript) {
+      try {
+        const rtSupabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const rtSupabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+        const rtSupabase = createClient(rtSupabaseUrl, rtSupabaseKey);
+
+        // Extract meaningful words from raw transcript (strip filler words)
+        const cleanTranscript = raw_transcript
+          .replace(/^(yeah|yes|it'?s|that'?s|can you|pick me up from|going to|drop me at|take me to|i'?m at|i'?m going to)\s*/gi, "")
+          .replace(/[.,!?]/g, "")
+          .trim();
+
+        if (cleanTranscript.length >= 3) {
+          // Try fuzzy matching the full cleaned transcript against zone_pois
+          const { data: poiMatches } = await rtSupabase.rpc("word_fuzzy_match_zone_poi", {
+            p_address: cleanTranscript,
+            p_min_similarity: 0.35,
+            p_limit: 5,
+          });
+
+          if (poiMatches && poiMatches.length > 0) {
+            const topMatch = poiMatches[0];
+            console.log(`🔍 Pre-Gemini POI check: raw_transcript="${raw_transcript}" → top match="${topMatch.poi_name}" (score=${topMatch.similarity_score}, area=${topMatch.area})`);
+
+            // Strong match (>= 0.6) — inject as a strong hint for Gemini
+            if (topMatch.similarity_score >= 0.6) {
+              const poiAddress = topMatch.area
+                ? `${topMatch.poi_name}, ${topMatch.area}`
+                : topMatch.poi_name;
+              rawTranscriptPoiHint = `\nRAW_TRANSCRIPT_POI_MATCH (CRITICAL — the caller's actual speech "${raw_transcript}" fuzzy-matched the known POI "${topMatch.poi_name}" in area "${topMatch.area || 'unknown'}" with score ${topMatch.similarity_score.toFixed(2)}. The AI interpretation may have garbled the name. PREFER this POI match over the AI interpretation if they differ. Resolve to: "${poiAddress}")`;
+              console.log(`✅ Pre-Gemini POI match injected: "${poiAddress}" (score=${topMatch.similarity_score})`);
+            }
+          } else {
+            // Also try individual words from transcript for partial matches
+            const words = cleanTranscript.split(/\s+/).filter((w: string) => w.length >= 3);
+            for (const word of words) {
+              const { data: wordMatches } = await rtSupabase.rpc("word_fuzzy_match_zone_poi", {
+                p_address: word,
+                p_min_similarity: 0.5,
+                p_limit: 3,
+              });
+              if (wordMatches && wordMatches.length > 0 && wordMatches[0].similarity_score >= 0.7) {
+                const wm = wordMatches[0];
+                // Only inject if it's a restaurant/business/landmark (not a generic street)
+                if (wm.poi_type !== "street") {
+                  const poiAddress = wm.area ? `${wm.poi_name}, ${wm.area}` : wm.poi_name;
+                  rawTranscriptPoiHint = `\nRAW_TRANSCRIPT_POI_MATCH (CRITICAL — the word "${word}" from raw speech "${raw_transcript}" matched known POI "${wm.poi_name}" (${wm.poi_type}) in "${wm.area || 'unknown'}". Resolve to: "${poiAddress}")`;
+                  console.log(`✅ Pre-Gemini word POI match: "${word}" → "${wm.poi_name}" (score=${wm.similarity_score})`);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      } catch (rtErr) {
+        console.warn(`⚠️ Pre-Gemini POI check failed (non-fatal):`, rtErr);
+      }
+    }
+
     // Build the user message with reference datetime for time parsing
     const refDatetime = new Date().toISOString();
     const timePart = pickup_time ? `\nPickup Time Requested: "${pickup_time}"\nREFERENCE_DATETIME (current UTC): ${refDatetime}` : '';
@@ -652,7 +716,7 @@ serve(async (req) => {
       : '';
 
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
-User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerAreaHint}${adaQuestionHint}${adaReadbackHint}${callerHistory}`;
+User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerAreaHint}${adaQuestionHint}${adaReadbackHint}${rawTranscriptPoiHint}${callerHistory}`;
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",

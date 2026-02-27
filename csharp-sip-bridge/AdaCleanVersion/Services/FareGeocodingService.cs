@@ -54,7 +54,8 @@ public class FareGeocodingService
         string? callerPhone = null,
         CancellationToken ct = default,
         string? adaReadback = null,
-        string? adaQuestion = null)
+        string? adaQuestion = null,
+        string? rawTranscript = null)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(10000); // 10s timeout for single address
@@ -65,9 +66,10 @@ public class FareGeocodingService
                 field, address, adaReadback ?? "none", adaQuestion != null ? "yes" : "no");
 
             // Build payload with full 3-way context for Gemini reconciliation
+            // Include raw_transcript (actual STT) alongside AI-interpreted address for zone_pois pre-check
             var payload = field == "pickup"
-                ? new { pickup = address, destination = "PLACEHOLDER_SKIP", phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null, ada_readback = adaReadback, ada_question = adaQuestion }
-                : new { pickup = "PLACEHOLDER_SKIP", destination = address, phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null, ada_readback = adaReadback, ada_question = adaQuestion };
+                ? new { pickup = address, destination = "PLACEHOLDER_SKIP", phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null, ada_readback = adaReadback, ada_question = adaQuestion, raw_transcript = rawTranscript }
+                : new { pickup = "PLACEHOLDER_SKIP", destination = address, phone = callerPhone, pickup_time = (string?)null, pickup_house_number = (string?)null, destination_house_number = (string?)null, ada_readback = adaReadback, ada_question = adaQuestion, raw_transcript = rawTranscript };
 
             var url = $"{_supabaseUrl}/functions/v1/address-dispatch";
 
