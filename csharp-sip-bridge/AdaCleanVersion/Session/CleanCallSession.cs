@@ -1128,7 +1128,12 @@ public class CleanCallSession
                 Log($"[SyncTool] whisper_transcript=\"{whisperTranscript}\" (differs from AI last_utterance)");
         }
 
-        // Store raw Whisper transcript for zone_pois fuzzy matching during geocoding.
+        // Log Ada's last spoken transcript if injected (for debugging readback vs caller speech)
+        if (TryGetArg(args, "ada_transcript", out var adaT) && !string.IsNullOrWhiteSpace(adaT))
+        {
+            Log($"[SyncTool] ada_transcript=\"{adaT}\"");
+        }
+
         // Whisper transcript is preferred because the AI often garbles POI names.
         var rawTranscriptForPoi = whisperTranscript ?? lastUtterance;
         if (!string.IsNullOrWhiteSpace(rawTranscriptForPoi))
