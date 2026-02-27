@@ -32,7 +32,7 @@ public sealed class RealtimeAudioBridge : IDisposable
     [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
 
     private const int FrameSize = 160;          // 20ms @ 8kHz
-    private const int MaxJitterFrames = 150;    // ~3s buffer — OpenAI sends in bursts
+    private const int MaxJitterFrames = 500;    // ~10s buffer — OpenAI sends full responses in <1s bursts
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly IRealtimeTransport _transport;
