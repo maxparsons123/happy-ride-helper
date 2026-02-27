@@ -612,7 +612,7 @@ public class CleanCallSession
             try
             {
                 var rawAddress = _engine.RawData.PickupRaw ?? "";
-                var rawTranscript = _engine.RawData.PickupLastUtterance;
+                var rawTranscript = _engine.RawData.GetLastUtterance("pickup");
                 Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
                 await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText, rawTranscript: rawTranscript);
             }
@@ -639,7 +639,7 @@ public class CleanCallSession
             try
             {
                 var rawAddress = _engine.RawData.DestinationRaw ?? "";
-                var rawTranscript = _engine.RawData.DestinationLastUtterance;
+                var rawTranscript = _engine.RawData.GetLastUtterance("destination");
                 Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
                 await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText, rawTranscript: rawTranscript);
             }
@@ -1139,9 +1139,9 @@ public class CleanCallSession
         if (!string.IsNullOrWhiteSpace(rawTranscriptForPoi))
         {
             if (slotsUpdated.Contains("pickup"))
-                _engine.RawData.PickupLastUtterance = rawTranscriptForPoi;
+                _engine.RawData.SetLastUtterance("pickup", rawTranscriptForPoi);
             if (slotsUpdated.Contains("destination"))
-                _engine.RawData.DestinationLastUtterance = rawTranscriptForPoi;
+                _engine.RawData.SetLastUtterance("destination", rawTranscriptForPoi);
         }
 
         if (slotsUpdated.Count == 0)
@@ -1673,8 +1673,8 @@ public class CleanCallSession
 
             var fareResult = await _fareService.CalculateAsync(
                 effectiveBooking, CallerId, ct,
-                rawPickupTranscript: _engine.RawData.PickupLastUtterance,
-                rawDestinationTranscript: _engine.RawData.DestinationLastUtterance);
+                rawPickupTranscript: _engine.RawData.GetLastUtterance("pickup"),
+                rawDestinationTranscript: _engine.RawData.GetLastUtterance("destination"));
 
             if (fareResult == null)
             {
