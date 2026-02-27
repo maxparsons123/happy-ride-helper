@@ -420,8 +420,10 @@ Do NOT:
 - Expand abbreviations
 - Replace with similar place names
 - Substitute previously confirmed addresses
+- INSERT HYPHENS into house numbers (e.g. ""1214A"" must NOT become ""12-14A"")
 
 Copy the raw spoken phrase character-for-character.
+""1214A"" is a SINGLE house number, NOT a range ""12-14A"".
 
 Even if the phrase sounds incomplete or unusual,
 you must copy it exactly.
