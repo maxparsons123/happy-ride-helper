@@ -617,7 +617,9 @@ serve(async (req) => {
     // (e.g., "Akis" → "Arcades"). Check the raw STT transcript against zone_pois
     // BEFORE Gemini processes it, so known POIs resolve correctly.
     let rawTranscriptPoiHint = '';
-    if (raw_transcript) {
+    // Skip POI matching if input looks like a residential address (has a house number)
+    const hasHouseNumber = /^\d+\s*[A-Za-z]?\s+\w/.test((raw_transcript || "").trim());
+    if (raw_transcript && !hasHouseNumber) {
       try {
         const rtSupabaseUrl = Deno.env.get("SUPABASE_URL")!;
         const rtSupabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
