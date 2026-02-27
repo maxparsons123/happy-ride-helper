@@ -25,6 +25,7 @@ public sealed class RealtimeToolRouter
     private volatile bool _toolCalledInResponse;
     private readonly HashSet<string> _processedCallIds = new();
     private volatile bool _frozen; // post-transfer/hangup freeze
+    private const long ThrottleMs = 500; // turn-level dedupe window
 
     /// <summary>True if a tool call was processed for the current turn.</summary>
     public bool ToolCalledInResponse => _toolCalledInResponse;
@@ -104,10 +105,19 @@ public sealed class RealtimeToolRouter
             return;
         }
 
-        // 🔒 Deduplicate by call_id — prevents double-processing from multiple OpenAI events
+        // 🔒 Deduplicate by call_id
         if (!_processedCallIds.Add(evt.ToolCallId))
         {
-            Log($"⚠ Duplicate tool call ignored: {evt.ToolCallId}");
+            Log($"⚠ Duplicate tool call ignored (call_id): {evt.ToolCallId}");
+            return;
+        }
+
+        // ⏱ Turn-level throttle: reject if another tool executed within 500ms
+        var nowTick = Environment.TickCount64;
+        var lastTick = Interlocked.Exchange(ref _lastToolCallTick, nowTick);
+        if (lastTick > 0 && (nowTick - lastTick) < ThrottleMs)
+        {
+            Log($"⚠ Duplicate tool call ignored (throttle {nowTick - lastTick}ms): {evt.ToolCallId}");
             return;
         }
 
