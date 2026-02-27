@@ -143,6 +143,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _tools.OnStageChanged += stage => { try { OnStageChanged?.Invoke(stage); } catch { } };
     }
 
+    private readonly TaskCompletionSource _sessionReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     // ─── Lifecycle ──────────────────────────────────────────
 
     public async Task ConnectAsync()
@@ -167,7 +169,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _audio.Start();
         Log("✅ Audio bridge active");
 
-        // Engine greeting → model speaks
+        // Wait for OpenAI to confirm session is ready before greeting
+        Log("⏳ Waiting for session.updated before greeting...");
+        var timeout = Task.Delay(5000, _cts.Token);
+        var ready = await Task.WhenAny(_sessionReady.Task, timeout);
+        if (ready == timeout)
+            Log("⚠ session.updated timeout — sending greeting anyway");
+
         await _tools.StartAsync();
         Log("📢 Engine started");
     }
@@ -244,7 +252,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 break;
 
             case RealtimeEventType.SessionUpdated:
-                Log("📋 Session config accepted");
+                Log("📋 Session config accepted — ready");
+                _sessionReady.TrySetResult();
                 break;
 
             case RealtimeEventType.Error:
