@@ -26,8 +26,7 @@ public record CorrectionResult(string SlotName, string NewValue);
 /// Calls the burst-dispatch edge function to split a freeform utterance
 /// into booking slots AND geocode addresses in a single round-trip.
 /// 
-/// Replaces the local AiFreeFormSplitter + separate geocoding calls,
-/// collapsing 3+ HTTP round-trips into one.
+/// Splits and geocodes in a single round-trip via the edge function.
 /// 
 /// Falls back gracefully (returns null) on timeout/error so the caller can
 /// skip burst processing and handle the input slot-by-slot.
@@ -53,7 +52,7 @@ public class EdgeBurstDispatcher
     }
 
     /// <summary>
-    /// Reuse the same burst-detection heuristic from AiFreeFormSplitter.
+    /// Burst-detection heuristic: checks if transcript contains multiple booking fields.
     /// </summary>
     /// <summary>
     /// Short phrases that are just ASAP variants — NOT bursts even though they contain signal words.
