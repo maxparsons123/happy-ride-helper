@@ -1673,8 +1673,8 @@ public class CleanCallSession
 
             var fareResult = await _fareService.CalculateAsync(
                 effectiveBooking, CallerId, ct,
-                rawPickupTranscript: _raw.PickupLastUtterance,
-                rawDestinationTranscript: _raw.DestinationLastUtterance);
+                rawPickupTranscript: _engine.RawData.PickupLastUtterance,
+                rawDestinationTranscript: _engine.RawData.DestinationLastUtterance);
 
             if (fareResult == null)
             {
