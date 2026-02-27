@@ -44,6 +44,9 @@ public sealed class RealtimeToolRouter
     /// <summary>Raised when the engine says to hang up.</summary>
     public event Action<string>? OnHangup;
 
+    /// <summary>Raised after each engine.Step() with the new stage.</summary>
+    public event Action<Stage>? OnStageChanged;
+
     public RealtimeToolRouter(
         DeterministicBookingEngine engine,
         IRealtimeTransport transport,
@@ -130,6 +133,7 @@ public sealed class RealtimeToolRouter
         // ── Step the engine ──
         var action = _engine.Step(toolEvent);
         Log($"⚙️ Engine: {_engine.State.Stage} → {action.Kind}");
+        OnStageChanged?.Invoke(_engine.State.Stage);
 
         // ── Execute the action (may chain for geocode/dispatch) ──
         await ExecuteActionAsync(action, evt.ToolCallId);
@@ -220,6 +224,7 @@ public sealed class RealtimeToolRouter
 
             var nextAction = _engine.Step(backendEvent);
             Log($"⚙️ Post-geocode: {_engine.State.Stage} → {nextAction.Kind}");
+            OnStageChanged?.Invoke(_engine.State.Stage);
 
             // Execute the follow-up action (Ask for next field, or escalate, etc.)
             await ExecuteFollowUpAsync(nextAction);
@@ -229,6 +234,7 @@ public sealed class RealtimeToolRouter
             Log($"⚠ Geocode error: {ex.Message}");
             var failEvent = new BackendResultEvent(type, Ok: false, Error: ex.Message);
             var nextAction = _engine.Step(failEvent);
+            OnStageChanged?.Invoke(_engine.State.Stage);
             await ExecuteFollowUpAsync(nextAction);
         }
     }
@@ -250,6 +256,7 @@ public sealed class RealtimeToolRouter
             Log($"📦 Dispatch result: ok={result.Ok}, bookingId={result.BookingId ?? "null"}, error={result.Error ?? "none"}");
             var nextAction = _engine.Step(backendEvent);
             Log($"⚙️ Post-dispatch: {_engine.State.Stage} → {nextAction.Kind}");
+            OnStageChanged?.Invoke(_engine.State.Stage);
             await ExecuteFollowUpAsync(nextAction);
         }
         catch (Exception ex)
@@ -257,6 +264,7 @@ public sealed class RealtimeToolRouter
             Log($"⚠ Dispatch error: {ex.Message}");
             var failEvent = new BackendResultEvent(BackendResultType.Dispatch, Ok: false, Error: ex.Message);
             var nextAction = _engine.Step(failEvent);
+            OnStageChanged?.Invoke(_engine.State.Stage);
             await ExecuteFollowUpAsync(nextAction);
         }
     }

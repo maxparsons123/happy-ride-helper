@@ -44,6 +44,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     public event Action? OnMicUngated;
     public event Action<string>? OnTransfer;
     public event Action<string>? OnHangup;
+    public event Action<Stage>? OnStageChanged;
 
     public OpenAiRealtimeClient(
         string apiKey,
@@ -58,7 +59,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         string? callerPhone = null,
         G711CodecType codec = G711CodecType.PCMU,
         IRealtimeTransport? transport = null,
-        VoIPMediaSession? mediaSession = null)
+        VoIPMediaSession? mediaSession = null,
+        DeterministicBookingEngine? engine = null)
     {
         _callId = callId;
         _voice = voice;
@@ -83,8 +85,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _audio.OnBargeIn += () => { try { OnBargeIn?.Invoke(); } catch { } };
         _audio.OnMicUngated += () => { try { OnMicUngated?.Invoke(); } catch { } };
 
-        // ── Deterministic engine ──
-        var engine = new DeterministicBookingEngine();
+        // ── Deterministic engine (shared or new) ──
+        var eng = engine ?? new DeterministicBookingEngine();
 
         // Geocode lambda
         Func<string, Task<GeocodeResult>> geocodeFn = async rawAddress =>
@@ -133,11 +135,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         };
 
         // ── Tool router (engine + backend lambdas) ──
-        _tools = new RealtimeToolRouter(engine, _transport, geocodeFn, dispatchFn, _cts.Token);
+        _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token);
         _tools.OnLog += Log;
         _tools.OnInstruction += instruction => Log($"📋 Instruction: {instruction}");
         _tools.OnTransfer += reason => { try { OnTransfer?.Invoke(reason); } catch { } };
         _tools.OnHangup += reason => { try { OnHangup?.Invoke(reason); } catch { } };
+        _tools.OnStageChanged += stage => { try { OnStageChanged?.Invoke(stage); } catch { } };
     }
 
     // ─── Lifecycle ──────────────────────────────────────────

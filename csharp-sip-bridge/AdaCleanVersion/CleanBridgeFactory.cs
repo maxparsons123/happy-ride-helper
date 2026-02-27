@@ -1,5 +1,6 @@
 using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
+using AdaCleanVersion.Engine;
 using AdaCleanVersion.Realtime;
 using AdaCleanVersion.Services;
 using AdaCleanVersion.Session;
@@ -7,6 +8,7 @@ using AdaCleanVersion.Sip;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
+using TaxiBot.Deterministic;
 
 namespace AdaCleanVersion;
 
@@ -88,6 +90,16 @@ public static class CleanBridgeFactory
             logger.LogInformation($"[RT:{callId}] Engine hangup: {reason}");
             // Trigger SIP BYE via bridge if needed
         };
+        client.OnStageChanged += stage =>
+        {
+            // Sync RT engine stage → session engine state
+            var mapped = MapStageToCollectionState(stage);
+            if (mapped.HasValue)
+            {
+                session.Engine.ForceState(mapped.Value);
+                logger.LogInformation($"[RT:{callId}] Session synced: {stage} → {mapped.Value}");
+            }
+        };
 
         try
         {
@@ -105,4 +117,23 @@ public static class CleanBridgeFactory
             await client.DisposeAsync();
         }
     }
+
+    /// <summary>
+    /// Maps DeterministicBookingEngine Stage → CallStateEngine CollectionState.
+    /// Returns null for stages that have no meaningful session-level equivalent.
+    /// </summary>
+    private static CollectionState? MapStageToCollectionState(Stage stage) => stage switch
+    {
+        Stage.Start => CollectionState.Greeting,
+        Stage.CollectPickup => CollectionState.CollectingPickup,
+        Stage.CollectDropoff => CollectionState.CollectingDestination,
+        Stage.CollectPassengers => CollectionState.CollectingPassengers,
+        Stage.CollectTime => CollectionState.CollectingPickupTime,
+        Stage.ConfirmDetails => CollectionState.AwaitingConfirmation,
+        Stage.Dispatching => CollectionState.Dispatched,
+        Stage.Booked => CollectionState.Dispatched,
+        Stage.End => CollectionState.Ending,
+        Stage.Escalate => CollectionState.Ending,
+        _ => null
+    };
 }
