@@ -419,13 +419,13 @@ public static class PromptBuilder
                 $"- Passengers: {booking.Passengers}\n" +
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
-                $"- Driver ETA: {fareResult.BusyMessage}\n" +
+                $"- ⚠️ Driver ETA (MANDATORY — you MUST say this): {fareResult.BusyMessage}\n" +
                 BuildStreetNameGuard(fareResult.Pickup.Address) +
                 BuildStreetNameGuard(fareResult.Destination.Address) +
                 BuildPostcodeGuard(fareResult.Pickup.Address) +
                 BuildPostcodeGuard(fareResult.Destination.Address) +
-                $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressForSpeech(fareResult.Pickup.Address)} to {FormatAddressForSpeech(fareResult.Destination.Address)}, the fare will be around {fareResult.FareSpoken}, and {fareResult.BusyMessage}. Would you like to go ahead with this booking?\" " +
-                "Do NOT paraphrase addresses.",
+                $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressForSpeech(fareResult.Pickup.Address)} to {FormatAddressForSpeech(fareResult.Destination.Address)}, the fare will be around {fareResult.FareSpoken}. {fareResult.BusyMessage} Would you like to go ahead with this booking?\" " +
+                "Do NOT paraphrase addresses. Do NOT skip the driver ETA / busy message — it is MANDATORY.",
 
             CollectionState.PresentingFare when booking != null =>
                 $"[INSTRUCTION] Present the booking summary to the caller:\n" +
