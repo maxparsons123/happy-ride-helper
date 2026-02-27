@@ -12,7 +12,7 @@ namespace AdaCleanVersion.Services;
 /// 
 /// Uses burst detection heuristics to avoid unnecessary AI calls on simple inputs.
 /// Falls back gracefully (returns null) on timeout/error so the caller can
-/// use the deterministic regex-based FreeFormSplitter as a safety net.
+/// skip AI splitting and handle the input slot-by-slot.
 /// 
 /// Examples:
 ///   "It's Max at 52A David Road going to the station for 4"
