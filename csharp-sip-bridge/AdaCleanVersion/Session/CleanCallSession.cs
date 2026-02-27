@@ -1652,7 +1652,9 @@ public class CleanCallSession
             Log($"Geocoding: pickup=\"{effectiveBooking.Pickup.DisplayName}\", dest=\"{effectiveBooking.Destination.DisplayName}\"");
 
             var fareResult = await _fareService.CalculateAsync(
-                effectiveBooking, CallerId, ct);
+                effectiveBooking, CallerId, ct,
+                rawPickupTranscript: _raw.PickupLastUtterance,
+                rawDestinationTranscript: _raw.DestinationLastUtterance);
 
             if (fareResult == null)
             {
