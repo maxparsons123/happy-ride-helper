@@ -1989,7 +1989,7 @@ public class CleanCallSession
                 {
                     Log($"Clarification loop breaker: {_clarificationAttempts} inline attempts — skipping verification");
                     _clarificationAttempts = 0;
-                    _engine.SkipVerification(field, "Address could not be resolved after multiple clarification attempts");
+                    _engine.SkipVerification(field, "Address could not be resolved after multiple clarification attempts", forceRecollect: true);
                     EmitCurrentInstruction();
                     return;
                 }

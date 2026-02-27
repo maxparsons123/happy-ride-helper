@@ -222,20 +222,31 @@ public class CallStateEngine
     }
 
     /// <summary>
-    /// Inline geocoding failed — re-collect the failed slot instead of advancing.
-    /// Previously this would advance to ReadyForExtraction even with unverified addresses,
-    /// causing a geocoding→clarification→extraction loop.
+    /// Inline geocoding failed — ask for clarification (area/city) instead of clearing the slot.
+    /// This avoids frustrating "repeat your address" loops when geocoding times out or fails.
+    /// Only clears and re-collects if the slot is truly empty or after clarification exhaustion.
     /// </summary>
-    public void SkipVerification(string field, string reason)
+    public void SkipVerification(string field, string reason, bool forceRecollect = false)
     {
         Log($"Verification skipped for {field}: {reason}");
 
-        // Clear the raw slot value so AllRequiredPresent correctly reflects the gap.
-        // This prevents the "counter mismatch" where all slots have values but one is unverified.
+        var rawValue = field == "pickup" ? RawData.PickupRaw : RawData.DestinationRaw;
+
+        // If we have a raw value and haven't exhausted clarification, ask for area/city context
+        if (!forceRecollect && !string.IsNullOrWhiteSpace(rawValue))
+        {
+            Log($"Keeping raw slot '{field}' (\"{rawValue}\") — entering clarification for area/city");
+            EnterClarification(new ClarificationInfo
+            {
+                AmbiguousField = field,
+                Message = $"I found \"{rawValue}\" but I'm not sure of the exact area. What area or city is that in?"
+            });
+            return;
+        }
+
+        // Fallback: clear and re-collect (e.g., slot was empty or clarification exhausted)
         RawData.SetSlot(field, "");
         Log($"Cleared raw slot '{field}' — forcing re-collection");
-
-        // Go back to collecting the failed slot
         TransitionTo(SlotToState(field));
     }
 

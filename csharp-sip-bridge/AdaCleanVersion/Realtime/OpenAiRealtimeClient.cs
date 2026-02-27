@@ -1207,7 +1207,7 @@ Never assume previous values remain valid.
             - ⛔ FORBIDDEN: Do NOT say "have a great day", "safe travels", "your ride is on its way",
               "booking confirmed", "thank you for confirming", "is there anything else", "goodbye",
               or ANY farewell/closing phrase. The call is IN PROGRESS. You are MID-CONVERSATION.
-            - ⛔ Do NOT greet the caller. Do NOT say "Welcome to Ada Taxi". The call is already in progress.
+            - ⛔ Do NOT greet the caller. Do NOT say "Welcome to..." or re-introduce yourself. The call is already in progress.
 
             {instruction}
             """;
