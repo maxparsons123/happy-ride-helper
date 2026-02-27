@@ -75,12 +75,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         _instructions = new InstructionCoordinator(
             _transport,
-            () => _session.Engine.State,
             () => _micGate.IsGated,
             _cts.Token);
         _instructions.OnLog += Log;
 
-        _tools = new RealtimeToolRouter(session, _transport, _instructions, _cts.Token);
+        _tools = new RealtimeToolRouter(session, _transport, _cts.Token);
         _tools.OnLog += Log;
 
         // ── Wire transport events ──
@@ -193,9 +192,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 await _tools.HandleToolCallAsync(evt);
                 break;
 
-            // ── Response canceled → apply pending instruction ──
+            // ── Response canceled (barge-in or truncation) ──
             case RealtimeEventType.ResponseCanceled:
-                await _instructions.OnResponseCanceledAsync();
+                Log("🛑 Response canceled");
                 break;
 
             // ── Session lifecycle ──
@@ -238,44 +237,14 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(transcript)) return;
 
-        // Store raw Whisper transcript BEFORE any AI reinterpretation
+        // Store raw Whisper transcript for tool context injection
         _tools.SetWhisperTranscript(transcript);
         Log($"👤 Caller: {transcript}");
 
-        // If tool call already handled this turn, skip
-        if (_tools.ToolCalledInResponse)
-        {
-            Log("📋 Transcript skipped — sync_booking_data already processed this turn");
-            return;
-        }
-
-        // ── Hybrid Tool-First Strategy ──
-        // Wait up to 1.5s for a tool call to arrive before falling back to deterministic path.
-        var capturedTranscript = transcript;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                for (int i = 0; i < 15; i++)
-                {
-                    await Task.Delay(100, _cts.Token);
-                    if (_tools.ToolCalledInResponse)
-                    {
-                        Log("📋 Transcript skipped (deferred) — sync_booking_data processed this turn");
-                        return;
-                    }
-                }
-
-                Log("📋 No tool call received — falling back to transcript processing");
-                await _transport.SendAsync(new { type = "response.cancel" }, _cts.Token);
-                await _session.ProcessCallerResponseAsync(capturedTranscript, _cts.Token);
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                Log($"⚠ Error processing transcript: {ex.Message}");
-            }
-        });
+        // Tool call is the single authority.
+        // If the model called sync_booking_data → it handled the data.
+        // If it didn't → the transcript is conversational noise. Ignore it.
+        // No fallback. No dual processing. No race conditions.
     }
 
     private void HandleAdaTranscript(string? rawText)
