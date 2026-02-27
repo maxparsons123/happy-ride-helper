@@ -1158,7 +1158,7 @@ public class CleanCallSession
             var targetSlot = DetectIntentTargetSlot(args);
             if (targetSlot != null)
             {
-                var targetState = _engine.SlotToState(targetSlot);
+                var targetState = CallStateEngine.SlotToState(targetSlot);
                 var currentSlotState = _engine.State;
 
                 // Only do intent-jump if the target is different from what we're currently collecting
@@ -1339,13 +1339,13 @@ public class CleanCallSession
             if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
             {
                 var interpLower = (interp ?? "").ToLowerInvariant();
-                var lastUtterance = (args.TryGetValue("last_utterance", out var lu) ? lu?.ToString() ?? "" : "").ToLowerInvariant();
+                var lastUtteranceLower = (args.TryGetValue("last_utterance", out var lu) ? lu?.ToString() ?? "" : "").ToLowerInvariant();
 
                 // Check for cancellation/rejection signals FIRST — these override confirmation keywords
                 bool hasCancelSignal = interpLower.Contains("cancel") || interpLower.Contains("reject") ||
                     interpLower.Contains("never mind") || interpLower.Contains("no thank") ||
-                    lastUtterance.Contains("cancel") || lastUtterance.Contains("never mind") ||
-                    lastUtterance.Contains("no thank") || lastUtterance.Contains("don't want");
+                    lastUtteranceLower.Contains("cancel") || lastUtteranceLower.Contains("never mind") ||
+                    lastUtteranceLower.Contains("no thank") || lastUtteranceLower.Contains("don't want");
 
                 bool hasConfirmSignal = interpLower.Contains("confirm") || interpLower.Contains("yes") ||
                     interpLower.Contains("go ahead") || interpLower.Contains("book") || interpLower.Contains("agreed");
