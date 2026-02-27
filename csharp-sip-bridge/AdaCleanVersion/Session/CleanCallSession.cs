@@ -60,6 +60,11 @@ public class CleanCallSession
     public event Action<StructuredBooking>? OnBookingReady;
     public event Action<FareResult>? OnFareReady;
     public event Action<bool>? OnTypingSoundsChanged; // enable/disable typing sounds during recalculation
+    /// <summary>
+    /// Fired when the session needs to truncate/reset the AI's conversation history
+    /// to prevent stale context from causing loops after field corrections.
+    /// </summary>
+    public event Func<Task>? OnTruncateConversation;
 
     public CleanCallSession(
         string sessionId,
@@ -921,6 +926,13 @@ public class CleanCallSession
             // Reset clarification counter — fresh correction, not a continuation
             _clarificationAttempts = 0;
 
+            // Truncate conversation to prevent AI from repeating stale questions
+            if (OnTruncateConversation != null)
+            {
+                try { await OnTruncateConversation.Invoke(); }
+                catch (Exception ex) { Log($"⚠️ Truncation failed: {ex.Message}"); }
+            }
+
             // Clear stale fare, verified address, and Gemini slot for this slot
             _engine.ClearFareResult();
             _engine.ClearVerifiedAddress(slotName);
@@ -1157,6 +1169,16 @@ public class CleanCallSession
 
                     // Reset clarification counter — this is a NEW correction, not a continuation
                     _clarificationAttempts = 0;
+
+                    // ── CONTEXT TRUNCATION ──
+                    // Physically reset the AI's conversation memory so it doesn't
+                    // "remember" its previous question (e.g., asking for passengers)
+                    // when the caller just said "change the pickup."
+                    if (OnTruncateConversation != null)
+                    {
+                        try { await OnTruncateConversation.Invoke(); }
+                        catch (Exception ex) { Log($"⚠️ Truncation failed: {ex.Message}"); }
+                    }
 
                     // Extract the value for the target slot
                     if (TryGetArg(args, targetSlot, out var newValue) && !string.IsNullOrWhiteSpace(newValue))
