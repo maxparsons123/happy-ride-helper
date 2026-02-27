@@ -1713,9 +1713,15 @@ Return a JSON object with pickup and/or dropoff objects containing: address, lat
     
     // Skip sanity guard if BOTH sides were matched from caller history — the caller has used
     // these addresses before, so even if STT garbled the name (Dabridge→David), the match is trusted.
+    // Also skip if ONE side matched from history and the other is a PLACEHOLDER_SKIP (inline geocode).
+    const pickupIsPlaceholder = (pickup || "").trim() === "PLACEHOLDER_SKIP";
+    const destIsPlaceholder = (destination || "").trim() === "PLACEHOLDER_SKIP";
     const bothMatchedFromHistory = parsed.pickup?.matched_from_history && parsed.dropoff?.matched_from_history;
-    if (bothMatchedFromHistory) {
-      console.log(`✅ Both addresses matched from caller history — skipping sanity guard, clearing disambiguation`);
+    const singleSideHistoryMatch = 
+      (parsed.pickup?.matched_from_history && destIsPlaceholder) ||
+      (parsed.dropoff?.matched_from_history && pickupIsPlaceholder);
+    if (bothMatchedFromHistory || singleSideHistoryMatch) {
+      console.log(`✅ Caller history match (${bothMatchedFromHistory ? 'both' : 'single-side'}) — skipping sanity guard, clearing disambiguation`);
       if (parsed.pickup) { parsed.pickup.is_ambiguous = false; parsed.pickup.alternatives = []; }
       if (parsed.dropoff) { parsed.dropoff.is_ambiguous = false; parsed.dropoff.alternatives = []; }
       parsed.status = "ready";
@@ -1742,7 +1748,7 @@ Return a JSON object with pickup and/or dropoff objects containing: address, lat
       }
     }
     
-    const needsSanityCheck = !bothMatchedFromHistory && !bothHaveExplicitPostcodes && !dropoffIsCityLevel && (
+    const needsSanityCheck = !bothMatchedFromHistory && !singleSideHistoryMatch && !bothHaveExplicitPostcodes && !dropoffIsCityLevel && (
       (parsed.status === "clarification_needed" && 
       (!parsed.pickup?.alternatives?.length && !parsed.dropoff?.alternatives?.length))
       || (distMilesPost !== null && distMilesPost > 50)
