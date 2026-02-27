@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Net;
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using AdaCleanVersion.Audio;
@@ -25,7 +24,7 @@ namespace AdaCleanVersion.Realtime;
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
 {
     private const string RealtimeUrl = "wss://api.openai.com/v1/realtime";
-    private const int ReceiveBufferSize = 16384;
+    private const int ReceiveBufferSize = 16384; // retained for reference — buffer owned by transport
 
     private readonly string _apiKey;
     private readonly string _model;
@@ -37,8 +36,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     private readonly G711CodecType _codec;
     private readonly CancellationTokenSource _cts = new();
 
-    private ClientWebSocket? _ws;
-    private Task? _receiveTask;
+    private readonly IRealtimeTransport _transport;
 
     /// <summary>
     /// Jitter-buffered playout engine — all outbound audio is routed through this.
@@ -162,7 +160,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         RTPSession rtpSession,
         CleanCallSession session,
         ILogger logger,
-        G711CodecType codec = G711CodecType.PCMU)
+        G711CodecType codec = G711CodecType.PCMU,
+        IRealtimeTransport? transport = null)
     {
         _apiKey = apiKey;
         _model = model;
@@ -175,6 +174,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _g711SilenceByte = G711Codec.SilenceByte(codec);
         _playout = new G711RtpPlayout(rtpSession, codec);
         _playout.OnLog += msg => Log(msg);
+        _transport = transport ?? new WebSocketRealtimeTransport();
     }
 
     // ─── Mic Gate Logic (v4.5 — buffer-all, flush tail, playout-driven ungate) ─────
@@ -209,12 +209,18 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
     public async Task ConnectAsync()
     {
-        _ws = new ClientWebSocket();
-        _ws.Options.SetRequestHeader("Authorization", $"Bearer {_apiKey}");
-        _ws.Options.SetRequestHeader("OpenAI-Beta", "realtime=v1");
-
         var url = $"{RealtimeUrl}?model={_model}";
-        await _ws.ConnectAsync(new Uri(url), _cts.Token);
+        var headers = new Dictionary<string, string>
+        {
+            ["Authorization"] = $"Bearer {_apiKey}",
+            ["OpenAI-Beta"] = "realtime=v1"
+        };
+
+        // Wire transport events → HandleServerEvent
+        _transport.OnMessage += HandleServerEvent;
+        _transport.OnDisconnected += reason => Log($"🔌 Transport disconnected: {reason}");
+
+        await _transport.ConnectAsync(url, headers, _cts.Token);
 
         Log("🔌 Connected to OpenAI Realtime");
 
@@ -236,20 +242,14 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         };
 
         // Wire mic ungate → session no-reply watchdog
-        // Watchdog starts AFTER playout drains, not when instruction is sent.
-        // This prevents the 12s timer from eating into Ada's speaking time.
         OnMicUngated += () => _session.NotifyMicUngated();
 
         // Start playout engine
         _playout.Start();
 
-        // Start receive loop
-        _receiveTask = Task.Run(ReceiveLoopAsync);
-
         Log("✅ Bidirectional audio bridge active (mic gate v4.3)");
 
-        // Send greeting as a conversation item (matches AdaSdkModel flow)
-        // This happens AFTER session config so the AI knows its role.
+        // Send greeting as a conversation item
         await SendGreetingAsync();
     }
 
@@ -309,23 +309,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         _playout.Stop();
 
-        if (_receiveTask != null)
-        {
-            try { await _receiveTask; } catch { }
-        }
-
-        if (_ws?.State == WebSocketState.Open)
-        {
-            try
-            {
-                await _ws.CloseAsync(
-                    WebSocketCloseStatus.NormalClosure, "call ended",
-                    CancellationToken.None);
-            }
-            catch { }
-        }
-
-        _ws?.Dispose();
+        await _transport.DisposeAsync();
         _cts.Dispose();
 
         Log("🔌 OpenAI Realtime disconnected");
@@ -626,40 +610,7 @@ Never assume previous values remain valid.
 
     // ─── OpenAI → RTP (AI Audio Out via Playout) ────────────
 
-    private async Task ReceiveLoopAsync()
-    {
-        var buffer = new byte[ReceiveBufferSize];
-        var msgBuffer = new MemoryStream();
-
-        try
-        {
-            while (!_cts.IsCancellationRequested && _ws?.State == WebSocketState.Open)
-            {
-                var result = await _ws.ReceiveAsync(buffer, _cts.Token);
-
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    Log("🔌 WebSocket closed by server");
-                    break;
-                }
-
-                msgBuffer.Write(buffer, 0, result.Count);
-
-                if (!result.EndOfMessage) continue;
-
-                var json = Encoding.UTF8.GetString(
-                    msgBuffer.GetBuffer(), 0, (int)msgBuffer.Length);
-                msgBuffer.SetLength(0);
-
-                await HandleServerEvent(json);
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Log($"⚠ Receive loop error: {ex.Message}");
-        }
-    }
+    // Receive loop is now owned by IRealtimeTransport — events arrive via OnMessage.
 
     private async Task HandleServerEvent(string json)
     {
@@ -1386,27 +1337,9 @@ Never assume previous values remain valid.
             """;
     }
 
-    // ─── WebSocket Send ─────────────────────────────────────
+    // ─── WebSocket Send (delegated to transport) ──────────────
 
-    private readonly SemaphoreSlim _sendLock = new(1, 1);
-
-    private async Task SendJsonAsync(object payload)
-    {
-        if (_ws?.State != WebSocketState.Open) return;
-
-        var json = JsonSerializer.Serialize(payload);
-        var bytes = Encoding.UTF8.GetBytes(json);
-
-        await _sendLock.WaitAsync(_cts.Token);
-        try
-        {
-            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, _cts.Token);
-        }
-        finally
-        {
-            _sendLock.Release();
-        }
-    }
+    private Task SendJsonAsync(object payload) => _transport.SendAsync(payload, _cts.Token);
 
     // G.711 codec logic moved to shared G711Codec class
 
