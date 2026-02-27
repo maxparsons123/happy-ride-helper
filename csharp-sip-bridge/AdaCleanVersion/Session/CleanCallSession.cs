@@ -2627,7 +2627,7 @@ public class CleanCallSession
                 {
                     // Caller rejected the options — clear the slot and re-collect from scratch
                     Log($"⛔ Clarification REJECTED for {clarifiedField} — re-collecting address");
-                    _engine.PendingClarification = null;
+                    _engine.ClearPendingClarification();
                     _engine.RawData.SetSlot(clarifiedField, null!);
                     _engine.HardClearVerifiedAddress(clarifiedField);
                     _engine.ClearFareResult();
