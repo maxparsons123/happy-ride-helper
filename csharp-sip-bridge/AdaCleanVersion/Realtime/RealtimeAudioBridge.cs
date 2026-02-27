@@ -342,7 +342,9 @@ public sealed class RealtimeAudioBridge : IDisposable
 
     private void ExecuteBargeIn()
     {
-        if (!_aiSpeaking && !_micGate.IsGated)
+        // Only honor barge-in while AI is actively speaking.
+        // After response.audio.done, let queued playout drain naturally.
+        if (!_aiSpeaking)
             return;
 
         _aiSpeaking = false;
@@ -368,7 +370,7 @@ public sealed class RealtimeAudioBridge : IDisposable
     /// <summary>External barge-in trigger (from speech_started event).</summary>
     public bool HandleBargeIn()
     {
-        if (!_aiSpeaking && !_micGate.IsGated)
+        if (!_aiSpeaking)
             return false;
 
         ExecuteBargeIn();
