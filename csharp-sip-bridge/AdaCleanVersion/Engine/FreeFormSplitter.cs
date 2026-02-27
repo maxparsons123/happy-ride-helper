@@ -108,9 +108,13 @@ public static class FreeFormSplitter
                 !Regex.IsMatch(cleaned, @"^\d+$") &&
                 !IsSpokenNumber(cleaned))
             {
+                // Guard: if the input starts with a number (even garbled like "3,000 years"),
+                // it's likely a passenger count with STT noise — do NOT reroute to address.
+                var startsWithNumber = Regex.IsMatch(cleaned, @"^\d");
+                
                 // This might be an address — but let the validator handle it
-                // Only reroute if it clearly has address markers
-                if (HasAddressMarkers(cleaned))
+                // Only reroute if it clearly has address markers AND doesn't start with a digit
+                if (!startsWithNumber && HasAddressMarkers(cleaned))
                 {
                     // Determine if it's pickup or destination based on which is missing
                     return new SplitResult

@@ -355,14 +355,20 @@ public class CallStateEngine
     /// </summary>
     public ExtractionRequest BuildExtractionRequest(CallerContext? context = null)
     {
+        // Prefer verified/geocoded addresses over raw STT when available.
+        // Raw slots can contain garbled STT (e.g., "3,000 years." instead of "7 Russell Street"),
+        // but verified addresses have been confirmed via geocoding.
+        var pickupForExtraction = VerifiedPickup?.Address ?? RawData.PickupRaw ?? "";
+        var destinationForExtraction = VerifiedDestination?.Address ?? RawData.DestinationRaw ?? "";
+
         return new ExtractionRequest
         {
             Context = context,
             Slots = new RawSlots
             {
                 Name = RawData.NameRaw ?? "",
-                Pickup = RawData.PickupRaw ?? "",
-                Destination = RawData.DestinationRaw ?? "",
+                Pickup = pickupForExtraction,
+                Destination = destinationForExtraction,
                 Passengers = RawData.PassengersRaw ?? "",
                 PickupTime = RawData.PickupTimeRaw ?? ""
             }
