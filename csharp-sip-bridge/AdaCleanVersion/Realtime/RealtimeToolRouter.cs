@@ -224,6 +224,7 @@ public sealed class RealtimeToolRouter
 
             var nextAction = _engine.Step(backendEvent);
             Log($"⚙️ Post-geocode: {_engine.State.Stage} → {nextAction.Kind}");
+            OnStageChanged?.Invoke(_engine.State.Stage);
 
             // Execute the follow-up action (Ask for next field, or escalate, etc.)
             await ExecuteFollowUpAsync(nextAction);
