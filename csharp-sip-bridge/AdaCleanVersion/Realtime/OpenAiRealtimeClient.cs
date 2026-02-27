@@ -686,16 +686,32 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        // No tool call for this turn — use transcript handler as fallback.
-        // Cancel any in-flight AI response and let the engine drive the next instruction.
-        _ = SendJsonAsync(new { type = "response.cancel" });
-
-        // Process transcript on background task to avoid blocking audio delta receive loop.
+        // ── Hybrid Tool-First Strategy ──
+        // The AI may be in the process of calling sync_booking_data right now.
+        // Whisper transcripts arrive concurrently with the AI's response processing.
+        // If we cancel the response immediately, we kill the tool call before it fires.
+        // Instead, wait briefly on a background task for the tool call to arrive.
+        // If it does, skip transcript processing. If not, fall back to deterministic path.
+        var capturedTranscript = transcript; // capture for closure
         _ = Task.Run(async () =>
         {
             try
             {
-                await _session.ProcessCallerResponseAsync(transcript, _cts.Token);
+                // Wait up to 1.5s for a tool call to arrive (AI typically calls within ~800ms)
+                for (int i = 0; i < 15; i++)
+                {
+                    await Task.Delay(100, _cts.Token);
+                    if (_toolCalledInResponse)
+                    {
+                        Log("📋 Transcript skipped (deferred) — sync_booking_data processed this turn");
+                        return;
+                    }
+                }
+
+                // No tool call arrived — fall back to deterministic transcript processing.
+                Log("📋 No tool call received — falling back to transcript processing");
+                await SendJsonAsync(new { type = "response.cancel" });
+                await _session.ProcessCallerResponseAsync(capturedTranscript, _cts.Token);
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
