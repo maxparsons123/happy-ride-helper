@@ -33,6 +33,7 @@ public static class RealtimeSessionConfig
                         ["destination"] = new { type = "string", description = "Destination address EXACTLY as spoken. VERBATIM." },
                         ["passengers"] = new { type = "integer", description = "Number of passengers." },
                         ["pickup_time"] = new { type = "string", description = "ASAP or YYYY-MM-DD HH:MM (24h)." },
+                        ["intent"] = new { type = "string", description = "One of: update_field, confirm, decline, cancel, amend. Default: update_field.", @enum = new[] { "update_field", "confirm", "decline", "cancel", "amend" } },
                         ["special_instructions"] = new { type = "string", description = "Any special request spoken by the caller." },
                         ["interpretation"] = new { type = "string", description = "Explanation of understanding. Must include correction markers if applicable." },
                         ["last_utterance"] = new { type = "string", description = "Full raw transcript of caller's latest speech. Must match transcript exactly." }
@@ -56,12 +57,12 @@ public static class RealtimeSessionConfig
                 turn_detection = new
                 {
                     type = "server_vad",
-                    threshold = 0.5,
+                    threshold = 0.6,
                     prefix_padding_ms = 300,
                     silence_duration_ms = 500
                 },
                 tools,
-                tool_choice = "auto",
+                tool_choice = "required",
                 temperature = 0.8
             }
         };
