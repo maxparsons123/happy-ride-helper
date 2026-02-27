@@ -918,6 +918,9 @@ public class CleanCallSession
         {
             Log($"Address correction for {slotName}: \"{oldValue}\" → \"{newValue}\" — routing through verification");
 
+            // Reset clarification counter — fresh correction, not a continuation
+            _clarificationAttempts = 0;
+
             // Clear stale fare, verified address, and Gemini slot for this slot
             _engine.ClearFareResult();
             _engine.ClearVerifiedAddress(slotName);
@@ -1152,12 +1155,16 @@ public class CleanCallSession
                 {
                     Log($"[SyncTool] Intent-jump: {currentSlotState} → {targetSlot} (AI detected out-of-order correction)");
 
+                    // Reset clarification counter — this is a NEW correction, not a continuation
+                    _clarificationAttempts = 0;
+
                     // Extract the value for the target slot
                     if (TryGetArg(args, targetSlot, out var newValue) && !string.IsNullOrWhiteSpace(newValue))
                     {
                         // Clear downstream verification for the changed slot
                         _engine.ClearVerifiedAddress(targetSlot);
                         _engine.ClearFareResult();
+                        _engine.IsRecalculating = true;
                         _engine.RawData.SetSlot(targetSlot, newValue);
 
                         // Store last_utterance for POI matching
