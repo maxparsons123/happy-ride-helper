@@ -594,7 +594,9 @@ public class CleanCallSession
         // Only the FIRST call should proceed; subsequent ones are no-ops.
         if (_engine.State == CollectionState.VerifyingPickup)
         {
-            if (!LooksLikeAddressReadback(adaText, "pickup"))
+            // During recalculation, skip readback check — we already have the address,
+            // just need to re-geocode it. Any AI response (even "[Silence]") triggers geocoding.
+            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "pickup"))
             {
                 Log($"⚠️ Ignoring non-readback AI transcript in VerifyingPickup: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
                 EmitCurrentInstruction();
@@ -610,7 +612,7 @@ public class CleanCallSession
             try
             {
                 var rawAddress = _engine.RawData.PickupRaw ?? "";
-                Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\")");
+                Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
                 await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText);
             }
             finally { _geocodeInFlight = false; }
@@ -618,7 +620,9 @@ public class CleanCallSession
         }
         if (_engine.State == CollectionState.VerifyingDestination)
         {
-            if (!LooksLikeAddressReadback(adaText, "destination"))
+            // During recalculation, skip readback check — we already have the address,
+            // just need to re-geocode it. Any AI response (even "[Silence]") triggers geocoding.
+            if (!_engine.IsRecalculating && !LooksLikeAddressReadback(adaText, "destination"))
             {
                 Log($"⚠️ Ignoring non-readback AI transcript in VerifyingDestination: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
                 EmitCurrentInstruction();
@@ -634,7 +638,7 @@ public class CleanCallSession
             try
             {
                 var rawAddress = _engine.RawData.DestinationRaw ?? "";
-                Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\")");
+                Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
                 await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText);
             }
             finally { _geocodeInFlight = false; }
