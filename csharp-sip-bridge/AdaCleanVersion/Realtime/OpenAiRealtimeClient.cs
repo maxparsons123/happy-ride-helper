@@ -76,7 +76,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _transport.OnDisconnected += reason => Log($"🔌 Transport disconnected: {reason}");
 
         // ── Mic gate (simple energy-based) ──
-        _micGate = new MicGateController();
+        _micGate = new MicGateController(codec);
 
         // ── Audio bridge (deterministic 20ms pacing, tiny jitter buffer) ──
         _audio = new RealtimeAudioBridge(rtpSession, _transport, codec, _micGate, _cts.Token, mediaSession);
