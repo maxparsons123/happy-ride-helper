@@ -2817,6 +2817,15 @@ public class CleanCallSession
                     EmitCurrentInstruction();
                 break;
 
+            case CollectionState.Dispatched:
+                // ── POST-DISPATCH: Caller spoke after "taxi on the way" ──
+                // Auto-end the call. The AI already said goodbye (or should have).
+                // Do NOT re-emit the Dispatched instruction — that causes a barrage
+                // of repeated questions as each response.create triggers another cycle.
+                Log($"📴 Post-dispatch speech detected: \"{transcript}\" — ending call");
+                EndCall(force: true);
+                break;
+
             default:
                 // ── SAFETY NET: If we somehow got here with missing slots, redirect ──
                 if (!_engine.RawData.AllRequiredPresent)
