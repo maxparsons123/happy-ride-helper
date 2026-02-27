@@ -24,9 +24,14 @@ public static class RealtimeEventParser
                     AudioBase64 = root.GetProperty("delta").GetString()
                 },
 
-                "response.created" or "response.audio.started" => new RealtimeEvent
+                "response.created" => new RealtimeEvent
                 {
                     Type = RealtimeEventType.ResponseCreated
+                },
+
+                "response.audio.started" => new RealtimeEvent
+                {
+                    Type = RealtimeEventType.AudioStarted
                 },
 
                 "response.audio.done" => new RealtimeEvent

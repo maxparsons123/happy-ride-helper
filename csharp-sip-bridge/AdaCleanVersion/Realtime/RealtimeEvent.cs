@@ -8,6 +8,7 @@ public enum RealtimeEventType
 {
     AudioDelta,
     ResponseCreated,
+    AudioStarted,
     AudioDone,
     ToolCallDone,
     CallerTranscript,

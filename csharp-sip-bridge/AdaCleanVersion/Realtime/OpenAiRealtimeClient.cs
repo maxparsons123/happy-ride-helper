@@ -182,6 +182,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 break;
 
             case RealtimeEventType.ResponseCreated:
+                break; // no-op — wait for actual audio
+
+            case RealtimeEventType.AudioStarted:
                 _micGate.Arm();
                 break;
 
