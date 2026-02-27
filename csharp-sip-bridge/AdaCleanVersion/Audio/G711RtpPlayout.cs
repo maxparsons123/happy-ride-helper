@@ -8,12 +8,13 @@ using SIPSorcery.Net;
 namespace AdaCleanVersion.Audio;
 
 /// <summary>
-/// G.711 RTP playout engine v12.0 — codec-agnostic (supports PCMU and PCMA).
+/// G.711 RTP playout engine v12.2 — codec-agnostic (supports PCMU and PCMA).
 ///
 /// Features:
 ///   - High-precision 20ms tick via Windows WaitableTimer (falls back to Thread.Sleep on Linux)
 ///   - ConcurrentQueue frame pool with bounded size to prevent memory growth
-///   - Split cold-start (80ms) vs mid-stream resume (100ms) thresholds
+///   - Split cold-start (80ms) vs mid-stream resume (60ms) thresholds
+///   - Grace period: tolerates up to 3 empty ticks (60ms) before entering full buffering
 ///   - Circuit breaker: stops sending after 10 consecutive RTP failures
 ///   - Hard-cut barge-in via _clearRequested flag (synchronous drain at top of loop)
 ///   - Typing sound fill during buffering pauses
@@ -36,7 +37,8 @@ public sealed class G711RtpPlayout : IDisposable
 
     private const int FrameSize = 160;          // 20ms @ 8kHz
     private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start
-    private const int ResumeThresholdFrames = 10;      // 200ms for mid-stream resume — absorbs WebSocket jitter
+    private const int ResumeThresholdFrames = 3;       // 60ms for mid-stream resume — minimizes warble
+    private const int GracePeriodTicks = 3;            // tolerate 3 empty ticks (60ms) before entering buffering
     private const int MaxPoolSize = 200;
     private const int MaxSendErrors = 10;
 
@@ -64,6 +66,7 @@ public sealed class G711RtpPlayout : IDisposable
     private volatile int _clearEpoch;
     private bool _buffering = true;
     private bool _hasPlayedAudio;
+    private int _emptyTickCount;           // tracks consecutive empty ticks for grace period
     private IntPtr _timer;
     private bool _useTimer;
 
@@ -97,6 +100,7 @@ public sealed class G711RtpPlayout : IDisposable
         _running = true;
         _buffering = true;
         _hasPlayedAudio = false;
+        _emptyTickCount = 0;
         _sendErrorCount = 0;
 
         if (IsWindows)
@@ -114,10 +118,10 @@ public sealed class G711RtpPlayout : IDisposable
         {
             IsBackground = true,
             Priority = ThreadPriority.AboveNormal,
-            Name = $"G711RtpPlayout-v12-{_codec}"
+            Name = $"G711RtpPlayout-v12.2-{_codec}"
         };
         _thread.Start();
-        SafeLog($"[RTP] G711RtpPlayout v12.0 started ({_codec}, PT={_payloadType})");
+        SafeLog($"[RTP] G711RtpPlayout v12.2 started ({_codec}, PT={_payloadType})");
     }
 
     public void Stop()
@@ -267,11 +271,13 @@ public sealed class G711RtpPlayout : IDisposable
             }
             _buffering = false;
             _hasPlayedAudio = true;
+            _emptyTickCount = 0;
         }
 
         if (_q.TryDequeue(out var item))
         {
             Interlocked.Decrement(ref _queueCount);
+            _emptyTickCount = 0;   // reset grace counter on successful dequeue
 
             if (item.epoch != currentEpoch)
             {
@@ -294,6 +300,7 @@ public sealed class G711RtpPlayout : IDisposable
                 else
                 {
                     _buffering = true;
+                    _emptyTickCount = 0;
                     Send(_silence);
                 }
                 return;
@@ -302,19 +309,34 @@ public sealed class G711RtpPlayout : IDisposable
             Send(item.data);
             ReturnFrame(item.data);
 
+            // Don't enter buffering immediately — use grace period
             if (Volatile.Read(ref _queueCount) == 0)
             {
-                _buffering = true;
-                try { OnQueueEmpty?.Invoke(); } catch { }
+                // Queue just emptied, but more frames may arrive within grace window
+                // Don't set _buffering yet — let grace ticks handle it
             }
         }
         else
         {
-            _buffering = true;
-            Send(_silence);
-            if (_hasPlayedAudio)
+            // Queue empty — use grace period before entering full buffering
+            _emptyTickCount++;
+
+            if (_emptyTickCount <= GracePeriodTicks)
             {
-                try { OnQueueEmpty?.Invoke(); } catch { }
+                // Within grace period: send silence but stay in playing mode
+                // so we resume instantly when the next frame arrives
+                Send(_silence);
+            }
+            else
+            {
+                // Grace period exhausted — enter full buffering
+                _buffering = true;
+                _emptyTickCount = 0;
+                Send(_silence);
+                if (_hasPlayedAudio)
+                {
+                    try { OnQueueEmpty?.Invoke(); } catch { }
+                }
             }
         }
     }
@@ -346,6 +368,7 @@ public sealed class G711RtpPlayout : IDisposable
         }
         _buffering = true;
         _hasPlayedAudio = false;
+        _emptyTickCount = 0;
         Volatile.Write(ref _clearRequested, false);
     }
 
