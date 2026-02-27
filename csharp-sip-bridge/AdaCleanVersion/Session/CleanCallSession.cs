@@ -702,6 +702,10 @@ public class CleanCallSession
                 return;
             }
             _geocodeInFlight = true;
+            // Inject SILENCE instruction to prevent Ada from speaking while geocoding runs
+            OnAiInstruction?.Invoke(
+                "[INSTRUCTION] ⚠️ ABSOLUTE SILENCE. Geocoding in progress. Do NOT speak. Do NOT ask any questions. Say NOTHING. Wait for the next instruction.",
+                false, true);
             try
             {
                 var rawAddress = _engine.RawData.PickupRaw ?? "";
@@ -729,6 +733,10 @@ public class CleanCallSession
                 return;
             }
             _geocodeInFlight = true;
+            // Inject SILENCE instruction to prevent Ada from speaking while geocoding runs
+            OnAiInstruction?.Invoke(
+                "[INSTRUCTION] ⚠️ ABSOLUTE SILENCE. Geocoding in progress. Do NOT speak. Do NOT ask any questions. Say NOTHING. Wait for the next instruction.",
+                false, true);
             try
             {
                 var rawAddress = _engine.RawData.DestinationRaw ?? "";
