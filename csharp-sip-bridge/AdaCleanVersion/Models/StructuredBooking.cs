@@ -28,8 +28,16 @@ public sealed class StructuredAddress
     public string? City { get; init; }
     public string? Postcode { get; init; }
 
-    /// <summary>Full display string for readback.</summary>
+    /// <summary>
+    /// The original verified address string, preserved verbatim.
+    /// When set, this is the SACRED display string — no reformatting allowed.
+    /// </summary>
+    public string? RawDisplayName { get; init; }
+
+    /// <summary>Full display string for readback. Uses verbatim original when available.</summary>
     public string DisplayName =>
-        string.Join(", ", new[] { HouseNumber, StreetName, Area, City, Postcode }
-            .Where(s => !string.IsNullOrWhiteSpace(s)));
+        !string.IsNullOrWhiteSpace(RawDisplayName)
+            ? RawDisplayName
+            : string.Join(", ", new[] { HouseNumber, StreetName, Area, City, Postcode }
+                .Where(s => !string.IsNullOrWhiteSpace(s)));
 }
