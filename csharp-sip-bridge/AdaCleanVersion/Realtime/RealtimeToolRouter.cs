@@ -65,7 +65,17 @@ public sealed class RealtimeToolRouter
     public async Task StartAsync()
     {
         var action = _engine.Start();
-        await ExecuteActionAsync(action, toolCallId: null);
+        // Greeting has no tool call context — use follow-up path to trigger audio
+        if (action is AskAction ask)
+        {
+            Log($"💬 Ask: {ask.Text}");
+            OnInstruction?.Invoke(ask.Text);
+            await UpdateInstructionAndRespond(ask.Text);
+        }
+        else
+        {
+            await ExecuteActionAsync(action, toolCallId: null);
+        }
     }
 
     /// <summary>
@@ -294,10 +304,15 @@ public sealed class RealtimeToolRouter
             }
         }, _ct);
 
+        // Override tool_choice to "none" so the model speaks audio instead of calling tools
         await _transport.SendAsync(new
         {
             type = "response.create",
-            response = new { modalities = new[] { "audio", "text" } }
+            response = new
+            {
+                modalities = new[] { "audio", "text" },
+                tool_choice = "none"
+            }
         }, _ct);
     }
 
