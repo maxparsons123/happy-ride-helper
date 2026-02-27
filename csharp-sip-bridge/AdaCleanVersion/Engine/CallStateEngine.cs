@@ -8,6 +8,9 @@ namespace AdaCleanVersion.Engine;
 /// Key principle: AI NEVER controls state transitions.
 /// The engine decides what to collect, when to extract, and when to dispatch.
 /// AI is only used as a normalization function at the extraction phase.
+/// 
+/// FSM transitions are enforced via AllowedTransitions map.
+/// ForceState() bypasses the map for legitimate correction jumps (logged as FORCE).
 /// </summary>
 public class CallStateEngine
 {
@@ -31,6 +34,125 @@ public class CallStateEngine
 
     public event Action<CollectionState, CollectionState>? OnStateChanged;
     public event Action<string>? OnLog;
+
+    // ─── TRANSITION MAP ─────────────────────────────────────────
+    // Defines all legal state transitions. Any transition not in this map
+    // is blocked by TransitionTo() (ForceState bypasses with audit log).
+
+    private static readonly Dictionary<CollectionState, HashSet<CollectionState>> AllowedTransitions = new()
+    {
+        [CollectionState.Greeting] = new()
+        {
+            CollectionState.CollectingName, CollectionState.CollectingPickup,
+            CollectionState.CollectingDestination, CollectionState.CollectingPassengers,
+            CollectionState.CollectingPickupTime, CollectionState.ReadyForExtraction,
+            CollectionState.ManagingExistingBooking, CollectionState.Ending
+        },
+        [CollectionState.ManagingExistingBooking] = new()
+        {
+            CollectionState.AwaitingCancelConfirmation, CollectionState.CollectingName,
+            CollectionState.CollectingPickup, CollectionState.Ending
+        },
+        [CollectionState.AwaitingCancelConfirmation] = new()
+        {
+            CollectionState.ManagingExistingBooking, CollectionState.Ending
+        },
+        [CollectionState.CollectingName] = new()
+        {
+            CollectionState.CollectingPickup, CollectionState.CollectingDestination,
+            CollectionState.CollectingPassengers, CollectionState.CollectingPickupTime,
+            CollectionState.ReadyForExtraction, CollectionState.Ending
+        },
+        [CollectionState.CollectingPickup] = new()
+        {
+            CollectionState.VerifyingPickup, CollectionState.CollectingDestination,
+            CollectionState.ReadyForExtraction, CollectionState.Ending
+        },
+        [CollectionState.VerifyingPickup] = new()
+        {
+            CollectionState.CollectingDestination, CollectionState.CollectingPassengers,
+            CollectionState.CollectingPickupTime, CollectionState.VerifyingDestination,
+            CollectionState.ReadyForExtraction, CollectionState.AwaitingClarification,
+            CollectionState.Ending
+        },
+        [CollectionState.CollectingDestination] = new()
+        {
+            CollectionState.VerifyingDestination, CollectionState.CollectingPassengers,
+            CollectionState.ReadyForExtraction, CollectionState.Ending
+        },
+        [CollectionState.VerifyingDestination] = new()
+        {
+            CollectionState.CollectingPassengers, CollectionState.CollectingPickupTime,
+            CollectionState.ReadyForExtraction, CollectionState.AwaitingClarification,
+            CollectionState.Ending
+        },
+        [CollectionState.CollectingPassengers] = new()
+        {
+            CollectionState.CollectingPickupTime, CollectionState.ReadyForExtraction,
+            CollectionState.Ending
+        },
+        [CollectionState.CollectingPickupTime] = new()
+        {
+            CollectionState.ReadyForExtraction, CollectionState.Ending
+        },
+        [CollectionState.ReadyForExtraction] = new()
+        {
+            CollectionState.Extracting, CollectionState.CollectingName,
+            CollectionState.CollectingPickup, CollectionState.CollectingDestination,
+            CollectionState.CollectingPassengers, CollectionState.CollectingPickupTime,
+            CollectionState.Ending
+        },
+        [CollectionState.Extracting] = new()
+        {
+            CollectionState.Geocoding, CollectionState.CollectingPickup,
+            CollectionState.CollectingDestination, CollectionState.ReadyForExtraction,
+            CollectionState.Ending
+        },
+        [CollectionState.Geocoding] = new()
+        {
+            CollectionState.PresentingFare, CollectionState.AwaitingClarification,
+            CollectionState.ReadyForExtraction, CollectionState.Ending
+        },
+        [CollectionState.AwaitingClarification] = new()
+        {
+            CollectionState.VerifyingPickup, CollectionState.VerifyingDestination,
+            CollectionState.CollectingPickup, CollectionState.CollectingDestination,
+            CollectionState.Ending
+        },
+        [CollectionState.PresentingFare] = new()
+        {
+            CollectionState.AwaitingPaymentChoice, CollectionState.AwaitingConfirmation,
+            CollectionState.ReadyForExtraction, CollectionState.CollectingPickup,
+            CollectionState.CollectingDestination, CollectionState.CollectingPassengers,
+            CollectionState.CollectingPickupTime, CollectionState.Ending
+        },
+        [CollectionState.AwaitingPaymentChoice] = new()
+        {
+            CollectionState.AwaitingConfirmation, CollectionState.ReadyForExtraction,
+            CollectionState.CollectingPickup, CollectionState.CollectingDestination,
+            CollectionState.Ending
+        },
+        [CollectionState.AwaitingConfirmation] = new()
+        {
+            CollectionState.Dispatched, CollectionState.CollectingPickup,
+            CollectionState.CollectingDestination, CollectionState.CollectingPassengers,
+            CollectionState.CollectingPickupTime, CollectionState.ReadyForExtraction,
+            CollectionState.Ending
+        },
+        [CollectionState.Dispatched] = new()
+        {
+            CollectionState.Ending
+        },
+        [CollectionState.Ending] = new()
+        {
+            CollectionState.Ended
+        },
+        [CollectionState.Ended] = new() // Terminal — no transitions allowed
+        {
+        },
+    };
+
+    // ─── COLLECTION ─────────────────────────────────────────────
 
     /// <summary>
     /// Advance from Greeting to first collection state.
@@ -108,15 +230,23 @@ public class CallStateEngine
         if (State >= CollectionState.ReadyForExtraction && State < CollectionState.Dispatched)
         {
             if (RawData.AllRequiredPresent)
-                TransitionTo(CollectionState.ReadyForExtraction);
+                ForceState(CollectionState.ReadyForExtraction);
         }
     }
 
+    // ─── EXTRACTION ─────────────────────────────────────────────
+
     /// <summary>
     /// Mark extraction as started.
+    /// Idempotency guard: blocks if already extracting or beyond.
     /// </summary>
     public void BeginExtraction()
     {
+        if (State >= CollectionState.Extracting && State != CollectionState.ReadyForExtraction)
+        {
+            Log($"Extraction already in progress or complete (state={State}) — ignoring");
+            return;
+        }
         if (State != CollectionState.ReadyForExtraction)
         {
             Log($"Cannot extract in state {State}");
@@ -148,11 +278,19 @@ public class CallStateEngine
         Log("Geocoding started");
     }
 
-    /// <summary>
-    /// Geocoded addresses stored per-slot for inline verification.
-    /// </summary>
+    // ─── VERIFIED ADDRESSES ─────────────────────────────────────
+    // Ground truth from geocoding. Uses reverification pattern:
+    // ClearVerifiedAddress flags for re-verify but preserves last known value
+    // until overwritten by a new verified result.
+
+    /// <summary>Geocoded addresses stored per-slot for inline verification.</summary>
     public GeocodedAddress? VerifiedPickup { get; private set; }
     public GeocodedAddress? VerifiedDestination { get; private set; }
+
+    /// <summary>True when pickup needs re-geocoding (address was corrected).</summary>
+    public bool PickupNeedsReverification { get; private set; }
+    /// <summary>True when destination needs re-geocoding (address was corrected).</summary>
+    public bool DestinationNeedsReverification { get; private set; }
 
     /// <summary>
     /// Store verified pickup address from inline geocoding and advance to next slot.
@@ -160,6 +298,7 @@ public class CallStateEngine
     public void CompletePickupVerification(GeocodedAddress geocoded)
     {
         VerifiedPickup = geocoded;
+        PickupNeedsReverification = false;
         Log($"Pickup verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
 
         // Don't resurrect a dead/ending call
@@ -194,6 +333,7 @@ public class CallStateEngine
     public void CompleteDestinationVerification(GeocodedAddress geocoded)
     {
         VerifiedDestination = geocoded;
+        DestinationNeedsReverification = false;
         Log($"Destination verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
 
         // Don't resurrect a dead/ending call
@@ -247,7 +387,7 @@ public class CallStateEngine
         // Fallback: clear and re-collect (e.g., slot was empty or clarification exhausted)
         RawData.SetSlot(field, "");
         Log($"Cleared raw slot '{field}' — forcing re-collection");
-        TransitionTo(SlotToState(field));
+        ForceState(SlotToState(field));
     }
 
     /// <summary>
@@ -269,6 +409,8 @@ public class CallStateEngine
         // session can still present booking and ask for confirmation
         TransitionTo(CollectionState.PresentingFare);
     }
+
+    // ─── CLARIFICATION ──────────────────────────────────────────
 
     /// <summary>
     /// Address needs clarification — enter clarification state.
@@ -333,7 +475,7 @@ public class CallStateEngine
             : CollectionState.VerifyingDestination;
 
         PendingClarification = null;
-        TransitionTo(targetState);
+        ForceState(targetState);
     }
 
     /// <summary>
@@ -344,8 +486,10 @@ public class CallStateEngine
         Log($"Extraction failed: {error}");
         // Determine which slot needs fixing based on error, or go back to first
         var next = RawData.NextMissingSlot() ?? "pickup";
-        TransitionTo(SlotToState(next));
+        ForceState(SlotToState(next));
     }
+
+    // ─── PAYMENT & CONFIRMATION ─────────────────────────────────
 
     /// <summary>
     /// Caller selected payment method. Advance to confirmation.
@@ -376,7 +520,7 @@ public class CallStateEngine
         {
             Log($"⛔ Confirmation BLOCKED — slots still missing. Next: {RawData.NextMissingSlot()}");
             var next = RawData.NextMissingSlot()!;
-            TransitionTo(SlotToState(next));
+            ForceState(SlotToState(next));
             return;
         }
         TransitionTo(CollectionState.Dispatched);
@@ -388,7 +532,7 @@ public class CallStateEngine
     /// </summary>
     public void RejectAndCorrect(string slotName)
     {
-        TransitionTo(SlotToState(slotName));
+        ForceState(SlotToState(slotName));
     }
 
     /// <summary>
@@ -407,6 +551,8 @@ public class CallStateEngine
         TransitionTo(CollectionState.Ending);
     }
 
+    // ─── EXTRACTION REQUEST ─────────────────────────────────────
+
     /// <summary>
     /// Build the ExtractionRequest payload for the AI service.
     /// </summary>
@@ -415,8 +561,11 @@ public class CallStateEngine
         // Prefer verified/geocoded addresses over raw STT when available.
         // Raw slots can contain garbled STT (e.g., "3,000 years." instead of "7 Russell Street"),
         // but verified addresses have been confirmed via geocoding.
-        var pickupForExtraction = VerifiedPickup?.Address ?? RawData.PickupRaw ?? "";
-        var destinationForExtraction = VerifiedDestination?.Address ?? RawData.DestinationRaw ?? "";
+        // REVERIFICATION GUARD: If flagged for re-verify, use raw data (new correction) not stale verified.
+        var pickupForExtraction = (!PickupNeedsReverification && VerifiedPickup != null)
+            ? VerifiedPickup.Address : (RawData.PickupRaw ?? "");
+        var destinationForExtraction = (!DestinationNeedsReverification && VerifiedDestination != null)
+            ? VerifiedDestination.Address : (RawData.DestinationRaw ?? "");
 
         return new ExtractionRequest
         {
@@ -432,13 +581,19 @@ public class CallStateEngine
         };
     }
 
+    // ─── STATE CONTROL ──────────────────────────────────────────
+
     /// <summary>
-    /// Force engine into a specific state — used for address correction re-verification.
+    /// Force engine into a specific state — bypasses transition map.
+    /// Used for address correction re-verification and error recovery.
+    /// Logged as FORCE for audit trail.
     /// </summary>
     public void ForceState(CollectionState newState)
     {
-        Log($"Force state: {State} → {newState}");
-        TransitionTo(newState);
+        var old = State;
+        Log($"⚡ FORCE state: {old} → {newState}");
+        State = newState;
+        OnStateChanged?.Invoke(old, newState);
     }
 
     /// <summary>
@@ -462,23 +617,45 @@ public class CallStateEngine
     }
 
     /// <summary>
-    /// Clear a verified address so it can be re-verified after correction.
+    /// Flag a verified address for re-verification after correction.
+    /// Preserves the last known verified value until overwritten by a new geocode result.
+    /// Ground truth should never disappear — only be replaced.
     /// </summary>
     public void ClearVerifiedAddress(string field)
     {
         if (field == "pickup")
         {
+            PickupNeedsReverification = true;
+            Log($"Pickup flagged for re-verification (preserving last verified: \"{VerifiedPickup?.Address ?? "none"}\")");
+        }
+        else if (field == "destination")
+        {
+            DestinationNeedsReverification = true;
+            Log($"Destination flagged for re-verification (preserving last verified: \"{VerifiedDestination?.Address ?? "none"}\")");
+        }
+    }
+
+    /// <summary>
+    /// Hard-clear a verified address (sets to null). Use only when the address is
+    /// completely invalid and no fallback is acceptable (e.g., same-address guard).
+    /// </summary>
+    public void HardClearVerifiedAddress(string field)
+    {
+        if (field == "pickup")
+        {
             VerifiedPickup = null;
-            Log("Verified pickup cleared for re-verification");
+            PickupNeedsReverification = false;
+            Log("Verified pickup HARD CLEARED (no fallback)");
         }
         else if (field == "destination")
         {
             VerifiedDestination = null;
-            Log("Verified destination cleared for re-verification");
+            DestinationNeedsReverification = false;
+            Log("Verified destination HARD CLEARED (no fallback)");
         }
     }
 
-    // ── EXISTING BOOKING MANAGEMENT ──
+    // ─── EXISTING BOOKING MANAGEMENT ────────────────────────────
 
     /// <summary>
     /// Start cancel confirmation flow — sets timeout guard.
@@ -492,11 +669,19 @@ public class CallStateEngine
 
     /// <summary>
     /// Check if cancel confirmation has expired (caller took too long).
+    /// Auto-reverts to ManagingExistingBooking if expired — prevents soft-lock.
     /// </summary>
     public bool IsCancelConfirmationExpired()
     {
         if (!_cancelConfirmationRequestedAt.HasValue) return false;
-        return (DateTime.UtcNow - _cancelConfirmationRequestedAt.Value).TotalSeconds > CANCEL_CONFIRMATION_TIMEOUT_SECONDS;
+        if ((DateTime.UtcNow - _cancelConfirmationRequestedAt.Value).TotalSeconds <= CANCEL_CONFIRMATION_TIMEOUT_SECONDS)
+            return false;
+
+        // Auto-reset: revert to ManagingExistingBooking to prevent soft-lock
+        Log("⏰ Cancel confirmation EXPIRED — auto-reverting to ManagingExistingBooking");
+        ClearCancelConfirmation();
+        ForceState(CollectionState.ManagingExistingBooking);
+        return true;
     }
 
     /// <summary>
@@ -524,9 +709,26 @@ public class CallStateEngine
     /// </summary>
     public bool IsRecalculating { get; set; }
 
+    // ─── CORE TRANSITION ────────────────────────────────────────
+
+    /// <summary>
+    /// Guarded state transition — validates against AllowedTransitions map.
+    /// Illegal transitions are blocked and logged.
+    /// </summary>
     private void TransitionTo(CollectionState newState)
     {
         var old = State;
+
+        // Self-transition is always allowed (no-op)
+        if (old == newState) return;
+
+        // Validate against transition map
+        if (!AllowedTransitions.TryGetValue(old, out var allowed) || !allowed.Contains(newState))
+        {
+            Log($"⛔ ILLEGAL transition blocked: {old} → {newState}");
+            return;
+        }
+
         State = newState;
         Log($"State: {old} → {newState}");
         OnStateChanged?.Invoke(old, newState);
