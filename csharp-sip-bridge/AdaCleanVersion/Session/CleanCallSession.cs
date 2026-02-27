@@ -1353,7 +1353,7 @@ public class CleanCallSession
                 var currentSlotState = _engine.State;
 
                 // Only do intent-jump if the target is different from what we're currently collecting
-                if (targetState != null && targetState != currentSlotState &&
+                if (targetState != currentSlotState &&
                     !IsCurrentlyCollecting(currentSlotState, targetSlot))
                 {
                     Log($"[SyncTool] Intent-jump: {currentSlotState} → {targetSlot} (AI detected out-of-order correction)");
@@ -1430,7 +1430,7 @@ public class CleanCallSession
         // the AI is ignoring our instruction and advancing prematurely.
         if (_engine.State == CollectionState.AwaitingClarification)
         {
-            var clarField = _engine.PendingClarification?.Field;
+            var clarField = _engine.PendingClarification?.AmbiguousField;
             Log($"[SyncTool] AwaitingClarification for '{clarField}' — checking if tool call is relevant");
             
             // Check if the AI is trying to fill a DIFFERENT slot (passengers, time, etc.)
@@ -1916,7 +1916,7 @@ public class CleanCallSession
         {
             // CRITICAL: Override next_required so the AI sees we're waiting for clarification,
             // NOT that all slots are filled. This prevents premature confirmation.
-            var clarField = _engine.PendingClarification?.Field ?? "address";
+            var clarField = _engine.PendingClarification?.AmbiguousField ?? "address";
             nextRequired = $"clarifying_{clarField}";
             action = $"Ask caller to clarify the {clarField} address — provide area or postcode";
         }
