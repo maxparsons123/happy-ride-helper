@@ -390,6 +390,17 @@ public class CallStateEngine
     }
 
     /// <summary>
+    /// Advance to the collection state for a named slot (e.g. "passengers" → CollectingPassengers).
+    /// Used by tool call handler to progress after populating partial slots.
+    /// </summary>
+    public void AdvanceToSlot(string slotName)
+    {
+        var target = SlotToState(slotName);
+        Log($"AdvanceToSlot: {slotName} → {target}");
+        TransitionTo(target);
+    }
+
+    /// <summary>
     /// Clear fare result for recalculation after address correction.
     /// </summary>
     public void ClearFareResult()
