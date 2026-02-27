@@ -222,6 +222,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // Wire session instructions → OpenAI session.update
         _session.OnAiInstruction += OnSessionAiInstruction;
 
+        // Wire conversation truncation for field corrections
+        _session.OnTruncateConversation += OnSessionTruncateConversation;
+
         // Typing sounds removed in v13 — log only
         _session.OnTypingSoundsChanged += enabled =>
         {
@@ -298,6 +301,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
         _session.OnAiInstruction -= OnSessionAiInstruction;
+        _session.OnTruncateConversation -= OnSessionTruncateConversation;
 
         _playout.Stop();
 
@@ -1001,6 +1005,58 @@ Never assume previous values remain valid.
     {
         Log(isReprompt ? "📋 Queuing REPROMPT instruction update" : "📋 Queuing instruction update");
         _ = StartInstructionSequenceAsync(new PendingInstruction(instruction, isReprompt, isSilent));
+    }
+
+    /// <summary>
+    /// Truncate/reset the AI's conversation context when a field correction happens.
+    /// Injects a context-reset system message so the AI "forgets" its previous questions
+    /// and focuses only on the fresh [INSTRUCTION].
+    /// </summary>
+    private async Task OnSessionTruncateConversation()
+    {
+        Log("✂️ Truncating conversation context for field correction");
+
+        try
+        {
+            // Cancel any active response to prevent stale output
+            if (!_responseCompleted)
+            {
+                await SendJsonAsync(new { type = "response.cancel" });
+                await Task.Delay(50);
+            }
+
+            // Clear the input audio buffer to prevent stale audio from being processed
+            await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+
+            // Inject a context-reset message so the AI knows to ignore prior conversation
+            await SendJsonAsync(new
+            {
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "system",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "input_text",
+                            text = "[SYSTEM] ⚠️ CONTEXT RESET: The caller has changed a booking detail. " +
+                                   "Your previous questions and the caller's previous answers about other fields are IRRELEVANT. " +
+                                   "Focus ONLY on the current [INSTRUCTION]. Do NOT repeat any previous question. " +
+                                   "🔄 PIVOT: Acknowledge the change naturally (e.g., 'No problem, let me update that.') " +
+                                   "and then follow the [INSTRUCTION] exactly."
+                        }
+                    }
+                }
+            });
+
+            Log("✅ Context reset injected — AI will follow fresh instruction only");
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠️ Truncation error: {ex.Message}");
+        }
     }
 
     /// <summary>

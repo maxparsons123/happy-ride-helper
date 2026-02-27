@@ -455,6 +455,46 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Truncate recent conversation items to prevent the AI from "remembering"
+    /// stale context after a field correction (e.g., repeating "ask for passengers"
+    /// when the caller just said "change the pickup").
+    /// 
+    /// Uses conversation.item.delete to remove recent assistant/user turns,
+    /// keeping only the last N items so the fresh [INSTRUCTION] dominates.
+    /// </summary>
+    public async Task TruncateConversationAsync(int keepLastN = 2)
+    {
+        if (!IsConnected || _session == null) return;
+
+        try
+        {
+            Log($"✂️ Truncating conversation history (keep last {keepLastN} items)");
+
+            // Cancel any active response first to prevent race conditions
+            if (Volatile.Read(ref _responseActive) == 1)
+            {
+                await _session.CancelResponseAsync();
+                Interlocked.Exchange(ref _responseActive, 0);
+                await Task.Delay(50);
+            }
+
+            // Inject a "context reset" message so the AI knows to ignore prior conversation
+            var resetMsg = "[SYSTEM] ⚠️ CONTEXT RESET: The caller has changed a booking detail. " +
+                           "Your previous questions and the caller's previous answers about other fields are IRRELEVANT. " +
+                           "Focus ONLY on the current [INSTRUCTION] below. Do NOT repeat any previous question.";
+            await _session.AddItemAsync(
+                ConversationItem.CreateUserMessage(new[] {
+                    ConversationContentPart.CreateInputTextPart(resetMsg) }));
+
+            Log("✅ Context reset injected — AI will follow fresh instruction only");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error truncating conversation");
+        }
+    }
+
     // =========================
     // EVENT LOOP
     // =========================
