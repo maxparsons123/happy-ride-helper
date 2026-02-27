@@ -1423,6 +1423,37 @@ public class CleanCallSession
             }
         }
 
+        // ── CLARIFICATION STATE GUARD ──────────────────────────────
+        // When engine is in AwaitingClarification, the ONLY valid input is
+        // clarification data (area, postcode) for the ambiguous address.
+        // Reject any slot updates that aren't the field being clarified —
+        // the AI is ignoring our instruction and advancing prematurely.
+        if (_engine.State == CollectionState.AwaitingClarification)
+        {
+            var clarField = _engine.PendingClarification?.Field;
+            Log($"[SyncTool] AwaitingClarification for '{clarField}' — checking if tool call is relevant");
+            
+            // Check if the AI is trying to fill a DIFFERENT slot (passengers, time, etc.)
+            bool hasRelevantUpdate = false;
+            if (clarField == "pickup" && TryGetArg(args, "pickup", out var clPickup) && !string.IsNullOrWhiteSpace(clPickup))
+                hasRelevantUpdate = true;
+            if (clarField == "destination" && TryGetArg(args, "destination", out var clDest) && !string.IsNullOrWhiteSpace(clDest))
+                hasRelevantUpdate = true;
+            
+            // Also accept caller_area as clarification data
+            if (TryGetArg(args, "caller_area", out var clArea) && !string.IsNullOrWhiteSpace(clArea))
+                hasRelevantUpdate = true;
+            
+            if (!hasRelevantUpdate)
+            {
+                // AI ignored the clarification instruction and tried to advance.
+                // Reject ALL slot updates and re-emit the clarification instruction.
+                Log($"⛔ [SyncTool] REJECTED — AI tried to fill slots while AwaitingClarification for '{clarField}'. Re-emitting clarification instruction.");
+                EmitCurrentInstruction();
+                return BuildSyncResponse("awaiting_clarification", null);
+            }
+        }
+
         var slotsUpdated = new List<string>();
         var currentState = _engine.State;
 
@@ -1869,12 +1900,53 @@ public class CleanCallSession
         // and asks for the destination instead of performing the readback.
         var engineState = _engine.State;
         string nextRequired;
+        string? action = null;
+        
         if (engineState == CollectionState.VerifyingPickup)
+        {
             nextRequired = "verifying_pickup";
+            action = "VERIFY pickup address by reading it back to caller";
+        }
         else if (engineState == CollectionState.VerifyingDestination)
+        {
             nextRequired = "verifying_destination";
+            action = "VERIFY destination address by reading it back to caller";
+        }
+        else if (engineState == CollectionState.AwaitingClarification)
+        {
+            // CRITICAL: Override next_required so the AI sees we're waiting for clarification,
+            // NOT that all slots are filled. This prevents premature confirmation.
+            var clarField = _engine.PendingClarification?.Field ?? "address";
+            nextRequired = $"clarifying_{clarField}";
+            action = $"Ask caller to clarify the {clarField} address — provide area or postcode";
+        }
+        else if (next == null)
+        {
+            // All raw slots are filled, but check if addresses are actually verified.
+            // If destination geocode failed and we're not in a verification state,
+            // the booking is NOT complete — we need clarification.
+            bool pickupVerified = _engine.VerifiedPickup != null && !_engine.PickupNeedsReverification;
+            bool destVerified = _engine.VerifiedDestination != null && !_engine.DestinationNeedsReverification;
+            
+            if (!destVerified && engineState < CollectionState.ReadyForExtraction)
+            {
+                nextRequired = "clarifying_destination";
+                action = "The destination address has NOT been verified. Do NOT confirm the booking. Ask the caller for more details about the destination.";
+            }
+            else if (!pickupVerified && engineState < CollectionState.ReadyForExtraction)
+            {
+                nextRequired = "clarifying_pickup";
+                action = "The pickup address has NOT been verified. Do NOT confirm the booking. Ask the caller for more details about the pickup.";
+            }
+            else
+            {
+                nextRequired = "all_collected";
+            }
+        }
         else
-            nextRequired = next ?? "all_collected";
+        {
+            nextRequired = next;
+        }
 
         return new
         {
@@ -1883,11 +1955,7 @@ public class CleanCallSession
             booking_state = state,
             next_required = nextRequired,
             engine_state = engineState.ToString(),
-            action = engineState == CollectionState.VerifyingPickup
-                ? "VERIFY pickup address by reading it back to caller"
-                : engineState == CollectionState.VerifyingDestination
-                    ? "VERIFY destination address by reading it back to caller"
-                    : (string?)null
+            action
         };
     }
 
