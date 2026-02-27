@@ -1583,7 +1583,7 @@ public class CleanCallSession
         // address. The transcript won't match the full combined address — that's expected.
         var coherenceTranscript = whisperTranscript ?? lastUtterance;
         var coherenceSource = whisperTranscript != null ? "whisper_transcript" : "last_utterance";
-        var skipCoherence = _engine.CurrentState == CollectionState.AwaitingClarification;
+        var skipCoherence = _engine.State == CollectionState.AwaitingClarification;
 
         if (!string.IsNullOrWhiteSpace(coherenceTranscript) && !skipCoherence)
         {
