@@ -258,16 +258,21 @@ public class CallStateEngine
         var field = PendingClarification.AmbiguousField;
         Log($"Clarification accepted for {field}: \"{clarifiedValue}\"");
 
-        // Update the raw slot with the clarified value
+        // Update the raw slot: use Ada's readback (cleaned address) + area clarification
+        // instead of endlessly appending to garbage accumulated raw strings.
+        // E.g., if Ada read back "52A David Road, Coventry" and caller says "Stoke",
+        // we want "52A David Road, Stoke, Coventry" — not the raw STT noise.
         if (field == "pickup")
         {
-            var existing = RawData.PickupRaw ?? "";
-            RawData.SetSlot("pickup", $"{existing}, {clarifiedValue}");
+            var verified = VerifiedPickup?.Address;
+            var baseAddr = !string.IsNullOrEmpty(verified) ? verified : (RawData.PickupRaw ?? "");
+            RawData.SetSlot("pickup", $"{baseAddr}, {clarifiedValue}");
         }
         else if (field == "destination")
         {
-            var existing = RawData.DestinationRaw ?? "";
-            RawData.SetSlot("destination", $"{existing}, {clarifiedValue}");
+            var verified = VerifiedDestination?.Address;
+            var baseAddr = !string.IsNullOrEmpty(verified) ? verified : (RawData.DestinationRaw ?? "");
+            RawData.SetSlot("destination", $"{baseAddr}, {clarifiedValue}");
         }
 
         // Transition back to re-verify (re-geocode) the clarified field — NOT to ReadyForExtraction

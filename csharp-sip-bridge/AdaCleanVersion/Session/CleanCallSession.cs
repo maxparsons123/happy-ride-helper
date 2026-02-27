@@ -1017,17 +1017,32 @@ public class CleanCallSession
 
             if (geocoded.IsAmbiguous)
             {
-                Log($"Inline geocode: {field} is ambiguous — entering clarification");
+                _clarificationAttempts++;
+                Log($"Inline geocode: {field} is ambiguous — entering clarification (attempt {_clarificationAttempts})");
+
+                // Loop breaker: after 2 consecutive clarification failures, skip verification
+                if (_clarificationAttempts >= 2)
+                {
+                    Log($"Clarification loop breaker: {_clarificationAttempts} inline attempts — skipping verification");
+                    _clarificationAttempts = 0;
+                    _engine.SkipVerification(field, "Address could not be resolved after multiple clarification attempts");
+                    EmitCurrentInstruction();
+                    return;
+                }
+
                 _engine.EnterClarification(new ClarificationInfo
                 {
                     AmbiguousField = field,
                     Message = "Which area is that in?",
                     Alternatives = geocoded.Alternatives,
-                    Attempt = 0
+                    Attempt = _clarificationAttempts
                 });
                 EmitCurrentInstruction();
                 return;
             }
+
+            // Success — reset clarification counter
+            _clarificationAttempts = 0;
 
             // Clean the geocoded address — strip raw STT prefix ONLY if the remaining part
             // still contains a street name (i.e., Gemini duplicated the raw input as a prefix).
