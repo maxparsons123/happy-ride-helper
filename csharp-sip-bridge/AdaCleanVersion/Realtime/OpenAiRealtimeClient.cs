@@ -346,33 +346,143 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             {
                 type = "function",
                 name = "sync_booking_data",
-                description = "MANDATORY: Persist booking data as collected from the caller. " +
-                    "Must be called BEFORE generating any text response when user provides or amends booking details. " +
-                    "CRITICAL: Include ALL fields the caller mentioned in their utterance — if they say " +
-                    "'from X going to Y with 3 passengers', set pickup, destination, AND passengers in ONE call. " +
-                    "NEVER split a compound utterance into multiple calls or ignore mentioned fields. " +
-                    "CORRECTION OVERRIDE RULE: If the caller says ANY new pickup or destination value, you MUST: " +
-                    "1) Replace the previous value entirely. " +
-                    "2) NEVER reuse any prior address value. " +
-                    "3) NEVER leave a field unchanged if the caller clearly provided a new one. " +
-                    "4) The tool arguments must reflect EXACTLY what was spoken in the latest utterance. " +
-                    "5) When a correction occurs, you MUST explain the change in the 'interpretation' field. " +
-                    "Failure to overwrite stale values is a system error.",
+                description = @"
+MANDATORY BOOKING SYNC TOOL — DISPATCH CRITICAL
+
+This tool is the ONLY mechanism for persisting booking data.
+
+You MUST call this tool BEFORE generating any text/audio response
+whenever the caller provides, changes, corrects, clarifies,
+or confirms ANY booking detail.
+
+────────────────────────────────────────
+SUPPORTED FIELDS
+────────────────────────────────────────
+- caller_name
+- caller_area
+- pickup
+- destination
+- passengers
+- pickup_time
+- special_instructions
+
+────────────────────────────────────────
+FREEFORM BURST RULE (CRITICAL)
+────────────────────────────────────────
+If the caller provides multiple details in ONE sentence
+(e.g. 'from 52A David Road going to Manchester with 3 passengers at 6pm'),
+you MUST include ALL mentioned fields in ONE SINGLE tool call.
+
+NEVER split a compound utterance into multiple calls.
+NEVER ignore any mentioned field.
+
+────────────────────────────────────────
+CORRECTION OVERRIDE RULE (STRICT)
+────────────────────────────────────────
+If the caller provides ANY new pickup or destination value,
+you MUST completely REPLACE the previous value.
+
+You are STRICTLY FORBIDDEN from:
+- Reusing a previous address
+- Keeping a field unchanged when a new value was spoken
+- Partially merging old and new addresses
+- Substituting similar or previously confirmed places
+- Autocompleting from memory
+
+The new value must reflect ONLY what was spoken
+in the most recent utterance.
+
+Failure to overwrite stale values is a SYSTEM ERROR.
+
+────────────────────────────────────────
+VERBATIM COPY RULE (ADDRESS INTEGRITY)
+────────────────────────────────────────
+pickup and destination MUST be copied EXACTLY as spoken
+in the transcript.
+
+Do NOT:
+- Normalize
+- Correct spelling
+- Expand abbreviations
+- Replace with similar place names
+- Substitute previously confirmed addresses
+
+Copy the raw spoken phrase character-for-character.
+
+Even if the phrase sounds incomplete or unusual,
+you must copy it exactly.
+
+────────────────────────────────────────
+INTERPRETATION FIELD (MANDATORY LOGIC TRACE)
+────────────────────────────────────────
+The 'interpretation' field MUST:
+
+1) Briefly explain what you understood.
+2) If ANY field changed, include:
+
+   [CORRECTION:<field>] Changed from '<old>' to '<new>'
+
+Example:
+[CORRECTION:destination] Changed from 'Piccadilly, 14 Argyle Street'
+to 'Peak in the Middle on Fargosworth Street'
+
+If no correction occurred, state:
+No corrections. Extracted fields: ...
+
+────────────────────────────────────────
+LAST UTTERANCE BINDING RULE
+────────────────────────────────────────
+You MUST include the FULL raw transcript of the caller's
+latest speech in the 'last_utterance' parameter.
+
+It must match the transcript exactly.
+Do NOT modify or summarize it.
+
+This prevents stale slot reuse.
+
+────────────────────────────────────────
+PARTIAL DATA RULE
+────────────────────────────────────────
+If the caller provides only one field,
+include only that field.
+
+DO NOT fabricate missing values.
+
+────────────────────────────────────────
+TIME RULE
+────────────────────────────────────────
+pickup_time must be:
+- 'ASAP'
+OR
+- formatted YYYY-MM-DD HH:MM (24h clock)
+
+Use the REFERENCE_DATETIME provided in system instructions
+to resolve relative phrases like 'tomorrow at 6'.
+
+────────────────────────────────────────
+SAFETY RULE
+────────────────────────────────────────
+If uncertain whether a field changed,
+treat it as changed and overwrite it.
+
+Never assume previous values remain valid.
+",
                 parameters = new
                 {
                     type = "object",
                     properties = new Dictionary<string, object>
                     {
-                        ["caller_name"] = new { type = "string", description = "Caller's name" },
-                        ["caller_area"] = new { type = "string", description = "Caller's self-reported area/district (e.g. 'Earlsdon', 'Tile Hill'). Used as location bias for address resolution." },
-                        ["pickup"] = new { type = "string", description = "Pickup address — MUST be copied EXACTLY as heard in the transcript. Do NOT normalize. Do NOT substitute similar place names. Do NOT autocomplete. Do NOT reuse previous values. The value must match the transcript character-for-character, including unusual names or partial phrases. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
-                        ["destination"] = new { type = "string", description = "Destination address — MUST be copied EXACTLY as heard in the transcript. Do NOT normalize. Do NOT substitute similar place names. Do NOT autocomplete. Do NOT reuse previous values. The value must match the transcript character-for-character, including unusual names or partial phrases. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
-                        ["passengers"] = new { type = "integer", description = "Number of passengers" },
-                        ["pickup_time"] = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. Use REFERENCE_DATETIME to resolve relative times." },
-                        ["interpretation"] = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, prefix with [CORRECTION:fieldname] and explain what changed from what to what." },
-                        ["last_utterance"] = new { type = "string", description = "The FULL raw transcript of the caller's latest speech. MUST match the transcript exactly, word-for-word. This is mandatory for traceability." },
-                        ["special_instructions"] = new { type = "string", description = "Any special requests or notes the caller wants to add." }
-                    }
+                        ["caller_name"] = new { type = "string", description = "Caller's name if spoken." },
+                        ["caller_area"] = new { type = "string", description = "Caller's self-reported area/district (location bias only)." },
+                        ["pickup"] = new { type = "string", description = "Pickup address EXACTLY as spoken. VERBATIM." },
+                        ["destination"] = new { type = "string", description = "Destination address EXACTLY as spoken. VERBATIM." },
+                        ["passengers"] = new { type = "integer", description = "Number of passengers." },
+                        ["pickup_time"] = new { type = "string", description = "ASAP or YYYY-MM-DD HH:MM (24h)." },
+                        ["special_instructions"] = new { type = "string", description = "Any special request spoken by the caller." },
+                        ["interpretation"] = new { type = "string", description = "Explanation of understanding. Must include correction markers if applicable." },
+                        ["last_utterance"] = new { type = "string", description = "Full raw transcript of caller's latest speech. Must match transcript exactly." }
+                    },
+                    required = new[] { "interpretation", "last_utterance" }
                 }
             }
         };
