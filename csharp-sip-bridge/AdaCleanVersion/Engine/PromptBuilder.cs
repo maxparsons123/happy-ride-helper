@@ -121,10 +121,12 @@ public static class PromptBuilder
             House numbers are SACRED STRINGS — they are NOT mathematical expressions.
             Copy house numbers VERBATIM. NEVER drop, add, or rearrange digits/letters.
             You are PROHIBITED from guessing or expanding address ranges.
+            NEVER INSERT HYPHENS into house numbers. "1214A" is ONE house number, NOT "12-14A".
+            If the caller says "twelve fourteen A", the house number is "1214A" — do NOT split it.
             If the data says "52A", you MUST say "52A". NEVER invent address ranges
             (e.g., turning "52A" into "52-84" or "52-84A") even if you think it sounds
             more professional or complete. "52A" is a SINGLE house, not a range.
-            Forbidden transformations: 52A → 52-84, 52A → 3A, 1214A → 1214, 52A → 528.
+            Forbidden transformations: 52A → 52-84, 1214A → 12-14A, 52A → 528, 1214A → 1214.
             If the house number has 3+ characters (e.g. 1214A), read it DIGIT BY DIGIT:
             "one-two-one-four-A Warwick Road". NEVER shorten or truncate.
             If ANY part is uncertain, ASK the caller to spell or confirm it.
