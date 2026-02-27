@@ -186,6 +186,13 @@ public sealed class RealtimeAudioBridge : IDisposable
         if (dc == 1 || dc % 50 == 0)
             OnLog?.Invoke($"🔈 AudioDelta #{dc} ({b64.Length} b64 chars, jitter={_jitterBuffer.Count})");
 
+        // Arm mic gate on first delta if not already speaking
+        // (AudioStarted event is not sent by all model versions)
+        if (!_aiSpeaking)
+        {
+            _micGate.Arm();
+            OnLog?.Invoke("🔇 Mic gated (first audio delta)");
+        }
         _aiSpeaking = true;
 
         byte[] data;
