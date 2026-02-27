@@ -195,21 +195,21 @@ public class CallStateEngine
     }
 
     /// <summary>
-    /// Inline geocoding failed — skip verification, proceed to next slot.
-    /// The full geocoding pipeline will run later.
+    /// Inline geocoding failed — re-collect the failed slot instead of advancing.
+    /// Previously this would advance to ReadyForExtraction even with unverified addresses,
+    /// causing a geocoding→clarification→extraction loop.
     /// </summary>
     public void SkipVerification(string field, string reason)
     {
         Log($"Verification skipped for {field}: {reason}");
-        if (RawData.AllRequiredPresent)
-        {
-            TransitionTo(CollectionState.ReadyForExtraction);
-        }
-        else
-        {
-            var next = RawData.NextMissingSlot();
-            TransitionTo(next != null ? SlotToState(next) : CollectionState.ReadyForExtraction);
-        }
+
+        // Clear the raw slot value so AllRequiredPresent correctly reflects the gap.
+        // This prevents the "counter mismatch" where all slots have values but one is unverified.
+        RawData.SetSlot(field, "");
+        Log($"Cleared raw slot '{field}' — forcing re-collection");
+
+        // Go back to collecting the failed slot
+        TransitionTo(SlotToState(field));
     }
 
     /// <summary>
