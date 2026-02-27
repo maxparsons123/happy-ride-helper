@@ -433,21 +433,29 @@ namespace TaxiBot.Deterministic
 
             if (patch.PickupChanged && patch.PickupRaw is not null)
             {
-                slots = slots with
+                // Only reset verification if the raw address actually changed
+                bool isSamePickup = string.Equals(slots.Pickup.Raw, patch.PickupRaw, StringComparison.OrdinalIgnoreCase);
+                if (!isSamePickup)
                 {
-                    Pickup = new AddressSlot(patch.PickupRaw, Normalized: null, Verified: false)
-                };
-                // Any pickup change invalidates verification retry counters
-                s = s.ResetRetry(RetryKey.PickupVerify);
+                    slots = slots with
+                    {
+                        Pickup = new AddressSlot(patch.PickupRaw, Normalized: null, Verified: false)
+                    };
+                    s = s.ResetRetry(RetryKey.PickupVerify);
+                }
             }
 
             if (patch.DropoffChanged && patch.DropoffRaw is not null)
             {
-                slots = slots with
+                bool isSameDropoff = string.Equals(slots.Dropoff.Raw, patch.DropoffRaw, StringComparison.OrdinalIgnoreCase);
+                if (!isSameDropoff)
                 {
-                    Dropoff = new AddressSlot(patch.DropoffRaw, Normalized: null, Verified: false)
-                };
-                s = s.ResetRetry(RetryKey.DropoffVerify);
+                    slots = slots with
+                    {
+                        Dropoff = new AddressSlot(patch.DropoffRaw, Normalized: null, Verified: false)
+                    };
+                    s = s.ResetRetry(RetryKey.DropoffVerify);
+                }
             }
 
             if (patch.PassengersChanged)
