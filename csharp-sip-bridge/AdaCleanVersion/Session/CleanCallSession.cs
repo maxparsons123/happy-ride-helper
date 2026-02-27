@@ -1153,12 +1153,28 @@ public class CleanCallSession
             if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
             {
                 var interpLower = (interp ?? "").ToLowerInvariant();
-                if (interpLower.Contains("confirm") || interpLower.Contains("yes") || interpLower.Contains("go ahead") ||
-                    interpLower.Contains("book") || interpLower.Contains("agreed"))
+                var lastUtterance = (args.TryGetValue("last_utterance", out var lu) ? lu : "").ToLowerInvariant();
+
+                // Check for cancellation/rejection signals FIRST — these override confirmation keywords
+                bool hasCancelSignal = interpLower.Contains("cancel") || interpLower.Contains("reject") ||
+                    interpLower.Contains("never mind") || interpLower.Contains("no thank") ||
+                    lastUtterance.Contains("cancel") || lastUtterance.Contains("never mind") ||
+                    lastUtterance.Contains("no thank") || lastUtterance.Contains("don't want");
+
+                bool hasConfirmSignal = interpLower.Contains("confirm") || interpLower.Contains("yes") ||
+                    interpLower.Contains("go ahead") || interpLower.Contains("book") || interpLower.Contains("agreed");
+
+                if (hasConfirmSignal && !hasCancelSignal)
                 {
                     Log($"[SyncTool] Confirmation detected via interpretation in {_engine.State} — dispatching");
                     await ConfirmBookingAsync(ct);
                     return BuildSyncResponse("confirmed");
+                }
+
+                if (hasCancelSignal)
+                {
+                    Log($"[SyncTool] Cancellation detected via interpretation in {_engine.State} — NOT dispatching");
+                    // Let the normal cancellation flow handle this
                 }
             }
 
