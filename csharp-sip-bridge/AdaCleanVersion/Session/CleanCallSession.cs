@@ -1146,9 +1146,9 @@ public class CleanCallSession
         // and asks for the destination instead of performing the readback.
         var engineState = _engine.State;
         string nextRequired;
-        if (engineState == Engine.CollectionState.VerifyingPickup)
+        if (engineState == CollectionState.VerifyingPickup)
             nextRequired = "verifying_pickup";
-        else if (engineState == Engine.CollectionState.VerifyingDestination)
+        else if (engineState == CollectionState.VerifyingDestination)
             nextRequired = "verifying_destination";
         else
             nextRequired = next ?? "all_collected";
@@ -1160,9 +1160,9 @@ public class CleanCallSession
             booking_state = state,
             next_required = nextRequired,
             engine_state = engineState.ToString(),
-            action = engineState == Engine.CollectionState.VerifyingPickup
+            action = engineState == CollectionState.VerifyingPickup
                 ? "VERIFY pickup address by reading it back to caller"
-                : engineState == Engine.CollectionState.VerifyingDestination
+                : engineState == CollectionState.VerifyingDestination
                     ? "VERIFY destination address by reading it back to caller"
                     : (string?)null
         };
