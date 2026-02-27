@@ -20,7 +20,7 @@ public sealed class StructuredBooking
 /// <summary>
 /// Normalized address from AI extraction.
 /// </summary>
-public sealed class StructuredAddress
+public sealed record StructuredAddress
 {
     public string? HouseNumber { get; init; }
     public string? StreetName { get; init; }
