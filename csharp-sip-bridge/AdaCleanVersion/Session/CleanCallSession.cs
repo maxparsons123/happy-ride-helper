@@ -2842,7 +2842,9 @@ public class CleanCallSession
     {
         CollectionState.CollectingName => true,
         CollectionState.CollectingPickup => true,
+        CollectionState.VerifyingPickup => true,
         CollectionState.CollectingDestination => true,
+        CollectionState.VerifyingDestination => true,
         CollectionState.CollectingPassengers => true,
         CollectionState.CollectingPickupTime => true,
         CollectionState.AwaitingClarification => true,
