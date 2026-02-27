@@ -1533,7 +1533,7 @@ public class CleanCallSession
                 if (!ToolAddressMatchesTranscript(pickupVal, lastUtterance))
                 {
                     Log($"🚨 TOOL-TRANSCRIPT MISMATCH (pickup) — tool=\"{pickupVal}\" transcript=\"{lastUtterance}\"");
-                    _engine.ClearVerifiedAddress("pickup");
+                    _engine.HardClearVerifiedAddress("pickup");
                     _engine.ClearFareResult();
                     _engine.RawData.SetSlot("pickup", null!); // Clear stale value
                     slotsUpdated.Remove("pickup");
@@ -1548,7 +1548,7 @@ public class CleanCallSession
                 if (!ToolAddressMatchesTranscript(destVal, lastUtterance))
                 {
                     Log($"🚨 TOOL-TRANSCRIPT MISMATCH (destination) — tool=\"{destVal}\" transcript=\"{lastUtterance}\"");
-                    _engine.ClearVerifiedAddress("destination");
+                    _engine.HardClearVerifiedAddress("destination");
                     _engine.ClearFareResult();
                     _engine.RawData.SetSlot("destination", null!); // Clear stale value
                     slotsUpdated.Remove("destination");
@@ -1651,14 +1651,14 @@ public class CleanCallSession
                 if (contaminatedSlot == "destination")
                 {
                     _engine.RawData.DestinationRaw = null;
-                    _engine.ClearVerifiedAddress("destination");
+                    _engine.HardClearVerifiedAddress("destination");
                     _engine.ClearFareResult();
                     _engine.ForceState(CollectionState.CollectingDestination);
                 }
                 else
                 {
                     _engine.RawData.PickupRaw = null;
-                    _engine.ClearVerifiedAddress("pickup");
+                    _engine.HardClearVerifiedAddress("pickup");
                     _engine.ClearFareResult();
                     _engine.ForceState(CollectionState.CollectingPickup);
                 }
@@ -1846,12 +1846,15 @@ public class CleanCallSession
         
         // Use verified addresses in booking_state when available — this prevents the AI
         // from seeing the caller's raw misspelling in conversation history and repeating it.
-        var verifiedPickup = _engine.VerifiedPickup?.Address;
+        // REVERIFICATION GUARD: Don't use stale verified address if flagged for re-verify.
+        var verifiedPickup = (!_engine.PickupNeedsReverification && _engine.VerifiedPickup != null)
+            ? _engine.VerifiedPickup.Address : null;
         state["pickup"] = !string.IsNullOrEmpty(verifiedPickup) 
             ? verifiedPickup 
             : _engine.RawData.PickupRaw;
         
-        var verifiedDest = _engine.VerifiedDestination?.Address;
+        var verifiedDest = (!_engine.DestinationNeedsReverification && _engine.VerifiedDestination != null)
+            ? _engine.VerifiedDestination.Address : null;
         state["destination"] = !string.IsNullOrEmpty(verifiedDest)
             ? verifiedDest
             : _engine.RawData.DestinationRaw;
@@ -2428,24 +2431,16 @@ public class CleanCallSession
         var destination = booking.Destination;
         var overridden = false;
 
-        if (_engine.VerifiedPickup != null)
+        if (_engine.VerifiedPickup != null && !_engine.PickupNeedsReverification)
         {
             var v = _engine.VerifiedPickup;
-            pickup = new StructuredAddress
-            {
-                HouseNumber = booking.Pickup.HouseNumber,
-                StreetName = booking.Pickup.StreetName,
-                Area = booking.Pickup.Area,
-                City = booking.Pickup.City,
-                Postcode = booking.Pickup.Postcode
-            };
             // Use the full verified display name as the dispatch address
             pickup = ParseVerifiedAddress(v.Address) ?? pickup;
             overridden = true;
             Log($"Fare override: pickup → verified \"{v.Address}\"");
         }
 
-        if (_engine.VerifiedDestination != null)
+        if (_engine.VerifiedDestination != null && !_engine.DestinationNeedsReverification)
         {
             var v = _engine.VerifiedDestination;
             destination = ParseVerifiedAddress(v.Address) ?? destination;
@@ -2705,11 +2700,15 @@ public class CleanCallSession
         _repromptCount = 0;
         _lastRepromptSlot = null;
 
+        // REVERIFICATION GUARD: Don't pass stale verified addresses to PromptBuilder
+        var activePickup = _engine.PickupNeedsReverification ? null : _engine.VerifiedPickup;
+        var activeDest = _engine.DestinationNeedsReverification ? null : _engine.VerifiedDestination;
+
         var instruction = PromptBuilder.BuildInstruction(
             _engine.State, _engine.RawData, _callerContext,
             _engine.StructuredResult, _engine.FareResult,
             _engine.PendingClarification,
-            _engine.VerifiedPickup, _engine.VerifiedDestination,
+            activePickup, activeDest,
             isRecalculating: _engine.IsRecalculating);
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, false, silent);
@@ -2731,11 +2730,14 @@ public class CleanCallSession
 
         Log($"Re-prompt #{_repromptCount} for slot '{currentSlot}' (reason: {rejectedReason})");
 
+        var activePickup2 = _engine.PickupNeedsReverification ? null : _engine.VerifiedPickup;
+        var activeDest2 = _engine.DestinationNeedsReverification ? null : _engine.VerifiedDestination;
+
         var instruction = PromptBuilder.BuildInstruction(
             _engine.State, _engine.RawData, _callerContext,
             _engine.StructuredResult, _engine.FareResult,
             _engine.PendingClarification,
-            _engine.VerifiedPickup, _engine.VerifiedDestination,
+            activePickup2, activeDest2,
             rejectedReason: rejectedReason);
         _lastEmittedInstruction = instruction;
         OnAiInstruction?.Invoke(instruction, true, false); // isReprompt = true
