@@ -1103,19 +1103,44 @@ public class CleanCallSession
         // Mid-fare address correction: if we're past collection (e.g. PresentingFare)
         // and an address was updated, route through CorrectSlotAsync for proper
         // recalculation (clear fare, clear verified address, re-geocode).
+        // GUARD: Only trigger if the new value actually differs from the verified/existing address.
         if (currentState >= CollectionState.ReadyForExtraction)
         {
             if (slotsUpdated.Contains("pickup"))
             {
-                Log($"[SyncTool] Mid-fare pickup correction detected (state={currentState})");
-                await CorrectSlotAsync("pickup", _engine.RawData.PickupRaw!, ct);
-                return BuildSyncResponse("ok", slotsUpdated);
+                var newPickup = _engine.RawData.PickupRaw ?? "";
+                var existingPickup = _engine.VerifiedPickup?.Address ?? "";
+                // Compare: strip whitespace/case and check if the verified address starts with the new value
+                // (verified often has postcode appended, e.g. "52A David Road, Coventry CV1 2BW")
+                bool pickupActuallyChanged = !existingPickup.StartsWith(newPickup, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(newPickup.Trim(), existingPickup.Trim(), StringComparison.OrdinalIgnoreCase);
+                if (pickupActuallyChanged)
+                {
+                    Log($"[SyncTool] Mid-fare pickup correction detected (state={currentState}): \"{newPickup}\" differs from verified \"{existingPickup}\"");
+                    await CorrectSlotAsync("pickup", newPickup, ct);
+                    return BuildSyncResponse("ok", slotsUpdated);
+                }
+                else
+                {
+                    Log($"[SyncTool] Pickup re-sent but unchanged — ignoring mid-fare correction (new=\"{newPickup}\", verified=\"{existingPickup}\")");
+                }
             }
             if (slotsUpdated.Contains("destination"))
             {
-                Log($"[SyncTool] Mid-fare destination correction detected (state={currentState})");
-                await CorrectSlotAsync("destination", _engine.RawData.DestinationRaw!, ct);
-                return BuildSyncResponse("ok", slotsUpdated);
+                var newDest = _engine.RawData.DestinationRaw ?? "";
+                var existingDest = _engine.VerifiedDestination?.Address ?? "";
+                bool destActuallyChanged = !existingDest.StartsWith(newDest, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(newDest.Trim(), existingDest.Trim(), StringComparison.OrdinalIgnoreCase);
+                if (destActuallyChanged)
+                {
+                    Log($"[SyncTool] Mid-fare destination correction detected (state={currentState}): \"{newDest}\" differs from verified \"{existingDest}\"");
+                    await CorrectSlotAsync("destination", newDest, ct);
+                    return BuildSyncResponse("ok", slotsUpdated);
+                }
+                else
+                {
+                    Log($"[SyncTool] Destination re-sent but unchanged — ignoring mid-fare correction (new=\"{newDest}\", verified=\"{existingDest}\")");
+                }
             }
         }
 
