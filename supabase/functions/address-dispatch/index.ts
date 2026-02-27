@@ -609,6 +609,91 @@ serve(async (req) => {
             console.warn(`⚠️ Pre-flight bypass error (non-fatal), falling through to Gemini:`, pfErr);
           }
         }
+
+        // ── SINGLE-SIDE PRE-FLIGHT: inline geocoding with PLACEHOLDER_SKIP ──
+        const pickupIsPlaceholderPF = (pickup || "").trim() === "PLACEHOLDER_SKIP";
+        const destIsPlaceholderPF = (destination || "").trim() === "PLACEHOLDER_SKIP";
+        const singleMatch = (!pickupIsPlaceholderPF && pickupMatch && destIsPlaceholderPF)
+          ? { side: "pickup" as const, match: pickupMatch }
+          : (pickupIsPlaceholderPF && !destIsPlaceholderPF && destMatch)
+            ? { side: "dropoff" as const, match: destMatch }
+            : null;
+
+        if (singleMatch) {
+          console.log(`⚡ SINGLE-SIDE PRE-FLIGHT: ${singleMatch.side} matched caller history — skipping Gemini`);
+          console.log(`   ${singleMatch.side}: "${singleMatch.side === "pickup" ? pickup : destination}" → "${singleMatch.match}"`);
+
+          try {
+            const pfSupabaseUrl = Deno.env.get("SUPABASE_URL")!;
+            const pfSupabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+            const pfSupabase = createClient(pfSupabaseUrl, pfSupabaseKey);
+
+            const streetName = singleMatch.match.split(",")[0].replace(/^\d+[A-Za-z]?\s*/, "").trim();
+            const matchCity = singleMatch.match.split(",").slice(1).map(s => s.trim()).find(s => s.length > 2 && !/^[A-Z]{1,2}\d/.test(s)) || "";
+            const contextCity = matchCity.toLowerCase();
+
+            let contextZoneId: string | null = null;
+            if (contextCity) {
+              const { data: zones } = await pfSupabase.from("dispatch_zones").select("id, zone_name").ilike("zone_name", `%${contextCity}%`).limit(1);
+              if (zones?.[0]) contextZoneId = zones[0].id;
+            }
+
+            const { data: poiResults } = await pfSupabase.rpc("word_fuzzy_match_zone_poi", { p_address: streetName, p_min_similarity: 0.5, p_limit: 20 });
+
+            let poi: any = null;
+            if (poiResults && poiResults.length > 0) {
+              if (contextZoneId) {
+                poi = poiResults.find((r: any) => r.zone_id === contextZoneId) || poiResults[0];
+              } else {
+                poi = poiResults[0];
+              }
+            }
+
+            if (poi?.lat && poi?.lng) {
+              const parts = singleMatch.match.split(",").map((p: string) => p.trim());
+              const streetPart = parts[0] || "";
+              const numMatch = streetPart.match(/^(\d+[A-Za-z]?)\s+(.+)/);
+              let city = "", postal_code = "";
+              for (const p of parts.slice(1)) {
+                if (/^[A-Z]{1,2}\d{1,2}\s?\d?[A-Z]{0,2}$/i.test(p)) postal_code = p;
+                else if (p.length > 2) city = p;
+              }
+
+              let matchedZone = null;
+              try {
+                const { data: zoneHits } = await pfSupabase.rpc("find_zone_for_point", { p_lat: poi.lat, p_lng: poi.lng });
+                if (zoneHits?.[0]) {
+                  matchedZone = { zone_id: zoneHits[0].zone_id, zone_name: zoneHits[0].zone_name, company_id: zoneHits[0].company_id, priority: zoneHits[0].priority };
+                  console.log(`🗺️ Zone match: ${zoneHits[0].zone_name} → company ${zoneHits[0].company_id}`);
+                }
+              } catch (_) { /* non-fatal */ }
+
+              const placeholderSide = { address: "PLACEHOLDER_SKIP", lat: 0, lon: 0, street_name: "", street_number: "", postal_code: "", city: "UNKNOWN", is_ambiguous: false, alternatives: [], matched_from_history: false };
+              const resolvedSide = {
+                address: singleMatch.match, lat: poi.lat, lon: poi.lng,
+                street_name: numMatch ? numMatch[2] : streetPart, street_number: numMatch ? numMatch[1] : "",
+                postal_code, city, is_ambiguous: false, alternatives: [], matched_from_history: true, resolved_area: poi.area || "",
+              };
+
+              const result = {
+                detected_area: city || contextCity || "unknown",
+                region_source: "caller_history",
+                phone_analysis: { detected_country: "UK", is_mobile: true, landline_city: null },
+                pickup: singleMatch.side === "pickup" ? resolvedSide : placeholderSide,
+                dropoff: singleMatch.side === "dropoff" ? resolvedSide : placeholderSide,
+                scheduled_at: null, status: "ready", fare: null,
+                matched_zone: matchedZone, preflight_bypass: true,
+              };
+
+              console.log(`✅ Single-side pre-flight result: area=${result.detected_area}, zone=${matchedZone?.zone_name || 'none'}`);
+              return new Response(JSON.stringify(result), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+            } else {
+              console.log(`⚠️ Single-side pre-flight: zone_pois coords missing — falling through to Gemini`);
+            }
+          } catch (pfErr) {
+            console.warn(`⚠️ Single-side pre-flight error (non-fatal):`, pfErr);
+          }
+        }
       }
     }
 
