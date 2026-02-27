@@ -23,6 +23,7 @@ public sealed class RealtimeToolRouter
 
     private long _lastToolCallTick;
     private volatile bool _toolCalledInResponse;
+    private readonly HashSet<string> _processedCallIds = new();
 
     /// <summary>True if a tool call was processed for the current turn.</summary>
     public bool ToolCalledInResponse => _toolCalledInResponse;
@@ -86,14 +87,16 @@ public sealed class RealtimeToolRouter
     {
         _toolCalledInResponse = true;
 
-        // ── Debounce rapid-fire tool calls ──
-        var now = Environment.TickCount64;
-        if (now - Volatile.Read(ref _lastToolCallTick) < 200) return;
-        Volatile.Write(ref _lastToolCallTick, now);
-
         if (string.IsNullOrEmpty(evt.ToolCallId) || string.IsNullOrEmpty(evt.ToolName))
         {
             Log("⚠ Tool call missing call_id or name — ignoring");
+            return;
+        }
+
+        // 🔒 Deduplicate by call_id — prevents double-processing from multiple OpenAI events
+        if (!_processedCallIds.Add(evt.ToolCallId))
+        {
+            Log($"⚠ Duplicate tool call ignored: {evt.ToolCallId}");
             return;
         }
 
