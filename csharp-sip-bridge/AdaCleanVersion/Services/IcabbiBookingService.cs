@@ -544,6 +544,104 @@ public sealed class IcabbiBookingService : IDisposable
     }
 
     // ═══════════════════════════════════════════
+    //  CUSTOMER LOOKUP BY PHONE
+    // ═══════════════════════════════════════════
+
+    /// <summary>
+    /// Searches iCabbi for a customer by phone number.
+    /// Returns name, email, address, and iCabbi customer ID if found.
+    /// Uses GET /passengers/search?phone={phone} with Basic auth.
+    /// </summary>
+    public async Task<IcabbiCustomerResult?> GetCustomerByPhoneAsync(
+        string phoneNumber, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(phoneNumber))
+            return null;
+
+        var e164 = FormatE164(phoneNumber);
+        _logger.LogInformation("[iCabbi] 🔍 Looking up customer by phone: {Phone}", e164);
+
+        try
+        {
+            // iCabbi passenger search endpoint
+            var url = $"{BaseUrl}passengers/search?phone={Uri.EscapeDataString(e164)}";
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            AddAuthHeaders(req, e164);
+
+            var resp = await _client.SendAsync(req, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            _logger.LogInformation("[iCabbi] Customer lookup {Status}: {Body}", resp.StatusCode, Truncate(body));
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[iCabbi] Customer lookup failed: HTTP {Status}", resp.StatusCode);
+                return null;
+            }
+
+            var root = JsonNode.Parse(body);
+            if (root is null) return null;
+
+            // Response can be { body: { passengers: [...] } } or { passengers: [...] } or array directly
+            JsonArray? passengers = null;
+
+            if (root is JsonArray arr)
+                passengers = arr;
+            else if (root is JsonObject obj)
+            {
+                passengers = (obj["body"]?["passengers"] as JsonArray)
+                          ?? (obj["passengers"] as JsonArray)
+                          ?? (obj["body"]?["results"] as JsonArray)
+                          ?? (obj["results"] as JsonArray);
+            }
+
+            if (passengers is null || passengers.Count == 0)
+            {
+                _logger.LogInformation("[iCabbi] No customer found for {Phone}", e164);
+                return null;
+            }
+
+            // Take the first (best) match
+            var pax = passengers[0]!.AsObject();
+            var result = new IcabbiCustomerResult
+            {
+                CustomerId = pax["id"]?.ToString() ?? pax["customer_id"]?.ToString(),
+                Name = pax["name"]?.ToString() ?? pax["passenger_name"]?.ToString(),
+                Phone = pax["phone"]?.ToString() ?? e164,
+                Email = pax["email"]?.ToString(),
+                Address = pax["address"]?.ToString() ?? pax["default_address"]?.ToString(),
+                AddressLat = TryGetDouble(pax, "lat") ?? TryGetDouble(pax, "address_lat"),
+                AddressLon = TryGetDouble(pax, "lng") ?? TryGetDouble(pax, "address_lng"),
+                BookingCount = SafeGetInt(pax, "booking_count") ?? SafeGetInt(pax, "total_bookings") ?? 0,
+                Notes = pax["notes"]?.ToString()
+            };
+
+            _logger.LogInformation(
+                "[iCabbi] ✅ Found customer: {Name} (ID: {Id}, bookings: {Count})",
+                result.Name, result.CustomerId, result.BookingCount);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[iCabbi] Customer lookup error for {Phone}", e164);
+            return null;
+        }
+    }
+
+    private static double? TryGetDouble(JsonObject obj, string key)
+    {
+        try
+        {
+            if (!obj.TryGetPropertyValue(key, out var val) || val is null) return null;
+            if (double.TryParse(val.ToString(), System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var d))
+                return d;
+        }
+        catch { }
+        return null;
+    }
+
+    // ═══════════════════════════════════════════
     //  GET BOOKING STATUS
     // ═══════════════════════════════════════════
 
@@ -811,6 +909,22 @@ public class IcabbiPassenger
     public string Email { get; set; } = "";
     public int Count { get; set; } = 1;
     public string Notes { get; set; } = "";
+}
+
+/// <summary>
+/// Result from iCabbi customer/passenger lookup by phone.
+/// </summary>
+public class IcabbiCustomerResult
+{
+    public string? CustomerId { get; set; }
+    public string? Name { get; set; }
+    public string? Phone { get; set; }
+    public string? Email { get; set; }
+    public string? Address { get; set; }
+    public double? AddressLat { get; set; }
+    public double? AddressLon { get; set; }
+    public int BookingCount { get; set; }
+    public string? Notes { get; set; }
 }
 
 /// <summary>

@@ -267,13 +267,49 @@ public class CleanSipBridge : IDisposable
 
         Log("✅ Call answered and RTP started");
 
-        // Look up returning caller
+        // Look up returning caller (Supabase callers table)
         var context = await _callerLookup.LookupAsync(callerId);
+
+        // Enrich with iCabbi customer data if available
+        if (_icabbiService != null)
+        {
+            try
+            {
+                var icabbiCustomer = await _icabbiService.GetCustomerByPhoneAsync(callerId);
+                if (icabbiCustomer != null)
+                {
+                    Log($"🚕 iCabbi customer found: {icabbiCustomer.Name} (ID: {icabbiCustomer.CustomerId}, bookings: {icabbiCustomer.BookingCount})");
+
+                    // Merge iCabbi data into caller context — Supabase data takes priority for name/addresses
+                    context = new CallerContext
+                    {
+                        CallerPhone = context.CallerPhone,
+                        IsReturningCaller = context.IsReturningCaller || true,
+                        CallerName = context.CallerName ?? icabbiCustomer.Name,
+                        PreferredLanguage = context.PreferredLanguage,
+                        ServiceArea = context.ServiceArea,
+                        LastPickup = context.LastPickup,
+                        LastDestination = context.LastDestination,
+                        TotalBookings = Math.Max(context.TotalBookings, icabbiCustomer.BookingCount),
+                        LastBookingAt = context.LastBookingAt,
+                        AddressAliases = context.AddressAliases,
+                        IcabbiCustomerId = icabbiCustomer.CustomerId,
+                        IcabbiDefaultAddress = icabbiCustomer.Address
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ iCabbi customer lookup failed (non-fatal): {ex.Message}");
+            }
+        }
 
         if (context.IsReturningCaller)
         {
             Log($"👤 Returning caller: {context.CallerName} ({context.TotalBookings} bookings, " +
                 $"last pickup: {context.LastPickup ?? "none"})");
+            if (!string.IsNullOrEmpty(context.IcabbiCustomerId))
+                Log($"🚕 iCabbi customer ID: {context.IcabbiCustomerId}");
         }
         else
         {

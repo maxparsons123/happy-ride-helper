@@ -40,4 +40,9 @@ public sealed class CallerContext
     public int TotalBookings { get; init; }
     public DateTime? LastBookingAt { get; init; }
     public Dictionary<string, string>? AddressAliases { get; init; }
+
+    /// <summary>iCabbi customer ID if found via phone lookup — used for dispatch.</summary>
+    public string? IcabbiCustomerId { get; init; }
+    /// <summary>Default address from iCabbi customer record.</summary>
+    public string? IcabbiDefaultAddress { get; init; }
 }
