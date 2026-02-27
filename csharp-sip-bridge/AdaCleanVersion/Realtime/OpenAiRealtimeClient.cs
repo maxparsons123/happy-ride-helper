@@ -79,6 +79,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private volatile string? _lastWhisperTranscript;
 
+    /// <summary>
+    /// Last Ada (AI) transcript from response.audio_transcript.done.
+    /// This is what Ada actually said, captured separately from the caller's Whisper transcript.
+    /// Injected into tool call args as "ada_transcript" for session-layer context.
+    /// </summary>
+    private volatile string? _lastAdaTranscript;
+
     // Mic gate buffer: stores ALL gated audio; only trailing speech frames are flushed
     private readonly List<byte[]> _micGateBuffer = new();
     private readonly bool[] _micGateEnergy = new bool[0]; // resized dynamically
@@ -704,6 +711,8 @@ Never assume previous values remain valid.
                     ? System.Text.RegularExpressions.Regex.Replace(aiText, @"^\[CORRECTION:\w+\]\s*", "").Trim()
                     : aiText;
                 Log($"🤖 AI: {cleanAiText}");
+                // Store Ada's raw transcript for injection into subsequent tool calls
+                _lastAdaTranscript = cleanAiText;
                 // Feed Ada's transcript to session on background task — don't block receive loop
                 // NOTE: Pass ORIGINAL text (with tags) to session so it can detect corrections
                 if (!string.IsNullOrWhiteSpace(aiText))
@@ -717,6 +726,7 @@ Never assume previous values remain valid.
             case "input_audio_buffer.speech_started":
                 _toolCalledInResponse = false; // Reset for new turn
                 _lastWhisperTranscript = null; // Reset Whisper transcript for new turn
+                _lastAdaTranscript = null; // Reset Ada transcript for new turn
                 var now = Environment.TickCount64;
                 var elapsed = now - _lastBargeInTick;
                 if (elapsed < 250)
@@ -907,6 +917,13 @@ Never assume previous values remain valid.
         if (_lastWhisperTranscript != null)
         {
             args["whisper_transcript"] = _lastWhisperTranscript;
+        }
+
+        // Inject Ada's last spoken transcript for session-layer context
+        // (e.g., detecting what Ada read back vs. what the caller said)
+        if (_lastAdaTranscript != null)
+        {
+            args["ada_transcript"] = _lastAdaTranscript;
         }
 
         // Route to session for processing
