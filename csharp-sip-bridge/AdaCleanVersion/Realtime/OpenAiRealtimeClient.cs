@@ -509,7 +509,7 @@ Never assume previous values remain valid.
                 },
                 tools,
                 tool_choice = "auto",
-                temperature = 0.7
+                temperature = 0.8
             }
         };
 
