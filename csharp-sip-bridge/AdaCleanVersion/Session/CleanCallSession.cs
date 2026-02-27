@@ -1109,6 +1109,41 @@ public class CleanCallSession
             Log($"[SyncTool] Multi-slot burst: {string.Join(", ", slotsUpdated)}");
         }
 
+        // ── SAME-ADDRESS GUARD ──────────────────────────────────────
+        // If pickup and destination end up identical after this sync, the AI
+        // likely cross-contaminated the slots (e.g. put a pickup correction
+        // into the destination field). Detect and recover.
+        {
+            var currentPickup = (_engine.RawData.PickupRaw ?? "").Trim();
+            var currentDest = (_engine.RawData.DestinationRaw ?? "").Trim();
+            if (!string.IsNullOrEmpty(currentPickup) && !string.IsNullOrEmpty(currentDest) &&
+                string.Equals(currentPickup, currentDest, StringComparison.OrdinalIgnoreCase))
+            {
+                // Determine which slot was just updated — that's the one the AI wrote incorrectly
+                var contaminatedSlot = slotsUpdated.Contains("destination") ? "destination" : "pickup";
+                var keepSlot = contaminatedSlot == "destination" ? "pickup" : "destination";
+                Log($"⚠ [SyncTool] SAME-ADDRESS GUARD — pickup and destination are identical (\"{currentPickup}\"). " +
+                    $"Clearing {contaminatedSlot} (keeping {keepSlot}). Transcript: \"{lastUtterance}\"");
+
+                if (contaminatedSlot == "destination")
+                {
+                    _engine.RawData.DestinationRaw = null;
+                    _engine.ClearVerifiedAddress("destination");
+                    _engine.FareResult = null;
+                    _engine.ForceState(CollectionState.CollectingDestination);
+                }
+                else
+                {
+                    _engine.RawData.PickupRaw = null;
+                    _engine.ClearVerifiedAddress("pickup");
+                    _engine.FareResult = null;
+                    _engine.ForceState(CollectionState.CollectingPickup);
+                }
+                EmitCurrentInstruction();
+                return BuildSyncResponse("same_address_blocked", slotsUpdated);
+            }
+        }
+
         // ── State progression: advance engine based on what was filled ──
 
         // Mid-fare address correction: if we're past collection (e.g. PresentingFare)
