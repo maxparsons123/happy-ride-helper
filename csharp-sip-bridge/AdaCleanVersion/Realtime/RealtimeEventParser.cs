@@ -74,6 +74,16 @@ public static class RealtimeEventParser
                     Type = RealtimeEventType.ResponseCanceled
                 },
 
+                // ── Explicitly ignored events ──
+                // These contain tool-related data but must NOT trigger execution.
+                // Only response.function_call_arguments.done is the correct trigger.
+                "response.output_item.done" => new RealtimeEvent { Type = RealtimeEventType.Unknown },
+                "response.output_item.added" => new RealtimeEvent { Type = RealtimeEventType.Unknown },
+                "response.done" => new RealtimeEvent { Type = RealtimeEventType.Unknown },
+                "response.content_part.done" => new RealtimeEvent { Type = RealtimeEventType.Unknown },
+                "response.content_part.added" => new RealtimeEvent { Type = RealtimeEventType.Unknown },
+                "response.function_call_arguments.delta" => new RealtimeEvent { Type = RealtimeEventType.Unknown },
+
                 "session.created" => new RealtimeEvent
                 {
                     Type = RealtimeEventType.SessionCreated

@@ -24,6 +24,7 @@ public sealed class RealtimeToolRouter
     private long _lastToolCallTick;
     private volatile bool _toolCalledInResponse;
     private readonly HashSet<string> _processedCallIds = new();
+    private volatile bool _frozen; // post-transfer/hangup freeze
 
     /// <summary>True if a tool call was processed for the current turn.</summary>
     public bool ToolCalledInResponse => _toolCalledInResponse;
@@ -85,6 +86,13 @@ public sealed class RealtimeToolRouter
     /// </summary>
     public async Task HandleToolCallAsync(RealtimeEvent evt)
     {
+        // 🧊 Post-transfer/hangup freeze — ignore all tool calls
+        if (_frozen)
+        {
+            Log("🧊 Frozen — tool call ignored (post-transfer/hangup)");
+            return;
+        }
+
         _toolCalledInResponse = true;
 
         if (string.IsNullOrEmpty(evt.ToolCallId) || string.IsNullOrEmpty(evt.ToolName))
@@ -146,6 +154,7 @@ public sealed class RealtimeToolRouter
 
             case HangupAction hangup:
                 Log($"📴 Hangup: {hangup.Text}");
+                _frozen = true; // 🧊 Freeze — no more tool routing
                 OnInstruction?.Invoke(hangup.Text);
                 await SendToolResultAsync(toolCallId, new { status = "hangup", instruction = hangup.Text });
                 // Trigger model to speak the hangup message
@@ -155,6 +164,7 @@ public sealed class RealtimeToolRouter
 
             case TransferAction transfer:
                 Log($"🔀 Transfer: {transfer.Why}");
+                _frozen = true; // 🧊 Freeze — no more tool routing
                 await SendToolResultAsync(toolCallId, new { status = "transfer", reason = transfer.Why });
                 OnTransfer?.Invoke(transfer.Why);
                 break;
@@ -268,6 +278,7 @@ public sealed class RealtimeToolRouter
 
             case HangupAction hangup:
                 Log($"📴 Follow-up hangup: {hangup.Text}");
+                _frozen = true; // 🧊 Freeze
                 OnInstruction?.Invoke(hangup.Text);
                 await UpdateInstructionAndRespond(hangup.Text);
                 OnHangup?.Invoke(hangup.Text);
@@ -275,6 +286,7 @@ public sealed class RealtimeToolRouter
 
             case TransferAction transfer:
                 Log($"🔀 Follow-up transfer: {transfer.Why}");
+                _frozen = true; // 🧊 Freeze
                 OnTransfer?.Invoke(transfer.Why);
                 break;
 
