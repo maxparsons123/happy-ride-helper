@@ -1339,7 +1339,7 @@ public class CleanCallSession
             if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
             {
                 var interpLower = (interp ?? "").ToLowerInvariant();
-                var lastUtterance = (args.TryGetValue("last_utterance", out var lu) ? lu : "").ToLowerInvariant();
+                var lastUtterance = (args.TryGetValue("last_utterance", out var lu) ? lu?.ToString() ?? "" : "").ToLowerInvariant();
 
                 // Check for cancellation/rejection signals FIRST — these override confirmation keywords
                 bool hasCancelSignal = interpLower.Contains("cancel") || interpLower.Contains("reject") ||
