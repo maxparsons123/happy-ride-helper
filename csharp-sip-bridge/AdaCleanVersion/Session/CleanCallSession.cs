@@ -793,9 +793,10 @@ public class CleanCallSession
         {
             Log($"Address correction for {slotName}: \"{oldValue}\" → \"{newValue}\" — routing through verification");
 
-            // Clear stale fare and verified address for this slot
+            // Clear stale fare, verified address, and Gemini slot for this slot
             _engine.ClearFareResult();
             _engine.ClearVerifiedAddress(slotName);
+            _engine.RawData.SetGeminiSlot(slotName, null);
             _engine.IsRecalculating = true;
 
             // Enable typing sounds to keep the line alive during recalculation
@@ -1218,10 +1219,14 @@ public class CleanCallSession
 
         try
         {
-            Log($"Geocoding: pickup=\"{booking.Pickup.DisplayName}\", dest=\"{booking.Destination.DisplayName}\"");
+            // Override extraction output with verified addresses when available.
+            // The extraction AI can hallucinate old addresses — verified ones are ground truth.
+            var effectiveBooking = OverrideWithVerifiedAddresses(booking);
+
+            Log($"Geocoding: pickup=\"{effectiveBooking.Pickup.DisplayName}\", dest=\"{effectiveBooking.Destination.DisplayName}\"");
 
             var fareResult = await _fareService.CalculateAsync(
-                booking, CallerId, ct);
+                effectiveBooking, CallerId, ct);
 
             if (fareResult == null)
             {
@@ -1318,6 +1323,69 @@ public class CleanCallSession
             _engine.GeocodingFailed(ex.Message);
             EmitCurrentInstruction();
         }
+    }
+
+    /// <summary>
+    /// Replace extraction-output addresses with verified (geocoded) addresses when available.
+    /// The extraction AI can hallucinate old addresses after mid-fare corrections;
+    /// verified addresses are ground truth from the geocoding pipeline.
+    /// </summary>
+    private StructuredBooking OverrideWithVerifiedAddresses(StructuredBooking booking)
+    {
+        var pickup = booking.Pickup;
+        var destination = booking.Destination;
+        var overridden = false;
+
+        if (_engine.VerifiedPickup != null)
+        {
+            var v = _engine.VerifiedPickup;
+            pickup = new StructuredAddress
+            {
+                HouseNumber = booking.Pickup.HouseNumber,
+                StreetName = booking.Pickup.StreetName,
+                Area = booking.Pickup.Area,
+                City = booking.Pickup.City,
+                Postcode = booking.Pickup.Postcode
+            };
+            // Use the full verified display name as the dispatch address
+            pickup = ParseVerifiedAddress(v.Address) ?? pickup;
+            overridden = true;
+            Log($"Fare override: pickup → verified \"{v.Address}\"");
+        }
+
+        if (_engine.VerifiedDestination != null)
+        {
+            var v = _engine.VerifiedDestination;
+            destination = ParseVerifiedAddress(v.Address) ?? destination;
+            overridden = true;
+            Log($"Fare override: destination → verified \"{v.Address}\"");
+        }
+
+        if (!overridden) return booking;
+
+        return new StructuredBooking
+        {
+            CallerName = booking.CallerName,
+            Pickup = pickup,
+            Destination = destination,
+            Passengers = booking.Passengers,
+            PickupTime = booking.PickupTime,
+            PickupDateTime = booking.PickupDateTime
+        };
+    }
+
+    /// <summary>
+    /// Parse a verified address string like "52A David Road, Coventry CV1 2BW" into a StructuredAddress.
+    /// Simple heuristic: use the full string as DisplayName by putting it all in StreetName.
+    /// </summary>
+    private static StructuredAddress? ParseVerifiedAddress(string? address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return null;
+        // Put the entire verified address as the display — the fare service sends DisplayName to the edge function
+        return new StructuredAddress
+        {
+            StreetName = address
+        };
     }
 
     private async Task HandlePostCollectionInput(string transcript, CancellationToken ct)
