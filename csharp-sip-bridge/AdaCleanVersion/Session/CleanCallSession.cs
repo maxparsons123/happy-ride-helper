@@ -355,7 +355,7 @@ public class CleanCallSession
             Log($"Name cleaned: \"{transcript}\" → \"{valueToStore}\"");
         }
 
-        // Quick ASAP detection for pickup_time — full normalization happens in StructureOnlyEngine
+        // Quick ASAP detection for pickup_time — full normalization happens in DirectBookingBuilder
         if (currentSlot == "pickup_time")
         {
             var lower = valueToStore.ToLowerInvariant();
@@ -472,9 +472,8 @@ public class CleanCallSession
     /// Ada's interpretation is stored for extraction context only.
     /// Called from OpenAiRealtimeClient on response.audio_transcript.done.
     /// 
-    /// NOTE: We no longer use AdaSlotRefiner to overwrite raw slot values.
-    /// Instead, Ada's transcripts are accumulated and fed to StructureOnlyEngine
-    /// as extraction context, which does the proper semantic parsing.
+    /// NOTE: Ada's transcripts are accumulated and fed to DirectBookingBuilder
+    /// as extraction context for time normalization reference.
     /// 
     /// ADDITIONALLY: When we're in VerifyingPickup/VerifyingDestination, Ada's readback
     /// triggers inline geocoding with BOTH the raw caller STT and Ada's interpretation.
