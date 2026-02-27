@@ -26,9 +26,9 @@ public static class SlotValidator
         "well", "so", "like", "right", "okay", "ok"
     };
 
-    // Patterns that are clearly not addresses
+    // Patterns that are clearly not addresses (supports multi-word combos like "correct, yeah")
     private static readonly Regex NonAddressPattern = new(
-        @"^(yes|no|yeah|nah|sure|please|thanks|thank you|cheers|ta|bye|goodbye)$",
+        @"^(yes|no|yeah|yep|nah|sure|please|thanks|thank you|cheers|ta|bye|goodbye|correct|right|that'?s right|that'?s correct|correct\s*,?\s*yeah|yeah\s*,?\s*correct|yes\s*,?\s*correct|correct\s*,?\s*yes|yeah\s*,?\s*that'?s\s*(right|correct|it)|yep\s*,?\s*that'?s\s*(right|it))$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
