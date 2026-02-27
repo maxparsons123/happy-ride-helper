@@ -44,6 +44,9 @@ public sealed class RealtimeToolRouter
     /// <summary>Raised when the engine says to hang up.</summary>
     public event Action<string>? OnHangup;
 
+    /// <summary>Raised after each engine.Step() with the new stage.</summary>
+    public event Action<Stage>? OnStageChanged;
+
     public RealtimeToolRouter(
         DeterministicBookingEngine engine,
         IRealtimeTransport transport,
