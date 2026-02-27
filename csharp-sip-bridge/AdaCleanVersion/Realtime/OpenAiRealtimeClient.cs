@@ -85,8 +85,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _audio.OnBargeIn += () => { try { OnBargeIn?.Invoke(); } catch { } };
         _audio.OnMicUngated += () => { try { OnMicUngated?.Invoke(); } catch { } };
 
-        // ── Deterministic engine ──
-        var engine = new DeterministicBookingEngine();
+        // ── Deterministic engine (shared or new) ──
+        var eng = engine ?? new DeterministicBookingEngine();
 
         // Geocode lambda
         Func<string, Task<GeocodeResult>> geocodeFn = async rawAddress =>
