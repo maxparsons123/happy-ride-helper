@@ -17,6 +17,7 @@ namespace TaxiBot.Deterministic
     public sealed class DeterministicBookingEngine
     {
         public BookingState State { get; private set; } = BookingState.New();
+        private int _noOpCount = 0;
 
         public DeterministicBookingEngine(EngineConfig? config = null)
         {
@@ -65,7 +66,25 @@ namespace TaxiBot.Deterministic
             if (State.Stage is Stage.End or Stage.Escalate)
                 return NextAction.Hangup("This call is already complete.");
 
-            var patch = BookingPatch.FromToolSync(ev, _cfg);
+            var patch = BookingPatch.FromToolSync(ev, _cfg, State.Slots);
+
+            // ── Fix #1: No-op tool calls must not trigger actions ──
+            // If the model called the tool but provided no real slot changes and no actionable intent,
+            // just reprompt the current question (bounded).
+            if (!patch.HasAnySlotChanges && patch.Intent == ToolIntent.Unknown)
+            {
+                _noOpCount++;
+                if (_noOpCount >= 3)
+                {
+                    State = State with { Stage = Stage.Escalate };
+                    return NextAction.TransferToHuman("I'm not getting the details clearly.");
+                }
+
+                // Reprompt whatever the current stage needs
+                return RepromptCurrentStage();
+            }
+
+            _noOpCount = 0; // Reset on real data
 
             // If we are booked and user provided any booking field, treat as amendment.
             if (State.Stage == Stage.Booked || State.Stage == Stage.AmendMenu || State.Stage == Stage.AmendConfirm ||
@@ -75,7 +94,7 @@ namespace TaxiBot.Deterministic
                 return OnAmendToolSync(ev, patch);
             }
 
-            // Handle "confirm" intent when we are confirming.
+            // ── Fix #3: ConfirmDetails must require explicit YES to dispatch ──
             if (State.Stage == Stage.ConfirmDetails)
             {
                 if (patch.Intent == ToolIntent.Confirm)
@@ -84,12 +103,17 @@ namespace TaxiBot.Deterministic
                     return NextAction.CallDispatch(State.Slots);
                 }
 
+                if (patch.Intent == ToolIntent.Decline || patch.Intent == ToolIntent.Cancel)
+                {
+                    State = State with { Stage = Stage.End };
+                    return NextAction.Hangup("No problem. Goodbye.");
+                }
+
                 // If they changed anything while confirming, apply patch, then go to verification/next missing.
                 if (patch.HasAnySlotChanges)
                 {
                     State = ApplyPatch(State, patch);
 
-                    // If pickup/dropoff changed, geocode immediately (one-shot action).
                     if (patch.PickupChanged)
                         return StartGeocodePickup();
 
@@ -107,7 +131,7 @@ namespace TaxiBot.Deterministic
                     return NextAction.TransferToHuman("Confirmation unclear too many times.");
                 }
 
-                return NextAction.Ask("Please say 'yes' to confirm, or tell me what you'd like to change.");
+                return NextAction.Ask("Just to confirm, is that correct? Please say yes or no.");
             }
 
             // Normal collection flow:
@@ -120,8 +144,28 @@ namespace TaxiBot.Deterministic
                 Stage.CollectDropoff => HandleCollectDropoff(),
                 Stage.CollectPassengers => HandleCollectPassengers(),
                 Stage.CollectTime => HandleCollectTime(),
-                Stage.Start => Start(), // if someone forgot to call Start()
+                Stage.Start => Start(),
                 _ => GoToNextMissingOrConfirm()
+            };
+        }
+
+        /// <summary>
+        /// Reprompt the current stage's question without advancing or geocoding.
+        /// </summary>
+        private NextAction RepromptCurrentStage()
+        {
+            // If we have a last prompt, reuse it
+            if (!string.IsNullOrWhiteSpace(State.LastPrompt))
+                return NextAction.Ask(State.LastPrompt);
+
+            return State.Stage switch
+            {
+                Stage.CollectPickup => NextAction.Ask("What is your pickup address?"),
+                Stage.CollectDropoff => NextAction.Ask("What is your dropoff address?"),
+                Stage.CollectPassengers => NextAction.Ask("How many passengers will be travelling?"),
+                Stage.CollectTime => NextAction.Ask("What time would you like the pickup?"),
+                Stage.ConfirmDetails => NextAction.Ask("Is that correct? Please say yes or no."),
+                _ => NextAction.Ask("Could you repeat that please?")
             };
         }
 
@@ -726,20 +770,27 @@ namespace TaxiBot.Deterministic
             PickupChanged || DropoffChanged || PassengersChanged || PickupTimeChanged ||
             !string.IsNullOrWhiteSpace(SpecialInstructions);
 
-        public static BookingPatch FromToolSync(ToolSyncEvent ev, EngineConfig cfg)
+        /// <summary>
+        /// Build a patch from tool args. Uses current slots to detect actual changes
+        /// vs the model re-sending the same data (dirty-flag logic).
+        /// </summary>
+        public static BookingPatch FromToolSync(ToolSyncEvent ev, EngineConfig cfg, BookingSlots currentSlots)
         {
             var intent = ParseIntent(ev.Intent);
 
-            // treat presence as "changed" (server overwrites)
-            var pickupChanged = !string.IsNullOrWhiteSpace(ev.Pickup);
-            var dropoffChanged = !string.IsNullOrWhiteSpace(ev.Destination);
-            var paxChanged = ev.Passengers.HasValue;
-            var timeChanged = !string.IsNullOrWhiteSpace(ev.PickupTime);
+            // ── Fix #2: Only flag as "changed" if the value is actually different ──
+            var pickupChanged = !string.IsNullOrWhiteSpace(ev.Pickup)
+                && !string.Equals(ev.Pickup, currentSlots.Pickup.Raw, StringComparison.OrdinalIgnoreCase);
+            var dropoffChanged = !string.IsNullOrWhiteSpace(ev.Destination)
+                && !string.Equals(ev.Destination, currentSlots.Dropoff.Raw, StringComparison.OrdinalIgnoreCase);
+            var paxChanged = ev.Passengers.HasValue
+                && ev.Passengers != currentSlots.Passengers;
+            var timeChanged = !string.IsNullOrWhiteSpace(ev.PickupTime)
+                && (currentSlots.PickupTime is null || !string.Equals(ev.PickupTime, currentSlots.PickupTime.Raw, StringComparison.OrdinalIgnoreCase));
 
             var pax = ev.Passengers;
             if (paxChanged && (pax is < 1 or > 8))
             {
-                // invalid; let state machine reprompt; keep null so it remains missing
                 paxChanged = false;
                 pax = null;
             }
@@ -749,9 +800,9 @@ namespace TaxiBot.Deterministic
             return new BookingPatch(
                 Intent: intent,
                 PickupChanged: pickupChanged,
-                PickupRaw: ev.Pickup,
+                PickupRaw: pickupChanged ? ev.Pickup : null,
                 DropoffChanged: dropoffChanged,
-                DropoffRaw: ev.Destination,
+                DropoffRaw: dropoffChanged ? ev.Destination : null,
                 PassengersChanged: paxChanged,
                 Passengers: pax,
                 PickupTimeChanged: timeChanged && time is not null,
