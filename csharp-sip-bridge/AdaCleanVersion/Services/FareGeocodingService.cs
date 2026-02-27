@@ -128,7 +128,9 @@ public class FareGeocodingService
     public async Task<FareResult?> CalculateAsync(
         StructuredBooking booking,
         string? callerPhone = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? rawPickupTranscript = null,
+        string? rawDestinationTranscript = null)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeoutMs);
@@ -147,7 +149,9 @@ public class FareGeocodingService
                 phone = callerPhone,
                 pickup_time = booking.IsAsap ? null : booking.PickupTime,
                 pickup_house_number = booking.Pickup.HouseNumber,
-                destination_house_number = booking.Destination.HouseNumber
+                destination_house_number = booking.Destination.HouseNumber,
+                raw_transcript = rawPickupTranscript,
+                raw_destination_transcript = rawDestinationTranscript
             };
 
             var url = $"{_supabaseUrl}/functions/v1/address-dispatch";
