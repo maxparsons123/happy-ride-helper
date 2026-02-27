@@ -237,6 +237,7 @@ public sealed class RealtimeToolRouter
                 BookingId: result.BookingId,
                 Error: result.Error);
 
+            Log($"📦 Dispatch result: ok={result.Ok}, bookingId={result.BookingId ?? "null"}, error={result.Error ?? "none"}");
             var nextAction = _engine.Step(backendEvent);
             Log($"⚙️ Post-dispatch: {_engine.State.Stage} → {nextAction.Kind}");
             await ExecuteFollowUpAsync(nextAction);
