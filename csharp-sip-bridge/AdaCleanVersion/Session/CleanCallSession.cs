@@ -1836,12 +1836,17 @@ public class CleanCallSession
             }
         }
 
-        if (slotsUpdated.Contains("destination") && !slotsUpdated.Contains("pickup") &&
-            currentState <= CollectionState.CollectingDestination)
+        // Destination needs verification — whether it came alone or in a multi-slot burst.
+        // In a burst (pickup+destination), pickup was already verified above; now verify destination.
+        if (slotsUpdated.Contains("destination") && currentState <= CollectionState.CollectingPassengers)
         {
-            _engine.ForceState(CollectionState.VerifyingDestination);
-            EmitCurrentInstruction();
-            return BuildSyncResponse("ok", slotsUpdated);
+            // Only force verification if destination isn't already verified
+            if (_engine.VerifiedDestination == null)
+            {
+                _engine.ForceState(CollectionState.VerifyingDestination);
+                EmitCurrentInstruction();
+                return BuildSyncResponse("ok", slotsUpdated);
+            }
         }
 
         // For non-address fields, let the engine figure out the next state.
@@ -2562,7 +2567,10 @@ public class CleanCallSession
         }
 
         // Check for correction intent first — even post-collection (AI then regex fallback)
-        if (HasCorrectionSignal(transcript))
+        // BUT: Skip correction detection during AwaitingClarification — "No, that's incorrect"
+        // means the caller is rejecting the disambiguation options, NOT providing a new address.
+        // Let the clarification handler (below) process it instead.
+        if (_engine.State != CollectionState.AwaitingClarification && HasCorrectionSignal(transcript))
         {
             if (_burstDispatcher != null)
             {
@@ -2604,9 +2612,33 @@ public class CleanCallSession
         switch (_engine.State)
         {
             case CollectionState.AwaitingClarification:
-                // Caller responded to "which area?" — accept and re-geocode inline
+                // Caller responded to "which area?" — check if it's a rejection or actual area info
                 Log($"Clarification response: \"{transcript}\"");
                 var clarifiedField = _engine.PendingClarification?.AmbiguousField ?? "pickup";
+                
+                // Detect REJECTION of disambiguation options (e.g., "No, that's incorrect", "No, that's wrong", "Neither")
+                var clarLower = transcript.ToLowerInvariant().Trim();
+                var isRejection = (clarLower.StartsWith("no") && 
+                    (clarLower.Contains("incorrect") || clarLower.Contains("wrong") || clarLower.Contains("not") || 
+                     clarLower.Contains("neither") || clarLower.Contains("none"))) ||
+                    clarLower == "no" || clarLower == "neither" || clarLower == "none of those";
+                
+                if (isRejection)
+                {
+                    // Caller rejected the options — clear the slot and re-collect from scratch
+                    Log($"⛔ Clarification REJECTED for {clarifiedField} — re-collecting address");
+                    _engine.PendingClarification = null;
+                    _engine.RawData.SetSlot(clarifiedField, null!);
+                    _engine.HardClearVerifiedAddress(clarifiedField);
+                    _engine.ClearFareResult();
+                    var reCollectState = clarifiedField == "pickup" 
+                        ? CollectionState.CollectingPickup 
+                        : CollectionState.CollectingDestination;
+                    _engine.ForceState(reCollectState);
+                    EmitCurrentInstruction();
+                    break;
+                }
+                
                 _engine.AcceptClarification(transcript);
 
                 // Re-run inline geocoding for the clarified field (NOT full extraction)
