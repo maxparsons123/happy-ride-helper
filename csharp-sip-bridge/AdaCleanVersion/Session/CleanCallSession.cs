@@ -1099,7 +1099,27 @@ public class CleanCallSession
         }
 
         // ── State progression: advance engine based on what was filled ──
-        // If addresses were provided, route to verification
+
+        // Mid-fare address correction: if we're past collection (e.g. PresentingFare)
+        // and an address was updated, route through CorrectSlotAsync for proper
+        // recalculation (clear fare, clear verified address, re-geocode).
+        if (currentState >= CollectionState.ReadyForExtraction)
+        {
+            if (slotsUpdated.Contains("pickup"))
+            {
+                Log($"[SyncTool] Mid-fare pickup correction detected (state={currentState})");
+                await CorrectSlotAsync("pickup", _engine.RawData.PickupRaw!, ct);
+                return BuildSyncResponse("ok", slotsUpdated);
+            }
+            if (slotsUpdated.Contains("destination"))
+            {
+                Log($"[SyncTool] Mid-fare destination correction detected (state={currentState})");
+                await CorrectSlotAsync("destination", _engine.RawData.DestinationRaw!, ct);
+                return BuildSyncResponse("ok", slotsUpdated);
+            }
+        }
+
+        // If addresses were provided during collection, route to verification
         if (slotsUpdated.Contains("pickup") && currentState <= CollectionState.CollectingPickup)
         {
             // Advance engine past any earlier collection states
