@@ -1522,6 +1522,43 @@ public class CleanCallSession
                 _engine.RawData.SetLastUtterance("destination", rawTranscriptForPoi);
         }
 
+        // ── PROACTIVE TOOL-TRANSCRIPT COHERENCE CHECK ──────────────────
+        // Verify that tool argument values actually match the transcript that triggered them.
+        // Catches the case where AI reuses a stale slot value despite the caller saying something new.
+        if (!string.IsNullOrWhiteSpace(lastUtterance))
+        {
+            if (slotsUpdated.Contains("pickup"))
+            {
+                var pickupVal = _engine.RawData.PickupRaw ?? "";
+                if (!ToolAddressMatchesTranscript(pickupVal, lastUtterance))
+                {
+                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (pickup) — tool=\"{pickupVal}\" transcript=\"{lastUtterance}\"");
+                    _engine.ClearVerifiedAddress("pickup");
+                    _engine.ClearFareResult();
+                    _engine.RawData.SetSlot("pickup", null!); // Clear stale value
+                    slotsUpdated.Remove("pickup");
+                    _engine.ForceState(CollectionState.CollectingPickup);
+                    EmitCurrentInstruction();
+                    return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
+                }
+            }
+            if (slotsUpdated.Contains("destination"))
+            {
+                var destVal = _engine.RawData.DestinationRaw ?? "";
+                if (!ToolAddressMatchesTranscript(destVal, lastUtterance))
+                {
+                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (destination) — tool=\"{destVal}\" transcript=\"{lastUtterance}\"");
+                    _engine.ClearVerifiedAddress("destination");
+                    _engine.ClearFareResult();
+                    _engine.RawData.SetSlot("destination", null!); // Clear stale value
+                    slotsUpdated.Remove("destination");
+                    _engine.ForceState(CollectionState.CollectingDestination);
+                    EmitCurrentInstruction();
+                    return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
+                }
+            }
+        }
+
         if (slotsUpdated.Count == 0)
         {
             // ── CONFIRMATION VIA TOOL CALL ──────────────────────────────
@@ -2817,6 +2854,35 @@ public class CleanCallSession
     }
 
     /// <summary>
+    /// Proactive tool-transcript coherence check.
+    /// Verifies that the address the AI put in the tool call actually matches the transcript.
+    /// Returns false if token overlap is below 30%, indicating stale slot reuse.
+    /// </summary>
+    private static bool ToolAddressMatchesTranscript(string toolValue, string transcript)
+    {
+        if (string.IsNullOrWhiteSpace(toolValue) || string.IsNullOrWhiteSpace(transcript))
+            return true; // Can't check — allow
+
+        var toolLower = toolValue.ToLowerInvariant();
+        var transcriptLower = transcript.ToLowerInvariant();
+
+        // Extract meaningful tokens from transcript (4+ chars, starts with letter)
+        var transcriptTokens = transcriptLower
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => t.Length > 3 && char.IsLetter(t[0]))
+            .Where(t => !IsCommonWord(t)) // Exclude filler words
+            .Distinct()
+            .ToList();
+
+        if (transcriptTokens.Count == 0) return true; // No meaningful tokens to compare
+
+        int overlap = transcriptTokens.Count(t => toolLower.Contains(t));
+
+        // If less than 30% token overlap → likely stale reuse
+        return (double)overlap / transcriptTokens.Count >= 0.3;
+    }
+
+
     /// FIX 4: Detects if a caller transcript contains signals that they're providing a NEW address,
     /// even though the tool reused the old value (stale slot carryover).
     /// Checks for correction keywords + presence of proper nouns / place-like tokens.
