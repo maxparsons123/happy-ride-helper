@@ -365,9 +365,9 @@ serve(async (req) => {
     
     const { pickup, destination, phone, pickup_time, pickup_house_number, destination_house_number, pickup_postcode, destination_postcode, caller_area, ada_readback, ada_question, raw_transcript, raw_destination_transcript } = body;
     
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
-      throw new Error("LOVABLE_API_KEY is not configured");
+    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    if (!GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY is not configured");
     }
 
     console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", adaReadback="${ada_readback || ''}", adaQuestion="${ada_question ? 'yes' : 'no'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}", callerArea="${caller_area || ''}", rawTranscript="${raw_transcript || ''}", rawDestTranscript="${raw_destination_transcript || ''}"`);
@@ -718,94 +718,97 @@ serve(async (req) => {
     const userMessage = `User Message: Pickup from "${pickup || 'not provided'}" going to "${destination || 'not provided'}"
 User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHints}${callerAreaHint}${adaQuestionHint}${adaReadbackHint}${rawTranscriptPoiHint}${callerHistory}`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    // ── Direct Gemini API with Google Maps Grounding for better POI accuracy ──
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+    const functionDeclaration = {
+      name: "resolve_addresses",
+      description: "Return the resolved pickup and dropoff addresses with coordinates and disambiguation info",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          detected_area: { type: "STRING" },
+          region_source: { type: "STRING", enum: ["caller_history", "landline_area_code", "text_mention", "landmark", "nearest_poi", "unknown"] },
+          phone_analysis: {
+            type: "OBJECT",
+            properties: {
+              detected_country: { type: "STRING" },
+              is_mobile: { type: "BOOLEAN" },
+              landline_city: { type: "STRING" }
+            },
+            required: ["detected_country", "is_mobile"]
+          },
+          pickup: {
+            type: "OBJECT",
+            properties: {
+              address: { type: "STRING" },
+              lat: { type: "NUMBER" },
+              lon: { type: "NUMBER" },
+              street_name: { type: "STRING" },
+              street_number: { type: "STRING" },
+              postal_code: { type: "STRING" },
+              city: { type: "STRING" },
+              is_ambiguous: { type: "BOOLEAN" },
+              alternatives: { type: "ARRAY", items: { type: "STRING" } },
+              districts_found: { type: "ARRAY", items: { type: "STRING" } },
+              matched_from_history: { type: "BOOLEAN" },
+              address_modified: { type: "BOOLEAN" },
+              original_input: { type: "STRING" },
+              modification_reason: { type: "STRING" }
+            },
+            required: ["address", "lat", "lon", "city", "is_ambiguous"]
+          },
+          dropoff: {
+            type: "OBJECT",
+            properties: {
+              address: { type: "STRING" },
+              lat: { type: "NUMBER" },
+              lon: { type: "NUMBER" },
+              street_name: { type: "STRING" },
+              street_number: { type: "STRING" },
+              postal_code: { type: "STRING" },
+              city: { type: "STRING" },
+              is_ambiguous: { type: "BOOLEAN" },
+              alternatives: { type: "ARRAY", items: { type: "STRING" } },
+              districts_found: { type: "ARRAY", items: { type: "STRING" } },
+              matched_from_history: { type: "BOOLEAN" },
+              address_modified: { type: "BOOLEAN" },
+              original_input: { type: "STRING" },
+              modification_reason: { type: "STRING" }
+            },
+            required: ["address", "lat", "lon", "city", "is_ambiguous"]
+          },
+          scheduled_at: { type: "STRING" },
+          status: { type: "STRING", enum: ["ready", "clarification_needed"] },
+          clarification_message: { type: "STRING" }
+        },
+        required: ["detected_area", "region_source", "phone_analysis", "pickup", "dropoff", "status"]
+      }
+    };
+
+    const response = await fetch(geminiUrl, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage },
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts: [{ text: userMessage }] }],
+        tools: [
+          { googleSearch: {} },
+          { functionDeclarations: [functionDeclaration] }
         ],
-        temperature: 0.1,
-        tools: [{
-          type: "function",
-          function: {
-            name: "resolve_addresses",
-            description: "Return the resolved pickup and dropoff addresses with coordinates and disambiguation info",
-            parameters: {
-              type: "object",
-              properties: {
-                detected_area: { type: "string" },
-                region_source: { type: "string", enum: ["caller_history", "landline_area_code", "text_mention", "landmark", "nearest_poi", "unknown"] },
-                phone_analysis: {
-                  type: "object",
-                  properties: {
-                    detected_country: { type: "string" },
-                    is_mobile: { type: "boolean" },
-                    landline_city: { type: "string" }
-                  },
-                  required: ["detected_country", "is_mobile"]
-                },
-                pickup: {
-                  type: "object",
-                  properties: {
-                    address: { type: "string" },
-                    lat: { type: "number" },
-                    lon: { type: "number" },
-                    street_name: { type: "string" },
-                    street_number: { type: "string" },
-                    postal_code: { type: "string", description: "FULL postcode e.g. 'B13 9NT' not just 'B13'" },
-                    city: { type: "string" },
-                    is_ambiguous: { type: "boolean" },
-                    alternatives: { type: "array", items: { type: "string" } },
-                    districts_found: { type: "array", items: { type: "string" }, description: "List of districts/areas this street appears in within the city (e.g. ['Hall Green', 'Moseley', 'Yardley']). Populate when is_ambiguous=true due to multi-district street." },
-                    matched_from_history: { type: "boolean" },
-                    address_modified: { type: "boolean", description: "True if the resolved street name differs from user input" },
-                    original_input: { type: "string", description: "The exact text the user spoke, if address was modified" },
-                    modification_reason: { type: "string", description: "Why the address was changed from user input" }
-                  },
-                  required: ["address", "lat", "lon", "city", "is_ambiguous"]
-                },
-                dropoff: {
-                  type: "object",
-                  properties: {
-                    address: { type: "string" },
-                    lat: { type: "number" },
-                    lon: { type: "number" },
-                    street_name: { type: "string" },
-                    street_number: { type: "string" },
-                    postal_code: { type: "string", description: "FULL postcode e.g. 'B13 9NT' not just 'B13'" },
-                    city: { type: "string" },
-                    is_ambiguous: { type: "boolean" },
-                    alternatives: { type: "array", items: { type: "string" } },
-                    districts_found: { type: "array", items: { type: "string" }, description: "List of districts/areas this street appears in within the city (e.g. ['Hall Green', 'Moseley', 'Yardley']). Populate when is_ambiguous=true due to multi-district street." },
-                    matched_from_history: { type: "boolean" },
-                    address_modified: { type: "boolean", description: "True if the resolved street name differs from user input" },
-                    original_input: { type: "string", description: "The exact text the user spoke, if address was modified" },
-                    modification_reason: { type: "string", description: "Why the address was changed from user input" }
-                  },
-                  required: ["address", "lat", "lon", "city", "is_ambiguous"]
-                },
-                scheduled_at: { type: "string", description: "ISO 8601 UTC datetime for scheduled pickup, or null if ASAP/immediate" },
-                status: { type: "string", enum: ["ready", "clarification_needed"] },
-                clarification_message: { type: "string" }
-              },
-              required: ["detected_area", "region_source", "phone_analysis", "pickup", "dropoff", "status"],
-              additionalProperties: false
-            }
+        toolConfig: {
+          functionCallingConfig: {
+            mode: "ANY",
+            allowedFunctionNames: ["resolve_addresses"]
           }
-        }],
-        tool_choice: { type: "function", function: { name: "resolve_addresses" } },
+        },
+        generationConfig: { temperature: 0.1 }
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`AI gateway error: ${response.status} - ${errorText}`);
+      console.error(`Gemini API error: ${response.status} - ${errorText}`);
       
       if (response.status === 429) {
         return new Response(JSON.stringify({ 
@@ -817,55 +820,63 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
         });
       }
       
-      throw new Error(`AI gateway error: ${response.status}`);
+      throw new Error(`Gemini API error: ${response.status}`);
     }
 
     let aiResponse;
     try {
       const responseText = await response.text();
-      console.log("AI gateway raw response length:", responseText.length);
+      console.log("Gemini API raw response length:", responseText.length);
       aiResponse = JSON.parse(responseText);
     } catch (parseErr) {
-      console.error("Failed to parse AI gateway response:", parseErr);
-      throw new Error("AI gateway returned invalid JSON");
+      console.error("Failed to parse Gemini API response:", parseErr);
+      throw new Error("Gemini API returned invalid JSON");
     }
 
-    // Parse structured tool call response (primary) or fallback to content parsing
+    // Parse Gemini native response format: candidates[].content.parts[].functionCall
     let parsed;
-    const toolCall = aiResponse.choices?.[0]?.message?.tool_calls?.[0];
-    if (toolCall?.function?.arguments) {
-      try {
-        parsed = typeof toolCall.function.arguments === "string" 
-          ? JSON.parse(toolCall.function.arguments) 
-          : toolCall.function.arguments;
-        console.log("✅ Parsed structured tool call response");
-      } catch (parseErr) {
-        console.error("Failed to parse tool call arguments:", parseErr);
+    const candidates = aiResponse.candidates;
+    if (candidates?.[0]?.content?.parts) {
+      for (const part of candidates[0].content.parts) {
+        if (part.functionCall?.name === "resolve_addresses" && part.functionCall?.args) {
+          parsed = part.functionCall.args;
+          console.log("✅ Parsed Gemini function call response");
+          
+          // Log grounding metadata if present
+          const groundingMeta = candidates[0].groundingMetadata;
+          if (groundingMeta?.searchEntryPoint || groundingMeta?.groundingChunks?.length > 0) {
+            console.log(`🗺️ Google Maps Grounding active — ${groundingMeta.groundingChunks?.length || 0} grounding chunks used`);
+          }
+          break;
+        }
       }
     }
     
-    // Fallback: parse from content if tool call didn't work
+    // Fallback: try parsing text content as JSON
     if (!parsed) {
-      const content = aiResponse.choices?.[0]?.message?.content;
-      if (!content) {
-        throw new Error("No content or tool call in AI response");
+      const textPart = candidates?.[0]?.content?.parts?.find((p: any) => p.text);
+      if (textPart?.text) {
+        try {
+          let jsonStr = textPart.text.trim();
+          const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+          if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+          parsed = JSON.parse(jsonStr);
+          console.log("⚠️ Fell back to Gemini text content parsing");
+        } catch (parseErr) {
+          console.error("Failed to parse Gemini text JSON:", textPart.text);
+        }
       }
-      try {
-        let jsonStr = content.trim();
-        const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
-        parsed = JSON.parse(jsonStr);
-        console.log("⚠️ Fell back to content parsing");
-      } catch (parseErr) {
-        console.error("Failed to parse AI JSON:", content);
-        parsed = {
-          detected_area: "unknown",
-          phone_analysis: { detected_country: "unknown", is_mobile: false, landline_city: null },
-          pickup: { address: pickup || "", is_ambiguous: false, alternatives: [] },
-          dropoff: { address: destination || "", is_ambiguous: false, alternatives: [] },
-          status: "ready"
-        };
-      }
+    }
+
+    if (!parsed) {
+      console.error("No function call or parseable content in Gemini response");
+      parsed = {
+        detected_area: "unknown",
+        phone_analysis: { detected_country: "unknown", is_mobile: false, landline_city: null },
+        pickup: { address: pickup || "", is_ambiguous: false, alternatives: [] },
+        dropoff: { address: destination || "", is_ambiguous: false, alternatives: [] },
+        status: "ready"
+      };
     }
 
     // ── Post-processing: CLEAR disambiguation via caller history OR explicit city ──
