@@ -435,7 +435,7 @@ namespace TaxiBot.Deterministic
             {
                 slots = slots with
                 {
-                    Pickup = new AddressSlot(patch.PickupRaw, normalized: null, verified: false)
+                    Pickup = new AddressSlot(patch.PickupRaw, Normalized: null, Verified: false)
                 };
                 // Any pickup change invalidates verification retry counters
                 s = s.ResetRetry(RetryKey.PickupVerify);
@@ -445,7 +445,7 @@ namespace TaxiBot.Deterministic
             {
                 slots = slots with
                 {
-                    Dropoff = new AddressSlot(patch.DropoffRaw, normalized: null, verified: false)
+                    Dropoff = new AddressSlot(patch.DropoffRaw, Normalized: null, Verified: false)
                 };
                 s = s.ResetRetry(RetryKey.DropoffVerify);
             }
@@ -588,7 +588,7 @@ namespace TaxiBot.Deterministic
     public sealed record AddressSlot(string? Raw, string? Normalized, bool Verified)
     {
         public bool HasValue => !string.IsNullOrWhiteSpace(Raw);
-        public static AddressSlot Empty() => new(null, null, verified: false);
+        public static AddressSlot Empty() => new(null, null, Verified: false);
     }
 
     public sealed record PickupTime(string Raw, DateTime? WhenUtc, bool IsAsap)

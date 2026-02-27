@@ -1,6 +1,7 @@
 using AdaCleanVersion.Audio;
 using AdaCleanVersion.Services;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.Media;
 using SIPSorcery.Net;
 using TaxiBot.Deterministic;
 
@@ -55,7 +56,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         IcabbiBookingService? icabbiService = null,
         string? callerPhone = null,
         G711CodecType codec = G711CodecType.PCMU,
-        IRealtimeTransport? transport = null)
+        IRealtimeTransport? transport = null,
+        VoIPMediaSession? mediaSession = null)
     {
         _callId = callId;
         _voice = voice;
@@ -74,7 +76,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _micGate = new MicGateController();
 
         // ── Audio bridge ──
-        _audio = new RealtimeAudioBridge(rtpSession, _transport, codec, _micGate, _cts.Token);
+        _audio = new RealtimeAudioBridge(rtpSession, _transport, codec, _micGate, _cts.Token, mediaSession);
         _audio.OnLog += Log;
         _audio.OnAudioOut += frame => { try { OnAudioOut?.Invoke(frame); } catch { } };
         _audio.OnBargeIn += () => { try { OnBargeIn?.Invoke(); } catch { } };
@@ -108,14 +110,21 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             {
                 var booking = new AdaCleanVersion.Models.StructuredBooking
                 {
-                    Pickup = slots.Pickup.Normalized ?? slots.Pickup.Raw ?? "",
-                    Destination = slots.Dropoff.Normalized ?? slots.Dropoff.Raw ?? "",
+                    CallerName = "Caller",
+                    Pickup = new AdaCleanVersion.Models.StructuredAddress
+                    {
+                        RawDisplayName = slots.Pickup.Normalized ?? slots.Pickup.Raw ?? ""
+                    },
+                    Destination = new AdaCleanVersion.Models.StructuredAddress
+                    {
+                        RawDisplayName = slots.Dropoff.Normalized ?? slots.Dropoff.Raw ?? ""
+                    },
                     Passengers = slots.Passengers ?? 1,
                     PickupTime = slots.PickupTime?.Raw ?? "ASAP",
                 };
                 // FareResult not available from engine — pass null, let service handle
                 var result = await icabbiService.CreateAndDispatchAsync(
-                    booking, null!, callerPhone ?? "", _cts.Token);
+                    booking, null!, callerPhone ?? "", callerName: null, icabbiDriverId: null, icabbiVehicleId: null, ct: _cts.Token);
                 return result.Success
                     ? new DispatchResult(true, BookingId: result.BookingRef)
                     : new DispatchResult(false, Error: result.Error);
