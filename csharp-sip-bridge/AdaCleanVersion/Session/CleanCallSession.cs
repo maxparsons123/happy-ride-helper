@@ -422,7 +422,7 @@ public class CleanCallSession
             var phoneticPassengerMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
             {
                 { "for", 4 }, { "fore", 4 }, { "pour", 4 }, { "poor", 4 },
-                { "tree", 3 }, { "free", 3 },
+                { "tree", 3 }, { "free", 3 }, { "really", 3 }, { "freely", 3 },
                 { "to", 2 }, { "too", 2 }, { "tue", 2 },
                 { "won", 1 }, { "wan", 1 },
                 { "sex", 6 }, { "sax", 6 },
