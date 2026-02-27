@@ -9,6 +9,12 @@ public enum CollectionState
     /// <summary>Call just started, greeting the caller.</summary>
     Greeting,
 
+    /// <summary>Returning caller has active booking — offering cancel/amend/status/new.</summary>
+    ManagingExistingBooking,
+
+    /// <summary>Caller wants to cancel — awaiting verbal confirmation.</summary>
+    AwaitingCancelConfirmation,
+
     /// <summary>Collecting caller name.</summary>
     CollectingName,
 

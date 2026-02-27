@@ -16,6 +16,19 @@ public class CallStateEngine
     public StructuredBooking? StructuredResult { get; private set; }
     public FareResult? FareResult { get; private set; }
 
+    /// <summary>Whether the caller has an active booking loaded from the database.</summary>
+    public bool HasActiveBooking { get; set; }
+
+    /// <summary>UUID of existing active booking (for cancel/status operations).</summary>
+    public string? ExistingBookingId { get; set; }
+
+    /// <summary>iCabbi journey ID from the existing booking (for cancel operations).</summary>
+    public string? ExistingIcabbiJourneyId { get; set; }
+
+    /// <summary>Timestamp when cancel confirmation was requested (for timeout guard).</summary>
+    private DateTime? _cancelConfirmationRequestedAt;
+    private const int CANCEL_CONFIRMATION_TIMEOUT_SECONDS = 30;
+
     public event Action<CollectionState, CollectionState>? OnStateChanged;
     public event Action<string>? OnLog;
 
@@ -452,6 +465,47 @@ public class CallStateEngine
             VerifiedDestination = null;
             Log("Verified destination cleared for re-verification");
         }
+    }
+
+    // ── EXISTING BOOKING MANAGEMENT ──
+
+    /// <summary>
+    /// Start cancel confirmation flow — sets timeout guard.
+    /// </summary>
+    public void RequestCancelConfirmation()
+    {
+        _cancelConfirmationRequestedAt = DateTime.UtcNow;
+        TransitionTo(CollectionState.AwaitingCancelConfirmation);
+        Log("Cancel confirmation requested — awaiting caller confirmation");
+    }
+
+    /// <summary>
+    /// Check if cancel confirmation has expired (caller took too long).
+    /// </summary>
+    public bool IsCancelConfirmationExpired()
+    {
+        if (!_cancelConfirmationRequestedAt.HasValue) return false;
+        return (DateTime.UtcNow - _cancelConfirmationRequestedAt.Value).TotalSeconds > CANCEL_CONFIRMATION_TIMEOUT_SECONDS;
+    }
+
+    /// <summary>
+    /// Clear cancel confirmation state (after confirmed or rejected).
+    /// </summary>
+    public void ClearCancelConfirmation()
+    {
+        _cancelConfirmationRequestedAt = null;
+    }
+
+    /// <summary>
+    /// Start new booking after managing existing (preserves caller identity).
+    /// </summary>
+    public void StartNewBookingFromManaging()
+    {
+        HasActiveBooking = false;
+        ExistingBookingId = null;
+        ExistingIcabbiJourneyId = null;
+        TransitionTo(CollectionState.CollectingPickup);
+        Log("New booking started — cleared active booking");
     }
 
     /// <summary>
