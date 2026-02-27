@@ -146,6 +146,11 @@ public static class PromptBuilder
 
             If unsure which field → use the one you most recently read back or asked about.
 
+            COMPOUND CORRECTIONS:
+            If the caller corrects multiple fields at once, use multiple tags:
+            [CORRECTION:pickup][CORRECTION:passengers]
+            Include ALL corrected values in ONE sync_booking_data call.
+
             ────────────────────────────────
             HOUSE NUMBER PROTECTION (STRICT)
             ────────────────────────────────
@@ -599,24 +604,32 @@ public static class PromptBuilder
         }
 
         // Attempt 1: just ask "which area?"
-        // Attempt 2+: if alternatives available, offer them
+        // Attempt 2+: if alternatives available, offer them; if caller says "I don't know", accept and proceed with best match
         if (info.Attempt <= 1 || info.Alternatives == null || info.Alternatives.Count == 0)
         {
             return $"[INSTRUCTION] The {fieldLabel} address \"{rawValue}\" exists in multiple areas. " +
                    "Simply ask: \"Which area is that in?\" " +
-                   "Do NOT list the areas — only list them if the caller asks.";
+                   "Do NOT list the areas — only list them if the caller asks. " +
+                   "If the caller says they don't know the area, say \"No problem\" and accept the address as-is.";
         }
         else
         {
             var altList = string.Join(", ", info.Alternatives);
             return $"[INSTRUCTION] The caller couldn't specify the area for \"{rawValue}\". " +
                    $"This time, offer the options: {altList}. " +
-                   $"Ask which one they mean.";
+                   $"Ask which one they mean. " +
+                   "If they still can't answer, say \"No problem, I'll use the closest match\" and accept.";
         }
     }
 
-    private static string NameAck(RawBookingData data) =>
-        string.IsNullOrWhiteSpace(data.NameRaw) ? "" : $"Thanks, {data.NameRaw}.";
+    private static string NameAck(RawBookingData data)
+    {
+        if (string.IsNullOrWhiteSpace(data.NameRaw)) return "";
+        // If the name looks like a sentence or STT noise (e.g. "I said Max", "my name is"),
+        // don't echo it back — just acknowledge generically.
+        if (data.NameRaw.Split(' ').Length > 2) return "Got that.";
+        return $"Thanks, {data.NameRaw}.";
+    }
 
     /// <summary>
     /// Build the greeting message to inject as a conversation item (like AdaSdkModel).
