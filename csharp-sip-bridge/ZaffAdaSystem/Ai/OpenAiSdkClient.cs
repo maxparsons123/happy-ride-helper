@@ -896,6 +896,7 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
             type = "object",
             properties = new
             {
+                intent = new { type = "string", @enum = new[] { "update_field", "confirm_booking", "cancel_booking", "provide_info" }, description = "MANDATORY. Describes the caller's intent for this turn. 'update_field' = caller is providing or correcting a booking field (name, pickup, destination, passengers, time). 'confirm_booking' = caller is explicitly confirming the booking (yes, go ahead, book it). 'cancel_booking' = caller wants to cancel or abandon. 'provide_info' = caller is answering your question with new info (default for normal collection flow)." },
                 caller_name = new { type = "string", description = "Caller's name" },
                 caller_area = new { type = "string", description = "Caller's self-reported area/district (e.g. 'Earlsdon', 'Tile Hill', 'Binley'). Used as a location bias for address resolution. Only set when the caller explicitly states their area." },
                 pickup = new { type = "string", description = "Pickup address ONLY — extract the address/place name from the caller's speech. Strip out unrelated info like passenger counts, times, or other details." },
@@ -906,7 +907,8 @@ public sealed class OpenAiSdkClient : IOpenAiClient, IAsyncDisposable
                 luggage = new { type = "string", @enum = new[] { "none", "small", "medium", "heavy" }, description = "Luggage amount. MUST ask about luggage when: (1) destination is an airport, train station, coach station, or seaport, OR (2) 3 or more passengers. Values: none=no luggage, small=hand luggage/backpacks, medium=1-2 suitcases, heavy=3+ suitcases or bulky items." },
                 interpretation = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed and why (e.g. 'User corrected pickup from Parkhouse Street to Far Gosford Street — venue name is Sweet Spot'). This helps the system track your understanding." },
                 special_instructions = new { type = "string", description = "Any special requests, notes, or instructions the caller wants to add to the booking (e.g. flight number, wheelchair access, child seat, meet at arrivals, extra luggage). Only set when the caller explicitly provides special instructions." }
-            }
+            },
+            required = new[] { "intent" }
         }))
     };
 
@@ -1272,6 +1274,33 @@ ABSOLUTE RULES – VIOLATION FORBIDDEN
 10. WAIT FOR [FARE RESULT]: After all 5 fields are collected, you MUST wait for the [FARE RESULT] system message before reading back any fare or address details. Do NOT proceed with the booking flow until the [FARE RESULT] arrives. Do NOT invent fare amounts or address details while waiting.
 
 ==============================
+INTENT-DRIVEN TOOL CALLS (CRITICAL)
+==============================
+
+⚠️ DYNAMIC INTENT DETECTION:
+You are an intelligent traffic controller. The 'intent' parameter on sync_booking_data
+tells the system EXACTLY what the caller wants. You MUST set it correctly:
+
+- 'provide_info': Caller is answering YOUR question (normal collection flow).
+  Example: You asked ""What's the pickup?"" → caller says ""52A David Road"" → intent=provide_info.
+
+- 'update_field': Caller is CORRECTING or CHANGING a previously provided field,
+  OR providing a field that is NOT the one you asked for.
+  Example: You asked ""How many passengers?"" → caller says ""Actually, change the pickup to Pig in the Middle"" → intent=update_field, pickup=""Pig in the Middle"".
+  Example: You're reading back the fare → caller says ""No, the destination should be the airport"" → intent=update_field, destination=""the airport"".
+
+- 'confirm_booking': Caller is explicitly confirming the booking after hearing the fare.
+  Example: ""Yes please"", ""Go ahead"", ""Book it"".
+
+- 'cancel_booking': Caller wants to abandon or cancel.
+  Example: ""Cancel"", ""Never mind"", ""I don't want it"".
+
+CRITICAL: If the caller deviates from your question to change a previous answer,
+you MUST follow them. Set intent='update_field' and update the relevant field.
+Do NOT be a slave to the current [INSTRUCTION]. If the user changes their mind,
+the [INSTRUCTION] is superseded. Focus on the caller's ACTUAL intent.
+
+==============================
 MID-FLOW CORRECTION LISTENING (CRITICAL)
 ==============================
 
@@ -1285,7 +1314,7 @@ If the user says something like ""no, it's Coventry"", ""I said Coventry not Koc
 ""that's wrong"", ""change the destination"", or corrects ANY detail at ANY point:
 1. STOP your current script immediately
 2. Acknowledge the correction (""Sorry about that, let me fix that"")
-3. Call sync_booking_data with the corrected data
+3. Call sync_booking_data with intent='update_field' and the corrected field
 4. Wait for new [FARE RESULT]
 5. Read back the corrected booking and ask for confirmation again
 

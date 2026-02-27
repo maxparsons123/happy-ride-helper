@@ -1089,6 +1089,120 @@ public class CleanCallSession
         CancelNoReplyWatchdog();
         _noReplyCount = 0;
 
+        // ── INTENT-DRIVEN ROUTING ──────────────────────────────────
+        // The AI signals caller intent via the 'intent' parameter.
+        // This lets us route corrections, confirmations, and cancellations
+        // BEFORE doing any slot processing — preventing cross-contamination.
+        string? intent = null;
+        if (TryGetArg(args, "intent", out var intentRaw))
+        {
+            intent = intentRaw.ToLowerInvariant();
+            Log($"[SyncTool] intent=\"{intent}\"");
+        }
+
+        // Handle explicit confirmation intent
+        if (intent == "confirm_booking")
+        {
+            if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
+            {
+                Log($"[SyncTool] Intent=confirm_booking in {_engine.State} — dispatching");
+                await ConfirmBookingAsync(ct);
+                return BuildSyncResponse("confirmed");
+            }
+            Log($"[SyncTool] Intent=confirm_booking ignored — state {_engine.State} not confirmable");
+        }
+
+        // Handle explicit cancellation intent
+        if (intent == "cancel_booking")
+        {
+            Log($"[SyncTool] Intent=cancel_booking — ending call");
+            // Cancel active iCabbi journey if one was dispatched
+            if (_icabbiResult?.Success == true && !string.IsNullOrEmpty(_icabbiResult.JourneyId))
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var (ok, msg) = await _icabbiService!.CancelBookingAsync(_icabbiResult.JourneyId);
+                        Log(ok
+                            ? $"✅ iCabbi journey {_icabbiResult.JourneyId} cancelled"
+                            : $"⚠️ iCabbi cancel failed: {msg}");
+                    }
+                    catch (Exception ex) { Log($"❌ iCabbi cancel error: {ex.Message}"); }
+                });
+            }
+            _engine.EndCall(force: true);
+            return BuildSyncResponse("cancelled");
+        }
+
+        // Handle update_field intent: if the AI signals a correction for a field
+        // that doesn't match the current collection state, route it directly
+        // to the correct slot WITHOUT contaminating the current state.
+        if (intent == "update_field")
+        {
+            var targetSlot = DetectIntentTargetSlot(args);
+            if (targetSlot != null)
+            {
+                var targetState = _engine.SlotToState(targetSlot);
+                var currentSlotState = _engine.State;
+
+                // Only do intent-jump if the target is different from what we're currently collecting
+                if (targetState != null && targetState != currentSlotState &&
+                    !IsCurrentlyCollecting(currentSlotState, targetSlot))
+                {
+                    Log($"[SyncTool] Intent-jump: {currentSlotState} → {targetSlot} (AI detected out-of-order correction)");
+
+                    // Extract the value for the target slot
+                    if (TryGetArg(args, targetSlot, out var newValue) && !string.IsNullOrWhiteSpace(newValue))
+                    {
+                        // Clear downstream verification for the changed slot
+                        _engine.ClearVerifiedAddress(targetSlot);
+                        _engine.ClearFareResult();
+                        _engine.RawData.SetSlot(targetSlot, newValue);
+
+                        // Store last_utterance for POI matching
+                        string? whisperT = null;
+                        TryGetArg(args, "whisper_transcript", out whisperT);
+                        string? lastUtt = null;
+                        TryGetArg(args, "last_utterance", out lastUtt);
+                        var rawForPoi = whisperT ?? lastUtt;
+                        if (!string.IsNullOrWhiteSpace(rawForPoi))
+                            _engine.RawData.SetLastUtterance(targetSlot, rawForPoi);
+
+                        if (TryGetArg(args, "interpretation", out var interp2))
+                            Log($"[SyncTool] interpretation=\"{interp2}\"");
+                        if (!string.IsNullOrWhiteSpace(lastUtt))
+                            Log($"[SyncTool] last_utterance=\"{lastUtt}\"");
+                        if (!string.IsNullOrWhiteSpace(whisperT) && whisperT != lastUtt)
+                            Log($"[SyncTool] whisper_transcript=\"{whisperT}\" (differs from AI last_utterance)");
+
+                        // Jump to verification state for address slots
+                        if (targetSlot is "pickup" or "destination")
+                        {
+                            var verifyState = targetSlot == "pickup"
+                                ? CollectionState.VerifyingPickup
+                                : CollectionState.VerifyingDestination;
+                            _engine.ForceState(verifyState);
+                            EmitCurrentInstruction();
+                            return BuildSyncResponse("ok", new List<string> { targetSlot });
+                        }
+
+                        // Non-address slot: just update and re-advance
+                        _engine.AdvanceToSlot(_engine.RawData.NextMissingSlot() ?? targetSlot);
+                        EmitCurrentInstruction();
+                        return BuildSyncResponse("ok", new List<string> { targetSlot });
+                    }
+                    else
+                    {
+                        // update_field with no value: caller said "change the pickup" but gave no new address
+                        Log($"[SyncTool] Intent-jump to {targetSlot} with no value — clearing and re-collecting");
+                        await CorrectSlotAsync(targetSlot, "", ct);
+                        return BuildSyncResponse("ok", new List<string> { targetSlot });
+                    }
+                }
+            }
+        }
+
         var slotsUpdated = new List<string>();
         var currentState = _engine.State;
 
@@ -1467,6 +1581,50 @@ public class CleanCallSession
         }
 
         return !string.IsNullOrWhiteSpace(value);
+    }
+
+    /// <summary>
+    /// Detect which slot the AI intends to update based on which fields are populated.
+    /// Returns the primary target slot name, or null if ambiguous.
+    /// </summary>
+    private static string? DetectIntentTargetSlot(Dictionary<string, object?> args)
+    {
+        // Check which booking fields are populated (excluding meta fields)
+        string? target = null;
+        foreach (var slot in new[] { "pickup", "destination", "passengers", "pickup_time", "caller_name" })
+        {
+            if (args.TryGetValue(slot, out var val) && val != null)
+            {
+                var str = val is JsonElement je
+                    ? (je.ValueKind == JsonValueKind.String ? je.GetString() : je.GetRawText())
+                    : val.ToString();
+                if (!string.IsNullOrWhiteSpace(str))
+                {
+                    // Map caller_name → name for engine slot naming
+                    target = slot == "caller_name" ? "name" : slot;
+                    break; // Take the first populated field as the target
+                }
+            }
+        }
+        return target;
+    }
+
+    /// <summary>
+    /// Check if the engine is currently collecting the given slot.
+    /// Prevents unnecessary intent-jumps when the AI says update_field
+    /// for the field we're already asking about.
+    /// </summary>
+    private static bool IsCurrentlyCollecting(CollectionState state, string slot)
+    {
+        return slot switch
+        {
+            "name" => state == CollectionState.CollectingName,
+            "pickup" => state is CollectionState.CollectingPickup or CollectionState.VerifyingPickup,
+            "destination" => state is CollectionState.CollectingDestination or CollectionState.VerifyingDestination,
+            "passengers" => state == CollectionState.CollectingPassengers,
+            "pickup_time" => state == CollectionState.CollectingPickupTime,
+            _ => false
+        };
     }
 
     // ─── Inline Address Verification ────────────────────────
