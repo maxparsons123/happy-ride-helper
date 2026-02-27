@@ -80,7 +80,7 @@ public sealed class ZoneGuardService : IDisposable
         _cfg = cfg;
         _supabase = supabase;
         _log = log;
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         _http.DefaultRequestHeaders.Add("apikey", supabase.AnonKey);
         _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {supabase.AnonKey}");
     }
