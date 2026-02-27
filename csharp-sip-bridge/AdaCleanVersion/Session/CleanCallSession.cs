@@ -1363,8 +1363,19 @@ public class CleanCallSession
     {
         var state = new Dictionary<string, string?>();
         if (!string.IsNullOrWhiteSpace(_engine.RawData.NameRaw)) state["name"] = _engine.RawData.NameRaw;
-        if (!string.IsNullOrWhiteSpace(_engine.RawData.PickupRaw)) state["pickup"] = _engine.RawData.PickupRaw;
-        if (!string.IsNullOrWhiteSpace(_engine.RawData.DestinationRaw)) state["destination"] = _engine.RawData.DestinationRaw;
+        
+        // Use verified addresses in booking_state when available — this prevents the AI
+        // from seeing the caller's raw misspelling in conversation history and repeating it.
+        var verifiedPickup = _engine.VerifiedPickup?.Address;
+        state["pickup"] = !string.IsNullOrEmpty(verifiedPickup) 
+            ? verifiedPickup 
+            : _engine.RawData.PickupRaw;
+        
+        var verifiedDest = _engine.VerifiedDestination?.Address;
+        state["destination"] = !string.IsNullOrEmpty(verifiedDest)
+            ? verifiedDest
+            : _engine.RawData.DestinationRaw;
+        
         if (!string.IsNullOrWhiteSpace(_engine.RawData.PassengersRaw)) state["passengers"] = _engine.RawData.PassengersRaw;
         if (!string.IsNullOrWhiteSpace(_engine.RawData.PickupTimeRaw)) state["pickup_time"] = _engine.RawData.PickupTimeRaw;
 
@@ -1569,18 +1580,24 @@ public class CleanCallSession
                 Log($"🧹 Prefix strip skipped — raw input \"{rawSlotValue}\" already contains street token, keeping full geocoded address");
             }
 
-            // POI alias detection: if the caller said a POI name (no street token in raw input)
-            // and the geocoder resolved to a different name, preserve the caller's POI name
-            // so Ada can say "Pig in the Middle on Far Gosford Street" instead of "Sweet Spot".
-            if (!rawHasStreetToken && !string.IsNullOrEmpty(rawSlotValue))
+            // POI alias detection: if the geocoder resolved to a different business name
+            // than what the caller said, preserve the caller's POI name for readback.
+            // Works for both pure POI inputs ("Pig in the Middle") and POI-on-street inputs
+            // ("Pig in the Middle on Fargosworth Street").
+            if (!string.IsNullOrEmpty(rawSlotValue))
             {
-                var rawLower = rawSlotValue.Trim().ToLowerInvariant();
                 var resolvedLower = geocoded.Address.ToLowerInvariant();
-                // If the resolved address does NOT contain the caller's POI name, store it
-                if (!resolvedLower.Contains(rawLower) && rawLower.Length >= 3)
+                // Extract the caller's POI name: everything before "on/at/near" + street reference
+                var poiName = ExtractCallerPoiName(rawSlotValue);
+                if (!string.IsNullOrEmpty(poiName))
                 {
-                    geocoded.CallerPoiName = rawSlotValue.Trim();
-                    Log($"📍 POI alias detected: caller said \"{rawSlotValue}\" but geocoded to \"{geocoded.Address}\" — preserving caller POI name");
+                    var poiLower = poiName.ToLowerInvariant();
+                    // If the resolved address does NOT contain the caller's POI name, store it
+                    if (!resolvedLower.Contains(poiLower) && poiLower.Length >= 3)
+                    {
+                        geocoded.CallerPoiName = poiName;
+                        Log($"📍 POI alias detected: caller said \"{poiName}\" but geocoded to \"{geocoded.Address}\" — preserving caller POI name");
+                    }
                 }
             }
 
@@ -1613,6 +1630,52 @@ public class CleanCallSession
             _engine.SkipVerification(field, ex.Message);
             EmitCurrentInstruction();
         }
+    }
+
+    /// <summary>
+    /// Extract the caller's POI/venue name from a raw address input.
+    /// Handles patterns like "Pig in the Middle on Fargosworth Street" → "Pig in the Middle"
+    /// and pure POI inputs like "Pig in the Middle" → "Pig in the Middle".
+    /// Returns null if the input looks like a regular street address (e.g., "52A David Road").
+    /// </summary>
+    private static string? ExtractCallerPoiName(string rawInput)
+    {
+        if (string.IsNullOrWhiteSpace(rawInput)) return null;
+        
+        var clean = rawInput.Trim();
+        
+        // Try to split on prepositions that separate POI name from street
+        // e.g., "Pig in the Middle on Fargosworth Street" → "Pig in the Middle"
+        var separators = new[] { " on ", " at ", " near ", " beside ", " opposite " };
+        foreach (var sep in separators)
+        {
+            var idx = clean.IndexOf(sep, StringComparison.OrdinalIgnoreCase);
+            if (idx > 2) // Must have at least a 3-char POI name before the separator
+            {
+                var candidate = clean[..idx].Trim();
+                // Verify the part after separator has a street token
+                var afterSep = clean[(idx + sep.Length)..].Trim();
+                var streetPattern = @"\b(Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|Close|Way|Place|Crescent|Court|Terrace|Grove|Hill|Gardens|Square|Parade|Row|Walk|Rise|Mews|Boulevard)\b";
+                if (System.Text.RegularExpressions.Regex.IsMatch(afterSep, streetPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                {
+                    return candidate;
+                }
+            }
+        }
+        
+        // Pure POI: no street token in the entire input → entire input is the POI name
+        var hasStreetToken = System.Text.RegularExpressions.Regex.IsMatch(
+            clean, 
+            @"\b(Road|Rd|Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|Close|Way|Place|Crescent|Court|Terrace|Grove|Hill|Gardens|Square|Parade|Row|Walk|Rise|Mews|Boulevard)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        
+        // Also check for house numbers — if present, it's a regular address
+        var hasHouseNumber = System.Text.RegularExpressions.Regex.IsMatch(clean, @"^\d+[A-Za-z]?\s");
+        
+        if (!hasStreetToken && !hasHouseNumber && clean.Length >= 3)
+            return clean;
+        
+        return null;
     }
 
     // ─── Private ─────────────────────────────────────────────

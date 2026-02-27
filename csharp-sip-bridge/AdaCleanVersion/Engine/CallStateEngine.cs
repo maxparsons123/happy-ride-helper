@@ -259,22 +259,35 @@ public class CallStateEngine
         var field = PendingClarification.AmbiguousField;
         Log($"Clarification accepted for {field}: \"{clarifiedValue}\"");
 
+        // Strip noise responses ("okay", "yes", "yeah", "sure", "right") that are just
+        // confirmations of Ada's suggestion, not actual area/address clarification data.
+        var cleaned = clarifiedValue.Trim().TrimEnd('.', '!', '?');
+        var noiseWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "okay", "ok", "yes", "yeah", "yep", "sure", "right", "correct", 
+            "that's right", "that's correct", "yes please", "yea"
+        };
+        
+        bool isNoiseOnly = noiseWords.Contains(cleaned);
+
         // Update the raw slot: use Ada's readback (cleaned address) + area clarification
         // instead of endlessly appending to garbage accumulated raw strings.
-        // E.g., if Ada read back "52A David Road, Coventry" and caller says "Stoke",
-        // we want "52A David Road, Stoke, Coventry" — not the raw STT noise.
         if (field == "pickup")
         {
             var verified = VerifiedPickup?.Address;
             var baseAddr = !string.IsNullOrEmpty(verified) ? verified : (RawData.PickupRaw ?? "");
-            RawData.SetSlot("pickup", $"{baseAddr}, {clarifiedValue}");
+            // If caller just said "okay" confirming Ada's suggestion, don't append — use base as-is
+            RawData.SetSlot("pickup", isNoiseOnly ? baseAddr : $"{baseAddr}, {cleaned}");
         }
         else if (field == "destination")
         {
             var verified = VerifiedDestination?.Address;
             var baseAddr = !string.IsNullOrEmpty(verified) ? verified : (RawData.DestinationRaw ?? "");
-            RawData.SetSlot("destination", $"{baseAddr}, {clarifiedValue}");
+            RawData.SetSlot("destination", isNoiseOnly ? baseAddr : $"{baseAddr}, {cleaned}");
         }
+        
+        if (isNoiseOnly)
+            Log($"Clarification was noise-only (\"{clarifiedValue}\") — using base address without appending");
 
         // Transition back to re-verify (re-geocode) the clarified field — NOT to ReadyForExtraction
         var targetState = field == "pickup"
