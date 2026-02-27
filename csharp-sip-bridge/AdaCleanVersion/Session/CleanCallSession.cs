@@ -56,7 +56,7 @@ public class CleanCallSession
     public CallStateEngine Engine => _engine;
 
     public event Action<string>? OnLog;
-    public event Action<string, bool>? OnAiInstruction; // (instruction, isReprompt)
+    public event Action<string, bool, bool>? OnAiInstruction; // (instruction, isReprompt, isSilent)
     public event Action<StructuredBooking>? OnBookingReady;
     public event Action<FareResult>? OnFareReady;
     public event Action<bool>? OnTypingSoundsChanged; // enable/disable typing sounds during recalculation
@@ -457,7 +457,13 @@ public class CleanCallSession
         }
         else
         {
-            EmitCurrentInstruction();
+            // When the name is processed via transcript fallback (no tool call),
+            // the AI already asked for pickup in its autonomous response.
+            // Emit the instruction silently (session.update only, no response.create)
+            // to set the right context without causing a duplicate question.
+            bool silent = currentSlot == "name"
+                && _engine.State == CollectionState.CollectingPickup;
+            EmitCurrentInstruction(silent: silent);
         }
     }
 
@@ -866,7 +872,7 @@ public class CleanCallSession
 
         var instruction = PromptBuilder.BuildCorrectionInstruction(
             slotName, oldValue ?? "", newValue);
-        OnAiInstruction?.Invoke(instruction, false);
+        OnAiInstruction?.Invoke(instruction, false, false);
 
         // Re-check if ready for extraction after correction
         if (_engine.RawData.AllRequiredPresent &&
@@ -1859,7 +1865,7 @@ public class CleanCallSession
     private int _repromptCount = 0;
     private string? _lastRepromptSlot;
 
-    private void EmitCurrentInstruction()
+    private void EmitCurrentInstruction(bool silent = false)
     {
         // Reset reprompt counter when we successfully advance
         _repromptCount = 0;
@@ -1872,7 +1878,7 @@ public class CleanCallSession
             _engine.VerifiedPickup, _engine.VerifiedDestination,
             isRecalculating: _engine.IsRecalculating);
         _lastEmittedInstruction = instruction;
-        OnAiInstruction?.Invoke(instruction, false);
+        OnAiInstruction?.Invoke(instruction, false, silent);
 
         // Watchdog is now armed by NotifyMicUngated() — not here.
         // This prevents the timer from counting down while Ada is still speaking.
@@ -1898,7 +1904,7 @@ public class CleanCallSession
             _engine.VerifiedPickup, _engine.VerifiedDestination,
             rejectedReason: rejectedReason);
         _lastEmittedInstruction = instruction;
-        OnAiInstruction?.Invoke(instruction, true); // isReprompt = true
+        OnAiInstruction?.Invoke(instruction, true, false); // isReprompt = true
 
         // Watchdog is now armed by NotifyMicUngated() — not here.
     }
