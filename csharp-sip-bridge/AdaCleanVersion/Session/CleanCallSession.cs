@@ -1577,10 +1577,15 @@ public class CleanCallSession
         // Verify tool argument values against the transcript that triggered them.
         // IMPORTANT: prefer Whisper transcript over AI last_utterance because
         // last_utterance can be paraphrased/hallucinated by the model.
+        //
+        // SKIP during AwaitingClarification: the caller provides SUPPLEMENTAL info
+        // (e.g., "It's in Coventry") which the AI correctly appends to the existing
+        // address. The transcript won't match the full combined address — that's expected.
         var coherenceTranscript = whisperTranscript ?? lastUtterance;
         var coherenceSource = whisperTranscript != null ? "whisper_transcript" : "last_utterance";
+        var skipCoherence = _engine.CurrentState == CollectionState.AwaitingClarification;
 
-        if (!string.IsNullOrWhiteSpace(coherenceTranscript))
+        if (!string.IsNullOrWhiteSpace(coherenceTranscript) && !skipCoherence)
         {
             if (slotsUpdated.Contains("pickup"))
             {
@@ -1612,6 +1617,10 @@ public class CleanCallSession
                     return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
                 }
             }
+        }
+        else if (skipCoherence)
+        {
+            Log($"📋 Coherence check skipped — AwaitingClarification (caller providing supplemental info)");
         }
 
         if (slotsUpdated.Count == 0)
