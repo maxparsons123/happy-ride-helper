@@ -1569,16 +1569,33 @@ public class CleanCallSession
                 Log($"🧹 Prefix strip skipped — raw input \"{rawSlotValue}\" already contains street token, keeping full geocoded address");
             }
 
+            // POI alias detection: if the caller said a POI name (no street token in raw input)
+            // and the geocoder resolved to a different name, preserve the caller's POI name
+            // so Ada can say "Pig in the Middle on Far Gosford Street" instead of "Sweet Spot".
+            if (!rawHasStreetToken && !string.IsNullOrEmpty(rawSlotValue))
+            {
+                var rawLower = rawSlotValue.Trim().ToLowerInvariant();
+                var resolvedLower = geocoded.Address.ToLowerInvariant();
+                // If the resolved address does NOT contain the caller's POI name, store it
+                if (!resolvedLower.Contains(rawLower) && rawLower.Length >= 3)
+                {
+                    geocoded.CallerPoiName = rawSlotValue.Trim();
+                    Log($"📍 POI alias detected: caller said \"{rawSlotValue}\" but geocoded to \"{geocoded.Address}\" — preserving caller POI name");
+                }
+            }
+
             // Success — store verified address and advance
             if (field == "pickup")
             {
                 _engine.CompletePickupVerification(geocoded);
-                Log($"✅ Pickup verified: \"{geocoded.Address}\"");
+                Log($"✅ Pickup verified: \"{geocoded.Address}\"" + 
+                    (geocoded.CallerPoiName != null ? $" (caller POI: \"{geocoded.CallerPoiName}\")" : ""));
             }
             else
             {
                 _engine.CompleteDestinationVerification(geocoded);
-                Log($"✅ Destination verified: \"{geocoded.Address}\"");
+                Log($"✅ Destination verified: \"{geocoded.Address}\"" +
+                    (geocoded.CallerPoiName != null ? $" (caller POI: \"{geocoded.CallerPoiName}\")" : ""));
             }
 
             // Emit instruction with verified address in the prompt

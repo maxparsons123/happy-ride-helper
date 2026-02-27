@@ -416,11 +416,15 @@ public static class PromptBuilder
                 BuildClarificationInstruction(rawData, clarification),
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
-                $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'. " +
+                $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to Ada Taxi'.\n" +
+                "⛔ TRUTH OVERRIDE: The caller may have mispronounced or misspelled addresses. " +
+                "You MUST NOT repeat the caller's words for addresses. You MUST ONLY use the VERIFIED addresses " +
+                "provided in the bullet points below. These are the geocode-confirmed ground truth. " +
+                "If you repeat the caller's misspelling instead of the verified address, the system WILL FAIL.\n" +
                 "You MUST read the verified pickup and destination EXACTLY as written below (no shortening):\n" +
                 $"- Name: {booking.CallerName}\n" +
-                $"- Pickup (VERBATIM): {FormatAddressForSpeech(fareResult.Pickup.Address)}\n" +
-                $"- Destination (VERBATIM): {FormatAddressForSpeech(fareResult.Destination.Address)}\n" +
+                $"- Pickup (VERIFIED — use ONLY this): {FormatAddressWithPoiAlias(fareResult.Pickup)}\n" +
+                $"- Destination (VERIFIED — use ONLY this): {FormatAddressWithPoiAlias(fareResult.Destination)}\n" +
                 $"- Passengers: {booking.Passengers}\n" +
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
@@ -429,8 +433,10 @@ public static class PromptBuilder
                 BuildStreetNameGuard(fareResult.Destination.Address) +
                 BuildPostcodeGuard(fareResult.Pickup.Address) +
                 BuildPostcodeGuard(fareResult.Destination.Address) +
-                $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressForSpeech(fareResult.Pickup.Address)} to {FormatAddressForSpeech(fareResult.Destination.Address)}, the fare will be around {fareResult.FareSpoken}. {fareResult.BusyMessage} Would you like to go ahead with this booking?\" " +
-                "Do NOT paraphrase addresses. Do NOT skip the driver ETA / busy message — it is MANDATORY.",
+                $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressWithPoiAlias(fareResult.Pickup)} to {FormatAddressWithPoiAlias(fareResult.Destination)}, the fare will be around {fareResult.FareSpoken}. {fareResult.BusyMessage} Would you like to go ahead with this booking?\"\n" +
+                "Do NOT paraphrase addresses. Do NOT skip the driver ETA / busy message — it is MANDATORY.\n" +
+                "WRONG: Repeating caller's mispronunciation (e.g., 'Fargosworth Street')\n" +
+                "CORRECT: Using verified address (e.g., 'Far Gosford Street')",
 
             CollectionState.PresentingFare when booking != null =>
                 $"[INSTRUCTION] Present the booking summary to the caller:\n" +
@@ -448,10 +454,11 @@ public static class PromptBuilder
                 "[INSTRUCTION] Ask the caller: would they like to pay by card or cash to the driver (meter)?",
 
             CollectionState.AwaitingConfirmation when fareResult != null && booking != null =>
-                $"[INSTRUCTION] Read back the full booking for final confirmation:\n" +
+                $"[INSTRUCTION] ⛔ TRUTH OVERRIDE: Use ONLY the verified addresses below, NOT the caller's words.\n" +
+                $"Read back the full booking for final confirmation:\n" +
                 $"- Name: {booking.CallerName}\n" +
-                $"- From: {fareResult.Pickup.Address}\n" +
-                $"- To: {fareResult.Destination.Address}\n" +
+                $"- From (VERIFIED): {FormatAddressWithPoiAlias(fareResult.Pickup)}\n" +
+                $"- To (VERIFIED): {FormatAddressWithPoiAlias(fareResult.Destination)}\n" +
                 $"- Passengers: {booking.Passengers}\n" +
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
@@ -744,5 +751,32 @@ public static class PromptBuilder
         if (!postcodeMatch.Success) return "";
 
         return $"⚠️ POSTCODE MANDATORY: You MUST say the postcode \"{postcodeMatch.Value}\" — do NOT skip it. ";
+    }
+
+    /// <summary>
+    /// Format a geocoded address for speech, prepending the caller's POI name if it differs
+    /// from the geocoder's resolved name (e.g., "Pig in the Middle, Far Gosford Street" 
+    /// instead of "Sweet Spot, 161-167 Far Gosford Street").
+    /// </summary>
+    internal static string FormatAddressWithPoiAlias(GeocodedAddress geocoded)
+    {
+        var formatted = FormatAddressForSpeech(geocoded.Address);
+        if (!string.IsNullOrEmpty(geocoded.CallerPoiName))
+        {
+            // Replace the geocoder's business name with the caller's POI name
+            // e.g., "Sweet Spot, 161-167 Far Gosford Street" → "Pig in the Middle, 161-167 Far Gosford Street"
+            // Find the first comma (business name separator) and replace everything before it
+            var commaIdx = formatted.IndexOf(',');
+            if (commaIdx > 0)
+            {
+                formatted = geocoded.CallerPoiName + formatted[commaIdx..];
+            }
+            else
+            {
+                // No comma — just prepend
+                formatted = $"{geocoded.CallerPoiName} at {formatted}";
+            }
+        }
+        return formatted;
     }
 }

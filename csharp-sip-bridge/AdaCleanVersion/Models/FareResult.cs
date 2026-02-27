@@ -44,4 +44,11 @@ public sealed class GeocodedAddress
     public bool IsAmbiguous { get; init; }
     public List<string>? Alternatives { get; init; }
     public bool MatchedFromHistory { get; init; }
+    
+    /// <summary>
+    /// The caller's original POI/venue name (e.g. "Pig in the Middle") when the geocoder
+    /// resolved to a different business name (e.g. "Sweet Spot"). Used in readback to
+    /// keep Ada in sync with the caller's intent.
+    /// </summary>
+    public string? CallerPoiName { get; set; }
 }
