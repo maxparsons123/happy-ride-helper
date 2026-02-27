@@ -1,126 +1,106 @@
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// Deterministic mic gate controller (v4.5).
-/// Buffer-all while AI speaks, flush-tail on barge-in.
-/// Variance-based energy detection prevents ghost transcripts from comfort noise.
+/// Simple, deterministic mic gate controller.
+/// ONE job: block caller audio to OpenAI while AI is speaking.
+/// Energy-based barge-in detection — no dynamic thresholds, no buffers.
+/// Telephony audio is predictable. Keep it boring.
 /// </summary>
 public sealed class MicGateController
 {
-    /// <summary>Max trailing frames to flush (25 frames = 500ms).</summary>
-    private const int MicTailMaxFlush = 25;
+    /// <summary>
+    /// RMS energy threshold for barge-in detection.
+    /// Tuned for UK PSTN G.711 lines. Comfort noise sits ~200-800,
+    /// speech starts at ~2000+. Set conservatively to avoid echo triggers.
+    /// </summary>
+    private const double BargeInThreshold = 4000;
 
     /// <summary>
-    /// Min variance score in a 160-byte frame to count as speech.
-    /// Variance-based detection catches low-level speech that byte-equality misses
-    /// (comfort noise, PBX DSP artifacts, transcoding residue).
+    /// Double-talk suppression window (ms).
+    /// Ignore caller speech within first 150ms of AI speaking
+    /// to prevent echo-triggered barge-ins.
     /// </summary>
-    private const int SpeechVarianceThreshold = 120;
+    private const int DoubleTalkGuardMs = 150;
 
-    private readonly List<byte[]> _buffer = new();
-    private readonly object _lock = new();
+    /// <summary>
+    /// Smooth energy over N frames before triggering barge-in.
+    /// Prevents single-frame spikes from false-triggering.
+    /// </summary>
+    private const int SmoothingFrames = 2;
+
     private volatile bool _gated;
-    private volatile bool _responseCompleted;
-    private long _lastBargeInTick;
+    private long _gatedAtTick;
+    private int _consecutiveHighFrames;
 
     /// <summary>True = mic is blocked (AI is speaking).</summary>
     public bool IsGated => _gated;
-
-    /// <summary>True = AI finished sending audio deltas for current response.</summary>
-    public bool ResponseCompleted => _responseCompleted;
 
     /// <summary>Gate mic when AI starts responding.</summary>
     public void Arm()
     {
         _gated = true;
-        _responseCompleted = false;
+        _gatedAtTick = Environment.TickCount64;
+        _consecutiveHighFrames = 0;
     }
 
-    /// <summary>Mark that response.audio.done was received.</summary>
-    public void MarkResponseCompleted()
+    /// <summary>Ungate mic (AI finished speaking or barge-in).</summary>
+    public void Ungate()
     {
-        _responseCompleted = true;
-    }
-
-    /// <summary>
-    /// Ungate after playout drains — discard buffer (it's all echo, not caller speech).
-    /// Returns true if actually ungated, false if already ungated.
-    /// </summary>
-    public bool TryRelease()
-    {
-        if (!_gated) return false;
         _gated = false;
-        Clear();
-        return true;
+        _consecutiveHighFrames = 0;
     }
 
     /// <summary>
-    /// Barge-in ungate with 250ms debounce.
-    /// Returns true if barge-in was processed. Outputs speech frames from tail.
-    /// Returns false if debounced or already ungated.
+    /// Should this frame be forwarded to OpenAI?
+    /// Returns true if mic is open OR if barge-in energy detected.
+    /// Caller must handle barge-in separately when this returns true while gated.
     /// </summary>
-    public bool TryBargeIn(out byte[][] speechFrames)
+    public bool ShouldSendToOpenAi(byte[] frame, out bool isBargeIn)
     {
-        speechFrames = Array.Empty<byte[]>();
+        isBargeIn = false;
 
-        var now = Environment.TickCount64;
-        var elapsed = now - Volatile.Read(ref _lastBargeInTick);
-        if (elapsed < 250) return false; // debounce
-        Volatile.Write(ref _lastBargeInTick, now);
+        if (!_gated)
+            return true;
 
-        if (!_gated) return false; // already ungated
+        // Double-talk guard: ignore speech in first 150ms of AI speaking
+        var elapsed = Environment.TickCount64 - Volatile.Read(ref _gatedAtTick);
+        if (elapsed < DoubleTalkGuardMs)
+            return false;
 
-        _gated = false;
-        speechFrames = FlushTailSpeechFrames();
-        return true;
-    }
+        // Compute RMS energy
+        double energy = ComputeRms(frame);
 
-    /// <summary>Buffer a frame while mic is gated.</summary>
-    public void Buffer(byte[] frame)
-    {
-        lock (_lock)
+        if (energy > BargeInThreshold)
         {
-            var copy = new byte[frame.Length];
-            System.Buffer.BlockCopy(frame, 0, copy, 0, frame.Length);
-            _buffer.Add(copy);
-        }
-    }
-
-    /// <summary>Clear the buffer (used on normal ungate — echo discard).</summary>
-    public void Clear()
-    {
-        lock (_lock) _buffer.Clear();
-    }
-
-    /// <summary>
-    /// Extract trailing speech frames using variance-based energy detection.
-    /// Scans the tail region for frames with actual speech energy,
-    /// filtering out silence/comfort noise to prevent ghost transcripts.
-    /// </summary>
-    private byte[][] FlushTailSpeechFrames()
-    {
-        lock (_lock)
-        {
-            int count = _buffer.Count;
-            if (count == 0) return Array.Empty<byte[]>();
-
-            int tailStart = Math.Max(0, count - MicTailMaxFlush);
-            var selected = new List<byte[]>();
-
-            for (int i = tailStart; i < count; i++)
+            _consecutiveHighFrames++;
+            if (_consecutiveHighFrames >= SmoothingFrames)
             {
-                var frame = _buffer[i];
-                // Variance-based energy: measures waveform movement
-                int variance = 0;
-                for (int j = 1; j < frame.Length; j++)
-                    variance += Math.Abs(frame[j] - frame[j - 1]);
-
-                if (variance >= SpeechVarianceThreshold)
-                    selected.Add(frame);
+                isBargeIn = true;
+                return true;
             }
-
-            _buffer.Clear();
-            return selected.ToArray();
         }
+        else
+        {
+            _consecutiveHighFrames = 0;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Simple RMS energy for G.711 byte frame.
+    /// Treats each byte as unsigned 8-bit centered at 128.
+    /// </summary>
+    private static double ComputeRms(byte[] frame)
+    {
+        if (frame.Length == 0) return 0;
+
+        double sum = 0;
+        for (int i = 0; i < frame.Length; i++)
+        {
+            int sample = frame[i] - 128;
+            sum += sample * sample;
+        }
+        return sum / frame.Length;
     }
 }

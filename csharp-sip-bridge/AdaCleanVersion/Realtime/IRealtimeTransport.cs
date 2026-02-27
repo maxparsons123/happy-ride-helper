@@ -20,7 +20,7 @@ public interface IRealtimeTransport : IAsyncDisposable
     Task ConnectAsync(string url, Dictionary<string, string> headers, CancellationToken ct = default);
 
     /// <summary>
-    /// Send a JSON-serialized message to the server.
+    /// Send a JSON-serializable object to the server (auto-serialized).
     /// Thread-safe — implementations must serialize concurrent sends.
     /// </summary>
     Task SendAsync(object payload, CancellationToken ct = default);
