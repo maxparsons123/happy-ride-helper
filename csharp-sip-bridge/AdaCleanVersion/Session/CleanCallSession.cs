@@ -1646,10 +1646,22 @@ public class CleanCallSession
                     // FIX 4: Stale detection for pickup
                     if (!string.IsNullOrWhiteSpace(lastUtterance) && TranscriptSuggestsAddressChange(lastUtterance))
                     {
-                        Log($"⚠ [SyncTool] STALE PICKUP REUSE DETECTED — tool sent \"{newPickup}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
-                        _engine.ClearVerifiedAddress("pickup");
-                        _engine.ClearFareResult();
-                        _engine.ForceState(CollectionState.CollectingPickup);
+                        // The AI resent the same address but the transcript has correction signals.
+                        // If the address is already verified/geocoded, jump to VerifyingPickup
+                        // to re-read it back — NOT CollectingPickup (which causes a loop).
+                        if (_engine.VerifiedPickup != null)
+                        {
+                            Log($"⚠ [SyncTool] STALE PICKUP REUSE — but address already verified. Jumping to VerifyingPickup for re-readback.");
+                            _engine.ClearFareResult();
+                            _engine.ForceState(CollectionState.VerifyingPickup);
+                        }
+                        else
+                        {
+                            Log($"⚠ [SyncTool] STALE PICKUP REUSE DETECTED — tool sent \"{newPickup}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
+                            _engine.ClearVerifiedAddress("pickup");
+                            _engine.ClearFareResult();
+                            _engine.ForceState(CollectionState.CollectingPickup);
+                        }
                         EmitCurrentInstruction();
                         return BuildSyncResponse("stale_reuse_detected", slotsUpdated);
                     }
@@ -1673,10 +1685,20 @@ public class CleanCallSession
                     // FIX 4: Stale detection — if transcript suggests a change but tool reused old value
                     if (!string.IsNullOrWhiteSpace(lastUtterance) && TranscriptSuggestsAddressChange(lastUtterance))
                     {
-                        Log($"⚠ [SyncTool] STALE DESTINATION REUSE DETECTED — tool sent \"{newDest}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
-                        _engine.ClearVerifiedAddress("destination");
-                        _engine.ClearFareResult();
-                        _engine.ForceState(CollectionState.CollectingDestination);
+                        // Same pattern as pickup: if already verified, jump to re-readback, not re-collection
+                        if (_engine.VerifiedDestination != null)
+                        {
+                            Log($"⚠ [SyncTool] STALE DESTINATION REUSE — but address already verified. Jumping to VerifyingDestination for re-readback.");
+                            _engine.ClearFareResult();
+                            _engine.ForceState(CollectionState.VerifyingDestination);
+                        }
+                        else
+                        {
+                            Log($"⚠ [SyncTool] STALE DESTINATION REUSE DETECTED — tool sent \"{newDest}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
+                            _engine.ClearVerifiedAddress("destination");
+                            _engine.ClearFareResult();
+                            _engine.ForceState(CollectionState.CollectingDestination);
+                        }
                         EmitCurrentInstruction();
                         return BuildSyncResponse("stale_reuse_detected", slotsUpdated);
                     }

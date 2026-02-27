@@ -127,8 +127,20 @@ public static class SlotValidator
         "ta ta", "ta-ta", "tata", "ciao", "take care", "have a good day"
     };
 
+    // Politeness phrases that should be ignored (not rejected) when collecting passengers
+    private static readonly HashSet<string> PolitenessFiller = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "thank you", "thanks", "thanks much", "thank you much", "thank you very much",
+        "many thanks", "much appreciated", "thanks a lot", "cheers", "ta",
+        "alright", "okay", "ok", "right", "sure", "yes please", "yes", "yeah"
+    };
+
     private static string? ValidatePassengers(string lower)
     {
+        // Ignore politeness phrases — don't reject, just treat as non-answer
+        if (PolitenessFiller.Contains(lower.TrimEnd('.', '!', '?', ',')))
+            return "filler";
+
         // Reject goodbye phrases before number extraction
         if (GoodbyePhrases.Contains(lower.TrimEnd('.', '!', '?', ',')))
             return "goodbye_not_passengers";
