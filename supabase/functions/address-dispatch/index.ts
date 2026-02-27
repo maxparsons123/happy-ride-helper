@@ -370,7 +370,7 @@ serve(async (req) => {
       throw new Error("LOVABLE_API_KEY is not configured");
     }
 
-    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", adaReadback="${ada_readback || ''}", adaQuestion="${ada_question ? 'yes' : 'no'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}", callerArea="${caller_area || ''}"`);
+    console.log(`📍 Address dispatch request: pickup="${pickup}", dest="${destination}", phone="${phone}", time="${pickup_time || 'not provided'}", adaReadback="${ada_readback || ''}", adaQuestion="${ada_question ? 'yes' : 'no'}", spokenPickupNum="${pickup_house_number || ''}", spokenDestNum="${destination_house_number || ''}", spokenPickupPC="${pickup_postcode || ''}", spokenDestPC="${destination_postcode || ''}", callerArea="${caller_area || ''}", rawTranscript="${raw_transcript || ''}", rawDestTranscript="${raw_destination_transcript || ''}"`);
 
 
     // Look up caller history from database
