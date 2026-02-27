@@ -55,12 +55,24 @@ public static class CorrectionDetector
     /// <param name="transcript">Raw caller transcript</param>
     /// <param name="currentSlot">The slot currently being collected (fallback target)</param>
     /// <param name="filledSlots">Which slots already have values (corrections only apply to filled slots)</param>
+    // Farewell/exit phrases — these should NEVER be treated as corrections
+    private static readonly string[] FarewellPhrases =
+    [
+        "have to go", "got to go", "gotta go", "need to go", "i have to leave",
+        "goodbye", "good bye", "bye bye", "see you", "talk later",
+        "have a good", "have a nice", "take care"
+    ];
+
     public static CorrectionMatch? Detect(string transcript, string? currentSlot, IReadOnlySet<string> filledSlots)
     {
         if (string.IsNullOrWhiteSpace(transcript))
             return null;
 
         var lower = transcript.ToLowerInvariant().Trim();
+
+        // Step 0: Reject farewell/exit speech — "I'm sorry but I have to go" is NOT a correction
+        if (FarewellPhrases.Any(p => lower.Contains(p)))
+            return null;
 
         // Step 1: Check if transcript contains a correction trigger
         var hasCorrection = CorrectionPrefixes.Any(p => lower.Contains(p));

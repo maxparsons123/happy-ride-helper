@@ -1516,6 +1516,45 @@ public class CleanCallSession
             return BuildSyncResponse("ok", slotsUpdated);
         }
 
+        // Mid-collection address correction: pickup was corrected while collecting a later slot
+        // (e.g., during CollectingPassengers or CollectingPickupTime).
+        // Must clear verified address and re-verify.
+        if (slotsUpdated.Contains("pickup") && currentState > CollectionState.CollectingPickup && currentState < CollectionState.ReadyForExtraction)
+        {
+            var newPickup = _engine.RawData.PickupRaw ?? "";
+            var existingPickup = _engine.VerifiedPickup?.Address ?? "";
+            bool pickupActuallyChanged = !existingPickup.StartsWith(newPickup, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(newPickup.Trim(), existingPickup.Trim(), StringComparison.OrdinalIgnoreCase);
+            if (pickupActuallyChanged)
+            {
+                Log($"[SyncTool] Mid-collection pickup correction (state={currentState}): \"{newPickup}\" differs from verified \"{existingPickup}\" — re-verifying");
+                _engine.ClearVerifiedAddress("pickup");
+                _engine.ClearFareResult();
+                _engine.ForceState(CollectionState.VerifyingPickup);
+                EmitCurrentInstruction();
+                return BuildSyncResponse("ok", slotsUpdated);
+            }
+        }
+
+        // Mid-collection destination correction
+        if (slotsUpdated.Contains("destination") && !slotsUpdated.Contains("pickup") &&
+            currentState > CollectionState.CollectingDestination && currentState < CollectionState.ReadyForExtraction)
+        {
+            var newDest = _engine.RawData.DestinationRaw ?? "";
+            var existingDest = _engine.VerifiedDestination?.Address ?? "";
+            bool destActuallyChanged = !existingDest.StartsWith(newDest, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(newDest.Trim(), existingDest.Trim(), StringComparison.OrdinalIgnoreCase);
+            if (destActuallyChanged)
+            {
+                Log($"[SyncTool] Mid-collection destination correction (state={currentState}): \"{newDest}\" differs from verified \"{existingDest}\" — re-verifying");
+                _engine.ClearVerifiedAddress("destination");
+                _engine.ClearFareResult();
+                _engine.ForceState(CollectionState.VerifyingDestination);
+                EmitCurrentInstruction();
+                return BuildSyncResponse("ok", slotsUpdated);
+            }
+        }
+
         if (slotsUpdated.Contains("destination") && !slotsUpdated.Contains("pickup") &&
             currentState <= CollectionState.CollectingDestination)
         {
@@ -2540,6 +2579,12 @@ public class CleanCallSession
             transcript.ToLowerInvariant(), @"[,\.\!\?;:]+", " ").Trim();
         // Also collapse multiple spaces
         lower = System.Text.RegularExpressions.Regex.Replace(lower, @"\s+", " ");
+
+        // Farewell/exit speech is NEVER a correction — "I'm sorry but I have to go" etc.
+        if (lower.Contains("have to go") || lower.Contains("got to go") || lower.Contains("gotta go") ||
+            lower.Contains("need to go") || lower.Contains("goodbye") || lower.Contains("bye bye") ||
+            lower.Contains("have a good") || lower.Contains("take care"))
+            return false;
         
         // Leading "no" is a strong correction signal (e.g., "no Morrison's Supermarket")
         var startsWithNo = lower.StartsWith("no ") || lower == "no";
