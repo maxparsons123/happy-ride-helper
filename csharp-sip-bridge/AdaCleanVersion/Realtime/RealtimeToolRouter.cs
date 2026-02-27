@@ -264,6 +264,7 @@ public sealed class RealtimeToolRouter
             Log($"⚠ Dispatch error: {ex.Message}");
             var failEvent = new BackendResultEvent(BackendResultType.Dispatch, Ok: false, Error: ex.Message);
             var nextAction = _engine.Step(failEvent);
+            OnStageChanged?.Invoke(_engine.State.Stage);
             await ExecuteFollowUpAsync(nextAction);
         }
     }
