@@ -117,4 +117,23 @@ public static class CleanBridgeFactory
             await client.DisposeAsync();
         }
     }
+
+    /// <summary>
+    /// Maps DeterministicBookingEngine Stage → CallStateEngine CollectionState.
+    /// Returns null for stages that have no meaningful session-level equivalent.
+    /// </summary>
+    private static CollectionState? MapStageToCollectionState(Stage stage) => stage switch
+    {
+        Stage.Start => CollectionState.Greeting,
+        Stage.CollectPickup => CollectionState.CollectingPickup,
+        Stage.CollectDropoff => CollectionState.CollectingDestination,
+        Stage.CollectPassengers => CollectionState.CollectingPassengers,
+        Stage.CollectTime => CollectionState.CollectingPickupTime,
+        Stage.ConfirmDetails => CollectionState.AwaitingConfirmation,
+        Stage.Dispatching => CollectionState.Dispatched,
+        Stage.Booked => CollectionState.Dispatched,
+        Stage.End => CollectionState.Ending,
+        Stage.Escalate => CollectionState.Ending,
+        _ => null
+    };
 }
