@@ -12,7 +12,7 @@ namespace AdaCleanVersion;
 
 /// <summary>
 /// Factory that wires up the full clean architecture stack.
-/// Creates CleanSipBridge with StructureOnlyEngine + FareGeocodingService,
+/// Creates CleanSipBridge with DirectBookingBuilder + FareGeocodingService,
 /// and auto-spawns OpenAiRealtimeClient per call for bidirectional audio.
 /// </summary>
 public static class CleanBridgeFactory
@@ -22,10 +22,7 @@ public static class CleanBridgeFactory
     /// </summary>
     public static CleanSipBridge Create(CleanAppSettings settings, ILogger logger, HttpClient? sharedClient = null)
     {
-        var extractionService = new StructureOnlyEngine(
-            openAiApiKey: settings.OpenAi.ApiKey,
-            logger: logger,
-            httpClient: sharedClient);
+        var extractionService = new DirectBookingBuilder(logger);
 
         var fareService = new FareGeocodingService(
             supabaseUrl: settings.SupabaseUrl,
