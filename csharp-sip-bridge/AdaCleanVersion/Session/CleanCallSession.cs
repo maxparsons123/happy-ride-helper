@@ -1141,13 +1141,30 @@ public class CleanCallSession
 
         var next = _engine.RawData.NextMissingSlot();
 
+        // When the engine is in a Verifying state, override next_required to indicate
+        // verification is pending. Without this, the AI sees "next_required":"destination"
+        // and asks for the destination instead of performing the readback.
+        var engineState = _engine.State;
+        string nextRequired;
+        if (engineState == Engine.CollectionState.VerifyingPickup)
+            nextRequired = "verifying_pickup";
+        else if (engineState == Engine.CollectionState.VerifyingDestination)
+            nextRequired = "verifying_destination";
+        else
+            nextRequired = next ?? "all_collected";
+
         return new
         {
             status,
             updated = updatedSlots ?? new List<string>(),
             booking_state = state,
-            next_required = next ?? "all_collected",
-            engine_state = _engine.State.ToString()
+            next_required = nextRequired,
+            engine_state = engineState.ToString(),
+            action = engineState == Engine.CollectionState.VerifyingPickup
+                ? "VERIFY pickup address by reading it back to caller"
+                : engineState == Engine.CollectionState.VerifyingDestination
+                    ? "VERIFY destination address by reading it back to caller"
+                    : (string?)null
         };
     }
 
