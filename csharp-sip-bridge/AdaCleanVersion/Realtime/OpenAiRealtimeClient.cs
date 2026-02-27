@@ -351,8 +351,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     "CRITICAL: Include ALL fields the caller mentioned in their utterance — if they say " +
                     "'from X going to Y with 3 passengers', set pickup, destination, AND passengers in ONE call. " +
                     "NEVER split a compound utterance into multiple calls or ignore mentioned fields. " +
-                    "CHANGE DETECTION: If the caller corrects ANY previously provided detail, you MUST call this tool " +
-                    "IMMEDIATELY with the corrected value AND explain what changed in the 'interpretation' field.",
+                    "CORRECTION OVERRIDE RULE: If the caller says ANY new pickup or destination value, you MUST: " +
+                    "1) Replace the previous value entirely. " +
+                    "2) NEVER reuse any prior address value. " +
+                    "3) NEVER leave a field unchanged if the caller clearly provided a new one. " +
+                    "4) The tool arguments must reflect EXACTLY what was spoken in the latest utterance. " +
+                    "5) When a correction occurs, you MUST explain the change in the 'interpretation' field. " +
+                    "Failure to overwrite stale values is a system error.",
                 parameters = new
                 {
                     type = "object",
@@ -360,11 +365,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     {
                         ["caller_name"] = new { type = "string", description = "Caller's name" },
                         ["caller_area"] = new { type = "string", description = "Caller's self-reported area/district (e.g. 'Earlsdon', 'Tile Hill'). Used as location bias for address resolution." },
-                        ["pickup"] = new { type = "string", description = "Pickup address VERBATIM from caller's speech. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
-                        ["destination"] = new { type = "string", description = "Destination address VERBATIM from caller's speech. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
+                        ["pickup"] = new { type = "string", description = "Pickup address — MUST be copied EXACTLY as heard in the transcript. Do NOT normalize. Do NOT substitute similar place names. Do NOT autocomplete. Do NOT reuse previous values. The value must match the transcript character-for-character, including unusual names or partial phrases. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
+                        ["destination"] = new { type = "string", description = "Destination address — MUST be copied EXACTLY as heard in the transcript. Do NOT normalize. Do NOT substitute similar place names. Do NOT autocomplete. Do NOT reuse previous values. The value must match the transcript character-for-character, including unusual names or partial phrases. MUST include house/flat numbers exactly as spoken. NEVER strip house numbers." },
                         ["passengers"] = new { type = "integer", description = "Number of passengers" },
                         ["pickup_time"] = new { type = "string", description = "Pickup time in YYYY-MM-DD HH:MM format (24h clock) or 'ASAP'. Use REFERENCE_DATETIME to resolve relative times." },
-                        ["interpretation"] = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, explain what changed." },
+                        ["interpretation"] = new { type = "string", description = "Brief explanation of what you understood from the caller's speech. If this is a CORRECTION, prefix with [CORRECTION:fieldname] and explain what changed from what to what." },
+                        ["last_utterance"] = new { type = "string", description = "The FULL raw transcript of the caller's latest speech. MUST match the transcript exactly, word-for-word. This is mandatory for traceability." },
                         ["special_instructions"] = new { type = "string", description = "Any special requests or notes the caller wants to add." }
                     }
                 }

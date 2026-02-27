@@ -1088,6 +1088,14 @@ public class CleanCallSession
             Log($"[SyncTool] interpretation=\"{interp}\"");
         }
 
+        // FIX 3: Log last_utterance for forensic traceability
+        string? lastUtterance = null;
+        if (TryGetArg(args, "last_utterance", out var utterance) && !string.IsNullOrWhiteSpace(utterance))
+        {
+            lastUtterance = utterance;
+            Log($"[SyncTool] last_utterance=\"{utterance}\"");
+        }
+
         if (slotsUpdated.Count == 0)
         {
             Log("[SyncTool] No slots updated — returning current state");
@@ -1125,6 +1133,16 @@ public class CleanCallSession
                 }
                 else
                 {
+                    // FIX 4: Stale detection for pickup
+                    if (!string.IsNullOrWhiteSpace(lastUtterance) && TranscriptSuggestsAddressChange(lastUtterance))
+                    {
+                        Log($"⚠ [SyncTool] STALE PICKUP REUSE DETECTED — tool sent \"{newPickup}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
+                        _engine.ClearVerifiedAddress("pickup");
+                        _engine.FareResult = null;
+                        _engine.ForceState(CollectionState.CollectingPickup);
+                        EmitCurrentInstruction();
+                        return BuildSyncResponse("stale_reuse_detected", slotsUpdated);
+                    }
                     Log($"[SyncTool] Pickup re-sent but unchanged — ignoring mid-fare correction (new=\"{newPickup}\", verified=\"{existingPickup}\")");
                 }
             }
@@ -1142,6 +1160,16 @@ public class CleanCallSession
                 }
                 else
                 {
+                    // FIX 4: Stale detection — if transcript suggests a change but tool reused old value
+                    if (!string.IsNullOrWhiteSpace(lastUtterance) && TranscriptSuggestsAddressChange(lastUtterance))
+                    {
+                        Log($"⚠ [SyncTool] STALE DESTINATION REUSE DETECTED — tool sent \"{newDest}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
+                        _engine.ClearVerifiedAddress("destination");
+                        _engine.FareResult = null;
+                        _engine.ForceState(CollectionState.CollectingDestination);
+                        EmitCurrentInstruction();
+                        return BuildSyncResponse("stale_reuse_detected", slotsUpdated);
+                    }
                     Log($"[SyncTool] Destination re-sent but unchanged — ignoring mid-fare correction (new=\"{newDest}\", verified=\"{existingDest}\")");
                 }
             }
@@ -2065,6 +2093,47 @@ public class CleanCallSession
                lower.Contains("correct") || lower.Contains("instead") || lower.Contains("it's not") ||
                lower.Contains("that's not") || lower.Contains("no it's") || lower.Contains("no its") ||
                lower.Contains("not dover") || lower.Contains("not that one") ||
-               lower.Contains("hang on") || lower.Contains("hold on") || lower.Contains("update");
+                lower.Contains("hang on") || lower.Contains("hold on") || lower.Contains("update");
+    }
+
+    /// <summary>
+    /// FIX 4: Detects if a caller transcript contains signals that they're providing a NEW address,
+    /// even though the tool reused the old value (stale slot carryover).
+    /// Checks for correction keywords + presence of proper nouns / place-like tokens.
+    /// </summary>
+    private static bool TranscriptSuggestsAddressChange(string transcript)
+    {
+        if (string.IsNullOrWhiteSpace(transcript)) return false;
+
+        var lower = transcript.ToLowerInvariant().Trim();
+
+        // Must contain correction signal words
+        bool hasCorrectionSignal =
+            lower.StartsWith("no") || lower.Contains("actually") || lower.Contains("change") ||
+            lower.Contains("sorry") || lower.Contains("wrong") || lower.Contains("instead") ||
+            lower.Contains("not that") || lower.Contains("i meant") || lower.Contains("it's not") ||
+            lower.Contains("destination is") || lower.Contains("pickup is") ||
+            lower.Contains("going to") || lower.Contains("heading to") ||
+            lower.Contains("take me to") || lower.Contains("from");
+
+        if (!hasCorrectionSignal) return false;
+
+        // Must also contain address-like content (proper noun heuristic:
+        // words with capital letters that aren't common filler)
+        var words = transcript.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var properNouns = words.Count(w =>
+            w.Length > 1 &&
+            char.IsUpper(w[0]) &&
+            !IsCommonWord(w.ToLowerInvariant()));
+
+        return properNouns >= 1;
+    }
+
+    private static bool IsCommonWord(string word)
+    {
+        return word is "the" or "to" or "from" or "is" or "it" or "my" or "no" or "not" or
+            "yes" or "and" or "or" or "on" or "in" or "at" or "of" or "for" or "it's" or
+            "i" or "i'm" or "that" or "that's" or "this" or "sorry" or "actually" or
+            "please" or "can" or "you" or "we" or "going" or "take" or "me" or "want";
     }
 }
