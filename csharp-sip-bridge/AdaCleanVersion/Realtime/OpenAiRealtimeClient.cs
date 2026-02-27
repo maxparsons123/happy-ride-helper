@@ -72,6 +72,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// </summary>
     private volatile bool _toolCalledInResponse;
 
+    /// <summary>
+    /// Last raw Whisper transcript from input_audio_transcription.completed.
+    /// This is the ACTUAL STT output, NOT the AI's reinterpretation.
+    /// Used to override last_utterance in tool calls for accurate POI fuzzy matching.
+    /// </summary>
+    private volatile string? _lastWhisperTranscript;
+
     // Mic gate buffer: stores ALL gated audio; only trailing speech frames are flushed
     private readonly List<byte[]> _micGateBuffer = new();
     private readonly bool[] _micGateEnergy = new bool[0]; // resized dynamically
@@ -709,6 +716,7 @@ Never assume previous values remain valid.
             // ── Barge-in: immediately cut everything and ungate (with debounce) ──
             case "input_audio_buffer.speech_started":
                 _toolCalledInResponse = false; // Reset for new turn
+                _lastWhisperTranscript = null; // Reset Whisper transcript for new turn
                 var now = Environment.TickCount64;
                 var elapsed = now - _lastBargeInTick;
                 if (elapsed < 250)
@@ -801,6 +809,9 @@ Never assume previous values remain valid.
         var transcript = root.GetProperty("transcript").GetString();
         if (string.IsNullOrWhiteSpace(transcript)) return Task.CompletedTask;
 
+        // Store raw Whisper transcript BEFORE any AI reinterpretation
+        _lastWhisperTranscript = transcript;
+
         Log($"👤 Caller: {transcript}");
 
         // If a tool call already handled this turn's data, skip transcript processing
@@ -889,6 +900,13 @@ Never assume previous values remain valid.
         {
             Log($"⚠ Tool args parse error: {ex.Message}");
             args = new();
+        }
+
+        // Inject the raw Whisper transcript so the session can use it for POI matching
+        // instead of the AI's reinterpretation in last_utterance
+        if (_lastWhisperTranscript != null)
+        {
+            args["whisper_transcript"] = _lastWhisperTranscript;
         }
 
         // Route to session for processing

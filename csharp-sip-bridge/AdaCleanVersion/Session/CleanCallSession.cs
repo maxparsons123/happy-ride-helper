@@ -1115,13 +1115,28 @@ public class CleanCallSession
         {
             lastUtterance = utterance;
             Log($"[SyncTool] last_utterance=\"{utterance}\"");
+        }
 
-            // Store raw transcript alongside the AI-interpreted address so geocoding
-            // can cross-check against zone_pois for STT-garbled POI names.
+        // Use the REAL Whisper transcript (injected by OpenAiRealtimeClient) for POI matching,
+        // NOT the AI's last_utterance which may be garbled (e.g., "Akis" → "Arcades").
+        // Fall back to last_utterance if whisper_transcript is unavailable.
+        string? whisperTranscript = null;
+        if (TryGetArg(args, "whisper_transcript", out var wt) && !string.IsNullOrWhiteSpace(wt))
+        {
+            whisperTranscript = wt;
+            if (whisperTranscript != lastUtterance)
+                Log($"[SyncTool] whisper_transcript=\"{whisperTranscript}\" (differs from AI last_utterance)");
+        }
+
+        // Store raw Whisper transcript for zone_pois fuzzy matching during geocoding.
+        // Whisper transcript is preferred because the AI often garbles POI names.
+        var rawTranscriptForPoi = whisperTranscript ?? lastUtterance;
+        if (!string.IsNullOrWhiteSpace(rawTranscriptForPoi))
+        {
             if (slotsUpdated.Contains("pickup"))
-                _engine.RawData.PickupLastUtterance = utterance;
+                _engine.RawData.PickupLastUtterance = rawTranscriptForPoi;
             if (slotsUpdated.Contains("destination"))
-                _engine.RawData.DestinationLastUtterance = utterance;
+                _engine.RawData.DestinationLastUtterance = rawTranscriptForPoi;
         }
 
         if (slotsUpdated.Count == 0)
