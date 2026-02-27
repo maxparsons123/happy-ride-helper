@@ -7,101 +7,59 @@ using SIPSorcery.Net;
 
 namespace AdaCleanVersion.Audio;
 
-/// <summary>
-/// G.711 RTP playout engine v12.2 — codec-agnostic (supports PCMU and PCMA).
-///
-/// Features:
-///   - High-precision 20ms tick via Windows WaitableTimer (falls back to Thread.Sleep on Linux)
-///   - ConcurrentQueue frame pool with bounded size to prevent memory growth
-///   - Split cold-start (80ms) vs mid-stream resume (60ms) thresholds
-///   - Grace period: tolerates up to 3 empty ticks (60ms) before entering full buffering
-///   - Circuit breaker: stops sending after 10 consecutive RTP failures
-///   - Hard-cut barge-in via _clearRequested flag (synchronous drain at top of loop)
-///   - Typing sound fill during buffering pauses
-///   - Epoch guard: Clear() increments _clearEpoch; frames stamped with stale epoch are dropped
-/// </summary>
 public sealed class G711RtpPlayout : IDisposable
 {
     private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
     [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint uPeriod);
     [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr CreateWaitableTimerExW(IntPtr lpAttr, IntPtr lpName, uint dwFlags, uint dwAccess);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetWaitableTimer(IntPtr hTimer, ref long lpDueTime, int lPeriod, IntPtr pfn, IntPtr lpArg, bool fResume);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMs);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObj);
 
-    private const int FrameSize = 160;          // 20ms @ 8kHz
-    private const int ColdStartThresholdFrames = 4;   // 80ms — fast greeting start
-    private const int ResumeThresholdFrames = 3;       // 60ms for mid-stream resume — minimizes warble
-    private const int GracePeriodTicks = 3;            // tolerate 3 empty ticks (60ms) before entering buffering
-    private const int MaxPoolSize = 200;
-    private const int MaxSendErrors = 10;
+    private const int FrameSize = 160; // 20ms @ 8kHz
+
+    private readonly RTPSession _rtpSession;
+    private readonly int _payloadType;
+    private readonly uint _ssrc;
+    private readonly byte[] _silence = new byte[FrameSize];
+    private readonly ConcurrentQueue<byte[]> _queue = new();
+
+    private Thread? _thread;
+    private volatile bool _running;
+    private ushort _sequence;
+    private uint _timestamp;
+    private IntPtr _timer;
+    private bool _useTimer;
 
     private static readonly double NsPerTick = 1_000_000_000.0 / Stopwatch.Frequency;
     private static readonly long TicksPerFrame = (long)(20_000_000.0 / NsPerTick);
 
-    private readonly RTPSession _rtpSession;
-    private readonly G711CodecType _codec;
-    private readonly int _payloadType;
-    private readonly byte _silenceByte;
-
-    private readonly ConcurrentQueue<(byte[] data, int epoch)> _q = new();
-    private readonly ConcurrentQueue<byte[]> _framePool = new();
-    private volatile int _poolCount;
-    private readonly byte[] _silence = new byte[FrameSize];
-
-    private byte[] _acc = new byte[8192];
-    private int _accCount;
-    private readonly object _accLock = new();
-
-    private Thread? _thread;
-    private volatile bool _running;
-    private volatile int _queueCount;
-    private volatile bool _clearRequested;
-    private volatile int _clearEpoch;
-    private bool _buffering = true;
-    private bool _hasPlayedAudio;
-    private int _emptyTickCount;           // tracks consecutive empty ticks for grace period
-    private IntPtr _timer;
-    private bool _useTimer;
-
-    private int _sendErrorCount;
-
-    private readonly TypingSoundGenerator _typingSound;
-    private volatile bool _typingSoundsEnabled = true;
-
-    public event Action? OnQueueEmpty;
     public event Action<string>? OnLog;
 
-    public int QueuedFrames => Volatile.Read(ref _queueCount);
-    public bool TypingSoundsEnabled { get => _typingSoundsEnabled; set => _typingSoundsEnabled = value; }
-    public G711CodecType Codec => _codec;
-
-    public G711RtpPlayout(RTPSession rtpSession, G711CodecType codec = G711CodecType.PCMU)
+    public G711RtpPlayout(RTPSession session, G711CodecType codec)
     {
-        _rtpSession = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
-        _codec = codec;
+        _rtpSession = session;
         _payloadType = G711Codec.PayloadType(codec);
-        _silenceByte = G711Codec.SilenceByte(codec);
-        _typingSound = new TypingSoundGenerator(codec);
-        Array.Fill(_silence, _silenceByte);
+        _ssrc = session.GetRtpChannel().Ssrc;
+        _sequence = (ushort)Random.Shared.Next(ushort.MaxValue);
+        _timestamp = (uint)Random.Shared.Next();
+        Array.Fill(_silence, G711Codec.SilenceByte(codec));
     }
-
-    // ─── Public API ─────────────────────────────────────────
 
     public void Start()
     {
         if (_running) return;
         _running = true;
-        _buffering = true;
-        _hasPlayedAudio = false;
-        _emptyTickCount = 0;
-        _sendErrorCount = 0;
 
         if (IsWindows)
         {
@@ -117,98 +75,43 @@ public sealed class G711RtpPlayout : IDisposable
         _thread = new Thread(Loop)
         {
             IsBackground = true,
-            Priority = ThreadPriority.AboveNormal,
-            Name = $"G711RtpPlayout-v12.2-{_codec}"
+            Priority = ThreadPriority.AboveNormal
         };
         _thread.Start();
-        SafeLog($"[RTP] G711RtpPlayout v12.2 started ({_codec}, PT={_payloadType})");
+        Log("RTP v13 started (manual timestamp control)");
     }
 
     public void Stop()
     {
         _running = false;
         try { _thread?.Join(500); } catch { }
-        _thread = null;
-
         if (IsWindows)
         {
             try { timeEndPeriod(1); } catch { }
-            var t = _timer;
-            _timer = IntPtr.Zero;
-            if (t != IntPtr.Zero) { try { CloseHandle(t); } catch { } }
-        }
-
-        while (_q.TryDequeue(out var item))
-        {
-            Interlocked.Decrement(ref _queueCount);
-            ReturnFrame(item.data);
+            if (_timer != IntPtr.Zero) CloseHandle(_timer);
         }
     }
 
     public void Dispose() => Stop();
 
-    /// <summary>
-    /// Hard-cut barge-in: increments epoch and signals synchronous drain.
-    /// </summary>
+    public void BufferG711(byte[] data)
+    {
+        if (data == null || data.Length == 0) return;
+
+        int offset = 0;
+        while (offset + FrameSize <= data.Length)
+        {
+            var frame = new byte[FrameSize];
+            Buffer.BlockCopy(data, offset, frame, 0, FrameSize);
+            _queue.Enqueue(frame);
+            offset += FrameSize;
+        }
+    }
+
     public void Clear()
     {
-        Interlocked.Increment(ref _clearEpoch);
-        Volatile.Write(ref _clearRequested, true);
-        lock (_accLock) _accCount = 0;
-        _typingSound.Reset();
+        while (_queue.TryDequeue(out _)) { }
     }
-
-    public void Flush()
-    {
-        lock (_accLock)
-        {
-            if (_accCount <= 0) return;
-            var frame = RentFrame();
-            Array.Fill(frame, _silenceByte);
-            Buffer.BlockCopy(_acc, 0, frame, 0, _accCount);
-            EnqueueFrame(frame);
-            _accCount = 0;
-        }
-    }
-
-    /// <summary>
-    /// Buffer G.711 encoded audio data. Automatically frames into 160-byte chunks.
-    /// </summary>
-    public void BufferG711(byte[] g711Data)
-    {
-        if (g711Data == null || g711Data.Length == 0) return;
-
-        var epoch = Volatile.Read(ref _clearEpoch);
-
-        lock (_accLock)
-        {
-            int needed = _accCount + g711Data.Length;
-            if (needed > _acc.Length)
-            {
-                int newSize = Math.Min(Math.Max(_acc.Length * 2, needed), 65536);
-                Array.Resize(ref _acc, newSize);
-            }
-
-            Buffer.BlockCopy(g711Data, 0, _acc, _accCount, g711Data.Length);
-            _accCount += g711Data.Length;
-
-            while (_accCount >= FrameSize)
-            {
-                var frame = RentFrame();
-                Buffer.BlockCopy(_acc, 0, frame, 0, FrameSize);
-                _q.Enqueue((frame, epoch));
-                Interlocked.Increment(ref _queueCount);
-
-                _accCount -= FrameSize;
-                if (_accCount > 0) Buffer.BlockCopy(_acc, FrameSize, _acc, 0, _accCount);
-            }
-        }
-    }
-
-    /// <summary>Legacy compat alias.</summary>
-    public void BufferMuLaw(byte[] data) => BufferG711(data);
-
-    // ─── Playout Loop ───────────────────────────────────────
 
     private void Loop()
     {
@@ -216,9 +119,6 @@ public sealed class G711RtpPlayout : IDisposable
 
         while (_running)
         {
-            if (Volatile.Read(ref _clearRequested))
-                ExecuteClear();
-
             long now = Stopwatch.GetTimestamp();
             long wait = nextTick - now;
 
@@ -238,166 +138,52 @@ public sealed class G711RtpPlayout : IDisposable
                 }
                 else
                 {
-                    Thread.Yield();
+                    Thread.SpinWait(50);
                 }
 
                 continue;
             }
 
-            TickOnce();
+            Tick();
             nextTick += TicksPerFrame;
 
-            long after = Stopwatch.GetTimestamp();
-            if ((after - nextTick) * NsPerTick > 100_000_000)
-                nextTick = after + TicksPerFrame;
+            long drift = Stopwatch.GetTimestamp() - nextTick;
+            if (drift > TicksPerFrame * 5)
+                nextTick = Stopwatch.GetTimestamp() + TicksPerFrame;
         }
     }
 
-    private void TickOnce()
+    private void Tick()
     {
-        int q = Volatile.Read(ref _queueCount);
-        int currentEpoch = Volatile.Read(ref _clearEpoch);
+        if (!_queue.TryDequeue(out var frame))
+            frame = _silence;
 
-        if (_buffering)
-        {
-            int threshold = _hasPlayedAudio ? ResumeThresholdFrames : ColdStartThresholdFrames;
-            if (q < threshold)
-            {
-                var fillFrame = _typingSoundsEnabled && !_hasPlayedAudio
-                    ? _typingSound.NextFrame()
-                    : _silence;
-                Send(fillFrame);
-                return;
-            }
-            _buffering = false;
-            _hasPlayedAudio = true;
-            _emptyTickCount = 0;
-        }
-
-        if (_q.TryDequeue(out var item))
-        {
-            Interlocked.Decrement(ref _queueCount);
-            _emptyTickCount = 0;   // reset grace counter on successful dequeue
-
-            if (item.epoch != currentEpoch)
-            {
-                ReturnFrame(item.data);
-
-                if (_q.TryDequeue(out var next))
-                {
-                    Interlocked.Decrement(ref _queueCount);
-                    if (next.epoch == currentEpoch)
-                    {
-                        Send(next.data);
-                        ReturnFrame(next.data);
-                    }
-                    else
-                    {
-                        ReturnFrame(next.data);
-                        Send(_silence);
-                    }
-                }
-                else
-                {
-                    _buffering = true;
-                    _emptyTickCount = 0;
-                    Send(_silence);
-                }
-                return;
-            }
-
-            Send(item.data);
-            ReturnFrame(item.data);
-
-            // Don't enter buffering immediately — use grace period
-            if (Volatile.Read(ref _queueCount) == 0)
-            {
-                // Queue just emptied, but more frames may arrive within grace window
-                // Don't set _buffering yet — let grace ticks handle it
-            }
-        }
-        else
-        {
-            // Queue empty — use grace period before entering full buffering
-            _emptyTickCount++;
-
-            if (_emptyTickCount <= GracePeriodTicks)
-            {
-                // Within grace period: send silence but stay in playing mode
-                // so we resume instantly when the next frame arrives
-                Send(_silence);
-            }
-            else
-            {
-                // Grace period exhausted — enter full buffering
-                _buffering = true;
-                _emptyTickCount = 0;
-                Send(_silence);
-                if (_hasPlayedAudio)
-                {
-                    try { OnQueueEmpty?.Invoke(); } catch { }
-                }
-            }
-        }
+        SendRtp(frame);
     }
 
-    private void Send(byte[] payload160)
+    private void SendRtp(byte[] payload)
     {
-        if (_sendErrorCount >= MaxSendErrors) return;
-
         try
         {
-            _rtpSession.SendAudio(FrameSize, payload160);
-            _sendErrorCount = 0;
+            var header = new RTPHeader(
+                _payloadType,
+                _sequence++,
+                _timestamp,
+                _ssrc);
+
+            _timestamp += FrameSize; // +160 samples
+
+            var packet = new RTPPacket(header, payload);
+            _rtpSession.SendRtpPacket(packet);
         }
         catch (Exception ex)
         {
-            if (Interlocked.Increment(ref _sendErrorCount) == MaxSendErrors)
-            {
-                SafeLog($"[RTP] Circuit breaker tripped after {MaxSendErrors} errors: {ex.Message}");
-            }
+            Log($"RTP send error: {ex.Message}");
         }
     }
 
-    private void ExecuteClear()
+    private void Log(string msg)
     {
-        while (_q.TryDequeue(out var item))
-        {
-            Interlocked.Decrement(ref _queueCount);
-            ReturnFrame(item.data);
-        }
-        _buffering = true;
-        _hasPlayedAudio = false;
-        _emptyTickCount = 0;
-        Volatile.Write(ref _clearRequested, false);
+        try { OnLog?.Invoke(msg); } catch { }
     }
-
-    // ─── Frame Pool ─────────────────────────────────────────
-
-    private byte[] RentFrame()
-    {
-        if (_framePool.TryDequeue(out var f))
-        {
-            Interlocked.Decrement(ref _poolCount);
-            return f;
-        }
-        return new byte[FrameSize];
-    }
-
-    private void ReturnFrame(byte[] f)
-    {
-        if (f.Length != FrameSize) return;
-        if (Volatile.Read(ref _poolCount) >= MaxPoolSize) return;
-        _framePool.Enqueue(f);
-        Interlocked.Increment(ref _poolCount);
-    }
-
-    private void EnqueueFrame(byte[] frame160)
-    {
-        var epoch = Volatile.Read(ref _clearEpoch);
-        _q.Enqueue((frame160, epoch));
-        Interlocked.Increment(ref _queueCount);
-    }
-
-    private void SafeLog(string msg) { try { OnLog?.Invoke(msg); } catch { } }
 }
