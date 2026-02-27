@@ -61,6 +61,7 @@ public static class CleanBridgeFactory
         // VoIPMediaSession extends RTPSession — cast to base for OpenAiRealtimeClient.
         RTPSession rtpSession = mediaSession;
 
+        // v5: Transport is created automatically (default WebSocketRealtimeTransport)
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,
             model: settings.OpenAi.Model,
