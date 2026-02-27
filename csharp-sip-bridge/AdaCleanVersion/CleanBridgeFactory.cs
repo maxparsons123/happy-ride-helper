@@ -17,9 +17,6 @@ namespace AdaCleanVersion;
 /// </summary>
 public static class CleanBridgeFactory
 {
-    /// <summary>
-    /// Build a fully-wired CleanSipBridge with auto-spawning Realtime clients.
-    /// </summary>
     public static CleanSipBridge Create(CleanAppSettings settings, ILogger logger, HttpClient? sharedClient = null)
     {
         var extractionService = new DirectBookingBuilder(logger);
@@ -36,12 +33,25 @@ public static class CleanBridgeFactory
             logger: logger,
             httpClient: sharedClient);
 
+        // IcabbiBookingService (if configured)
+        IcabbiBookingService? icabbiService = null;
+        if (!string.IsNullOrWhiteSpace(settings.IcabbiTenantBase))
+        {
+            icabbiService = new IcabbiBookingService(
+                tenantBase: settings.IcabbiTenantBase,
+                appKey: settings.IcabbiAppKey,
+                secretKey: settings.IcabbiSecretKey,
+                siteId: settings.IcabbiSiteId,
+                supabaseUrl: settings.SupabaseUrl,
+                supabaseKey: settings.SupabaseServiceRoleKey,
+                logger: logger);
+        }
+
         var bridge = new CleanSipBridge(logger, settings, extractionService, fareService, callerLookup);
 
-        // Auto-wire OpenAI Realtime client for each connected call
         bridge.OnCallConnected += (callId, rtpSession, session) =>
         {
-            _ = SpawnRealtimeClientAsync(callId, rtpSession, session, settings, logger, bridge);
+            _ = SpawnRealtimeClientAsync(callId, rtpSession, session, settings, logger, bridge, fareService, icabbiService);
         };
 
         return bridge;
@@ -53,36 +63,41 @@ public static class CleanBridgeFactory
         CleanCallSession session,
         CleanAppSettings settings,
         ILogger logger,
-        CleanSipBridge bridge)
+        CleanSipBridge bridge,
+        FareGeocodingService fareService,
+        IcabbiBookingService? icabbiService)
     {
-        // SIP is forced to PCMA-only — always use PCMA for OpenAI too
         var codec = G711CodecType.PCMA;
-
-        // VoIPMediaSession extends RTPSession — cast to base for OpenAiRealtimeClient.
         RTPSession rtpSession = mediaSession;
 
-        // v5: Transport is created automatically (default WebSocketRealtimeTransport)
+        // v8: Pure transport bridge — pass systemPrompt + callerPhone, not session
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,
             model: settings.OpenAi.Model,
             voice: settings.OpenAi.Voice,
             callId: callId,
+            systemPrompt: session.GetSystemPrompt(),
             rtpSession: rtpSession,
-            session: session,
             logger: logger,
+            fareService: fareService,
+            icabbiService: icabbiService,
+            callerPhone: session.CallerId,
             codec: codec);
 
         client.OnLog += msg => logger.LogInformation(msg);
-
-        // Proxy audio/barge-in events to bridge for UI consumers (e.g. Simli avatar)
         client.OnAudioOut += frame => bridge.RaiseAudioOut(frame);
         client.OnBargeIn += () => bridge.RaiseBargeIn();
+        client.OnTransfer += reason => logger.LogWarning($"[RT:{callId}] Transfer requested: {reason}");
+        client.OnHangup += reason =>
+        {
+            logger.LogInformation($"[RT:{callId}] Engine hangup: {reason}");
+            // Trigger SIP BYE via bridge if needed
+        };
 
         try
         {
             await client.ConnectAsync();
 
-            // Keep alive until RTP session closes
             rtpSession.OnRtpClosed += async (reason) =>
             {
                 logger.LogInformation($"[RT:{callId}] RTP closed — disposing Realtime client");
