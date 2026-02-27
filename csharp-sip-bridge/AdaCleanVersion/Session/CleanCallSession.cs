@@ -1174,14 +1174,14 @@ public class CleanCallSession
                 {
                     _engine.RawData.DestinationRaw = null;
                     _engine.ClearVerifiedAddress("destination");
-                    _engine.FareResult = null;
+                    _engine.ClearFareResult();
                     _engine.ForceState(CollectionState.CollectingDestination);
                 }
                 else
                 {
                     _engine.RawData.PickupRaw = null;
                     _engine.ClearVerifiedAddress("pickup");
-                    _engine.FareResult = null;
+                    _engine.ClearFareResult();
                     _engine.ForceState(CollectionState.CollectingPickup);
                 }
                 EmitCurrentInstruction();
@@ -1218,7 +1218,7 @@ public class CleanCallSession
                     {
                         Log($"⚠ [SyncTool] STALE PICKUP REUSE DETECTED — tool sent \"{newPickup}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
                         _engine.ClearVerifiedAddress("pickup");
-                        _engine.FareResult = null;
+                        _engine.ClearFareResult();
                         _engine.ForceState(CollectionState.CollectingPickup);
                         EmitCurrentInstruction();
                         return BuildSyncResponse("stale_reuse_detected", slotsUpdated);
@@ -1245,7 +1245,7 @@ public class CleanCallSession
                     {
                         Log($"⚠ [SyncTool] STALE DESTINATION REUSE DETECTED — tool sent \"{newDest}\" but transcript \"{lastUtterance}\" suggests a new address. Flagging for clarification.");
                         _engine.ClearVerifiedAddress("destination");
-                        _engine.FareResult = null;
+                        _engine.ClearFareResult();
                         _engine.ForceState(CollectionState.CollectingDestination);
                         EmitCurrentInstruction();
                         return BuildSyncResponse("stale_reuse_detected", slotsUpdated);
