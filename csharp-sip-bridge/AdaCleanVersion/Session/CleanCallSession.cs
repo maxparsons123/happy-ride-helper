@@ -1307,6 +1307,17 @@ public class CleanCallSession
             Log($"[SyncTool] Intent=confirm_booking ignored — state {_engine.State} not confirmable");
         }
 
+        // Handle explicit rejection during fare presentation
+        if (intent == "reject_booking" || intent == "reject_fare")
+        {
+            if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
+            {
+                Log($"[SyncTool] Intent={intent} in {_engine.State} — ending call gracefully");
+                _engine.EndCall(force: true);
+                return BuildSyncResponse("cancelled");
+            }
+        }
+
         // Handle explicit cancellation intent
         if (intent == "cancel_booking")
         {
@@ -1930,11 +1941,15 @@ public class CleanCallSession
             // Primary path: address-dispatch edge function with 3-way context
             if (_fareService != null)
             {
+                // Inject caller's area/city as bias to narrow geocoding search space
+                var biasCity = _callerContext?.ServiceArea
+                    ?? _callerContext?.LastPickup?.Split(',').LastOrDefault()?.Trim();
                 geocoded = await _fareService.GeocodeAddressAsync(
                     rawAddress, field, CallerId, ct,
                     adaReadback: adaReadback,
                     adaQuestion: adaQuestion,
-                    rawTranscript: rawTranscript);
+                    rawTranscript: rawTranscript,
+                    biasCity: biasCity);
             }
 
             // Fallback: local Gemini reconciler if primary failed
