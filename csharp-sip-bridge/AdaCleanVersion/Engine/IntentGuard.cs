@@ -9,6 +9,8 @@ namespace AdaCleanVersion.Engine;
 /// 
 /// Enforces critical actions when the AI model fails to call them,
 /// eliminating bugs where the model "understands" but skips the action.
+/// 
+/// This runs BEFORE the AI — if it resolves an intent, the AI is never consulted.
 /// </summary>
 public sealed class IntentGuard
 {
@@ -23,6 +25,7 @@ public sealed class IntentGuard
         CancelBooking,      // User wants to cancel existing booking
         AmendBooking,       // User wants to amend existing booking
         CheckStatus,        // User wants to check booking status
+        WantsToChange,      // User wants to change a slot (generic — "can I change", "wrong")
     }
 
     private static readonly Regex AffirmativePattern = new(
@@ -30,7 +33,7 @@ public sealed class IntentGuard
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex NegativePattern = new(
-        @"\b(no|nah|nope|not right|wrong|incorrect|change|cancel|don'?t|too (much|expensive|high)|actually)\b",
+        @"\b(no|nah|nope|not right|wrong|incorrect|change|cancel|don'?t|too (much|expensive|high)|actually|can i change|i want to change|let me change)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex NothingElsePattern = new(
@@ -38,7 +41,7 @@ public sealed class IntentGuard
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex CancelPattern = new(
-        @"\b(cancel|cancel\s*(it|that|the booking|my booking)|don'?t want|scrap it|forget it|remove it)\b",
+        @"\b(cancel|cancel\s*(it|that|the booking|my booking)|don'?t want|scrap it|forget it|remove it|never mind)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex AmendPattern = new(
@@ -62,6 +65,14 @@ public sealed class IntentGuard
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
+    /// "Change" patterns that indicate generic intent to modify without specifying what.
+    /// Distinct from NegativePattern — these don't imply rejection, just a desire to revise.
+    /// </summary>
+    private static readonly Regex ChangeIntentPattern = new(
+        @"\b(can i change|i want to change|let me change|i need to change|change (the|my)|wrong|that'?s? wrong|that'?s? not right|not correct|incorrect)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
     /// Resolve user intent based on current collection state and what they said.
     /// Maps CollectionState to the intent resolution logic.
     /// </summary>
@@ -78,12 +89,16 @@ public sealed class IntentGuard
             CollectionState.AwaitingConfirmation => ResolveFareResponse(text),
             CollectionState.Dispatched => ResolveAnythingElseResponse(text),
             CollectionState.AwaitingClarification => ResolvedIntent.SelectOption,
+            CollectionState.ManagingExistingBooking => ResolveManageBookingResponse(text),
+            CollectionState.AwaitingCancelConfirmation => ResolveCancelConfirmation(text),
             _ => ResolvedIntent.None
         };
     }
 
     private static ResolvedIntent ResolveFareResponse(string text)
     {
+        // Check for explicit change intent first — "can I change the pickup?" is NOT a rejection
+        if (ChangeIntentPattern.IsMatch(text)) return ResolvedIntent.WantsToChange;
         if (AffirmativePattern.IsMatch(text)) return ResolvedIntent.ConfirmBooking;
         if (NegativePattern.IsMatch(text)) return ResolvedIntent.RejectFare;
         return ResolvedIntent.None;
@@ -94,6 +109,26 @@ public sealed class IntentGuard
         if (NothingElsePattern.IsMatch(text)) return ResolvedIntent.EndCall;
         if (CurrentBookingActionPattern.IsMatch(text)) return ResolvedIntent.None;
         if (SomethingElsePattern.IsMatch(text)) return ResolvedIntent.NewBooking;
+        return ResolvedIntent.None;
+    }
+
+    private static ResolvedIntent ResolveManageBookingResponse(string text)
+    {
+        if (CancelPattern.IsMatch(text)) return ResolvedIntent.CancelBooking;
+        if (AmendPattern.IsMatch(text)) return ResolvedIntent.AmendBooking;
+        if (StatusPattern.IsMatch(text)) return ResolvedIntent.CheckStatus;
+        // Only resolve as NewBooking if explicitly mentions wanting a new booking —
+        // bare "yes" is ambiguous (could be confirming cancel/amend that Ada just asked about)
+        if (NewBookingPattern.IsMatch(text)) return ResolvedIntent.NewBooking;
+        return ResolvedIntent.None;
+    }
+
+    private static ResolvedIntent ResolveCancelConfirmation(string text)
+    {
+        // "Yes, cancel" → confirm cancellation (maps to CancelBooking)
+        if (AffirmativePattern.IsMatch(text)) return ResolvedIntent.CancelBooking;
+        // "No, don't cancel" → back to manage options
+        if (NegativePattern.IsMatch(text)) return ResolvedIntent.None; // Let engine revert
         return ResolvedIntent.None;
     }
 }
