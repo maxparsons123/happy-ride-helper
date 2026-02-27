@@ -612,8 +612,9 @@ public class CleanCallSession
             try
             {
                 var rawAddress = _engine.RawData.PickupRaw ?? "";
+                var rawTranscript = _engine.RawData.PickupLastUtterance;
                 Log($"Ada readback for pickup: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
-                await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText);
+                await RunInlineGeocodeAsync("pickup", rawAddress, ct, adaReadback: adaText, rawTranscript: rawTranscript);
             }
             finally { _geocodeInFlight = false; }
             return;
@@ -638,8 +639,9 @@ public class CleanCallSession
             try
             {
                 var rawAddress = _engine.RawData.DestinationRaw ?? "";
+                var rawTranscript = _engine.RawData.DestinationLastUtterance;
                 Log($"Ada readback for destination: \"{adaText}\" (raw STT: \"{rawAddress}\"){(_engine.IsRecalculating ? " [recalc-bypass]" : "")}");
-                await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText);
+                await RunInlineGeocodeAsync("destination", rawAddress, ct, adaReadback: adaText, rawTranscript: rawTranscript);
             }
             finally { _geocodeInFlight = false; }
             return;
@@ -1113,6 +1115,13 @@ public class CleanCallSession
         {
             lastUtterance = utterance;
             Log($"[SyncTool] last_utterance=\"{utterance}\"");
+
+            // Store raw transcript alongside the AI-interpreted address so geocoding
+            // can cross-check against zone_pois for STT-garbled POI names.
+            if (slotsUpdated.Contains("pickup"))
+                _engine.RawData.PickupLastUtterance = utterance;
+            if (slotsUpdated.Contains("destination"))
+                _engine.RawData.DestinationLastUtterance = utterance;
         }
 
         if (slotsUpdated.Count == 0)
@@ -1362,7 +1371,7 @@ public class CleanCallSession
     ///   1. Primary: address-dispatch edge function with 3-way context
     ///   2. Fallback: local Gemini reconciler (if edge function fails)
     /// </summary>
-    private async Task RunInlineGeocodeAsync(string field, string rawAddress, CancellationToken ct, string? adaReadback = null)
+    private async Task RunInlineGeocodeAsync(string field, string rawAddress, CancellationToken ct, string? adaReadback = null, string? rawTranscript = null)
     {
         if (_fareService == null && _reconciler == null)
         {
@@ -1387,7 +1396,8 @@ public class CleanCallSession
                 geocoded = await _fareService.GeocodeAddressAsync(
                     rawAddress, field, CallerId, ct,
                     adaReadback: adaReadback,
-                    adaQuestion: adaQuestion);
+                    adaQuestion: adaQuestion,
+                    rawTranscript: rawTranscript);
             }
 
             // Fallback: local Gemini reconciler if primary failed

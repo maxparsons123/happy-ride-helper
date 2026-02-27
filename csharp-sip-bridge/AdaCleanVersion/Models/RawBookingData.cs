@@ -19,10 +19,24 @@ public class RawBookingData
     public string? PickupGemini { get; set; }
 
     /// <summary>
+    /// Raw STT transcript (last_utterance) from when the pickup was spoken.
+    /// Preserved separately from PickupRaw (which is the AI interpretation).
+    /// Used to cross-check against zone_pois for STT-garbled POI names.
+    /// </summary>
+    public string? PickupLastUtterance { get; set; }
+
+    /// <summary>
     /// Gemini-cleaned version of destination address (from burst-dispatch).
     /// Used for Ada readback so she reads the AI-corrected version, not raw STT.
     /// </summary>
     public string? DestinationGemini { get; set; }
+
+    /// <summary>
+    /// Raw STT transcript (last_utterance) from when the destination was spoken.
+    /// Preserved separately from DestinationRaw (which is the AI interpretation).
+    /// Used to cross-check against zone_pois for STT-garbled POI names.
+    /// </summary>
+    public string? DestinationLastUtterance { get; set; }
 
     /// <summary>
     /// True when the caller provided multiple slots in a single utterance.
