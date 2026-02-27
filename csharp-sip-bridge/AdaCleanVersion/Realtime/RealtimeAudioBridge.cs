@@ -38,6 +38,7 @@ public sealed class RealtimeAudioBridge : IDisposable
     private readonly IRealtimeTransport _transport;
     private readonly MicGateController _micGate;
     private readonly CancellationToken _ct;
+    private readonly int _payloadType;
     private readonly byte _silenceByte;
 
     // Jitter buffer: ConcurrentQueue of exactly 160-byte frames
@@ -80,17 +81,11 @@ public sealed class RealtimeAudioBridge : IDisposable
         _transport = transport;
         _micGate = micGate;
         _ct = ct;
+        _payloadType = G711Codec.PayloadType(codec);
         _silenceByte = G711Codec.SilenceByte(codec);
 
         _mediaSession = mediaSession ?? (rtpSession as VoIPMediaSession)
             ?? throw new ArgumentException("A VoIPMediaSession is required for RTP playout");
-
-        // CRITICAL: Tell SIPSorcery which codec we're sending so it manages
-        // SSRC, sequence numbers, timestamps, and payload type correctly.
-        var sdpFormat = codec == G711CodecType.PCMA
-            ? SDPMediaFormatsEnum.PCMA
-            : SDPMediaFormatsEnum.PCMU;
-        _mediaSession.SetSendCodecFormat(new SDPAudioVideoMediaFormat(sdpFormat));
 
         // Wire RTP inbound
         rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
@@ -315,10 +310,11 @@ public sealed class RealtimeAudioBridge : IDisposable
                 wasPlaying = false;
             }
 
-            // Send RTP — let SIPSorcery manage SSRC/seq/timestamp/PT
+            // Send RTP via SendAudio — SIPSorcery manages seq/SSRC,
+            // we provide timestamp increment (160 samples = 20ms @ 8kHz)
             try
             {
-                _mediaSession.SendAudioFrame((uint)FrameSize, frame);
+                _mediaSession.SendAudio((uint)FrameSize, frame);
             }
             catch { /* RTP send failure — non-fatal */ }
 
