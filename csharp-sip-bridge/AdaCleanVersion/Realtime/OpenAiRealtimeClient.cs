@@ -60,7 +60,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>OpenAI finished sending audio deltas.</summary>
     private volatile bool _responseCompleted;
 
-    private sealed record PendingInstruction(string Text, bool IsReprompt);
+    private sealed record PendingInstruction(string Text, bool IsReprompt, bool IsSilent = false);
 
     /// <summary>Pending instruction to send after response.canceled arrives.</summary>
     private PendingInstruction? _pendingInstruction;
@@ -813,7 +813,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     turn_detection = vadConfig
                 }
             });
-            isSilent = IsSilentInstruction(pending.Text);
+            isSilent = IsSilentInstruction(pending.Text) || pending.IsSilent;
             Log($"📋 Pre-tool-result instruction applied (VAD: {vadConfig.type})");
         }
 
@@ -866,10 +866,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                instruction.Contains("Do NOT speak at all");
     }
 
-    private void OnSessionAiInstruction(string instruction, bool isReprompt)
+    private void OnSessionAiInstruction(string instruction, bool isReprompt, bool isSilent)
     {
         Log(isReprompt ? "📋 Queuing REPROMPT instruction update" : "📋 Queuing instruction update");
-        _ = StartInstructionSequenceAsync(new PendingInstruction(instruction, isReprompt));
+        _ = StartInstructionSequenceAsync(new PendingInstruction(instruction, isReprompt, isSilent));
     }
 
     /// <summary>
@@ -883,8 +883,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         {
             Interlocked.Exchange(ref _pendingInstruction, pending);
 
-            // Cancel any in-progress response — response.canceled event will trigger the rest
-            await SendJsonAsync(new { type = "response.cancel" });
+            // For silent instructions, don't cancel the active response — just
+            // let the fallback timer apply the session.update quietly.
+            if (!pending.IsSilent)
+            {
+                // Cancel any in-progress response — response.canceled event will trigger the rest
+                await SendJsonAsync(new { type = "response.cancel" });
+            }
 
             if (pending.IsReprompt)
             {
@@ -951,7 +956,9 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             // ── Silent State Suppression ──
             // For Extracting/Geocoding, do NOT send response.create.
             // This prevents Ada from speaking "your taxi is on its way" etc.
-            if (IsSilentInstruction(instruction))
+            // Also suppress when the caller explicitly flagged this instruction as silent
+            // (e.g., name→pickup transition where the AI already asked naturally).
+            if (IsSilentInstruction(instruction) || pending.IsSilent)
             {
                 Log($"📋 Silent instruction update sent (VAD: {vadConfig.type}) — NO response.create");
                 return;

@@ -299,7 +299,7 @@ public class CleanSipBridge : IDisposable
 
         session.OnLog += msg => Log(msg);
 
-        session.OnAiInstruction += (instruction, isReprompt) =>
+        session.OnAiInstruction += (instruction, isReprompt, isSilent) =>
         {
             Log(isReprompt ? $"🔒 REPROMPT: {instruction}" : $"📋 Instruction: {instruction}");
         };
