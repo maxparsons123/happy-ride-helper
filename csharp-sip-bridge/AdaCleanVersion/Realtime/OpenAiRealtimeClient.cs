@@ -135,11 +135,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         };
 
         // ── Tool router (engine + backend lambdas) ──
-        _tools = new RealtimeToolRouter(engine, _transport, geocodeFn, dispatchFn, _cts.Token);
+        _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token);
         _tools.OnLog += Log;
         _tools.OnInstruction += instruction => Log($"📋 Instruction: {instruction}");
         _tools.OnTransfer += reason => { try { OnTransfer?.Invoke(reason); } catch { } };
         _tools.OnHangup += reason => { try { OnHangup?.Invoke(reason); } catch { } };
+        _tools.OnStageChanged += stage => { try { OnStageChanged?.Invoke(stage); } catch { } };
     }
 
     // ─── Lifecycle ──────────────────────────────────────────
