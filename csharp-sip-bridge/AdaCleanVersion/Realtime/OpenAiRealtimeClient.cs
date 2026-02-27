@@ -508,7 +508,8 @@ Never assume previous values remain valid.
                     silence_duration_ms = 500
                 },
                 tools,
-                tool_choice = "auto"
+                tool_choice = "auto",
+                temperature = 0.7
             }
         };
 
