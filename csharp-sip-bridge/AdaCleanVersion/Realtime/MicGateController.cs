@@ -1,3 +1,5 @@
+using AdaCleanVersion.Audio;
+
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
@@ -10,8 +12,8 @@ public sealed class MicGateController
 {
     /// <summary>
     /// RMS energy threshold for barge-in detection.
-    /// Tuned for UK PSTN G.711 lines. Comfort noise sits ~200-800,
-    /// speech starts at ~2000+. Set conservatively to avoid echo triggers.
+    /// Measured in encoded-domain bytes centered around codec silence byte.
+    /// Tuned conservatively to avoid echo triggers.
     /// </summary>
     private const double BargeInThreshold = 4000;
 
@@ -28,9 +30,17 @@ public sealed class MicGateController
     /// </summary>
     private const int SmoothingFrames = 2;
 
+    private readonly int _silenceCenter;
+
     private volatile bool _gated;
     private long _gatedAtTick;
     private int _consecutiveHighFrames;
+
+    public MicGateController(G711CodecType codec = G711CodecType.PCMU)
+    {
+        // IMPORTANT: G.711 silence is codec-specific, not 128.
+        _silenceCenter = codec == G711CodecType.PCMA ? 0xD5 : 0xFF;
+    }
 
     /// <summary>True = mic is blocked (AI is speaking).</summary>
     public bool IsGated => _gated;
@@ -67,8 +77,8 @@ public sealed class MicGateController
         if (elapsed < DoubleTalkGuardMs)
             return false;
 
-        // Compute RMS energy
-        double energy = ComputeRms(frame);
+        // Compute RMS energy around codec silence center
+        double energy = ComputeRms(frame, _silenceCenter);
 
         if (energy > BargeInThreshold)
         {
@@ -88,19 +98,20 @@ public sealed class MicGateController
     }
 
     /// <summary>
-    /// Simple RMS energy for G.711 byte frame.
-    /// Treats each byte as unsigned 8-bit centered at 128.
+    /// RMS energy for encoded G.711 bytes, centered on codec-specific silence byte.
+    /// This avoids false barge-ins on A-law silence (0xD5) / µ-law silence (0xFF).
     /// </summary>
-    private static double ComputeRms(byte[] frame)
+    private static double ComputeRms(byte[] frame, int silenceCenter)
     {
         if (frame.Length == 0) return 0;
 
         double sum = 0;
         for (int i = 0; i < frame.Length; i++)
         {
-            int sample = frame[i] - 128;
+            int sample = frame[i] - silenceCenter;
             sum += sample * sample;
         }
         return sum / frame.Length;
     }
 }
+
