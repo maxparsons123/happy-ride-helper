@@ -20,8 +20,9 @@ public interface IOpenAiClient
     /// Truncate recent conversation history to prevent the AI from "remembering"
     /// stale context after a field correction. This forces the model to rely only
     /// on the fresh [INSTRUCTION] for its next response.
+    /// Default implementation is a no-op — override in implementations that support it.
     /// </summary>
-    Task TruncateConversationAsync(int keepLastN = 2);
+    Task TruncateConversationAsync(int keepLastN = 2) => Task.CompletedTask;
 
     event Action<byte[]>? OnAudio;
     event Func<string, Dictionary<string, object?>, Task<object>>? OnToolCall;
