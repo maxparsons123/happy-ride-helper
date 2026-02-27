@@ -1453,6 +1453,33 @@ public class CleanCallSession
             var clarField = _engine.PendingClarification?.AmbiguousField;
             Log($"[SyncTool] AwaitingClarification for '{clarField}' — checking if tool call is relevant");
             
+            // ── PIVOT DETECTION (Closed-Loop Pillar 3) ──────────────────
+            // If the caller provides a DIFFERENT slot during clarification (e.g., gives
+            // destination while we're clarifying pickup), accept the pivot and store it.
+            // This prevents the state machine from ignoring valid caller input.
+            bool hasPivotField = false;
+            if (clarField == "pickup" && TryGetArg(args, "destination", out var pivotDest) && !string.IsNullOrWhiteSpace(pivotDest))
+            {
+                Log($"🔄 PIVOT: Caller provided destination during pickup clarification — accepting");
+                _engine.RawData.SetSlot("destination", pivotDest);
+                hasPivotField = true;
+                // Store raw transcript for POI matching
+                if (TryGetArg(args, "whisper_transcript", out var pivotWt) && !string.IsNullOrWhiteSpace(pivotWt))
+                    _engine.RawData.SetLastUtterance("destination", pivotWt);
+                else if (TryGetArg(args, "last_utterance", out var pivotLu) && !string.IsNullOrWhiteSpace(pivotLu))
+                    _engine.RawData.SetLastUtterance("destination", pivotLu);
+            }
+            if (clarField == "destination" && TryGetArg(args, "pickup", out var pivotPickup) && !string.IsNullOrWhiteSpace(pivotPickup))
+            {
+                Log($"🔄 PIVOT: Caller provided pickup during destination clarification — accepting");
+                _engine.RawData.SetSlot("pickup", pivotPickup);
+                hasPivotField = true;
+                if (TryGetArg(args, "whisper_transcript", out var pivotWt2) && !string.IsNullOrWhiteSpace(pivotWt2))
+                    _engine.RawData.SetLastUtterance("pickup", pivotWt2);
+                else if (TryGetArg(args, "last_utterance", out var pivotLu2) && !string.IsNullOrWhiteSpace(pivotLu2))
+                    _engine.RawData.SetLastUtterance("pickup", pivotLu2);
+            }
+
             // Check if the AI is trying to fill a DIFFERENT slot (passengers, time, etc.)
             bool hasRelevantUpdate = false;
             if (clarField == "pickup" && TryGetArg(args, "pickup", out var clPickup) && !string.IsNullOrWhiteSpace(clPickup))
@@ -1464,13 +1491,22 @@ public class CleanCallSession
             if (TryGetArg(args, "caller_area", out var clArea) && !string.IsNullOrWhiteSpace(clArea))
                 hasRelevantUpdate = true;
             
-            if (!hasRelevantUpdate)
+            if (!hasRelevantUpdate && !hasPivotField)
             {
                 // AI ignored the clarification instruction and tried to advance.
                 // Reject ALL slot updates and re-emit the clarification instruction.
                 Log($"⛔ [SyncTool] REJECTED — AI tried to fill slots while AwaitingClarification for '{clarField}'. Re-emitting clarification instruction.");
                 EmitCurrentInstruction();
                 return BuildSyncResponse("awaiting_clarification", null);
+            }
+
+            // If we only had a pivot (no clarification data), re-emit clarification
+            // but acknowledge the pivot was stored
+            if (hasPivotField && !hasRelevantUpdate)
+            {
+                Log($"[SyncTool] Pivot field stored, but clarification for '{clarField}' still pending — re-emitting");
+                EmitCurrentInstruction();
+                return BuildSyncResponse("pivot_accepted", null);
             }
         }
 
@@ -1592,14 +1628,34 @@ public class CleanCallSession
                 var pickupVal = _engine.RawData.PickupRaw ?? "";
                 if (!ToolAddressMatchesTranscript(pickupVal, coherenceTranscript))
                 {
-                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (pickup) [{coherenceSource}] — tool=\"{pickupVal}\" transcript=\"{coherenceTranscript}\"");
-                    _engine.HardClearVerifiedAddress("pickup");
-                    _engine.ClearFareResult();
-                    _engine.RawData.SetSlot("pickup", null!); // Clear stale value
-                    slotsUpdated.Remove("pickup");
-                    _engine.ForceState(CollectionState.CollectingPickup);
-                    EmitCurrentInstruction();
-                    return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
+                    var mismatchKey = "pickup";
+                    var count = _softMismatchCount.GetValueOrDefault(mismatchKey, 0) + 1;
+                    _softMismatchCount[mismatchKey] = count;
+
+                    if (count >= 2)
+                    {
+                        // HARD CLEAR: second consecutive mismatch — escalate
+                        Log($"🚨 TOOL-TRANSCRIPT MISMATCH (pickup, hard clear #{count}) [{coherenceSource}] — tool=\"{pickupVal}\" transcript=\"{coherenceTranscript}\"");
+                        _softMismatchCount[mismatchKey] = 0;
+                        _engine.HardClearVerifiedAddress("pickup");
+                        _engine.ClearFareResult();
+                        _engine.RawData.SetSlot("pickup", null!);
+                        slotsUpdated.Remove("pickup");
+                        _engine.ForceState(CollectionState.CollectingPickup);
+                        EmitCurrentInstruction();
+                        return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
+                    }
+                    else
+                    {
+                        // SOFT LANDING: first mismatch — keep the value, log warning, proceed
+                        Log($"⚠️ TOOL-TRANSCRIPT SOFT MISMATCH (pickup, #{count}) [{coherenceSource}] — tool=\"{pickupVal}\" transcript=\"{coherenceTranscript}\" — keeping value (soft landing)");
+                        // Don't clear — let it proceed to verification which will catch real errors
+                    }
+                }
+                else
+                {
+                    // Coherent — reset mismatch counter
+                    _softMismatchCount["pickup"] = 0;
                 }
             }
             if (slotsUpdated.Contains("destination"))
@@ -1607,14 +1663,32 @@ public class CleanCallSession
                 var destVal = _engine.RawData.DestinationRaw ?? "";
                 if (!ToolAddressMatchesTranscript(destVal, coherenceTranscript))
                 {
-                    Log($"🚨 TOOL-TRANSCRIPT MISMATCH (destination) [{coherenceSource}] — tool=\"{destVal}\" transcript=\"{coherenceTranscript}\"");
-                    _engine.HardClearVerifiedAddress("destination");
-                    _engine.ClearFareResult();
-                    _engine.RawData.SetSlot("destination", null!); // Clear stale value
-                    slotsUpdated.Remove("destination");
-                    _engine.ForceState(CollectionState.CollectingDestination);
-                    EmitCurrentInstruction();
-                    return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
+                    var mismatchKey = "destination";
+                    var count = _softMismatchCount.GetValueOrDefault(mismatchKey, 0) + 1;
+                    _softMismatchCount[mismatchKey] = count;
+
+                    if (count >= 2)
+                    {
+                        // HARD CLEAR: second consecutive mismatch — escalate
+                        Log($"🚨 TOOL-TRANSCRIPT MISMATCH (destination, hard clear #{count}) [{coherenceSource}] — tool=\"{destVal}\" transcript=\"{coherenceTranscript}\"");
+                        _softMismatchCount[mismatchKey] = 0;
+                        _engine.HardClearVerifiedAddress("destination");
+                        _engine.ClearFareResult();
+                        _engine.RawData.SetSlot("destination", null!);
+                        slotsUpdated.Remove("destination");
+                        _engine.ForceState(CollectionState.CollectingDestination);
+                        EmitCurrentInstruction();
+                        return BuildSyncResponse("tool_transcript_mismatch", slotsUpdated);
+                    }
+                    else
+                    {
+                        // SOFT LANDING: first mismatch — keep the value, log warning, proceed
+                        Log($"⚠️ TOOL-TRANSCRIPT SOFT MISMATCH (destination, #{count}) [{coherenceSource}] — tool=\"{destVal}\" transcript=\"{coherenceTranscript}\" — keeping value (soft landing)");
+                    }
+                }
+                else
+                {
+                    _softMismatchCount["destination"] = 0;
                 }
             }
         }
@@ -3230,5 +3304,33 @@ public class CleanCallSession
         }
 
         return "";
+    }
+
+    // ─── Slot Locking (Closed-Loop Pillar 1) ────────────────
+
+    /// <summary>Consecutive soft mismatch count per slot for escalation to hard clear.</summary>
+    private readonly Dictionary<string, int> _softMismatchCount = new();
+
+    /// <summary>
+    /// Check if any slot referenced in the tool args is currently being geocoded.
+    /// Prevents the AI from overwriting a slot mid-geocode which causes race conditions.
+    /// </summary>
+    public bool IsSlotLocked(Dictionary<string, object?> args)
+    {
+        if (!_geocodeInFlight) return false;
+
+        // Check if the tool call is trying to update the slot being geocoded
+        var geocodingState = _engine.State;
+        if (geocodingState == CollectionState.VerifyingPickup && args.ContainsKey("pickup"))
+        {
+            Log("🔒 Slot lock check: pickup is being geocoded — blocking update");
+            return true;
+        }
+        if (geocodingState == CollectionState.VerifyingDestination && args.ContainsKey("destination"))
+        {
+            Log("🔒 Slot lock check: destination is being geocoded — blocking update");
+            return true;
+        }
+        return false;
     }
 }
