@@ -227,7 +227,13 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 break;
 
             case RealtimeEventType.ToolCallDone:
-                await _tools.HandleToolCallAsync(evt);
+                // CRITICAL: never block receive loop on tool execution.
+                // Audio deltas must remain real-time even during geocode/dispatch.
+                _ = Task.Run(async () =>
+                {
+                    try { await _tools.HandleToolCallAsync(evt); }
+                    catch (Exception ex) { Log($"⚠ Tool routing error: {ex.Message}"); }
+                }, _cts.Token);
                 break;
 
             case RealtimeEventType.ResponseCanceled:
