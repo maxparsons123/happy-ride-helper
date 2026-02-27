@@ -512,6 +512,15 @@ public static class PromptBuilder
         var fieldLabel = info.AmbiguousField == "pickup" ? "pickup" : "destination";
         var rawValue = info.AmbiguousField == "pickup" ? data.PickupRaw : data.DestinationRaw;
 
+        // Special case: geocode failed entirely — tell caller location wasn't found
+        if (!string.IsNullOrWhiteSpace(info.Message) && info.Message.StartsWith("GEOCODE_FAILED:"))
+        {
+            var failedAddr = info.Message.Substring("GEOCODE_FAILED:".Length);
+            return $"[INSTRUCTION] ⚠️ Tell the caller: \"I'm sorry, I wasn't able to locate '{failedAddr}'. " +
+                   $"Could you confirm the address or give me a bit more detail like the area or postcode?\" " +
+                   "Wait for their response. Do NOT ask for a completely new address — just ask for clarification.";
+        }
+
         // If FareGeo provided a specific clarification message (e.g., "Did you mean David Road?"),
         // use that instead of the generic "Which area?" question
         var hasSpecificMessage = !string.IsNullOrWhiteSpace(info.Message)

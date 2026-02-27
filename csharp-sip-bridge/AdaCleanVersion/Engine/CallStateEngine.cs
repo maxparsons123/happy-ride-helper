@@ -235,11 +235,11 @@ public class CallStateEngine
         // If we have a raw value and haven't exhausted clarification, ask for area/city context
         if (!forceRecollect && !string.IsNullOrWhiteSpace(rawValue))
         {
-            Log($"Keeping raw slot '{field}' (\"{rawValue}\") — entering clarification for area/city");
+            Log($"Keeping raw slot '{field}' (\"{rawValue}\") — asking caller to confirm or provide more detail");
             EnterClarification(new ClarificationInfo
             {
                 AmbiguousField = field,
-                Message = $"I found \"{rawValue}\" but I'm not sure of the exact area. What area or city is that in?"
+                Message = $"GEOCODE_FAILED:{rawValue}",
             });
             return;
         }
