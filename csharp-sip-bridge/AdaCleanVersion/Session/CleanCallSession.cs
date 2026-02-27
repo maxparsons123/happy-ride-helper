@@ -948,7 +948,7 @@ public class CleanCallSession
 
                 if (_icabbiResult.Success)
                 {
-                    Log($"✅ iCabbi booking dispatched — Journey: {_icabbiResult.JourneyId}, Tracking: {_icabbiResult.TrackingUrl}");
+                    Log($"✅ iCabbi booking dispatched — Journey: {_icabbiResult.JourneyId}, TripId: {_icabbiResult.TripId}, Tracking: {_icabbiResult.TrackingUrl}");
                 }
                 else
                 {
@@ -1174,7 +1174,25 @@ public class CleanCallSession
                 if (hasCancelSignal)
                 {
                     Log($"[SyncTool] Cancellation detected via interpretation in {_engine.State} — NOT dispatching");
-                    // Let the normal cancellation flow handle this
+
+                    // Cancel active iCabbi journey if one was dispatched
+                    if (_icabbiResult?.Success == true && !string.IsNullOrEmpty(_icabbiResult.JourneyId))
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var (ok, msg) = await _icabbiService!.CancelBookingAsync(_icabbiResult.JourneyId);
+                                Log(ok
+                                    ? $"✅ iCabbi journey {_icabbiResult.JourneyId} cancelled"
+                                    : $"⚠️ iCabbi cancel failed: {msg}");
+                            }
+                            catch (Exception ex) { Log($"❌ iCabbi cancel error: {ex.Message}"); }
+                        });
+                    }
+
+                    _engine.EndCall(force: true);
+                    return BuildSyncResponse("cancelled");
                 }
             }
 
@@ -1741,14 +1759,15 @@ public class CleanCallSession
                 try
                 {
                     var paxCount = booking.Passengers > 0 ? booking.Passengers : 1;
-                    var icabbiFare = await _icabbiService.GetFareQuoteAsync(fareResult, paxCount, ct);
+                    var scheduledAt = booking.IsAsap ? (DateTime?)null : booking.PickupDateTime;
+                    var icabbiFare = await _icabbiService.GetFareQuoteAsync(fareResult, paxCount, scheduledAt, ct);
                     if (icabbiFare != null)
                     {
-                        Log($"🚕 iCabbi fare quote: {icabbiFare.FareDisplay} (replacing local: {fareResult.Fare})");
+                        Log($"🚕 iCabbi fare quote: {icabbiFare.FareFormatted} (replacing local: {fareResult.Fare})");
                         fareResult = fareResult with
                         {
-                            Fare = icabbiFare.FareDisplay,
-                            FareSpoken = icabbiFare.FareSpoken,
+                            Fare = icabbiFare.FareFormatted,
+                            FareSpoken = $"{icabbiFare.FareDecimal:F2} pounds",
                             DriverEtaMinutes = icabbiFare.EtaMinutes ?? fareResult.DriverEtaMinutes,
                             DriverEta = icabbiFare.EtaMinutes.HasValue
                                 ? $"{icabbiFare.EtaMinutes} minutes"
