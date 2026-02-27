@@ -793,7 +793,6 @@ User Phone: ${phone || 'not provided'}${timePart}${houseNumberHints}${postcodeHi
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents: [{ role: "user", parts: [{ text: userMessage }] }],
         tools: [
-          { googleSearch: {} },
           { functionDeclarations: [functionDeclaration] }
         ],
         toolConfig: {
