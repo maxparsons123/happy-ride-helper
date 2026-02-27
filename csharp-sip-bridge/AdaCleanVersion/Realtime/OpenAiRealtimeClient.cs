@@ -44,6 +44,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     public event Action? OnMicUngated;
     public event Action<string>? OnTransfer;
     public event Action<string>? OnHangup;
+    public event Action<Stage>? OnStageChanged;
 
     public OpenAiRealtimeClient(
         string apiKey,
