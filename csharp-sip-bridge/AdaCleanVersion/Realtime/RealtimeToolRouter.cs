@@ -234,6 +234,7 @@ public sealed class RealtimeToolRouter
             Log($"⚠ Geocode error: {ex.Message}");
             var failEvent = new BackendResultEvent(type, Ok: false, Error: ex.Message);
             var nextAction = _engine.Step(failEvent);
+            OnStageChanged?.Invoke(_engine.State.Stage);
             await ExecuteFollowUpAsync(nextAction);
         }
     }
@@ -255,6 +256,7 @@ public sealed class RealtimeToolRouter
             Log($"📦 Dispatch result: ok={result.Ok}, bookingId={result.BookingId ?? "null"}, error={result.Error ?? "none"}");
             var nextAction = _engine.Step(backendEvent);
             Log($"⚙️ Post-dispatch: {_engine.State.Stage} → {nextAction.Kind}");
+            OnStageChanged?.Invoke(_engine.State.Stage);
             await ExecuteFollowUpAsync(nextAction);
         }
         catch (Exception ex)
