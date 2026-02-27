@@ -137,12 +137,16 @@ public sealed class RealtimeToolRouter
                 Log($"💬 Ask: {ask.Text}");
                 OnInstruction?.Invoke(ask.Text);
                 await SendToolResultAsync(toolCallId, new { status = "ok", instruction = ask.Text, stage = _engine.State.Stage.ToString() });
+                // Trigger model to speak the instruction as audio
+                await TriggerAudioResponse(ask.Text);
                 break;
 
             case HangupAction hangup:
                 Log($"📴 Hangup: {hangup.Text}");
                 OnInstruction?.Invoke(hangup.Text);
                 await SendToolResultAsync(toolCallId, new { status = "hangup", instruction = hangup.Text });
+                // Trigger model to speak the hangup message
+                await TriggerAudioResponse(hangup.Text);
                 OnHangup?.Invoke(hangup.Text);
                 break;
 
@@ -334,6 +338,24 @@ public sealed class RealtimeToolRouter
                 type = "function_call_output",
                 call_id = toolCallId,
                 output = resultJson
+            }
+        }, _ct);
+    }
+
+    /// <summary>
+    /// Trigger the model to speak an instruction as audio after a tool result.
+    /// Uses response.create with tool_choice "none" so the model produces audio, not another tool call.
+    /// </summary>
+    private async Task TriggerAudioResponse(string instruction)
+    {
+        await _transport.SendAsync(new
+        {
+            type = "response.create",
+            response = new
+            {
+                modalities = new[] { "audio", "text" },
+                instructions = $"[INSTRUCTION] {instruction}",
+                tool_choice = "none"
             }
         }, _ct);
     }
