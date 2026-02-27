@@ -18,7 +18,7 @@ public static class RealtimeEventParser
 
             return type switch
             {
-                "response.audio.delta" => new RealtimeEvent
+                "response.audio.delta" or "response.output_audio.delta" => new RealtimeEvent
                 {
                     Type = RealtimeEventType.AudioDelta,
                     AudioBase64 = root.GetProperty("delta").GetString()

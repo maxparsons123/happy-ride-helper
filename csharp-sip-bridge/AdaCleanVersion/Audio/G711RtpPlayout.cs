@@ -34,6 +34,8 @@ public sealed class G711RtpPlayout : IDisposable
     private readonly int _payloadType;
     private readonly byte[] _silence = new byte[FrameSize];
     private readonly ConcurrentQueue<byte[]> _queue = new();
+    private readonly byte[] _partial = new byte[FrameSize];
+    private int _partialLen;
 
     private Thread? _thread;
     private volatile bool _running;
@@ -97,6 +99,26 @@ public sealed class G711RtpPlayout : IDisposable
         if (data == null || data.Length == 0) return;
 
         int offset = 0;
+
+        // If we have a partial frame from a previous call, fill it first
+        if (_partialLen > 0)
+        {
+            int needed = FrameSize - _partialLen;
+            int copy = Math.Min(needed, data.Length);
+            Buffer.BlockCopy(data, 0, _partial, _partialLen, copy);
+            _partialLen += copy;
+            offset = copy;
+
+            if (_partialLen >= FrameSize)
+            {
+                var frame = new byte[FrameSize];
+                Buffer.BlockCopy(_partial, 0, frame, 0, FrameSize);
+                _queue.Enqueue(frame);
+                _partialLen = 0;
+            }
+        }
+
+        // Enqueue complete frames
         while (offset + FrameSize <= data.Length)
         {
             var frame = new byte[FrameSize];
@@ -104,11 +126,20 @@ public sealed class G711RtpPlayout : IDisposable
             _queue.Enqueue(frame);
             offset += FrameSize;
         }
+
+        // Save any trailing partial data
+        int remaining = data.Length - offset;
+        if (remaining > 0)
+        {
+            Buffer.BlockCopy(data, offset, _partial, _partialLen, remaining);
+            _partialLen += remaining;
+        }
     }
 
     public void Clear()
     {
         while (_queue.TryDequeue(out _)) { }
+        _partialLen = 0;
     }
 
     private void Loop()
