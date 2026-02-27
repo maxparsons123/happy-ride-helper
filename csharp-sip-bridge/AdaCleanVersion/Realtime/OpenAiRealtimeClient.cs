@@ -126,8 +126,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                 var result = await icabbiService.CreateAndDispatchAsync(
                     booking, null!, callerPhone ?? "", callerName: null, icabbiDriverId: null, icabbiVehicleId: null, ct: _cts.Token);
                 return result.Success
-                    ? new DispatchResult(true, BookingId: result.BookingRef)
-                    : new DispatchResult(false, Error: result.Error);
+                    ? new DispatchResult(true, BookingId: result.JourneyId)
+                    : new DispatchResult(false, Error: result.Message);
             }
             catch (Exception ex) { return new DispatchResult(false, Error: ex.Message); }
         };

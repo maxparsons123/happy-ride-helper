@@ -37,14 +37,9 @@ public static class CleanBridgeFactory
         IcabbiBookingService? icabbiService = null;
         if (!string.IsNullOrWhiteSpace(settings.Icabbi.TenantBase))
         {
-            icabbiService = new IcabbiBookingService(
-                tenantBase: settings.Icabbi.TenantBase,
-                appKey: settings.Icabbi.AppKey,
-                secretKey: settings.Icabbi.SecretKey,
-                siteId: settings.Icabbi.SiteId,
-                supabaseUrl: settings.SupabaseUrl,
-                supabaseKey: settings.SupabaseServiceRoleKey,
-                logger: logger);
+            var icabbiLogger = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Debug))
+                .CreateLogger<IcabbiBookingService>();
+            icabbiService = new IcabbiBookingService(icabbiLogger, settings.Icabbi, settings.Supabase);
         }
 
         var bridge = new CleanSipBridge(logger, settings, extractionService, fareService, callerLookup);
