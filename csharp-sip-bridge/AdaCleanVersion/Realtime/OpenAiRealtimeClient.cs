@@ -95,8 +95,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     /// <summary>Max trailing frames to flush (25 frames = 500ms — enough for "four passengers").</summary>
     private const int MicTailMaxFlush = 25;
 
-    /// <summary>Min non-silence bytes in a 160-byte frame to count as speech.</summary>
-    private const int SpeechEnergyThreshold = 8;
+    /// <summary>
+    /// Min variance score in a 160-byte frame to count as speech.
+    /// Variance-based detection catches low-level speech that byte-equality misses
+    /// (comfort noise, PBX DSP artifacts, transcoding residue).
+    /// </summary>
+    private const int SpeechVarianceThreshold = 120;
 
     // ─── Auto VAD Config ───────────────────────────────────
     /// <summary>
@@ -583,13 +587,14 @@ Never assume previous values remain valid.
             for (int i = tailStart; i < count; i++)
             {
                 var frame = _micGateBuffer[i];
-                int nonSilence = 0;
-                for (int j = 0; j < frame.Length; j++)
-                {
-                    if (frame[j] != _g711SilenceByte && ++nonSilence >= SpeechEnergyThreshold)
-                        break;
-                }
-                if (nonSilence >= SpeechEnergyThreshold)
+                // Variance-based energy detection: measures actual waveform movement
+                // instead of byte-equality against silence byte.
+                // Catches low-level speech that comfort noise / PBX DSP would mask.
+                int variance = 0;
+                for (int j = 1; j < frame.Length; j++)
+                    variance += Math.Abs(frame[j] - frame[j - 1]);
+
+                if (variance >= SpeechVarianceThreshold)
                     selected.Add(frame);
             }
 
@@ -1107,6 +1112,16 @@ Never assume previous values remain valid.
         try
         {
             await Task.Delay(300, _cts.Token);
+
+            // Race-condition guard: only send if no active response started
+            // during the 300ms wait. Prevents double-trigger where fallback
+            // fires an instruction mid-speech if OpenAI auto-responded.
+            if (!_responseCompleted && _micGated)
+            {
+                Log("⏳ Fallback skipped — response active (mic still gated)");
+                return;
+            }
+
             await SendPendingInstructionAsync();
         }
         catch (OperationCanceledException) { }
