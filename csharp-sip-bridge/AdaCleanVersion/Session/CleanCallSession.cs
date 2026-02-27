@@ -588,6 +588,13 @@ public class CleanCallSession
         // Only the FIRST call should proceed; subsequent ones are no-ops.
         if (_engine.State == CollectionState.VerifyingPickup)
         {
+            if (!LooksLikeAddressReadback(adaText, "pickup"))
+            {
+                Log($"⚠️ Ignoring non-readback AI transcript in VerifyingPickup: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
+                EmitCurrentInstruction();
+                return;
+            }
+
             if (_geocodeInFlight)
             {
                 Log($"⚠️ Geocode already in flight for pickup — skipping duplicate trigger from: \"{adaText[..Math.Min(60, adaText.Length)]}\"");
@@ -605,6 +612,13 @@ public class CleanCallSession
         }
         if (_engine.State == CollectionState.VerifyingDestination)
         {
+            if (!LooksLikeAddressReadback(adaText, "destination"))
+            {
+                Log($"⚠️ Ignoring non-readback AI transcript in VerifyingDestination: \"{adaText[..Math.Min(80, adaText.Length)]}\"");
+                EmitCurrentInstruction();
+                return;
+            }
+
             if (_geocodeInFlight)
             {
                 Log($"⚠️ Geocode already in flight for destination — skipping duplicate trigger from: \"{adaText[..Math.Min(60, adaText.Length)]}\"");
@@ -620,6 +634,42 @@ public class CleanCallSession
             finally { _geocodeInFlight = false; }
             return;
         }
+    }
+
+    /// <summary>
+    /// Detect whether Ada's transcript looks like an address readback (not a stale reprompt).
+    /// Prevents stale "repeat your pickup" prompts from triggering verification geocoding.
+    /// </summary>
+    private static bool LooksLikeAddressReadback(string text, string field)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        var lower = text.ToLowerInvariant();
+
+        // Known stale reprompt/question shapes that must NEVER be treated as readbacks
+        if (lower.Contains("would you like to go ahead with this booking")) return false;
+        if (field == "pickup")
+        {
+            if (lower.Contains("repeat your pickup address") ||
+                lower.Contains("provide your pickup address") ||
+                lower.Contains("pickup address please"))
+                return false;
+        }
+        else
+        {
+            if (lower.Contains("repeat your destination address") ||
+                lower.Contains("provide your destination address") ||
+                lower.Contains("destination address please"))
+                return false;
+        }
+
+        // Positive readback cues
+        if (lower.Contains("let me just confirm")) return true;
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b(road|street|lane|avenue|drive|close|way|crescent|court|place|grove|terrace)\b")) return true;
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b[a-z]{1,2}\d{1,2}\s*\d[a-z]{2}\b")) return true; // UK postcode
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, @"\b\d{1,5}[a-z]?\b")) return true; // house number
+
+        return false;
     }
 
     /// <summary>
