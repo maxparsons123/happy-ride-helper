@@ -206,6 +206,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             case RealtimeEventType.AudioStarted:
                 _micGate.Arm();
+                Log("🔇 Mic gated (audio started)");
                 break;
 
             case RealtimeEventType.AudioDone:

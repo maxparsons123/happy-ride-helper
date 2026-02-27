@@ -29,12 +29,12 @@ public static class RealtimeEventParser
                     Type = RealtimeEventType.ResponseCreated
                 },
 
-                "response.audio.started" => new RealtimeEvent
+                "response.audio.started" or "response.output_audio.started" => new RealtimeEvent
                 {
                     Type = RealtimeEventType.AudioStarted
                 },
 
-                "response.audio.done" => new RealtimeEvent
+                "response.audio.done" or "response.output_audio.done" => new RealtimeEvent
                 {
                     Type = RealtimeEventType.AudioDone
                 },
