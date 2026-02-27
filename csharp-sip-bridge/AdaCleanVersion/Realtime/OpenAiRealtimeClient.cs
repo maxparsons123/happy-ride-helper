@@ -8,16 +8,17 @@ using TaxiBot.Deterministic;
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// v8 — Pure transport bridge. Zero orchestration logic.
+/// v9 — Clean transport bridge. Zero orchestration logic.
 /// 
 /// This class does exactly 4 things:
 ///   1. Audio: RTP ↔ OpenAI (G.711 passthrough via RealtimeAudioBridge)
-///   2. Mic gate: arm on response, ungate on audio done, flush on barge-in
+///   2. Mic gate: arm on audio start, ungate when playout drains, barge-in via response.cancel
 ///   3. Tool passthrough: sync_booking_data → engine.Step() → execute action
 ///   4. Log transcripts (no processing, no fallback, no state changes)
 ///
 /// The DeterministicBookingEngine owns ALL state.
 /// The AI model is voice-only — it speaks what the engine tells it to.
+/// AudioBridge never touches state. ToolRouter never touches audio.
 /// </summary>
 public sealed class OpenAiRealtimeClient : IAsyncDisposable
 {
@@ -72,10 +73,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         _transport.OnMessage += HandleServerMessageAsync;
         _transport.OnDisconnected += reason => Log($"🔌 Transport disconnected: {reason}");
 
-        // ── Mic gate ──
+        // ── Mic gate (simple energy-based) ──
         _micGate = new MicGateController();
 
-        // ── Audio bridge ──
+        // ── Audio bridge (deterministic 20ms pacing, tiny jitter buffer) ──
         _audio = new RealtimeAudioBridge(rtpSession, _transport, codec, _micGate, _cts.Token, mediaSession);
         _audio.OnLog += Log;
         _audio.OnAudioOut += frame => { try { OnAudioOut?.Invoke(frame); } catch { } };
@@ -122,7 +123,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
                     Passengers = slots.Passengers ?? 1,
                     PickupTime = slots.PickupTime?.Raw ?? "ASAP",
                 };
-                // FareResult not available from engine — pass null, let service handle
                 var result = await icabbiService.CreateAndDispatchAsync(
                     booking, null!, callerPhone ?? "", callerName: null, icabbiDriverId: null, icabbiVehicleId: null, ct: _cts.Token);
                 return result.Success
@@ -203,8 +203,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             case RealtimeEventType.SpeechStarted:
                 _tools.ResetTurn();
-                if (_micGate.IsGated && !_audio.HandleBargeIn())
-                    Log("🎤 Barge-in debounced");
+                if (_micGate.IsGated)
+                {
+                    if (!_audio.HandleBargeIn())
+                        Log("🎤 Barge-in debounced");
+                }
                 break;
 
             case RealtimeEventType.SpeechStopped:
@@ -213,13 +216,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             case RealtimeEventType.CallerTranscript:
                 if (!string.IsNullOrWhiteSpace(evt.Transcript))
                     Log($"👤 Caller: {evt.Transcript}");
-                // No fallback. Tool call is the only path.
                 break;
 
             case RealtimeEventType.AdaTranscriptDone:
                 if (!string.IsNullOrWhiteSpace(evt.Transcript))
                     Log($"🤖 AI: {evt.Transcript}");
-                // No processing. Engine drives state, not transcripts.
                 break;
 
             case RealtimeEventType.ToolCallDone:

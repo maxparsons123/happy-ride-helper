@@ -1,5 +1,7 @@
-using System.Buffers;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
+using System.Runtime.InteropServices;
 using AdaCleanVersion.Audio;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
@@ -7,30 +9,66 @@ using SIPSorcery.Net;
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// Bridges RTP ↔ OpenAI Realtime audio (G.711 passthrough).
-/// Handles mic gate integration and jitter-buffered playout.
-/// No booking logic — pure audio path.
+/// Production-grade telephony audio bridge: SIP RTP ↔ OpenAI Realtime.
+///
+/// Design principles:
+///   - G.711 passthrough only (zero format conversion)
+///   - Deterministic 20ms RTP clock (you are the clock)
+///   - Immediate upstream audio (each 20ms frame sent individually)
+///   - Tiny jitter buffer (3-5 frames, FIFO, silence fill)
+///   - Simple energy-based mic gate for barge-in
+///   - response.cancel on barge-in (let model recover naturally)
+///
+/// AudioBridge never touches state.
+/// ToolRouter never touches audio.
+/// Separation = stability.
 /// </summary>
 public sealed class RealtimeAudioBridge : IDisposable
 {
-    private readonly RTPSession _rtpSession;
+    private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
+    [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint uPeriod);
+    [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
+
+    private const int FrameSize = 160;          // 20ms @ 8kHz
+    private const int MaxJitterFrames = 5;       // tiny jitter buffer
+
+    private readonly VoIPMediaSession _mediaSession;
     private readonly IRealtimeTransport _transport;
-    private readonly G711RtpPlayout _playout;
+    private readonly MicGateController _micGate;
     private readonly CancellationToken _ct;
+    private readonly int _payloadType;
+    private readonly byte _silenceByte;
 
-    public MicGateController MicGate { get; }
+    // Jitter buffer: ConcurrentQueue of exactly 160-byte frames
+    private readonly ConcurrentQueue<byte[]> _jitterBuffer = new();
+    private readonly byte[] _partialAccum = new byte[FrameSize];
+    private int _partialLen;
 
-    /// <summary>Fires with each G.711 audio frame sent to playout (for avatar feeding).</summary>
+    // RTP send loop state
+    private Thread? _sendThread;
+    private volatile bool _running;
+    private uint _rtpTimestamp;
+
+    // AI speaking state (for barge-in)
+    private volatile bool _aiSpeaking;
+
+    private static readonly double NsPerTick = 1_000_000_000.0 / Stopwatch.Frequency;
+    private static readonly long TicksPerFrame = (long)(20_000_000.0 / NsPerTick);
+
+    /// <summary>Fires with each G.711 audio frame queued for playout (for avatar feeding).</summary>
     public event Action<byte[]>? OnAudioOut;
 
     /// <summary>Fires when barge-in occurs.</summary>
     public event Action? OnBargeIn;
 
-    /// <summary>Fires when mic is ungated (playout drained, caller can speak).</summary>
+    /// <summary>Fires when mic is ungated (AI finished speaking).</summary>
     public event Action? OnMicUngated;
 
     /// <summary>Diagnostic logging.</summary>
     public event Action<string>? OnLog;
+
+    public MicGateController MicGate => _micGate;
 
     public RealtimeAudioBridge(
         RTPSession rtpSession,
@@ -40,47 +78,82 @@ public sealed class RealtimeAudioBridge : IDisposable
         CancellationToken ct,
         VoIPMediaSession? mediaSession = null)
     {
-        _rtpSession = rtpSession;
         _transport = transport;
+        _micGate = micGate;
         _ct = ct;
-        MicGate = micGate;
-        var session = mediaSession ?? (rtpSession as VoIPMediaSession)
+        _payloadType = G711Codec.PayloadType(codec);
+        _silenceByte = G711Codec.SilenceByte(codec);
+        _rtpTimestamp = (uint)Random.Shared.Next();
+
+        _mediaSession = mediaSession ?? (rtpSession as VoIPMediaSession)
             ?? throw new ArgumentException("A VoIPMediaSession is required for RTP playout");
-        _playout = new G711RtpPlayout(session, codec);
-        _playout.OnLog += msg => OnLog?.Invoke(msg);
+
+        // Wire RTP inbound
+        rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
     }
 
-    /// <summary>Wire RTP receive and start playout engine.</summary>
+    // ─────────────────────────────────────────────────────────
+    // LIFECYCLE
+    // ─────────────────────────────────────────────────────────
+
     public void Start()
     {
-        _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
-        _playout.Start();
+        if (_running) return;
+        _running = true;
+
+        if (IsWindows)
+        {
+            try { timeBeginPeriod(1); } catch { }
+        }
+
+        _sendThread = new Thread(RtpSendLoop)
+        {
+            IsBackground = true,
+            Priority = ThreadPriority.AboveNormal
+        };
+        _sendThread.Start();
+
+        OnLog?.Invoke("RTP send loop started (20ms deterministic pacing)");
     }
 
-    /// <summary>Stop playout and unwire RTP.</summary>
-    public void Stop()
+    public void Dispose()
     {
-        _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
-        _playout.Stop();
+        _running = false;
+        try { _sendThread?.Join(500); } catch { }
+
+        if (IsWindows)
+        {
+            try { timeEndPeriod(1); } catch { }
+        }
     }
 
-    // ─── Inbound: RTP → OpenAI ──────────────────────────────
+    // ─────────────────────────────────────────────────────────
+    // RTP INBOUND: Caller → OpenAI
+    // Each 20ms frame sent immediately. No batching.
+    // ─────────────────────────────────────────────────────────
 
     private void OnRtpPacketReceived(
         IPEndPoint remoteEndPoint,
         SDPMediaTypesEnum mediaType,
         RTPPacket rtpPacket)
     {
-        if (mediaType != SDPMediaTypesEnum.audio) return;
+        if (mediaType != SDPMediaTypesEnum.audio || _ct.IsCancellationRequested)
+            return;
 
         var payload = rtpPacket.Payload;
-
-        if (MicGate.IsGated)
-        {
-            MicGate.Buffer(payload);
+        if (payload == null || payload.Length == 0)
             return;
+
+        // Mic gate check with barge-in detection
+        if (!_micGate.ShouldSendToOpenAi(payload, out bool isBargeIn))
+            return;
+
+        if (isBargeIn)
+        {
+            ExecuteBargeIn();
         }
 
+        // Forward raw G.711 to OpenAI immediately
         ForwardToOpenAi(payload);
     }
 
@@ -90,79 +163,204 @@ public sealed class RealtimeAudioBridge : IDisposable
         try
         {
             var b64 = Convert.ToBase64String(g711Payload);
-            _ = _transport.SendAsync(new { type = "input_audio_buffer.append", audio = b64 }, _ct);
+            _ = _transport.SendAsync(
+                new { type = "input_audio_buffer.append", audio = b64 }, _ct);
         }
         catch { /* non-critical — next frame will retry */ }
     }
 
-    // ─── Outbound: OpenAI → RTP (via playout) ───────────────
+    // ─────────────────────────────────────────────────────────
+    // OPENAI → RTP: Audio delta handling
+    // Decode base64, split into 160-byte frames, enqueue to jitter buffer
+    // ─────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Handle response.audio.delta — GC-free base64 decode into playout buffer.
-    /// </summary>
+    /// <summary>Handle response.audio.delta — decode and enqueue frames.</summary>
     public void HandleAudioDelta(string? b64)
     {
         if (string.IsNullOrEmpty(b64)) return;
 
-        int maxBytes = (b64.Length / 4 + 1) * 3;
-        byte[] rented = ArrayPool<byte>.Shared.Rent(maxBytes);
-        try
+        _aiSpeaking = true;
+
+        byte[] data;
+        try { data = Convert.FromBase64String(b64); }
+        catch { return; }
+
+        if (data.Length == 0) return;
+
+        int offset = 0;
+
+        // Fill partial accumulator from previous delta
+        if (_partialLen > 0)
         {
-            if (!Convert.TryFromBase64String(b64, rented, out int written) || written == 0)
-                return;
+            int needed = FrameSize - _partialLen;
+            int copy = Math.Min(needed, data.Length);
+            Buffer.BlockCopy(data, 0, _partialAccum, _partialLen, copy);
+            _partialLen += copy;
+            offset = copy;
 
-            var g711 = new byte[written];
-            Buffer.BlockCopy(rented, 0, g711, 0, written);
-
-            _playout.BufferG711(g711);
-
-            try { OnAudioOut?.Invoke(g711); } catch { }
+            if (_partialLen >= FrameSize)
+            {
+                EnqueueFrame(_partialAccum, 0);
+                _partialLen = 0;
+            }
         }
-        finally
+
+        // Enqueue complete 160-byte frames
+        while (offset + FrameSize <= data.Length)
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            EnqueueFrame(data, offset);
+            offset += FrameSize;
+        }
+
+        // Save trailing partial
+        int remaining = data.Length - offset;
+        if (remaining > 0)
+        {
+            Buffer.BlockCopy(data, offset, _partialAccum, _partialLen, remaining);
+            _partialLen += remaining;
         }
     }
 
-    // ─── Mic Gate Events ────────────────────────────────────
+    private void EnqueueFrame(byte[] source, int offset)
+    {
+        var frame = new byte[FrameSize];
+        Buffer.BlockCopy(source, offset, frame, 0, FrameSize);
+        _jitterBuffer.Enqueue(frame);
 
-    /// <summary>Handle response.audio.done — mark complete and attempt ungate.</summary>
+        // Cap jitter buffer to prevent drift accumulation
+        while (_jitterBuffer.Count > MaxJitterFrames)
+            _jitterBuffer.TryDequeue(out _);
+
+        // Feed avatar
+        try { OnAudioOut?.Invoke(frame); } catch { }
+    }
+
+    /// <summary>Handle response.audio.done — AI finished speaking.</summary>
     public void HandleResponseAudioDone()
     {
-        MicGate.MarkResponseCompleted();
+        _aiSpeaking = false;
+        // Don't ungate immediately — let jitter buffer drain first.
+        // The send loop will detect empty buffer + !_aiSpeaking and ungate.
         OnLog?.Invoke("🔊 response.audio.done");
+    }
 
-        if (MicGate.TryRelease())
+    // ─────────────────────────────────────────────────────────
+    // RTP SEND LOOP: Fixed 20ms deterministic clock
+    // You are the clock. Not the network. Not OpenAI.
+    // ─────────────────────────────────────────────────────────
+
+    private void RtpSendLoop()
+    {
+        var silenceFrame = new byte[FrameSize];
+        Array.Fill(silenceFrame, _silenceByte);
+
+        long nextTick = Stopwatch.GetTimestamp();
+        bool wasPlaying = false;
+
+        while (_running)
         {
-            OnLog?.Invoke("🔓 Mic ungated (audio done) — buffer discarded (echo)");
-            try { OnMicUngated?.Invoke(); } catch { }
+            long now = Stopwatch.GetTimestamp();
+            long wait = nextTick - now;
+
+            if (wait > 0)
+            {
+                long waitNs = (long)(wait * NsPerTick);
+                if (waitNs > 2_000_000)
+                    Thread.Sleep((int)(waitNs / 1_000_000) - 1);
+                else
+                    Thread.SpinWait(50);
+                continue;
+            }
+
+            // Pop frame or silence
+            byte[] frame;
+            if (_jitterBuffer.TryDequeue(out var queued))
+            {
+                frame = queued;
+                wasPlaying = true;
+            }
+            else
+            {
+                frame = silenceFrame;
+
+                // Ungate mic when buffer drained and AI finished
+                if (wasPlaying && !_aiSpeaking && _micGate.IsGated)
+                {
+                    _micGate.Ungate();
+                    OnLog?.Invoke("🔓 Mic ungated (playout drained)");
+                    try { OnMicUngated?.Invoke(); } catch { }
+                }
+                wasPlaying = false;
+            }
+
+            // Send RTP
+            try
+            {
+                _mediaSession.SendRtpRaw(
+                    SDPMediaTypesEnum.audio,
+                    frame,
+                    _rtpTimestamp,
+                    0,
+                    _payloadType);
+            }
+            catch { /* RTP send failure — non-fatal */ }
+
+            _rtpTimestamp += FrameSize; // +160 samples per 20ms
+
+            nextTick += TicksPerFrame;
+
+            // Drift correction: if we fell behind by >5 frames, reset
+            long drift = Stopwatch.GetTimestamp() - nextTick;
+            if (drift > TicksPerFrame * 5)
+                nextTick = Stopwatch.GetTimestamp() + TicksPerFrame;
         }
     }
 
-    /// <summary>
-    /// Handle barge-in (speech_started). Clears playout, flushes tail speech frames.
-    /// Returns true if barge-in was processed (not debounced/already ungated).
-    /// </summary>
+    // ─────────────────────────────────────────────────────────
+    // BARGE-IN: Stop AI, flush buffer, send response.cancel
+    // That's it. No state changes. No instruction resends.
+    // Let the model recover naturally.
+    // ─────────────────────────────────────────────────────────
+
+    private void ExecuteBargeIn()
+    {
+        if (!_aiSpeaking && !_micGate.IsGated)
+            return;
+
+        _aiSpeaking = false;
+
+        // Flush jitter buffer
+        while (_jitterBuffer.TryDequeue(out _)) { }
+        _partialLen = 0;
+
+        // Send response.cancel to OpenAI
+        try
+        {
+            _ = _transport.SendAsync(new { type = "response.cancel" }, _ct);
+        }
+        catch { }
+
+        // Ungate mic
+        _micGate.Ungate();
+
+        OnLog?.Invoke("🎤 Barge-in — playout flushed, response.cancel sent, mic ungated");
+        try { OnBargeIn?.Invoke(); } catch { }
+    }
+
+    /// <summary>External barge-in trigger (from speech_started event).</summary>
     public bool HandleBargeIn()
     {
-        if (!MicGate.TryBargeIn(out var speechFrames))
+        if (!_aiSpeaking && !_micGate.IsGated)
             return false;
 
-        _playout.Clear();
-
-        // Flush tail speech frames to OpenAI
-        foreach (var f in speechFrames)
-            ForwardToOpenAi(f);
-
-        OnLog?.Invoke($"🎤 Barge-in — playout cleared, mic ungated, {speechFrames.Length} speech frames flushed");
-        try { OnBargeIn?.Invoke(); } catch { }
+        ExecuteBargeIn();
         return true;
     }
 
-    public void ClearPlayout() => _playout.Clear();
-
-    public void Dispose()
+    /// <summary>Clear playout buffer (external reset).</summary>
+    public void ClearPlayout()
     {
-        Stop();
+        while (_jitterBuffer.TryDequeue(out _)) { }
+        _partialLen = 0;
     }
 }
