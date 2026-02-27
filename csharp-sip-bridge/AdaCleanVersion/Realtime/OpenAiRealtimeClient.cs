@@ -59,7 +59,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         string? callerPhone = null,
         G711CodecType codec = G711CodecType.PCMU,
         IRealtimeTransport? transport = null,
-        VoIPMediaSession? mediaSession = null)
+        VoIPMediaSession? mediaSession = null,
+        DeterministicBookingEngine? engine = null)
     {
         _callId = callId;
         _voice = voice;
