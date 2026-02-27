@@ -175,9 +175,16 @@ public sealed class RealtimeAudioBridge : IDisposable
     // ─────────────────────────────────────────────────────────
 
     /// <summary>Handle response.audio.delta — decode and enqueue frames.</summary>
+    private long _deltaCount;
+    private long _frameCount;
+
     public void HandleAudioDelta(string? b64)
     {
         if (string.IsNullOrEmpty(b64)) return;
+
+        var dc = Interlocked.Increment(ref _deltaCount);
+        if (dc == 1 || dc % 50 == 0)
+            OnLog?.Invoke($"🔈 AudioDelta #{dc} ({b64.Length} b64 chars, jitter={_jitterBuffer.Count})");
 
         _aiSpeaking = true;
 
@@ -225,7 +232,11 @@ public sealed class RealtimeAudioBridge : IDisposable
     {
         var frame = new byte[FrameSize];
         Buffer.BlockCopy(source, offset, frame, 0, FrameSize);
+        var fc = Interlocked.Increment(ref _frameCount);
         _jitterBuffer.Enqueue(frame);
+
+        if (fc == 1 || fc % 50 == 0)
+            OnLog?.Invoke($"🔈 Frame #{fc} enqueued (jitter={_jitterBuffer.Count})");
 
         // Cap jitter buffer to prevent drift accumulation
         while (_jitterBuffer.Count > MaxJitterFrames)
