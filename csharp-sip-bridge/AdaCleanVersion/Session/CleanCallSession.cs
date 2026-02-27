@@ -235,14 +235,28 @@ public class CleanCallSession
                     }
                     if (burst.Pickup != null)
                     {
+                        // Clear stale verified address if this is a correction
+                        if (_engine.VerifiedPickup != null)
+                        {
+                            _engine.ClearVerifiedAddress("pickup");
+                            _engine.ClearFareResult();
+                            Log($"[BurstDispatch] Cleared stale verified pickup for correction");
+                        }
                         _engine.RawData.SetSlot("pickup", burst.Pickup);
-                        _engine.RawData.SetGeminiSlot("pickup", burst.Pickup); // Store Gemini-cleaned version for readback
+                        _engine.RawData.SetGeminiSlot("pickup", burst.Pickup);
                         Log($"[BurstDispatch] pickup=\"{burst.Pickup}\"");
                     }
                     if (burst.Destination != null)
                     {
+                        // Clear stale verified address if this is a correction
+                        if (_engine.VerifiedDestination != null)
+                        {
+                            _engine.ClearVerifiedAddress("destination");
+                            _engine.ClearFareResult();
+                            Log($"[BurstDispatch] Cleared stale verified destination for correction");
+                        }
                         _engine.RawData.SetSlot("destination", burst.Destination);
-                        _engine.RawData.SetGeminiSlot("destination", burst.Destination); // Store Gemini-cleaned version for readback
+                        _engine.RawData.SetGeminiSlot("destination", burst.Destination);
                         Log($"[BurstDispatch] destination=\"{burst.Destination}\"");
                     }
                     if (burst.Passengers.HasValue)

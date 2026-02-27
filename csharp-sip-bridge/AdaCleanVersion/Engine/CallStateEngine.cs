@@ -149,6 +149,13 @@ public class CallStateEngine
         VerifiedPickup = geocoded;
         Log($"Pickup verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
 
+        // Don't resurrect a dead/ending call
+        if (State >= CollectionState.Ending)
+        {
+            Log("Pickup verification completed after call ended — ignoring state transition");
+            return;
+        }
+
         // If destination is pre-filled (burst) but unverified, go verify it next
         if (!string.IsNullOrWhiteSpace(RawData.DestinationRaw) && VerifiedDestination == null)
         {
@@ -175,6 +182,13 @@ public class CallStateEngine
     {
         VerifiedDestination = geocoded;
         Log($"Destination verified: \"{geocoded.Address}\" ({geocoded.Lat:F5},{geocoded.Lon:F5})");
+
+        // Don't resurrect a dead/ending call
+        if (State >= CollectionState.Ending)
+        {
+            Log("Destination verification completed after call ended — ignoring state transition");
+            return;
+        }
 
         // Clear burst flag — both addresses verified, resume normal flow
         if (RawData.IsMultiSlotBurst)
