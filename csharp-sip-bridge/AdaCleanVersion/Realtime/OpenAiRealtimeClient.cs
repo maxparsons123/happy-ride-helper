@@ -869,6 +869,11 @@ Never assume previous values remain valid.
     /// <summary>
     /// Handle response.function_call_arguments.done from OpenAI Realtime.
     /// Parses the tool call, routes to CleanCallSession, sends result back, triggers follow-up response.
+    /// 
+    /// Closed-Loop Enhancements:
+    /// - SLOT LOCKING: Prevents AI from overwriting a slot being geocoded
+    /// - PACER: 2.5s timer with filler speech if geocoding is slow
+    /// - VAD RE-SHIELDING: Tightens sensitivity during address readback
     /// </summary>
     private async Task HandleToolCallAsync(JsonElement root)
     {
@@ -902,6 +907,19 @@ Never assume previous values remain valid.
             args = new();
         }
 
+        // ── SLOT LOCKING: Prevent AI from overwriting a slot currently being geocoded ──
+        if (_session.IsSlotLocked(args))
+        {
+            Log("🔒 Tool update blocked: Slot is currently being geocoded — returning hold status");
+            var lockResult = JsonSerializer.Serialize(new { status = "slot_locked", message = "Address is being verified. Please wait." });
+            await SendJsonAsync(new
+            {
+                type = "conversation.item.create",
+                item = new { type = "function_call_output", call_id = callId, output = lockResult }
+            });
+            return;
+        }
+
         // Inject the raw Whisper transcript so the session can use it for POI matching
         // instead of the AI's reinterpretation in last_utterance
         if (_lastWhisperTranscript != null)
@@ -916,17 +934,40 @@ Never assume previous values remain valid.
             args["ada_transcript"] = _lastAdaTranscript;
         }
 
-        // Route to session for processing
-        // HandleToolCallAsync may fire OnAiInstruction synchronously, which sets _pendingInstruction.
+        // ── PACER LOGIC: Race between geocoder and 2.5s filler timer ──
+        // If geocoding takes longer than 2.5s, inject a filler phrase
+        // to keep the caller on the line and prevent perceived silence.
+        using var pacerCts = new CancellationTokenSource();
+        var logicTask = _session.HandleToolCallAsync(name, args, _cts.Token);
+        var pacerTask = Task.Delay(2500, pacerCts.Token);
+
         object result;
         try
         {
-            result = await _session.HandleToolCallAsync(name, args, _cts.Token);
+            var completed = await Task.WhenAny(logicTask, pacerTask);
+            if (completed == pacerTask && !logicTask.IsCompleted)
+            {
+                Log("⏱️ Pacer triggered — geocoding taking >2.5s, sending filler speech");
+                await SendPacerSpeechAsync("One moment while I check the map...");
+            }
+            result = await logicTask;
+            pacerCts.Cancel();
         }
         catch (Exception ex)
         {
+            pacerCts.Cancel();
             Log($"⚠ Tool handler error: {ex.Message}");
             result = new { error = ex.Message };
+        }
+
+        // ── VAD RE-SHIELDING: Tighten during readback to prevent barge-in on echo ──
+        var isAddressReadback = _session.Engine.State is
+            Engine.CollectionState.VerifyingPickup or
+            Engine.CollectionState.VerifyingDestination;
+        if (isAddressReadback)
+        {
+            Log("🛡️ VAD re-shielded for address readback (threshold=0.8)");
+            await UpdateVadForReadbackAsync(tight: true);
         }
 
         var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
@@ -993,6 +1034,82 @@ Never assume previous values remain valid.
             await SendJsonAsync(new { type = "response.create" });
         }
         // If isSilent, don't send response.create — the AI should stay quiet.
+
+        // ── VAD RE-SHIELD RELEASE: Loosen VAD after readback response is queued ──
+        if (isAddressReadback)
+        {
+            // Delay to let the readback audio start playing before loosening VAD
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(3000); // Allow readback to play
+                await UpdateVadForReadbackAsync(tight: false);
+                Log("🛡️ VAD re-shield released (readback complete)");
+            });
+        }
+    }
+
+    // ─── Pacer Speech (filler during slow geocoding) ────────────
+
+    /// <summary>
+    /// Inject a filler phrase so the caller doesn't hear dead air during geocoding.
+    /// Uses response.create with a one-shot instruction override.
+    /// </summary>
+    private async Task SendPacerSpeechAsync(string fillerText)
+    {
+        try
+        {
+            await SendJsonAsync(new
+            {
+                type = "response.create",
+                response = new
+                {
+                    modalities = new[] { "text", "audio" },
+                    instructions = $"[PACING] Say EXACTLY: \"{fillerText}\" — nothing more. Do NOT ask questions. Do NOT end the call."
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Pacer speech error: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Adjust VAD sensitivity for address readback protection.
+    /// Tight = high threshold (0.8) to prevent echo/barge-in during readback.
+    /// Loose = normal threshold from GetVadConfigForCurrentState().
+    /// </summary>
+    private async Task UpdateVadForReadbackAsync(bool tight)
+    {
+        if (tight)
+        {
+            await SendJsonAsync(new
+            {
+                type = "session.update",
+                session = new
+                {
+                    turn_detection = new
+                    {
+                        type = "server_vad",
+                        threshold = 0.8,
+                        prefix_padding_ms = 200,
+                        silence_duration_ms = 400
+                    }
+                }
+            });
+        }
+        else
+        {
+            var vadConfig = GetVadConfigForCurrentState();
+            await SendJsonAsync(new
+            {
+                type = "session.update",
+                session = new
+                {
+                    turn_detection = vadConfig
+                }
+            });
+        }
     }
 
     // ─── Instruction Updates (Event-Driven v4.1) ────────────
