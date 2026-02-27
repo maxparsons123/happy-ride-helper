@@ -776,6 +776,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         }
 
         // Route to session for processing
+        // HandleToolCallAsync may fire OnAiInstruction synchronously, which sets _pendingInstruction.
         object result;
         try
         {
@@ -790,7 +791,33 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         var resultJson = result is string s ? s : JsonSerializer.Serialize(result);
         Log($"✅ Tool result: {(resultJson.Length > 200 ? resultJson[..200] + "..." : resultJson)}");
 
-        // Send tool result back to OpenAI
+        // ── CRITICAL SEQUENCING ──
+        // The engine may have queued an instruction (e.g., VerifyingPickup readback).
+        // We MUST apply it BEFORE sending the tool result, because OpenAI auto-generates
+        // a response after receiving function_call_output. If the instruction isn't applied
+        // yet, the AI will freestyle with stale context (e.g., "Where would you like to go?"
+        // instead of doing the readback).
+        
+        // Step 1: Consume any pending instruction and send session.update FIRST
+        var pending = Interlocked.Exchange(ref _pendingInstruction, null);
+        bool isSilent = false;
+        if (pending != null)
+        {
+            var vadConfig = GetVadConfigForCurrentState();
+            await SendJsonAsync(new
+            {
+                type = "session.update",
+                session = new
+                {
+                    instructions = pending.Text,
+                    turn_detection = vadConfig
+                }
+            });
+            isSilent = IsSilentInstruction(pending.Text);
+            Log($"📋 Pre-tool-result instruction applied (VAD: {vadConfig.type})");
+        }
+
+        // Step 2: Send the tool result back to OpenAI
         await SendJsonAsync(new
         {
             type = "conversation.item.create",
@@ -802,13 +829,29 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             }
         });
 
-        // DO NOT send response.create here.
-        // The deterministic engine has already queued an instruction via OnAiInstruction
-        // (which triggers StartInstructionSequenceAsync → session.update → response.create).
-        // Sending response.create here causes:
-        // 1) AI freestyling ("Where would you like to go?") before the instruction arrives
-        // 2) "Conversation already has an active response" errors when the instruction fires
-        // 3) Verification bypass — AI skips readback and hallucinates next steps
+        // Step 3: Explicitly trigger response.create (unless silent state)
+        // We must send this ourselves because we consumed the pending instruction above,
+        // so StartInstructionSequenceAsync won't fire response.create.
+        if (pending != null && !isSilent)
+        {
+            await SendJsonAsync(new
+            {
+                type = "response.create",
+                response = new
+                {
+                    modalities = new[] { "text", "audio" },
+                    instructions = BuildStrictResponseInstruction(pending.Text)
+                }
+            });
+            Log($"📋 Post-tool-result response.create sent");
+        }
+        else if (pending == null)
+        {
+            // No instruction was queued — this shouldn't normally happen with sync_booking_data,
+            // but send response.create as a safety net so the AI doesn't hang silently.
+            await SendJsonAsync(new { type = "response.create" });
+        }
+        // If isSilent, don't send response.create — the AI should stay quiet.
     }
 
     // ─── Instruction Updates (Event-Driven v4.1) ────────────
