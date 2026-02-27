@@ -59,7 +59,7 @@ public class FareGeocodingService
         string? biasCity = null)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(6000); // 6s timeout — fail fast to keep conversation flowing
+        cts.CancelAfter(10000); // 10s timeout — allow edge function enough time to complete
 
         try
         {
