@@ -203,41 +203,39 @@ public sealed class TurnAnalyzerRealtime
         ExpectedResponse expected,
         string utterance)
     {
-        return
-$"""
-You analyze short telephony conversation turns for a taxi booking system.
+        var q = lastQuestion ?? "None";
+        return @$"You analyze short telephony conversation turns for a taxi booking system.
 
 Return STRICT JSON only:
 
 {{
-  "relationship": "direct_answer|correction|confirmation_yes|confirmation_no|new_request|irrelevant|unclear",
-  "slot": "pickup|destination|passengers|pickup_time|null",
-  "value": "extracted value or null",
-  "confidence": 0.0-1.0
+  ""relationship"": ""direct_answer|correction|confirmation_yes|confirmation_no|new_request|irrelevant|unclear"",
+  ""slot"": ""pickup|destination|passengers|pickup_time|null"",
+  ""value"": ""extracted value or null"",
+  ""confidence"": 0.0-1.0
 }}
 
 Classification rules:
-- "direct_answer": caller answers the question directly
-- "correction": caller changes a previously stated detail (e.g. "change the pickup to X")
-- "confirmation_yes": caller confirms (yes, yeah, correct, go ahead)
-- "confirmation_no": caller rejects WITHOUT providing a new value
-- "new_request": unrelated to the current question
-- "irrelevant": noise, filler words
-- "unclear": cannot determine intent
+- ""direct_answer"": caller answers the question directly
+- ""correction"": caller changes a previously stated detail (e.g. ""change the pickup to X"")
+- ""confirmation_yes"": caller confirms (yes, yeah, correct, go ahead)
+- ""confirmation_no"": caller rejects WITHOUT providing a new value
+- ""new_request"": unrelated to the current question
+- ""irrelevant"": noise, filler words
+- ""unclear"": cannot determine intent
 
-Important: Speech-to-text is noisy. If caller says "no" followed by a new value, that's "correction" not "confirmation_no".
+Important: Speech-to-text is noisy. If caller says ""no"" followed by a new value, that's ""correction"" not ""confirmation_no"".
 
 Ada last asked:
-"{lastQuestion ?? "None"}"
+""{q}""
 
 Expected:
-"{expected}"
+""{expected}""
 
 Caller said:
-"{utterance}"
+""{utterance}""
 
-Return JSON only.
-""";
+Return JSON only.";
     }
 
     // ─────────────────────────────────────────
