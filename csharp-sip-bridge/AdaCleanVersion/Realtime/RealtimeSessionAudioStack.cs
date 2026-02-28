@@ -63,15 +63,17 @@ public sealed class RealtimeSessionAudioStack : IDisposable
         IRealtimeTransport transport,
         MicGateController micGate,
         CancellationToken ct,
-        G711CodecType codec = G711CodecType.PCMA)
+        G711CodecType codec = G711CodecType.PCMU,
+        VoIPMediaSession? mediaSession = null)
     {
         _rtp = rtpSession ?? throw new ArgumentNullException(nameof(rtpSession));
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _micGate = micGate ?? throw new ArgumentNullException(nameof(micGate));
         _ct = ct;
 
-        // Resolve VoIPMediaSession from RTPSession
-        _mediaSession = (rtpSession as VoIPMediaSession)
+        // Resolve VoIPMediaSession — explicit param or cast from RTPSession
+        _mediaSession = mediaSession
+            ?? (rtpSession as VoIPMediaSession)
             ?? throw new ArgumentException("A VoIPMediaSession is required for RTP playout");
 
         // Stable, proven 20ms cadence engine
