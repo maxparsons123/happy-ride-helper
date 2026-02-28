@@ -9,8 +9,9 @@ namespace AdaCleanVersion.Realtime;
 ///   - Arms/ungates MicGateController around AI speech
 ///   - Handles barge-in (flush playout, send response.cancel)
 ///
-/// Does NOT touch state. Does NOT handle caller→OpenAI.
-/// Pure audio output lifecycle.
+/// Drain detection uses G711RtpPlayout.OnDrained callback —
+/// fires on the playout thread when the queue empties. No polling,
+/// no Task.Delay, no thread pool pressure on the precision audio loop.
 /// </summary>
 public sealed class AudioOutputController
 {
@@ -29,6 +30,11 @@ public sealed class AudioOutputController
     private volatile bool _aiSpeaking;
     private long _deltaCount;
     private long _frameCount;
+
+    // Watchdog: if drain never fires (e.g. OpenAI sends audio.done with 0 frames),
+    // force-ungate after a timeout. Much simpler than the old polling loop.
+    private CancellationTokenSource? _watchdogCts;
+    private readonly object _watchdogLock = new();
 
     /// <summary>Fires with each 160B frame queued (for avatar, monitoring).</summary>
     public event Action<byte[]>? OnAudioFrame;
@@ -51,6 +57,9 @@ public sealed class AudioOutputController
         _micGate = micGate ?? throw new ArgumentNullException(nameof(micGate));
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _ct = ct;
+
+        // Wire drain callback — fires on playout thread, zero polling
+        _playout.OnDrained += HandlePlayoutDrained;
     }
 
     // ─────────────────────────────────────────────
@@ -62,6 +71,8 @@ public sealed class AudioOutputController
     {
         _aiSpeaking = true;
         _micGate.Arm();
+        CancelWatchdog();
+        _playout.DisarmDrain(); // cancel any pending drain from previous response
         SafeLog("🔇 Mic gated (audio started)");
     }
 
@@ -77,6 +88,8 @@ public sealed class AudioOutputController
         {
             _aiSpeaking = true;
             _micGate.Arm();
+            CancelWatchdog();
+            _playout.DisarmDrain();
             SafeLog("🔇 Mic gated (first audio delta)");
         }
 
@@ -124,42 +137,41 @@ public sealed class AudioOutputController
     public void HandleAudioDone()
     {
         _aiSpeaking = false;
-        SafeLog("🔊 response.audio.done — waiting for playout to drain");
 
-        // Don't ungate immediately — let playout drain.
-        // Poll every 20ms; watchdog timeout adapts to queued audio duration.
-        _ = Task.Run(async () =>
+        // Flush any remaining partial frame (pad with silence to prevent
+        // stale bytes contaminating the next response)
+        if (_partialLen > 0)
         {
-            int initialQueued = _playout.QueuedFrames;
-            int dynamicWaitMs = Math.Clamp((initialQueued * 20) + 1500, 4000, 15000);
-            int elapsed = 0;
+            // Pad remainder with silence (0xD5 for PCMA)
+            Array.Fill(_partial, (byte)0xD5, _partialLen, FrameSize - _partialLen);
+            EmitFrame(_partial, 0);
+            _partialLen = 0;
+        }
 
-            while (elapsed < dynamicWaitMs)
-            {
-                if (_ct.IsCancellationRequested) return;
-                if (_playout.QueuedFrames <= 0) break;
-                await Task.Delay(20, _ct).ConfigureAwait(false);
-                elapsed += 20;
-            }
+        SafeLog("🔊 response.audio.done — drain armed");
 
-            if (_micGate.IsGated && !_aiSpeaking)
-            {
-                var forced = elapsed >= dynamicWaitMs && _playout.QueuedFrames > 0;
-                _micGate.Ungate();
+        // Arm drain detector — playout thread will fire OnDrained when queue empties
+        _playout.ArmDrain();
 
-                if (forced)
-                {
-                    _playout.Clear();
-                    SafeLog($"⚠ Stuck-mic watchdog — force-ungated after {dynamicWaitMs}ms, playout flushed");
-                }
-                else
-                {
-                    SafeLog("🔓 Mic ungated (playout drained)");
-                }
+        // Safety watchdog: if drain never fires (empty response, or playout stopped),
+        // force-ungate after a generous timeout based on queued frames
+        StartWatchdog();
+    }
 
-                try { OnMicUngated?.Invoke(); } catch { }
-            }
-        }, _ct);
+    /// <summary>
+    /// Called by G711RtpPlayout.OnDrained on the playout thread.
+    /// Queue just went empty — ungate mic immediately, zero latency.
+    /// </summary>
+    private void HandlePlayoutDrained()
+    {
+        CancelWatchdog();
+
+        if (_micGate.IsGated && !_aiSpeaking)
+        {
+            _micGate.Ungate();
+            SafeLog("🔓 Mic ungated (playout drained)");
+            try { OnMicUngated?.Invoke(); } catch { }
+        }
     }
 
     // ─────────────────────────────────────────────
@@ -173,8 +185,9 @@ public sealed class AudioOutputController
 
         _aiSpeaking = false;
         _partialLen = 0;
+        CancelWatchdog();
 
-        // Flush playout buffer
+        // Flush playout buffer (also disarms drain)
         _playout.Clear();
 
         // Cancel AI response
@@ -188,6 +201,52 @@ public sealed class AudioOutputController
         _micGate.Ungate();
 
         SafeLog("🎤 Barge-in — playout flushed, response.cancel sent, mic ungated");
+    }
+
+    // ─────────────────────────────────────────────
+    // Watchdog (safety net only — drain callback is primary)
+    // ─────────────────────────────────────────────
+
+    private void StartWatchdog()
+    {
+        lock (_watchdogLock)
+        {
+            _watchdogCts?.Cancel();
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+            _watchdogCts = cts;
+
+            int queuedMs = _playout.QueuedFrames * 20;
+            int timeoutMs = Math.Clamp(queuedMs + 2000, 4000, 15000);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(timeoutMs, cts.Token);
+                    if (cts.IsCancellationRequested) return;
+
+                    // Drain callback didn't fire — force ungate
+                    _playout.DisarmDrain();
+                    if (_micGate.IsGated && !_aiSpeaking)
+                    {
+                        _micGate.Ungate();
+                        _playout.Clear();
+                        SafeLog($"⚠ Stuck-mic watchdog — force-ungated after {timeoutMs}ms");
+                        try { OnMicUngated?.Invoke(); } catch { }
+                    }
+                }
+                catch (OperationCanceledException) { }
+            }, cts.Token);
+        }
+    }
+
+    private void CancelWatchdog()
+    {
+        lock (_watchdogLock)
+        {
+            _watchdogCts?.Cancel();
+            _watchdogCts = null;
+        }
     }
 
     // ─────────────────────────────────────────────

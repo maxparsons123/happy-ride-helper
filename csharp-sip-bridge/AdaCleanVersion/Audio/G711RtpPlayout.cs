@@ -47,10 +47,21 @@ public sealed class G711RtpPlayout : IDisposable
     private IntPtr _timer;
     private bool _useTimer;
 
+    // Drain detection: fires once when queue transitions from non-empty to empty
+    // while _drainArmed is true. Runs on the playout thread — no polling needed.
+    private volatile bool _drainArmed;
+    private volatile bool _hadFrames; // true once we've dequeued at least one real frame since arming
+
     private static readonly double NsPerTick = 1_000_000_000.0 / Stopwatch.Frequency;
     private static readonly long TicksPerFrame = (long)(20_000_000.0 / NsPerTick);
 
     public event Action<string>? OnLog;
+
+    /// <summary>
+    /// Fires on the playout thread when the queue drains to empty after ArmDrain() was called.
+    /// Zero-allocation, zero-polling, no thread pool pressure.
+    /// </summary>
+    public event Action? OnDrained;
 
     /// <summary>Number of frames currently queued for playout.</summary>
     public int QueuedFrames => _queue.Count;
@@ -61,6 +72,23 @@ public sealed class G711RtpPlayout : IDisposable
         _payloadType = G711Codec.PayloadType(codec);
         _timestamp = (uint)Random.Shared.Next();
         Array.Fill(_silence, G711Codec.SilenceByte(codec));
+    }
+
+    /// <summary>
+    /// Arm the drain detector. OnDrained will fire once the queue empties.
+    /// Call this when response.audio.done is received.
+    /// </summary>
+    public void ArmDrain()
+    {
+        _hadFrames = _queue.Count > 0;
+        _drainArmed = true;
+    }
+
+    /// <summary>Disarm drain detector (e.g. on barge-in or new response).</summary>
+    public void DisarmDrain()
+    {
+        _drainArmed = false;
+        _hadFrames = false;
     }
 
     public void Start()
@@ -161,6 +189,7 @@ public sealed class G711RtpPlayout : IDisposable
         while (_queue.TryDequeue(out _)) { }
         _partialLen = 0;
         _preBuffering = true; // enter pre-buffer mode until enough frames arrive
+        DisarmDrain();
     }
 
     private void Loop()
@@ -220,7 +249,22 @@ public sealed class G711RtpPlayout : IDisposable
         }
 
         if (!_queue.TryDequeue(out var frame))
+        {
             frame = _silence;
+
+            // Drain detection: queue just went empty after having had frames
+            if (_drainArmed && _hadFrames)
+            {
+                _drainArmed = false;
+                _hadFrames = false;
+                try { OnDrained?.Invoke(); } catch { }
+            }
+        }
+        else
+        {
+            // We have real audio — mark that we've seen frames
+            _hadFrames = true;
+        }
 
         SendRtp(frame);
     }
