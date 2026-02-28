@@ -122,6 +122,7 @@ public sealed class RealtimeToolRouter
         }
 
         Log($"🔧 Tool call: {evt.ToolName}");
+        Log($"📥 Tool args: {evt.ToolArgsJson?.Substring(0, Math.Min(evt.ToolArgsJson?.Length ?? 0, 500))}");
 
         // ── Parse arguments ──
         Dictionary<string, object?> args;

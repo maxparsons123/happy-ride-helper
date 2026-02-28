@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using AdaCleanVersion.Services;
 
 namespace TaxiBot.Deterministic
 {
@@ -851,11 +852,31 @@ namespace TaxiBot.Deterministic
         {
             raw = raw.Trim();
 
+            // Use the full UkTimeParser which handles ASAP variants, relative offsets,
+            // UK colloquialisms ("half seven"), named periods, day-of-week, explicit times, etc.
+            var result = UkTimeParser.Parse(raw);
+            if (result != null)
+            {
+                if (result.IsAsap)
+                    return new PickupTime("ASAP", WhenUtc: null, IsAsap: true);
+
+                // Convert London local time to UTC for scheduling
+                DateTime? whenUtc = null;
+                if (result.Resolved.HasValue)
+                {
+                    var londonTz = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+                    whenUtc = TimeZoneInfo.ConvertTimeToUtc(
+                        DateTime.SpecifyKind(result.Resolved.Value, DateTimeKind.Unspecified), londonTz);
+                }
+
+                return new PickupTime(result.Normalized, whenUtc, IsAsap: false);
+            }
+
+            // Legacy fallback: exact "asap" match (should be caught by UkTimeParser above)
             if (string.Equals(raw, "asap", StringComparison.OrdinalIgnoreCase))
                 return new PickupTime("ASAP", WhenUtc: null, IsAsap: true);
 
-            // If you already force the model to emit ISO "yyyy-MM-dd HH:mm", parse it deterministically.
-            // If not parseable, return null and let the engine reprompt.
+            // Last resort: try ISO format
             if (DateTime.TryParseExact(
                 raw,
                 "yyyy-MM-dd HH:mm",
@@ -866,8 +887,6 @@ namespace TaxiBot.Deterministic
                 return new PickupTime(raw, dt, IsAsap: false);
             }
 
-            // If model sends "tomorrow at 6pm" you'll parse it elsewhere or reprompt.
-            // For a fully deterministic engine, keep it strict and reprompt.
             return null;
         }
     }
