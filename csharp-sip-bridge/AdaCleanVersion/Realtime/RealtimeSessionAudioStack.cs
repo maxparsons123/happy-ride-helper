@@ -178,6 +178,9 @@ public sealed class RealtimeSessionAudioStack : IDisposable
             try { OnBargeIn?.Invoke(); } catch { }
         }
 
+        // v3.1: Flush any buffered audio from gate window first (preserves first syllables)
+        FlushMicGateBuffer();
+
         // Forward raw G.711 to OpenAI immediately
         try
         {
@@ -208,6 +211,30 @@ public sealed class RealtimeSessionAudioStack : IDisposable
         _monEnergyMin = double.MaxValue;
         _monEnergyMax = 0;
         _monSilenceFrames = 0;
+    }
+
+    /// <summary>
+    /// Flush buffered audio from mic gate to OpenAI (preserves first syllables).
+    /// Mirrors AdaSdkModel's FlushMicGateBuffer approach.
+    /// </summary>
+    private void FlushMicGateBuffer()
+    {
+        var buffered = _micGate.FlushBuffer();
+        if (buffered.Length == 0) return;
+
+        Log($"🔄 Flushing {buffered.Length} buffered mic frames to OpenAI");
+        try
+        {
+            foreach (var frame in buffered)
+            {
+                var b64 = Convert.ToBase64String(frame);
+                _ = _transport.SendAsync(new { type = "input_audio_buffer.append", audio = b64 }, _ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ Error flushing mic gate buffer: {ex.Message}");
+        }
     }
 
     /// <summary>Average absolute deviation from codec silence center (same as MicGateController).</summary>
