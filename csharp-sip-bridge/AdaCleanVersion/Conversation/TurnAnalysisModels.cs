@@ -1,6 +1,6 @@
 namespace AdaCleanVersion.Conversation;
 
-public enum TurnRelationship
+internal enum TurnRelationship
 {
     DirectAnswer,
     Correction,
