@@ -1,5 +1,5 @@
 using AdaCleanVersion.Audio;
-using AdaCleanVersion.Conversation;
+using AdaCleanVersion.Conversation; // TurnAnalyzerRealtime
 using AdaCleanVersion.Services;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
@@ -60,8 +60,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         G711CodecType codec = G711CodecType.PCMU,
         IRealtimeTransport? transport = null,
         VoIPMediaSession? mediaSession = null,
-        DeterministicBookingEngine? engine = null,
-        TurnAnalyzer? turnAnalyzer = null)
+        DeterministicBookingEngine? engine = null)
     {
         _callId = callId;
         _voice = voice;
@@ -135,7 +134,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             catch (Exception ex) { return new DispatchResult(false, Error: ex.Message); }
         };
 
-        // ── Tool router (engine + backend lambdas) ──
+        // ── Turn analyzer (reuses same WebSocket, conversation:"none") ──
+        var turnAnalyzer = new TurnAnalyzerRealtime(_transport, minConfidence: 0.65);
+
+        // ── Tool router (engine + backend lambdas + turn analyzer) ──
         _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token, turnAnalyzer);
         _tools.OnLog += Log;
         _tools.OnInstruction += instruction => Log($"📋 Instruction: {instruction}");

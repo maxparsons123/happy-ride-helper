@@ -1,6 +1,6 @@
 using AdaCleanVersion.Audio;
 using AdaCleanVersion.Config;
-using AdaCleanVersion.Conversation;
+// TurnAnalyzer now created internally by OpenAiRealtimeClient
 using AdaCleanVersion.Engine;
 using AdaCleanVersion.Realtime;
 using AdaCleanVersion.Services;
@@ -67,14 +67,7 @@ public static class CleanBridgeFactory
     {
         var codec = G711CodecType.PCMA;
 
-        // TurnAnalyzer — LLM-based turn reconciliation classifier
-        var turnAnalyzer = new TurnAnalyzer(
-            apiKey: settings.OpenAi.ApiKey,
-            model: "gpt-4o-mini",
-            minConfidence: 0.65);
-        turnAnalyzer.OnLog += msg => logger.LogInformation(msg);
-
-        // v9: Pure transport bridge + TurnAnalyzer reconciliation
+        // v10: TurnAnalyzer now created internally by OpenAiRealtimeClient (reuses WebSocket)
         var client = new OpenAiRealtimeClient(
             apiKey: settings.OpenAi.ApiKey,
             model: settings.OpenAi.Model,
@@ -87,8 +80,7 @@ public static class CleanBridgeFactory
             icabbiService: icabbiService,
             callerPhone: session.CallerId,
             codec: codec,
-            mediaSession: mediaSession,
-            turnAnalyzer: turnAnalyzer);
+            mediaSession: mediaSession);
 
         client.OnLog += msg => logger.LogInformation(msg);
         client.OnAudioOut += frame => bridge.RaiseAudioOut(frame);

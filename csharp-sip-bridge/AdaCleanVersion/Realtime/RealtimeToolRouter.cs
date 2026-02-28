@@ -21,7 +21,7 @@ public sealed class RealtimeToolRouter
     private readonly IRealtimeTransport _transport;
     private readonly Func<string, Task<GeocodeResult>> _geocode;
     private readonly Func<BookingSlots, Task<DispatchResult>> _dispatch;
-    private readonly TurnAnalyzer? _turnAnalyzer;
+    private readonly TurnAnalyzerRealtime? _turnAnalyzer;
     private readonly CancellationToken _ct;
 
     private long _lastToolCallTick;
@@ -62,7 +62,7 @@ public sealed class RealtimeToolRouter
         Func<string, Task<GeocodeResult>> geocode,
         Func<BookingSlots, Task<DispatchResult>> dispatch,
         CancellationToken ct,
-        TurnAnalyzer? turnAnalyzer = null)
+        TurnAnalyzerRealtime? turnAnalyzer = null)
     {
         _engine = engine;
         _transport = transport;
