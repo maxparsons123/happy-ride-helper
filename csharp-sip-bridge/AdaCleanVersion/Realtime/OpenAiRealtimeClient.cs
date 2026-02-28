@@ -133,11 +133,11 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
             catch (Exception ex) { return new DispatchResult(false, Error: ex.Message); }
         };
 
-        // ── Turn analyzer (reuses same WebSocket, conversation:"none") ──
-        var turnAnalyzer = new TurnAnalyzerRealtime(_transport, minConfidence: 0.65);
+        // ── Turn analyzer DISABLED — causes response conflicts on shared WebSocket ──
+        // var turnAnalyzer = new TurnAnalyzerRealtime(_transport, minConfidence: 0.65);
 
-        // ── Tool router (engine + backend lambdas + turn analyzer) ──
-        _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token, turnAnalyzer);
+        // ── Tool router (engine + backend lambdas, no turn analyzer) ──
+        _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token, turnAnalyzer: null);
         _tools.OnLog += Log;
         _tools.OnInstruction += instruction => Log($"📋 Instruction: {instruction}");
         _tools.OnTransfer += reason => { try { OnTransfer?.Invoke(reason); } catch { } };
