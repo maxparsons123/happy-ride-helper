@@ -127,13 +127,14 @@ public sealed class AudioOutputController
         SafeLog("🔊 response.audio.done — waiting for playout to drain");
 
         // Don't ungate immediately — let playout drain.
-        // Poll every 20ms, but force-ungate after 4s (stuck-mic watchdog).
+        // Poll every 20ms; watchdog timeout adapts to queued audio duration.
         _ = Task.Run(async () =>
         {
-            const int maxWaitMs = 4000;
+            int initialQueued = _playout.QueuedFrames;
+            int dynamicWaitMs = Math.Clamp((initialQueued * 20) + 1500, 4000, 15000);
             int elapsed = 0;
 
-            while (elapsed < maxWaitMs)
+            while (elapsed < dynamicWaitMs)
             {
                 if (_ct.IsCancellationRequested) return;
                 if (_playout.QueuedFrames <= 0) break;
@@ -143,13 +144,13 @@ public sealed class AudioOutputController
 
             if (_micGate.IsGated && !_aiSpeaking)
             {
-                var forced = elapsed >= maxWaitMs;
+                var forced = elapsed >= dynamicWaitMs && _playout.QueuedFrames > 0;
                 _micGate.Ungate();
 
                 if (forced)
                 {
                     _playout.Clear();
-                    SafeLog("⚠ Stuck-mic watchdog — force-ungated after 4s, playout flushed");
+                    SafeLog($"⚠ Stuck-mic watchdog — force-ungated after {dynamicWaitMs}ms, playout flushed");
                 }
                 else
                 {
