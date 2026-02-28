@@ -91,7 +91,12 @@ public sealed class G711RtpPlayout : IDisposable
         if (IsWindows)
         {
             try { timeEndPeriod(1); } catch { }
-            if (_timer != IntPtr.Zero) CloseHandle(_timer);
+            if (_useTimer && _timer != IntPtr.Zero)
+            {
+                try { CloseHandle(_timer); } catch { }
+                _timer = IntPtr.Zero;
+                _useTimer = false;
+            }
         }
     }
 
