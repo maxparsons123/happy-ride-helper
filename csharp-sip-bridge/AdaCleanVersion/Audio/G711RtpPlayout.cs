@@ -29,6 +29,8 @@ public sealed class G711RtpPlayout : IDisposable
     private static extern bool CloseHandle(IntPtr hObj);
 
     private const int FrameSize = 160; // 20ms @ 8kHz
+    private const int MaxQueuedFrames = 60; // 1.2s cap
+    private const int TrimTarget = 30;      // trim back to 600ms
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly int _payloadType;
@@ -126,9 +128,16 @@ public sealed class G711RtpPlayout : IDisposable
             }
         }
 
-        // Enqueue complete frames
+        // Enqueue complete frames (with jitter cap)
         while (offset + FrameSize <= data.Length)
         {
+            // Trim if queue exceeds cap — drop oldest to prevent latency buildup
+            if (_queue.Count > MaxQueuedFrames)
+            {
+                while (_queue.Count > TrimTarget) _queue.TryDequeue(out _);
+                Log($"⚠ Jitter cap hit ({MaxQueuedFrames}), trimmed to {TrimTarget}");
+            }
+
             var frame = new byte[FrameSize];
             Buffer.BlockCopy(data, offset, frame, 0, FrameSize);
             _queue.Enqueue(frame);
@@ -163,29 +172,30 @@ public sealed class G711RtpPlayout : IDisposable
             {
                 long waitNs = (long)(wait * NsPerTick);
 
-                if (_useTimer && waitNs > 1_000_000)
+                if (_useTimer && waitNs > 2_000_000)
                 {
-                    long due = -(waitNs / 100);
+                    // Sleep most of the interval via high-res waitable timer
+                    long due = -((waitNs - 500_000) / 100); // wake 0.5ms early
                     if (SetWaitableTimer(_timer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
                         WaitForSingleObject(_timer, 100);
                 }
-                else if (waitNs > 2_000_000)
+                else if (waitNs > 3_000_000)
                 {
-                    Thread.Sleep((int)(waitNs / 1_000_000) - 1);
-                }
-                else
-                {
-                    Thread.SpinWait(50);
+                    // Fallback: sleep but leave 2ms margin
+                    Thread.Sleep(1);
                 }
 
-                continue;
+                // Spin-wait for final precision (sub-ms)
+                while (Stopwatch.GetTimestamp() < nextTick)
+                    Thread.SpinWait(20);
             }
 
             Tick();
             nextTick += TicksPerFrame;
 
+            // Reset if we drifted more than 3 frames behind
             long drift = Stopwatch.GetTimestamp() - nextTick;
-            if (drift > TicksPerFrame * 5)
+            if (drift > TicksPerFrame * 3)
                 nextTick = Stopwatch.GetTimestamp() + TicksPerFrame;
         }
     }
