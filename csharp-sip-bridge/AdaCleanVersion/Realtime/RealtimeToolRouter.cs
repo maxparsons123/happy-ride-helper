@@ -28,7 +28,7 @@ public sealed class RealtimeToolRouter
     private volatile bool _toolCalledInResponse;
     private readonly HashSet<string> _processedCallIds = new();
     private volatile bool _frozen; // post-transfer/hangup freeze
-    private const long ThrottleMs = 500; // turn-level dedupe window
+    private const long ThrottleMs = 2500; // turn-level dedupe — covers TurnAnalyzer processing time
 
     // ── Turn context for TurnAnalyzer ──
     private string? _lastAdaQuestion;
