@@ -1,4 +1,5 @@
 using AdaCleanVersion.Audio;
+using AdaCleanVersion.Conversation;
 using AdaCleanVersion.Services;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
@@ -59,7 +60,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         G711CodecType codec = G711CodecType.PCMU,
         IRealtimeTransport? transport = null,
         VoIPMediaSession? mediaSession = null,
-        DeterministicBookingEngine? engine = null)
+        DeterministicBookingEngine? engine = null,
+        TurnAnalyzer? turnAnalyzer = null)
     {
         _callId = callId;
         _voice = voice;
@@ -134,7 +136,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         };
 
         // ── Tool router (engine + backend lambdas) ──
-        _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token);
+        _tools = new RealtimeToolRouter(eng, _transport, geocodeFn, dispatchFn, _cts.Token, turnAnalyzer);
         _tools.OnLog += Log;
         _tools.OnInstruction += instruction => Log($"📋 Instruction: {instruction}");
         _tools.OnTransfer += reason => { try { OnTransfer?.Invoke(reason); } catch { } };
@@ -216,7 +218,10 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             case RealtimeEventType.CallerTranscript:
                 if (!string.IsNullOrWhiteSpace(evt.Transcript))
+                {
                     Log($"👤 Caller: {evt.Transcript}");
+                    _tools.SetCallerTranscript(evt.Transcript);
+                }
                 break;
 
             case RealtimeEventType.AdaTranscriptDone:
