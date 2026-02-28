@@ -77,7 +77,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // ── Mic gate (simple energy-based) ──
         _micGate = new MicGateController(codec);
 
-        // ── Unified audio stack (replaces RealtimeAudioBridge) ──
+        // ── Unified audio stack (RTP ↔ OpenAI, mic gate, barge-in) ──
         _audioStack = new RealtimeSessionAudioStack(rtpSession, _transport, _micGate, _cts.Token, codec);
         _audioStack.OnLog += Log;
         _audioStack.OnAudioOutFrame += frame => { try { OnAudioOut?.Invoke(frame); } catch { } };
