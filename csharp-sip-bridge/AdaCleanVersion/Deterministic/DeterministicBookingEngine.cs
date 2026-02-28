@@ -387,8 +387,8 @@ namespace TaxiBot.Deterministic
             // All captured -> confirm
             State = State with { Stage = Stage.ConfirmDetails };
 
-            var pickup = State.Slots.Pickup.Raw!;
-            var dropoff = State.Slots.Dropoff.Raw!;
+            var pickup = State.Slots.Pickup.Normalized ?? State.Slots.Pickup.Raw!;
+            var dropoff = State.Slots.Dropoff.Normalized ?? State.Slots.Dropoff.Raw!;
             var pax = State.Slots.Passengers!.Value;
             var time = State.Slots.PickupTime!.Display;
 
