@@ -131,7 +131,7 @@ namespace TaxiBot.Deterministic
                     return NextAction.TransferToHuman("Confirmation unclear too many times.");
                 }
 
-                return NextAction.Ask("Just to confirm, is that correct? Please say yes or no.");
+                return NextAction.Ask("⛔ CONFIRMATION GATE: The booking is NOT confirmed. Do NOT say 'booked', 'confirmed', 'safe travels' or any closing phrase. Say ONLY: \"Just to confirm, is that correct? Please say yes or no.\" Then STOP.");
             }
 
             // Normal collection flow:
@@ -383,7 +383,11 @@ namespace TaxiBot.Deterministic
             var pax = State.Slots.Passengers!.Value;
             var time = State.Slots.PickupTime!.Display;
 
-            return NextAction.Ask($"Just to confirm: pickup {pickup}, going to {dropoff}, {pax} passenger{(pax == 1 ? "" : "s")}, at {time}. Is that correct?");
+            return NextAction.Ask(
+                $"⛔ CONFIRMATION GATE: The booking is NOT confirmed yet. You MUST read back the details and ask the caller to confirm. " +
+                $"Do NOT say 'booked', 'confirmed', 'arranged', 'on its way', 'safe travels', 'have a good day', or ANY closing phrase. " +
+                $"Say ONLY: \"Just to confirm: pickup {pickup}, going to {dropoff}, {pax} passenger{(pax == 1 ? "" : "s")}, at {time}. Is that correct?\" " +
+                $"Then STOP and WAIT for the caller to say yes or no. NOTHING ELSE.");
         }
 
         private NextAction HandleDispatchResult(BackendResultEvent ev)
