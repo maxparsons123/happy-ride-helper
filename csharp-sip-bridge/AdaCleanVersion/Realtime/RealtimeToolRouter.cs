@@ -92,17 +92,25 @@ public sealed class RealtimeToolRouter
 
     /// <summary>
     /// Call once at session start to get the greeting instruction.
+    /// Uses conversation.item.create + response.create (NOT session.update)
+    /// so we don't overwrite the system prompt.
     /// </summary>
     public async Task StartAsync()
     {
         var action = _engine.Start();
-        // Greeting has no tool call context — use follow-up path to trigger audio
         if (action is AskAction ask)
         {
-            Log($"💬 Ask: {ask.Text}");
+            Log($"💬 Greeting: {ask.Text}");
             TrackAdaQuestion(ask.Text);
             OnInstruction?.Invoke(ask.Text);
-            await UpdateInstructionAndRespond(ask.Text);
+
+            // Inject the greeting as a user-role conversation item
+            await _transport.SendAsync(
+                RealtimeSessionConfig.BuildGreetingItem(ask.Text), _ct);
+
+            // Trigger model to speak the greeting (tool_choice none so it speaks, not calls tools)
+            await _transport.SendAsync(
+                RealtimeSessionConfig.BuildGreetingResponse(), _ct);
         }
         else
         {

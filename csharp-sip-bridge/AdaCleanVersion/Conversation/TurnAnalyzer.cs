@@ -42,6 +42,8 @@ public sealed class TurnAnalyzer
     /// <summary>
     /// Analyze a single conversation turn and classify the caller's intent
     /// relative to Ada's last question.
+    /// Fast local heuristics handle obvious cases (yes/no/yeah/correct);
+    /// only ambiguous utterances go to the LLM.
     /// </summary>
     public async Task<TurnAnalysisResult> AnalyzeAsync(
         string? lastAdaQuestion,
@@ -52,6 +54,15 @@ public sealed class TurnAnalyzer
         if (string.IsNullOrWhiteSpace(callerUtterance))
         {
             return Fallback("Empty utterance");
+        }
+
+        // ── Fast local heuristic: skip LLM for obvious cases ──
+        var local = TryLocalClassify(callerUtterance, expected);
+        if (local != null)
+        {
+            Log($"🧠 TurnAnalyzer (local): {local.Relationship} " +
+                $"(confidence={local.Confidence:F2}, value={local.Value ?? "null"})");
+            return local;
         }
 
         var prompt = BuildPrompt(lastAdaQuestion, expected, callerUtterance);
@@ -108,6 +119,89 @@ public sealed class TurnAnalyzer
             Log($"⚠ TurnAnalyzer error: {ex.Message}");
             return Fallback($"Exception: {ex.Message}");
         }
+    }
+
+    // ─────────────────────────────────────────
+    // LOCAL HEURISTICS (skip LLM for obvious cases)
+    // ─────────────────────────────────────────
+
+    private static readonly HashSet<string> YesPatterns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "yes", "yeah", "yep", "yup", "ya", "aye", "correct", "that's right",
+        "that's correct", "right", "go ahead", "please", "yes please",
+        "absolutely", "sure", "okay", "ok", "yes that's right", "yes it is",
+        "yes that's correct", "confirm", "confirmed", "affirmative"
+    };
+
+    private static readonly HashSet<string> NoPatterns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "no", "nah", "nope", "no thanks", "not quite", "that's wrong",
+        "that's not right", "wrong", "incorrect", "no it's not",
+        "no that's wrong", "negative"
+    };
+
+    private static readonly HashSet<string> AsapPatterns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "asap", "now", "as soon as possible", "straight away", "right now",
+        "immediately", "right away"
+    };
+
+    /// <summary>
+    /// Fast regex/set-based classifier for obvious utterances.
+    /// Returns null if ambiguous (falls through to LLM).
+    /// </summary>
+    private static TurnAnalysisResult? TryLocalClassify(string utterance, ExpectedResponse expected)
+    {
+        var trimmed = utterance.Trim().TrimEnd('.', '!', '?', ',');
+
+        // ── Confirmation yes/no (only when expecting confirmation) ──
+        if (expected == ExpectedResponse.ConfirmationYesNo)
+        {
+            if (YesPatterns.Contains(trimmed))
+                return new TurnAnalysisResult(TurnRelationship.ConfirmationYes, null, null, 0.98, "local:yes");
+
+            if (NoPatterns.Contains(trimmed))
+                return new TurnAnalysisResult(TurnRelationship.ConfirmationNo, null, null, 0.98, "local:no");
+        }
+
+        // ── Passenger count (simple numbers) ──
+        if (expected == ExpectedResponse.Passengers)
+        {
+            var paxValue = TryParsePassengers(trimmed);
+            if (paxValue != null)
+                return new TurnAnalysisResult(TurnRelationship.DirectAnswer, "passengers", paxValue, 0.95, "local:passengers");
+        }
+
+        // ── ASAP / now for pickup time ──
+        if (expected == ExpectedResponse.PickupTime && AsapPatterns.Contains(trimmed))
+        {
+            return new TurnAnalysisResult(TurnRelationship.DirectAnswer, "pickup_time", "ASAP", 0.95, "local:asap");
+        }
+
+        return null; // ambiguous → fall through to LLM
+    }
+
+    private static readonly Dictionary<string, string> WordNumbers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["one"] = "1", ["two"] = "2", ["three"] = "3", ["four"] = "4",
+        ["five"] = "5", ["six"] = "6", ["seven"] = "7", ["eight"] = "8"
+    };
+
+    private static string? TryParsePassengers(string text)
+    {
+        // "2", "3" etc.
+        if (int.TryParse(text, out var n) && n >= 1 && n <= 8)
+            return n.ToString();
+
+        // "two passengers", "3 passengers", "two"
+        var lower = text.ToLowerInvariant().Replace("passengers", "").Replace("passenger", "").Trim();
+        if (int.TryParse(lower, out var n2) && n2 >= 1 && n2 <= 8)
+            return n2.ToString();
+
+        if (WordNumbers.TryGetValue(lower, out var val))
+            return val;
+
+        return null;
     }
 
     // ─────────────────────────────────────────
