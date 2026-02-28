@@ -140,8 +140,8 @@ public static class CleanBridgeFactory
         Stage.CollectPassengers => CollectionState.CollectingPassengers,
         Stage.CollectTime => CollectionState.CollectingPickupTime,
         Stage.ConfirmDetails => CollectionState.AwaitingConfirmation,
-        Stage.Dispatching => CollectionState.Dispatched,
-        Stage.Booked => CollectionState.Dispatched,
+        Stage.Dispatching => CollectionState.AwaitingConfirmation, // Never map directly to Dispatched — must go through confirmation gate
+        Stage.Booked => CollectionState.Ending, // Already dispatched bookings go to ending, not re-dispatch
         Stage.End => CollectionState.Ending,
         Stage.Escalate => CollectionState.Ending,
         _ => null

@@ -736,6 +736,18 @@ public class CallStateEngine
         // Self-transition is always allowed (no-op)
         if (old == newState) return;
 
+        // ── DISPATCH HARD BLOCK ──
+        // Dispatched is ONLY reachable from AwaitingConfirmation with ConfirmationReceived = true.
+        // Even if a bug or future code tries to dispatch, this gate prevents it.
+        if (newState == CollectionState.Dispatched)
+        {
+            if (!ConfirmationReceived || old != CollectionState.AwaitingConfirmation)
+            {
+                Log($"⛔ DISPATCH BLOCKED: ConfirmationReceived={ConfirmationReceived}, state={old} — cannot dispatch");
+                return;
+            }
+        }
+
         // Validate against transition map
         if (!AllowedTransitions.TryGetValue(old, out var allowed) || !allowed.Contains(newState))
         {
