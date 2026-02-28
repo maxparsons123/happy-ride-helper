@@ -137,6 +137,14 @@ namespace TaxiBot.Deterministic
             // Normal collection flow:
             State = ApplyPatch(State, patch);
 
+            // If an address changed at any point in collection, re-verify immediately
+            // before asking for downstream fields (e.g. destination correction during passengers).
+            if (patch.PickupChanged)
+                return StartGeocodePickup();
+
+            if (patch.DropoffChanged)
+                return StartGeocodeDropoff();
+
             // Decide next action deterministically based on stage + slots.
             return State.Stage switch
             {
@@ -308,6 +316,14 @@ namespace TaxiBot.Deterministic
 
         private NextAction HandleCollectPassengers()
         {
+            // Guard: if destination is missing/unverified, collect & verify it first.
+            // This prevents "stuck on passengers" after destination corrections.
+            if (!State.Slots.Dropoff.HasValue || !State.Slots.Dropoff.Verified)
+            {
+                State = State with { Stage = Stage.CollectDropoff };
+                return HandleCollectDropoff();
+            }
+
             if (State.Slots.Passengers is >= 1 and <= 8)
                 return GoToNextMissingOrConfirm();
 
