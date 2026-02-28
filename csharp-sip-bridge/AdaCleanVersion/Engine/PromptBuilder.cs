@@ -74,12 +74,13 @@ public static class PromptBuilder
             If the caller provides ANY booking detail
             (name, pickup, destination, passengers, time, corrections):
 
-            1) Call sync_booking_data.
+            1) Call sync_booking_data SILENTLY — no speech before the call.
             2) WAIT for the tool result.
-            3) ONLY AFTER the tool result arrives, follow the next [INSTRUCTION].
+            3) ONLY AFTER the tool result arrives, respond per the latest [INSTRUCTION].
 
-            Speaking before calling the tool when required is a CRITICAL ERROR.
-            If you do not call the tool, the booking will FAIL.
+            Do NOT say "just a moment", "let me check", "okay" or ANY filler before the tool call.
+            Do NOT apologise for waiting after the tool result.
+            Speaking before calling the tool is a CRITICAL ERROR.
 
             If multiple fields are given in one sentence,
             include ALL fields in ONE tool call.
@@ -90,24 +91,16 @@ public static class PromptBuilder
 
             Never split a compound utterance into multiple tool calls.
 
-            Keywords to detect compound input:
-            "from X to Y", "going to", "heading to", "X with N passengers", "for N people".
-
             ────────────────────────────────
             SPEECH STYLE RULES
             ────────────────────────────────
 
             - Under 15 words per response where possible.
             - One question at a time.
-            - No filler phrases.
-            - No repetition.
-            - SPEAK VERY SLOWLY AND CLEARLY. You are talking to real people on the phone.
-            - Add a brief pause (...) between every sentence. Never chain sentences together without breathing room.
-            - When reading back addresses, postcodes, or fares, speak EXTREMELY SLOWLY — pause between each word.
-              For example: "52 A ... David Road ... C V 1 ... 2 B W ... Coventry"
-            - Speak as if you are a calm, patient human receptionist who has all the time in the world.
-            - Never rush. If in doubt, go slower. The caller needs to hear and understand every word.
-            - Never sound robotic. Sound warm, patient, and unhurried.
+            - No filler phrases. No repetition.
+            - Speak slowly and clearly. Use natural pauses. Do not exaggerate pauses.
+            - Never rush. Sound warm, patient, and unhurried.
+            - When reading back addresses or fares, speak extra slowly.
             - NEVER repeat the greeting. You greet ONCE at the start.
 
             ────────────────────────────────
@@ -162,25 +155,11 @@ public static class PromptBuilder
             ────────────────────────────────
 
             House numbers are SACRED STRINGS.
-
-            NEVER:
-            - Insert hyphens
-            - Drop digits
-            - Rearrange characters
-            - Convert to ranges
-            - Guess missing characters
-
+            NEVER insert hyphens, drop digits, rearrange, convert to ranges, or guess.
             Forbidden: 52A → 52-84, 1214A → 12-14A, 52A → 528.
-
-            If 3+ characters (e.g. 1214A), read DIGIT BY DIGIT:
-            "one-two-one-four-A".
-
+            If 3+ characters (e.g. 1214A), read DIGIT BY DIGIT: "one-two-one-four-A".
             If ANY part is uncertain → ask the caller to confirm.
-
-            MID-SPEECH SELF-CORRECTION:
-            If caller says one number then hesitates and says another,
-            the LATTER number is the correction.
-            "52A no 1214A David Road" → 1214A David Road.
+            Mid-speech self-correction: latter number wins ("52A no 1214A" → 1214A).
 
             ────────────────────────────────
             SPELLED-OUT NAMES
@@ -297,13 +276,9 @@ public static class PromptBuilder
             };
         }
 
-        // Hard enforcement prefix — injected into every collecting state
         const string SLOT_GUARD =
-            "⛔ CRITICAL: You are collecting booking details. The booking is NOT complete. " +
-            "Do NOT say 'if you need any more assistance', 'is there anything else', 'have a good day', " +
-            "'I've noted that', 'safe travels', or ANY closing/farewell phrase. " +
-            "Do NOT offer general assistance. Do NOT say the booking is confirmed. " +
-            "You MUST ask ONLY for the specific field described below. NOTHING ELSE. ";
+            "⛔ BOOKING INCOMPLETE. Ask ONLY for the required field. " +
+            "No closing phrases. No confirmations. No general help. ";
 
         // Build dynamic remaining fields based on what's actually missing
         string RemainingFields()
@@ -355,41 +330,26 @@ public static class PromptBuilder
                 "[INSTRUCTION] The caller just changed their pickup address. " +
                 "Say \"No problem, let me update that for you\" and then read back the new pickup address " +
                 $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? rawData.GetSlot("pickup") ?? "")}\" VERBATIM. " +
-                "Then say \"One moment while I recalculate the fare.\" " +
-                "Then STOP and wait silently. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\".",
+                "Then say \"One moment while I recalculate the fare.\" Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingPickup when rawData.IsMultiSlotBurst =>
                 "[INSTRUCTION] The caller provided multiple details at once. " +
-                "You must prioritize verifying the PICKUP first. " +
+                "Prioritize verifying the PICKUP first. " +
                 $"Say: \"I've got all those details. First, let me confirm the pickup: {FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? rawData.PickupRaw ?? "")}.\" " +
-                "Do NOT confirm the destination or passengers yet. Then STOP and wait silently. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
-                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
-                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+                "Do NOT confirm destination or passengers yet. Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingPickup when rawData.GetGeminiSlot("pickup") != null =>
-                "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back EXACTLY this pickup address: " +
+                "[INSTRUCTION] Read back EXACTLY this pickup address: " +
                 $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? "")}\". " +
-                "This is the AI-cleaned version — read it VERBATIM, do NOT change or reinterpret it. " +
-                "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
-                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
-                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+                "This is the AI-cleaned version — read it VERBATIM. Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingPickup =>
-                "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the pickup address " +
-                "AS YOU UNDERSTOOD IT from the caller's speech. Do NOT read the raw transcript — use your own " +
-                "interpretation of what the caller actually said (e.g., if the transcript says \"This is your way, David Rhoads\" " +
-                "but you heard \"52A David Road\", say \"52A David Road\"). " +
-                "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
-                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
-                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+                "[INSTRUCTION] Read back the pickup address AS YOU UNDERSTOOD IT from the caller's speech. " +
+                "Do NOT read the raw transcript. Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.CollectingDestination when verifiedPickup != null && context?.LastDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}Pickup confirmed as \"{FormatAddressForSpeech(verifiedPickup.Address)}\". " +
@@ -419,42 +379,28 @@ public static class PromptBuilder
 
             CollectionState.VerifyingDestination when isRecalculating =>
                 "[INSTRUCTION] The caller just changed their destination address. " +
-                "Say \"No problem, let me update that for you\" and then read back the new destination address " +
+                "Say \"No problem, let me update that for you\" and then read back the new destination " +
                 $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? rawData.GetSlot("destination") ?? "")}\" VERBATIM. " +
-                "Then say \"One moment while I recalculate the fare.\" " +
-                "Then STOP and wait silently. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\".",
+                "Then say \"One moment while I recalculate the fare.\" Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingDestination when rawData.IsMultiSlotBurst =>
                 "[INSTRUCTION] The caller provided multiple details at once. " +
                 "Now verify the DESTINATION. " +
                 $"Say: \"And for the destination, that's {FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? rawData.DestinationRaw ?? "")}.\" " +
-                "Then STOP and wait silently. Do NOT confirm passengers or time yet. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
-                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
-                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+                "Then STOP. Do NOT confirm passengers or time yet. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingDestination when rawData.GetGeminiSlot("destination") != null =>
-                "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back EXACTLY this destination address: " +
+                "[INSTRUCTION] Read back EXACTLY this destination address: " +
                 $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? "")}\". " +
-                "This is the AI-cleaned version — read it VERBATIM, do NOT change or reinterpret it. " +
-                "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
-                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
-                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+                "This is the AI-cleaned version — read it VERBATIM. Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingDestination =>
-                "[INSTRUCTION] Say \"Let me just confirm that for you\" and then read back the destination address " +
-                "AS YOU UNDERSTOOD IT from the caller's speech. Do NOT read the raw transcript — use your own " +
-                "interpretation of what the caller actually said. " +
-                "Then STOP and wait silently. Do NOT say \"let me just confirm\" again. " +
-                "IMPORTANT: House numbers are SACRED STRINGS — NEVER convert them into ranges. " +
-                "\"52A\" means house fifty-two-A, NOT a range 52-84. Read it as \"52 A\". " +
-                "If the house number has 3 or more characters (e.g., 1214A), read it DIGIT BY DIGIT " +
-                "(e.g., \"one-two-one-four-A Warwick Road\"). NEVER shorten or truncate house numbers.",
+                "[INSTRUCTION] Read back the destination address AS YOU UNDERSTOOD IT from the caller's speech. " +
+                "Do NOT read the raw transcript. Then STOP. " +
+                "House numbers are SACRED STRINGS.",
 
             CollectionState.CollectingPassengers when verifiedDestination != null =>
                 $"[INSTRUCTION] {SLOT_GUARD}Destination confirmed as \"{FormatAddressForSpeech(verifiedDestination.Address)}\". " +
@@ -492,27 +438,20 @@ public static class PromptBuilder
                 BuildClarificationInstruction(rawData, clarification),
 
             CollectionState.PresentingFare when fareResult != null && booking != null =>
-                $"[INSTRUCTION] ⚠️ You are MID-CALL. Do NOT greet the caller again. Do NOT say 'Welcome to...' or re-introduce yourself.\n" +
-                "⛔ TRUTH OVERRIDE: The caller may have mispronounced or misspelled addresses. " +
-                "You MUST NOT repeat the caller's words for addresses. You MUST ONLY use the VERIFIED addresses " +
-                "provided in the bullet points below. These are the geocode-confirmed ground truth. " +
-                "If you repeat the caller's misspelling instead of the verified address, the system WILL FAIL.\n" +
-                "You MUST read the verified pickup and destination EXACTLY as written below (no shortening):\n" +
+                $"[INSTRUCTION] ⛔ TRUTH OVERRIDE: Use ONLY the VERIFIED addresses below, NOT the caller's words.\n" +
                 $"- Name: {booking.CallerName}\n" +
-                $"- Pickup (VERIFIED — use ONLY this): {FormatAddressWithPoiAlias(fareResult.Pickup)}\n" +
-                $"- Destination (VERIFIED — use ONLY this): {FormatAddressWithPoiAlias(fareResult.Destination)}\n" +
+                $"- Pickup (VERIFIED): {FormatAddressWithPoiAlias(fareResult.Pickup)}\n" +
+                $"- Destination (VERIFIED): {FormatAddressWithPoiAlias(fareResult.Destination)}\n" +
                 $"- Passengers: {booking.Passengers}\n" +
                 $"- Time: {booking.PickupTime}\n" +
                 $"- Fare: {fareResult.FareSpoken}\n" +
-                $"- ⚠️ Driver ETA (MANDATORY — you MUST say this): {fareResult.BusyMessage}\n" +
+                $"- Driver ETA (MANDATORY): {fareResult.BusyMessage}\n" +
                 BuildStreetNameGuard(fareResult.Pickup.Address) +
                 BuildStreetNameGuard(fareResult.Destination.Address) +
                 BuildPostcodeGuard(fareResult.Pickup.Address) +
                 BuildPostcodeGuard(fareResult.Destination.Address) +
                 $"Say EXACTLY: \"So {booking.CallerName}, that's from {FormatAddressWithPoiAlias(fareResult.Pickup)} to {FormatAddressWithPoiAlias(fareResult.Destination)}, the fare will be around {fareResult.FareSpoken}. {fareResult.BusyMessage} Would you like to go ahead with this booking?\"\n" +
-                "Do NOT paraphrase addresses. Do NOT skip the driver ETA / busy message — it is MANDATORY.\n" +
-                "WRONG: Repeating caller's mispronunciation (e.g., 'Fargosworth Street')\n" +
-                "CORRECT: Using verified address (e.g., 'Far Gosford Street')",
+                "Do NOT paraphrase addresses. Do NOT skip the ETA message.",
 
             CollectionState.PresentingFare when booking != null =>
                 $"[INSTRUCTION] Present the booking summary to the caller:\n" +
