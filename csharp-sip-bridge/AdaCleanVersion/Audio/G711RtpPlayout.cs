@@ -257,11 +257,6 @@ public sealed class G711RtpPlayout : IDisposable
             {
                 _drainArmed = false;
                 _hadFrames = false;
-                // Re-arm pre-buffer for the NEXT response so it gets
-                // the same 100ms smoothing that post-barge-in gets.
-                // Without this, the next response plays frames immediately
-                // as they arrive, causing choppy "grumble" from network jitter.
-                _preBuffering = true;
                 try { OnDrained?.Invoke(); } catch { }
             }
         }
