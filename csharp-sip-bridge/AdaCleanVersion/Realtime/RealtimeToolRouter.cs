@@ -1,17 +1,19 @@
 using System.Text.Json;
+using AdaCleanVersion.Conversation;
 using TaxiBot.Deterministic;
 
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// v7 — Deterministic engine wiring.
+/// v8 — Deterministic engine wiring + TurnAnalyzer reconciliation.
 /// 
-/// Single path: parse tool args → engine.Step(ToolSyncEvent) → execute NextAction → done.
+/// Pipeline: caller transcript → TurnAnalyzer classifies intent → override ToolSyncEvent intent → engine.Step() → execute action.
 /// Backend results (geocode, dispatch) feed back via engine.Step(BackendResultEvent).
 /// Model auto-responds after receiving function_call_output for Ask/Hangup actions.
 /// 
-/// NO transcript fallback. NO slot locking. NO pacer. NO manual response.create.
-/// The engine is the single authority.
+/// The TurnAnalyzer acts as a "conversation referee" — it classifies whether the caller's
+/// utterance is a direct answer, correction, confirmation, etc. relative to Ada's last question.
+/// The engine remains the sole authority for state transitions.
 /// </summary>
 public sealed class RealtimeToolRouter
 {
@@ -19,6 +21,7 @@ public sealed class RealtimeToolRouter
     private readonly IRealtimeTransport _transport;
     private readonly Func<string, Task<GeocodeResult>> _geocode;
     private readonly Func<BookingSlots, Task<DispatchResult>> _dispatch;
+    private readonly TurnAnalyzer? _turnAnalyzer;
     private readonly CancellationToken _ct;
 
     private long _lastToolCallTick;
@@ -26,6 +29,11 @@ public sealed class RealtimeToolRouter
     private readonly HashSet<string> _processedCallIds = new();
     private volatile bool _frozen; // post-transfer/hangup freeze
     private const long ThrottleMs = 500; // turn-level dedupe window
+
+    // ── Turn context for TurnAnalyzer ──
+    private string? _lastAdaQuestion;
+    private string? _lastCallerTranscript;
+    private readonly object _transcriptLock = new();
 
     /// <summary>True if a tool call was processed for the current turn.</summary>
     public bool ToolCalledInResponse => _toolCalledInResponse;
@@ -53,17 +61,34 @@ public sealed class RealtimeToolRouter
         IRealtimeTransport transport,
         Func<string, Task<GeocodeResult>> geocode,
         Func<BookingSlots, Task<DispatchResult>> dispatch,
-        CancellationToken ct)
+        CancellationToken ct,
+        TurnAnalyzer? turnAnalyzer = null)
     {
         _engine = engine;
         _transport = transport;
         _geocode = geocode;
         _dispatch = dispatch;
         _ct = ct;
+        _turnAnalyzer = turnAnalyzer;
+
+        if (_turnAnalyzer != null)
+            _turnAnalyzer.OnLog += Log;
     }
 
     /// <summary>Reset per-turn state on new speech_started.</summary>
     public void ResetTurn() => _toolCalledInResponse = false;
+
+    /// <summary>
+    /// Feed caller transcript for turn analysis context.
+    /// Called from OpenAiRealtimeClient when a CallerTranscript event arrives.
+    /// </summary>
+    public void SetCallerTranscript(string transcript)
+    {
+        lock (_transcriptLock)
+        {
+            _lastCallerTranscript = transcript;
+        }
+    }
 
     /// <summary>
     /// Call once at session start to get the greeting instruction.
@@ -75,6 +100,7 @@ public sealed class RealtimeToolRouter
         if (action is AskAction ask)
         {
             Log($"💬 Ask: {ask.Text}");
+            TrackAdaQuestion(ask.Text);
             OnInstruction?.Invoke(ask.Text);
             await UpdateInstructionAndRespond(ask.Text);
         }
@@ -86,7 +112,7 @@ public sealed class RealtimeToolRouter
 
     /// <summary>
     /// Handle response.function_call_arguments.done from OpenAI Realtime.
-    /// Parse → engine.Step(ToolSyncEvent) → execute action chain → done.
+    /// Parse → TurnAnalyzer classifies → override intent → engine.Step(ToolSyncEvent) → execute action chain → done.
     /// </summary>
     public async Task HandleToolCallAsync(RealtimeEvent evt)
     {
@@ -138,6 +164,9 @@ public sealed class RealtimeToolRouter
             args = new();
         }
 
+        // ── TurnAnalyzer reconciliation (if available) ──
+        args = await ReconcileTurnAsync(args);
+
         // ── Convert to ToolSyncEvent ──
         var toolEvent = ToolSyncMapper.FromToolArgs(evt.ToolCallId, args);
 
@@ -151,6 +180,128 @@ public sealed class RealtimeToolRouter
     }
 
     /// <summary>
+    /// Run the TurnAnalyzer to classify the caller's utterance relative to Ada's question.
+    /// If the analysis yields a high-confidence classification that differs from what the AI
+    /// sent as "intent", override the intent in the args dictionary.
+    /// </summary>
+    private async Task<Dictionary<string, object?>> ReconcileTurnAsync(Dictionary<string, object?> args)
+    {
+        if (_turnAnalyzer == null)
+            return args;
+
+        string? callerUtterance;
+        string? adaQuestion;
+        lock (_transcriptLock)
+        {
+            callerUtterance = _lastCallerTranscript;
+            adaQuestion = _lastAdaQuestion;
+        }
+
+        if (string.IsNullOrWhiteSpace(callerUtterance))
+        {
+            Log("🧠 TurnAnalyzer skipped: no caller transcript available");
+            return args;
+        }
+
+        var expected = MapStageToExpected(_engine.State.Stage);
+
+        try
+        {
+            var analysis = await _turnAnalyzer.AnalyzeAsync(
+                adaQuestion, expected, callerUtterance, _ct);
+
+            Log($"🧠 Turn: {analysis.Relationship} (conf={analysis.Confidence:F2}, " +
+                $"slot={analysis.Slot ?? "null"}, value={analysis.Value ?? "null"})");
+
+            // ── Apply reconciliation overrides ──
+            switch (analysis.Relationship)
+            {
+                case TurnRelationship.ConfirmationYes:
+                    // Override intent to "confirm" if engine is in ConfirmDetails
+                    if (_engine.State.Stage == Stage.ConfirmDetails)
+                    {
+                        Log("🧠 Override: intent → confirm (TurnAnalyzer)");
+                        args["intent"] = "confirm";
+                    }
+                    break;
+
+                case TurnRelationship.ConfirmationNo:
+                    // Override intent to "decline" if engine is in ConfirmDetails
+                    if (_engine.State.Stage == Stage.ConfirmDetails)
+                    {
+                        Log("🧠 Override: intent → decline (TurnAnalyzer)");
+                        args["intent"] = "decline";
+                    }
+                    break;
+
+                case TurnRelationship.Correction:
+                    // If analyzer detected a correction with a specific slot + value,
+                    // override the corresponding field and set intent to amend
+                    if (!string.IsNullOrWhiteSpace(analysis.Slot) &&
+                        !string.IsNullOrWhiteSpace(analysis.Value))
+                    {
+                        Log($"🧠 Override: {analysis.Slot} → \"{analysis.Value}\" (correction)");
+                        args[analysis.Slot] = analysis.Value;
+                        // Don't override intent if AI already sent "amend" or a field update
+                        if (!args.ContainsKey("intent") || args["intent"]?.ToString() == "update_field")
+                            args["intent"] = "amend";
+                    }
+                    break;
+
+                case TurnRelationship.DirectAnswer:
+                    // If the AI's tool args are empty but analyzer found a value,
+                    // inject it into the expected slot
+                    if (!string.IsNullOrWhiteSpace(analysis.Slot) &&
+                        !string.IsNullOrWhiteSpace(analysis.Value))
+                    {
+                        var currentVal = args.TryGetValue(analysis.Slot, out var v) ? v?.ToString() : null;
+                        if (string.IsNullOrWhiteSpace(currentVal))
+                        {
+                            Log($"🧠 Inject: {analysis.Slot} → \"{analysis.Value}\" (direct answer)");
+                            args[analysis.Slot] = analysis.Value;
+                        }
+                    }
+                    break;
+
+                case TurnRelationship.Irrelevant:
+                case TurnRelationship.Unclear:
+                    // Let the engine handle it with whatever the AI sent
+                    Log($"🧠 No override: {analysis.Relationship}");
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"⚠ TurnAnalyzer error (non-fatal): {ex.Message}");
+            // Fall through — engine processes original args
+        }
+
+        return args;
+    }
+
+    /// <summary>
+    /// Map the current engine Stage to the ExpectedResponse for the TurnAnalyzer.
+    /// </summary>
+    private static ExpectedResponse MapStageToExpected(Stage stage) => stage switch
+    {
+        Stage.CollectPickup => ExpectedResponse.Pickup,
+        Stage.CollectDropoff => ExpectedResponse.Destination,
+        Stage.CollectPassengers => ExpectedResponse.Passengers,
+        Stage.CollectTime => ExpectedResponse.PickupTime,
+        Stage.ConfirmDetails => ExpectedResponse.ConfirmationYesNo,
+        _ => ExpectedResponse.None
+    };
+
+    /// <summary>Track Ada's last question for TurnAnalyzer context.</summary>
+    private void TrackAdaQuestion(string question)
+    {
+        lock (_transcriptLock)
+        {
+            _lastAdaQuestion = question;
+        }
+    }
+
+    /// <summary>
     /// Execute a NextAction. For backend actions (geocode, dispatch),
     /// this calls the backend, feeds the result back into engine.Step(),
     /// and recurses on the resulting action.
@@ -161,6 +312,7 @@ public sealed class RealtimeToolRouter
         {
             case AskAction ask:
                 Log($"💬 Ask: {ask.Text}");
+                TrackAdaQuestion(ask.Text);
                 OnInstruction?.Invoke(ask.Text);
                 await SendToolResultAsync(toolCallId, new { status = "ok", instruction = ask.Text, stage = _engine.State.Stage.ToString() });
                 // Trigger model to speak the instruction as audio
@@ -290,6 +442,7 @@ public sealed class RealtimeToolRouter
         {
             case AskAction ask:
                 Log($"💬 Follow-up ask: {ask.Text}");
+                TrackAdaQuestion(ask.Text);
                 OnInstruction?.Invoke(ask.Text);
                 // Update session instructions and trigger model to speak
                 await UpdateInstructionAndRespond(ask.Text);
