@@ -9,27 +9,40 @@ namespace AdaCleanVersion.Conversation;
 /// Key design:
 ///   - Sends response.create with conversation:"none" → does NOT pollute main dialogue
 ///   - Uses modalities:["text"] → no audio output, no TTS cost
-///   - Listens for response.text.done on the shared transport
+///   - Tracks responses by response_id to isolate from main conversation responses
 ///   - Local heuristics handle trivial turns (yes/no/ASAP) without any API call
 ///   - Falls back to "unclear" on timeout (never blocks the pipeline)
 ///
-/// This eliminates the separate HTTP/gpt-4o-mini call, saving ~200ms latency
-/// and billing overhead per non-trivial turn.
+/// Response isolation strategy:
+///   1. Send response.create → capture response_id from response.created event
+///   2. Match response.text.done OR response.content_part.done by response_id
+///   3. Only process text from OUR response, ignore all main conversation events
 /// </summary>
 public sealed class TurnAnalyzerRealtime
 {
     private readonly IRealtimeTransport _transport;
     private readonly double _minConfidence;
+    private readonly int _timeoutMs;
 
     /// <summary>Diagnostic logging.</summary>
     public event Action<string>? OnLog;
 
+    // Active analysis tracking — only one at a time
+    private volatile string? _pendingResponseId;
+    private TaskCompletionSource<string>? _pendingTcs;
+    private readonly object _pendingLock = new();
+
     public TurnAnalyzerRealtime(
         IRealtimeTransport transport,
-        double minConfidence = 0.65)
+        double minConfidence = 0.65,
+        int timeoutMs = 2000)
     {
         _transport = transport;
         _minConfidence = minConfidence;
+        _timeoutMs = timeoutMs;
+
+        // Single persistent handler — routes by response_id
+        _transport.OnMessage += HandleTransportMessage;
     }
 
     /// <summary>
@@ -59,28 +72,13 @@ public sealed class TurnAnalyzerRealtime
         var prompt = BuildPrompt(lastAdaQuestion, expected, callerUtterance);
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // Listen for response.text.done — only fires for text-only modality responses.
-        // The main session uses audio+text, so response.text.done is exclusively ours.
-        Func<string, Task> handler = json =>
+        // Register pending analysis — cancel any previous one
+        lock (_pendingLock)
         {
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-                var type = root.GetProperty("type").GetString();
-
-                if (type == "response.text.done")
-                {
-                    var text = root.TryGetProperty("text", out var t) ? t.GetString() : null;
-                    if (!string.IsNullOrWhiteSpace(text))
-                        tcs.TrySetResult(text);
-                }
-            }
-            catch { /* ignore parse errors on unrelated events */ }
-            return Task.CompletedTask;
-        };
-
-        _transport.OnMessage += handler;
+            _pendingTcs?.TrySetCanceled();
+            _pendingTcs = tcs;
+            _pendingResponseId = null; // will be set when response.created arrives
+        }
 
         try
         {
@@ -97,7 +95,7 @@ public sealed class TurnAnalyzerRealtime
                 }
             }, ct);
 
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(3000, ct));
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(_timeoutMs, ct));
 
             if (completed != tcs.Task)
                 return Fallback("Timeout");
@@ -119,7 +117,161 @@ public sealed class TurnAnalyzerRealtime
         }
         finally
         {
-            _transport.OnMessage -= handler;
+            lock (_pendingLock)
+            {
+                _pendingTcs = null;
+                _pendingResponseId = null;
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // TRANSPORT MESSAGE HANDLER (persistent, routes by response_id)
+    // ─────────────────────────────────────────
+
+    private Task HandleTransportMessage(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var type = root.GetProperty("type").GetString();
+
+            switch (type)
+            {
+                // Capture response_id when our response is created
+                case "response.created":
+                    HandleResponseCreated(root);
+                    break;
+
+                // Text completed — check if it's ours by response_id
+                case "response.text.done":
+                    HandleTextDone(root);
+                    break;
+
+                // Some models emit content_part.done with text instead of text.done
+                case "response.content_part.done":
+                    HandleContentPartDone(root);
+                    break;
+
+                // Response completed — if ours and no text captured, check output
+                case "response.done":
+                    HandleResponseDone(root);
+                    break;
+            }
+        }
+        catch { /* ignore parse errors on unrelated events */ }
+        return Task.CompletedTask;
+    }
+
+    private void HandleResponseCreated(JsonElement root)
+    {
+        // response.created → { response: { id: "resp_xxx", ... } }
+        if (!root.TryGetProperty("response", out var resp)) return;
+        if (!resp.TryGetProperty("id", out var idProp)) return;
+        var responseId = idProp.GetString();
+        if (string.IsNullOrEmpty(responseId)) return;
+
+        // Check if this is a conversation:"none" response (ours)
+        // We identify it by checking if conversation is "none" or missing
+        var isNone = false;
+        if (resp.TryGetProperty("conversation", out var conv))
+        {
+            var convVal = conv.GetString();
+            isNone = convVal == "none" || string.IsNullOrEmpty(convVal);
+        }
+
+        if (!isNone) return;
+
+        lock (_pendingLock)
+        {
+            if (_pendingTcs != null && _pendingResponseId == null)
+            {
+                _pendingResponseId = responseId;
+                Log($"🧠 TurnAnalyzer: tracking response_id={responseId}");
+            }
+        }
+    }
+
+    private void HandleTextDone(JsonElement root)
+    {
+        var responseId = GetResponseId(root);
+        if (!IsOurResponse(responseId)) return;
+
+        var text = root.TryGetProperty("text", out var t) ? t.GetString() : null;
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            Log($"🧠 TurnAnalyzer: got text.done for {responseId}");
+            CompleteWithText(text);
+        }
+    }
+
+    private void HandleContentPartDone(JsonElement root)
+    {
+        var responseId = GetResponseId(root);
+        if (!IsOurResponse(responseId)) return;
+
+        // content_part.done → { part: { type: "text", text: "..." } }
+        if (!root.TryGetProperty("part", out var part)) return;
+        var partType = part.TryGetProperty("type", out var pt) ? pt.GetString() : null;
+        if (partType != "text") return;
+
+        var text = part.TryGetProperty("text", out var t) ? t.GetString() : null;
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            Log($"🧠 TurnAnalyzer: got content_part.done for {responseId}");
+            CompleteWithText(text);
+        }
+    }
+
+    private void HandleResponseDone(JsonElement root)
+    {
+        // Last resort: extract text from response.done → output[0].content[0].text
+        if (!root.TryGetProperty("response", out var resp)) return;
+        var responseId = resp.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+        if (!IsOurResponse(responseId)) return;
+
+        try
+        {
+            if (resp.TryGetProperty("output", out var output) &&
+                output.GetArrayLength() > 0)
+            {
+                var firstOutput = output[0];
+                if (firstOutput.TryGetProperty("content", out var content) &&
+                    content.GetArrayLength() > 0)
+                {
+                    var firstContent = content[0];
+                    var text = firstContent.TryGetProperty("text", out var t) ? t.GetString() : null;
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        Log($"🧠 TurnAnalyzer: got response.done fallback for {responseId}");
+                        CompleteWithText(text);
+                    }
+                }
+            }
+        }
+        catch { /* non-fatal */ }
+    }
+
+    private static string? GetResponseId(JsonElement root)
+    {
+        return root.TryGetProperty("response_id", out var rid) ? rid.GetString() : null;
+    }
+
+    private bool IsOurResponse(string? responseId)
+    {
+        if (string.IsNullOrEmpty(responseId)) return false;
+        lock (_pendingLock)
+        {
+            return _pendingResponseId == responseId && _pendingTcs != null;
+        }
+    }
+
+    private void CompleteWithText(string text)
+    {
+        lock (_pendingLock)
+        {
+            _pendingTcs?.TrySetResult(text);
         }
     }
 
