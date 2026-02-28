@@ -1,17 +1,16 @@
 using AdaCleanVersion.Audio;
 using AdaCleanVersion.Services;
 using Microsoft.Extensions.Logging;
-using SIPSorcery.Media;
 using SIPSorcery.Net;
 using TaxiBot.Deterministic;
 
 namespace AdaCleanVersion.Realtime;
 
 /// <summary>
-/// v9 — Clean transport bridge. Zero orchestration logic.
+/// v10 — Clean transport bridge. Zero orchestration logic.
 /// 
 /// This class does exactly 4 things:
-///   1. Audio: RTP ↔ OpenAI (G.711 passthrough via RealtimeAudioBridge)
+///   1. Audio: RTP ↔ OpenAI (G.711 passthrough via RealtimeSessionAudioStack)
 ///   2. Mic gate: arm on audio start, ungate when playout drains, barge-in via response.cancel
 ///   3. Tool passthrough: sync_booking_data → engine.Step() → execute action
 ///   4. Log transcripts (no processing, no fallback, no state changes)
@@ -34,7 +33,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     // ── Components (only 4) ──
     private readonly IRealtimeTransport _transport;
     private readonly MicGateController _micGate;
-    private readonly RealtimeAudioBridge _audio;
+    private readonly RealtimeSessionAudioStack _audioStack;
     private readonly RealtimeToolRouter _tools;
 
     // ── Events ──
@@ -78,12 +77,12 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         // ── Mic gate (simple energy-based) ──
         _micGate = new MicGateController(codec);
 
-        // ── Audio bridge (deterministic 20ms pacing, tiny jitter buffer) ──
-        _audio = new RealtimeAudioBridge(rtpSession, _transport, codec, _micGate, _cts.Token, mediaSession);
-        _audio.OnLog += Log;
-        _audio.OnAudioOut += frame => { try { OnAudioOut?.Invoke(frame); } catch { } };
-        _audio.OnBargeIn += () => { try { OnBargeIn?.Invoke(); } catch { } };
-        _audio.OnMicUngated += () => { try { OnMicUngated?.Invoke(); } catch { } };
+        // ── Unified audio stack (replaces RealtimeAudioBridge) ──
+        _audioStack = new RealtimeSessionAudioStack(rtpSession, _transport, _micGate, _cts.Token, codec);
+        _audioStack.OnLog += Log;
+        _audioStack.OnAudioOutFrame += frame => { try { OnAudioOut?.Invoke(frame); } catch { } };
+        _audioStack.OnBargeIn += () => { try { OnBargeIn?.Invoke(); } catch { } };
+        _audioStack.OnMicUngated += () => { try { OnMicUngated?.Invoke(); } catch { } };
 
         // ── Deterministic engine (shared or new) ──
         var eng = engine ?? new DeterministicBookingEngine();
@@ -166,8 +165,8 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
         var fmt = _codec == G711CodecType.PCMU ? "g711_ulaw" : "g711_alaw";
         Log($"📋 Session configured: {fmt}, static VAD, sync_booking_data tool");
 
-        _audio.Start();
-        Log("✅ Audio bridge active");
+        _audioStack.Start();
+        Log("✅ Audio stack active");
 
         // Wait for OpenAI to confirm session is ready before greeting
         Log("⏳ Waiting for session.updated before greeting...");
@@ -183,7 +182,7 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-        _audio.Dispose();
+        _audioStack.Dispose();
         await _transport.DisposeAsync();
         _cts.Dispose();
         Log("🔌 Disconnected");
@@ -197,29 +196,19 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
         switch (evt.Type)
         {
+            // ── Audio events → unified stack handles everything ──
+            case RealtimeEventType.AudioStarted:
             case RealtimeEventType.AudioDelta:
-                _audio.HandleAudioDelta(evt.AudioBase64);
+            case RealtimeEventType.AudioDone:
+                _audioStack.HandleRealtimeEvent(evt);
                 break;
 
             case RealtimeEventType.ResponseCreated:
                 break; // no-op — wait for actual audio
 
-            case RealtimeEventType.AudioStarted:
-                _micGate.Arm();
-                Log("🔇 Mic gated (audio started)");
-                break;
-
-            case RealtimeEventType.AudioDone:
-                _audio.HandleResponseAudioDone();
-                break;
-
             case RealtimeEventType.SpeechStarted:
                 _tools.ResetTurn();
-                if (_micGate.IsGated)
-                {
-                    if (!_audio.HandleBargeIn())
-                        Log("🎤 Barge-in debounced");
-                }
+                _audioStack.HandleRealtimeEvent(evt); // triggers barge-in via stack
                 break;
 
             case RealtimeEventType.SpeechStopped:
@@ -237,7 +226,6 @@ public sealed class OpenAiRealtimeClient : IAsyncDisposable
 
             case RealtimeEventType.ToolCallDone:
                 // CRITICAL: never block receive loop on tool execution.
-                // Audio deltas must remain real-time even during geocode/dispatch.
                 _ = Task.Run(async () =>
                 {
                     try { await _tools.HandleToolCallAsync(evt); }
