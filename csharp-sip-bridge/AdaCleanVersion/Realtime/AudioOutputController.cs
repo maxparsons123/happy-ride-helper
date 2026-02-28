@@ -164,19 +164,21 @@ public sealed class AudioOutputController
     /// </summary>
     private void HandlePlayoutDrained()
     {
-        // CRITICAL: This runs on the high-priority RTP playout thread.
-        // Do minimal work here — offload everything to the thread pool
-        // so the next Tick() isn't delayed (which causes the stutter).
+        // Ungate mic SYNCHRONOUSLY on the playout thread — this is just
+        // setting a volatile bool, costs <1µs, and MUST NOT be delayed
+        // by Task.Run scheduling (which caused 50-100ms delays, clipping
+        // the first consonant of caller speech → "seven" heard as "Devon").
+        if (_micGate.IsGated && !_aiSpeaking)
+        {
+            _micGate.Ungate();
+            SafeLog("🔓 Mic ungated (playout drained)");
+        }
+
+        // Offload heavier work (watchdog cancel, event propagation) to thread pool
         Task.Run(() =>
         {
             CancelWatchdog();
-
-            if (_micGate.IsGated && !_aiSpeaking)
-            {
-                _micGate.Ungate();
-                SafeLog("🔓 Mic ungated (playout drained)");
-                try { OnMicUngated?.Invoke(); } catch { }
-            }
+            try { OnMicUngated?.Invoke(); } catch { }
         });
     }
 
