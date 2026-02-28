@@ -40,6 +40,7 @@ public sealed class RealtimeAudioBridge : IDisposable
     private readonly MicGateController _micGate;
     private readonly CancellationToken _ct;
     private readonly int _payloadType;
+    private uint _timestamp;
     private readonly byte _silenceByte;
 
     // Jitter buffer: ConcurrentQueue of exactly 160-byte frames
@@ -329,9 +330,11 @@ public sealed class RealtimeAudioBridge : IDisposable
                 wasPlaying = false;
             }
 
+            // Send raw RTP — we manage timestamp, SIPSorcery manages SSRC/seq
             try
             {
-                _mediaSession.SendAudio((uint)FrameSize, frame);
+                _mediaSession.SendRtpRaw(SDPMediaTypesEnum.audio, frame, _timestamp, 0, _payloadType);
+                _timestamp += FrameSize; // 160 samples = 20ms @ 8kHz
             }
             catch { }
 
