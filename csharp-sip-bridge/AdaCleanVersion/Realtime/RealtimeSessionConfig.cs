@@ -53,7 +53,7 @@ public static class RealtimeSessionConfig
                 instructions = systemPrompt,
                 input_audio_format = audioFormat,
                 output_audio_format = audioFormat,
-                input_audio_transcription = new { model = "whisper-1" },
+                input_audio_transcription = new { model = "whisper-1", language = "en" },
                 turn_detection = new
                 {
                     type = "server_vad",
