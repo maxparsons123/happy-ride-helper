@@ -127,21 +127,35 @@ public sealed class AudioOutputController
         SafeLog("🔊 response.audio.done — waiting for playout to drain");
 
         // Don't ungate immediately — let playout drain.
-        // Start a background task to watch for drain completion.
+        // Poll every 20ms, but force-ungate after 4s (stuck-mic watchdog).
         _ = Task.Run(async () =>
         {
-            // Poll until playout queue is empty (max ~3s)
-            for (int i = 0; i < 150; i++)
+            const int maxWaitMs = 4000;
+            int elapsed = 0;
+
+            while (elapsed < maxWaitMs)
             {
                 if (_ct.IsCancellationRequested) return;
                 if (_playout.QueuedFrames <= 0) break;
                 await Task.Delay(20, _ct).ConfigureAwait(false);
+                elapsed += 20;
             }
 
-            if (!_aiSpeaking && _micGate.IsGated)
+            if (_micGate.IsGated && !_aiSpeaking)
             {
+                var forced = elapsed >= maxWaitMs;
                 _micGate.Ungate();
-                SafeLog("🔓 Mic ungated (playout drained)");
+
+                if (forced)
+                {
+                    _playout.Clear();
+                    SafeLog("⚠ Stuck-mic watchdog — force-ungated after 4s, playout flushed");
+                }
+                else
+                {
+                    SafeLog("🔓 Mic ungated (playout drained)");
+                }
+
                 try { OnMicUngated?.Invoke(); } catch { }
             }
         }, _ct);
