@@ -48,6 +48,9 @@ public sealed class G711RtpPlayout : IDisposable
 
     public event Action<string>? OnLog;
 
+    /// <summary>Number of frames currently queued for playout.</summary>
+    public int QueuedFrames => _queue.Count;
+
     public G711RtpPlayout(VoIPMediaSession session, G711CodecType codec)
     {
         _mediaSession = session;
