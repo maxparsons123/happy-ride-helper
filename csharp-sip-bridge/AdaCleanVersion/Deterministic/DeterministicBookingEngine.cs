@@ -140,11 +140,19 @@ namespace TaxiBot.Deterministic
 
             // If an address changed at any point in collection, re-verify immediately
             // before asking for downstream fields (e.g. destination correction during passengers).
+            // Also reset the retry counter for the stage we're pivoting away from,
+            // so when flow returns after geocoding, the counter starts fresh.
             if (patch.PickupChanged)
+            {
+                ResetCurrentStageRetry();
                 return StartGeocodePickup();
+            }
 
             if (patch.DropoffChanged)
+            {
+                ResetCurrentStageRetry();
                 return StartGeocodeDropoff();
+            }
 
             // Decide next action deterministically based on stage + slots.
             return State.Stage switch
@@ -488,6 +496,26 @@ namespace TaxiBot.Deterministic
             var time = State.Slots.PickupTime?.Display ?? "ASAP";
 
             return NextAction.Ask($"Confirm the changes: pickup {pickup}, going to {dropoff}, {pax} passenger{(pax == 1 ? "" : "s")}, at {time}. Is that correct?");
+        }
+
+        /// <summary>
+        /// Reset the retry counter for the current collection stage.
+        /// Called before a correction pivot so that when flow returns
+        /// to this stage after geocoding, the counter starts fresh.
+        /// </summary>
+        private void ResetCurrentStageRetry()
+        {
+            var key = State.Stage switch
+            {
+                Stage.CollectPickup => RetryKey.Pickup,
+                Stage.CollectDropoff => RetryKey.Dropoff,
+                Stage.CollectPassengers => RetryKey.Passengers,
+                Stage.CollectTime => RetryKey.Time,
+                Stage.ConfirmDetails => RetryKey.Confirm,
+                _ => (RetryKey?)null
+            };
+            if (key.HasValue)
+                State = State.ResetRetry(key.Value);
         }
 
         // ---------- Utilities ----------
