@@ -29,8 +29,8 @@ public sealed class G711RtpPlayout : IDisposable
     private static extern bool CloseHandle(IntPtr hObj);
 
     private const int FrameSize = 160; // 20ms @ 8kHz
-    private const int MaxQueuedFrames = 60; // 1.2s cap
-    private const int TrimTarget = 30;      // trim back to 600ms
+    private const int MaxQueuedFrames = 400; // 8s cap — OpenAI bursts ~400 frames at once
+    private const int TrimTarget = 200;      // trim back to 4s
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly int _payloadType;
@@ -128,16 +128,9 @@ public sealed class G711RtpPlayout : IDisposable
             }
         }
 
-        // Enqueue complete frames (with jitter cap)
+        // Enqueue complete frames
         while (offset + FrameSize <= data.Length)
         {
-            // Trim if queue exceeds cap — drop oldest to prevent latency buildup
-            if (_queue.Count > MaxQueuedFrames)
-            {
-                while (_queue.Count > TrimTarget) _queue.TryDequeue(out _);
-                Log($"⚠ Jitter cap hit ({MaxQueuedFrames}), trimmed to {TrimTarget}");
-            }
-
             var frame = new byte[FrameSize];
             Buffer.BlockCopy(data, offset, frame, 0, FrameSize);
             _queue.Enqueue(frame);
@@ -150,6 +143,14 @@ public sealed class G711RtpPlayout : IDisposable
         {
             Buffer.BlockCopy(data, offset, _partial, _partialLen, remaining);
             _partialLen += remaining;
+        }
+
+        // Trim ONCE after all frames enqueued (not per-frame)
+        if (_queue.Count > MaxQueuedFrames)
+        {
+            int before = _queue.Count;
+            while (_queue.Count > TrimTarget) _queue.TryDequeue(out _);
+            Log($"⚠ Jitter cap: {before} → {_queue.Count} frames");
         }
     }
 
