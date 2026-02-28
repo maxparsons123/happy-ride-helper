@@ -40,6 +40,16 @@ public sealed class RealtimeSessionAudioStack : IDisposable
 
     private volatile bool _started;
 
+    // ── Audio monitor stats (logged every 50 frames = 1s) ──
+    private int _monFrameCount;
+    private int _monSentCount;
+    private int _monGatedCount;
+    private double _monEnergySum;
+    private double _monEnergyMin = double.MaxValue;
+    private double _monEnergyMax;
+    private int _monSilenceFrames; // frames below threshold 5
+    private const int MonitorInterval = 50; // frames (1 second)
+
     /// <summary>Diagnostic logging.</summary>
     public event Action<string>? OnLog;
 
@@ -144,9 +154,23 @@ public sealed class RealtimeSessionAudioStack : IDisposable
         var payload = rtpPacket.Payload;
         if (payload == null || payload.Length == 0) return;
 
+        // ── Audio monitor: compute energy for every frame ──
+        double energy = ComputeEnergy(payload);
+        _monFrameCount++;
+        _monEnergySum += energy;
+        if (energy < _monEnergyMin) _monEnergyMin = energy;
+        if (energy > _monEnergyMax) _monEnergyMax = energy;
+        if (energy < 5) _monSilenceFrames++;
+
         // Gate & barge-in detection
         if (!_micGate.ShouldSendToOpenAi(payload, out bool isBargeIn))
+        {
+            _monGatedCount++;
+            LogMonitorIfDue();
             return;
+        }
+
+        _monSentCount++;
 
         if (isBargeIn)
         {
@@ -161,6 +185,41 @@ public sealed class RealtimeSessionAudioStack : IDisposable
             _ = _transport.SendAsync(new { type = "input_audio_buffer.append", audio = b64 }, _ct);
         }
         catch { /* non-fatal */ }
+
+        LogMonitorIfDue();
+    }
+
+    private void LogMonitorIfDue()
+    {
+        if (_monFrameCount < MonitorInterval) return;
+
+        double avg = _monEnergySum / _monFrameCount;
+        double min = _monEnergyMin == double.MaxValue ? 0 : _monEnergyMin;
+        Log($"🎤 Audio monitor: sent={_monSentCount} gated={_monGatedCount} " +
+            $"energy avg={avg:F1} min={min:F1} max={_monEnergyMax:F1} " +
+            $"silence={_monSilenceFrames}/{_monFrameCount} " +
+            $"micGated={_micGate.IsGated}");
+
+        // Reset
+        _monFrameCount = 0;
+        _monSentCount = 0;
+        _monGatedCount = 0;
+        _monEnergySum = 0;
+        _monEnergyMin = double.MaxValue;
+        _monEnergyMax = 0;
+        _monSilenceFrames = 0;
+    }
+
+    /// <summary>Average absolute deviation from codec silence center (same as MicGateController).</summary>
+    private double ComputeEnergy(byte[] frame)
+    {
+        if (frame.Length == 0) return 0;
+        // Use PCMA silence center 0xD5 (213) — matches MicGateController
+        const int silenceCenter = 0xD5;
+        double sum = 0;
+        for (int i = 0; i < frame.Length; i++)
+            sum += Math.Abs(frame[i] - silenceCenter);
+        return sum / frame.Length;
     }
 
     // ─────────────────────────────────────────────
