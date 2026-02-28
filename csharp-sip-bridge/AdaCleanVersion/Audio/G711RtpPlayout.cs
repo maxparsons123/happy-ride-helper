@@ -31,6 +31,7 @@ public sealed class G711RtpPlayout : IDisposable
     private const int FrameSize = 160; // 20ms @ 8kHz
     private const int MaxQueuedFrames = 400; // 8s cap — OpenAI bursts ~400 frames at once
     private const int TrimTarget = 200;      // trim back to 4s
+    private const int PreBufferFrames = 5;   // 100ms pre-buffer after clear/barge-in
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly int _payloadType;
@@ -38,6 +39,7 @@ public sealed class G711RtpPlayout : IDisposable
     private readonly ConcurrentQueue<byte[]> _queue = new();
     private readonly byte[] _partial = new byte[FrameSize];
     private int _partialLen;
+    private volatile bool _preBuffering; // true after Clear() until enough frames arrive
 
     private Thread? _thread;
     private volatile bool _running;
@@ -158,6 +160,7 @@ public sealed class G711RtpPlayout : IDisposable
     {
         while (_queue.TryDequeue(out _)) { }
         _partialLen = 0;
+        _preBuffering = true; // enter pre-buffer mode until enough frames arrive
     }
 
     private void Loop()
@@ -203,6 +206,19 @@ public sealed class G711RtpPlayout : IDisposable
 
     private void Tick()
     {
+        // Pre-buffer: after a barge-in/clear, wait until enough frames accumulate
+        // to prevent choppy playback from OpenAI's burst delivery pattern
+        if (_preBuffering)
+        {
+            if (_queue.Count >= PreBufferFrames)
+                _preBuffering = false;
+            else
+            {
+                SendRtp(_silence);
+                return;
+            }
+        }
+
         if (!_queue.TryDequeue(out var frame))
             frame = _silence;
 
