@@ -19,6 +19,12 @@ public class CallStateEngine
     public StructuredBooking? StructuredResult { get; private set; }
     public FareResult? FareResult { get; private set; }
 
+    /// <summary>
+    /// Hard confirmation lock — set ONLY when state == AwaitingConfirmation
+    /// and caller explicitly says yes. Engine-level authority, not AI.
+    /// </summary>
+    public bool ConfirmationReceived { get; private set; }
+
     /// <summary>Whether the caller has an active booking loaded from the database.</summary>
     public bool HasActiveBooking { get; set; }
 
@@ -519,7 +525,7 @@ public class CallStateEngine
     {
         if (State != CollectionState.AwaitingConfirmation)
         {
-            Log($"Confirmation ignored in state {State}");
+            Log($"⛔ Confirmation BLOCKED — state is {State}, not AwaitingConfirmation");
             return;
         }
         if (!RawData.AllRequiredPresent)
@@ -529,6 +535,8 @@ public class CallStateEngine
             ForceState(SlotToState(next));
             return;
         }
+        ConfirmationReceived = true;
+        Log("✅ ConfirmationReceived = true — caller explicitly confirmed");
         TransitionTo(CollectionState.Dispatched);
     }
 

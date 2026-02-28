@@ -575,6 +575,29 @@ public class CleanCallSession
     {
         if (string.IsNullOrWhiteSpace(adaText)) return;
 
+        // ── ENGINE-LEVEL SPEECH OVERRIDE ──
+        // If AI produces confirmation/closing language while NOT in Dispatched state,
+        // this is a rogue completion. Log it and force a reprompt.
+        if (_engine.State != CollectionState.Dispatched && _engine.State != CollectionState.Ending)
+        {
+            var lower = adaText.ToLowerInvariant();
+            bool hasRogueConfirmation = lower.Contains("booking confirmed") ||
+                lower.Contains("booking is confirmed") ||
+                lower.Contains("taxi is on") || lower.Contains("cab is on") ||
+                lower.Contains("driver is on") || lower.Contains("on its way") ||
+                lower.Contains("safe travels") || lower.Contains("have a safe") ||
+                lower.Contains("your ride is") || lower.Contains("booked for you") ||
+                (lower.Contains("confirmed") && lower.Contains("travel"));
+
+            if (hasRogueConfirmation)
+            {
+                Log($"⛔ SPEECH OVERRIDE: AI said \"{adaText}\" in state {_engine.State} — blocking rogue confirmation");
+                // Force reprompt with correct instruction
+                EmitCurrentInstruction();
+                return; // Do NOT process this transcript further
+            }
+        }
+
         // ── Hybrid correction tag detection ──
         // The AI prefixes corrections with [CORRECTION:slotname] based on conversational context.
         // This is more reliable than regex pattern matching on caller STT.
@@ -1315,14 +1338,24 @@ public class CleanCallSession
             return BuildSyncResponse("ok", managingBooking: true);
         }
 
-        // Handle explicit confirmation intent
+        // Handle explicit confirmation intent — ONLY from AwaitingConfirmation
         if (intent == "confirm_booking")
         {
-            if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice or CollectionState.AwaitingConfirmation)
+            if (_engine.State == CollectionState.AwaitingConfirmation)
             {
-                Log($"[SyncTool] Intent=confirm_booking in {_engine.State} — dispatching");
+                Log($"[SyncTool] Intent=confirm_booking in AwaitingConfirmation — dispatching");
                 await ConfirmBookingAsync(ct);
                 return BuildSyncResponse("confirmed");
+            }
+            // If in PresentingFare or AwaitingPaymentChoice, advance to AwaitingConfirmation first
+            if (_engine.State is CollectionState.PresentingFare or CollectionState.AwaitingPaymentChoice)
+            {
+                Log($"[SyncTool] Intent=confirm_booking in {_engine.State} — advancing to AwaitingConfirmation (NOT dispatching yet)");
+                if (_engine.State == CollectionState.PresentingFare)
+                    _engine.AcceptPaymentChoice("meter");
+                // Now in AwaitingConfirmation — emit instruction asking for explicit yes/no
+                EmitCurrentInstruction();
+                return BuildSyncResponse("awaiting_confirmation");
             }
             Log($"[SyncTool] Intent=confirm_booking ignored — state {_engine.State} not confirmable");
         }
@@ -1718,9 +1751,19 @@ public class CleanCallSession
 
                 if (hasConfirmSignal && !hasCancelSignal)
                 {
-                    Log($"[SyncTool] Confirmation detected via interpretation in {_engine.State} — dispatching");
-                    await ConfirmBookingAsync(ct);
-                    return BuildSyncResponse("confirmed");
+                    // CONFIRMATION GATE: Only dispatch from AwaitingConfirmation
+                    if (_engine.State == CollectionState.AwaitingConfirmation)
+                    {
+                        Log($"[SyncTool] Confirmation detected via interpretation in AwaitingConfirmation — dispatching");
+                        await ConfirmBookingAsync(ct);
+                        return BuildSyncResponse("confirmed");
+                    }
+                    // Otherwise advance to AwaitingConfirmation but do NOT dispatch
+                    Log($"[SyncTool] Confirmation signal in {_engine.State} — advancing to AwaitingConfirmation (NOT dispatching)");
+                    if (_engine.State == CollectionState.PresentingFare)
+                        _engine.AcceptPaymentChoice("meter");
+                    EmitCurrentInstruction();
+                    return BuildSyncResponse("awaiting_confirmation");
                 }
 
                 if (hasCancelSignal)
