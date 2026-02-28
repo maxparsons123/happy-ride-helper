@@ -32,7 +32,8 @@ public sealed class RealtimeAudioBridge : IDisposable
     [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint uPeriod);
 
     private const int FrameSize = 160;          // 20ms @ 8kHz
-    private const int MaxJitterFrames = 500;    // ~10s buffer — OpenAI sends full responses in <1s bursts
+    private const int MaxJitterFrames = 60;     // 1.2s cap
+    private const int TrimToFrames   = 30;     // trim back to 0.6s
 
     private readonly VoIPMediaSession _mediaSession;
     private readonly IRealtimeTransport _transport;
@@ -53,8 +54,8 @@ public sealed class RealtimeAudioBridge : IDisposable
     // AI speaking state (for barge-in)
     private volatile bool _aiSpeaking;
 
-    private static readonly double NsPerTick = 1_000_000_000.0 / Stopwatch.Frequency;
-    private static readonly long TicksPerFrame = (long)(20_000_000.0 / NsPerTick);
+    private static readonly long TicksPerFrame = Stopwatch.Frequency / 50; // 20ms
+    private int _jbCount;
 
     /// <summary>Fires with each G.711 audio frame queued for playout (for avatar feeding).</summary>
     public event Action<byte[]>? OnAudioOut;
@@ -239,14 +240,19 @@ public sealed class RealtimeAudioBridge : IDisposable
         var frame = new byte[FrameSize];
         Buffer.BlockCopy(source, offset, frame, 0, FrameSize);
         var fc = Interlocked.Increment(ref _frameCount);
+
         _jitterBuffer.Enqueue(frame);
+        Interlocked.Increment(ref _jbCount);
 
         if (fc == 1 || fc % 50 == 0)
-            OnLog?.Invoke($"🔈 Frame #{fc} enqueued (jitter={_jitterBuffer.Count})");
+            OnLog?.Invoke($"🔈 Frame #{fc} enqueued (jitter={Volatile.Read(ref _jbCount)})");
 
-        // Cap jitter buffer to prevent drift accumulation
-        while (_jitterBuffer.Count > MaxJitterFrames)
-            _jitterBuffer.TryDequeue(out _);
+        // Hard cap jitter buffer
+        if (_jbCount > MaxJitterFrames)
+        {
+            while (_jbCount > TrimToFrames && _jitterBuffer.TryDequeue(out _))
+                Interlocked.Decrement(ref _jbCount);
+        }
 
         // Feed avatar
         try { OnAudioOut?.Invoke(frame); } catch { }
@@ -271,28 +277,40 @@ public sealed class RealtimeAudioBridge : IDisposable
         var silenceFrame = new byte[FrameSize];
         Array.Fill(silenceFrame, _silenceByte);
 
-        long nextTick = Stopwatch.GetTimestamp();
+        long next = Stopwatch.GetTimestamp();
         bool wasPlaying = false;
+        int sent = 0;
 
-        while (_running)
+        while (_running && !_ct.IsCancellationRequested)
         {
-            long now = Stopwatch.GetTimestamp();
-            long wait = nextTick - now;
+            next += TicksPerFrame;
 
-            if (wait > 0)
+            // High-precision hybrid wait
+            while (true)
             {
-                long waitNs = (long)(wait * NsPerTick);
-                if (waitNs > 2_000_000)
-                    Thread.Sleep((int)(waitNs / 1_000_000) - 1);
+                long now = Stopwatch.GetTimestamp();
+                long remaining = next - now;
+
+                if (remaining <= 0)
+                    break;
+
+                // If more than ~2ms remaining → sleep 1ms
+                if (remaining > Stopwatch.Frequency / 500)
+                    Thread.Sleep(1);
                 else
                     Thread.SpinWait(50);
-                continue;
             }
 
-            // Pop frame or silence
+            // If we fell behind badly (GC pause etc), snap forward
+            long late = Stopwatch.GetTimestamp() - next;
+            if (late > TicksPerFrame * 3)
+                next = Stopwatch.GetTimestamp();
+
             byte[] frame;
+
             if (_jitterBuffer.TryDequeue(out var queued))
             {
+                Interlocked.Decrement(ref _jbCount);
                 frame = queued;
                 wasPlaying = true;
             }
@@ -300,30 +318,26 @@ public sealed class RealtimeAudioBridge : IDisposable
             {
                 frame = silenceFrame;
 
-                // Ungate mic when buffer drained and AI finished
+                // Ungate mic once playback finished
                 if (wasPlaying && !_aiSpeaking && _micGate.IsGated)
                 {
                     _micGate.Ungate();
                     OnLog?.Invoke("🔓 Mic ungated (playout drained)");
                     try { OnMicUngated?.Invoke(); } catch { }
                 }
+
                 wasPlaying = false;
             }
 
-            // Send RTP via SendAudio — SIPSorcery manages seq/SSRC,
-            // we provide timestamp increment (160 samples = 20ms @ 8kHz)
             try
             {
                 _mediaSession.SendAudio((uint)FrameSize, frame);
             }
-            catch { /* RTP send failure — non-fatal */ }
+            catch { }
 
-            nextTick += TicksPerFrame;
-
-            // Drift correction: if we fell behind by >5 frames, reset
-            long drift = Stopwatch.GetTimestamp() - nextTick;
-            if (drift > TicksPerFrame * 5)
-                nextTick = Stopwatch.GetTimestamp() + TicksPerFrame;
+            sent++;
+            if (sent % 50 == 0)
+                OnLog?.Invoke($"📤 RTP sent={sent}, jitter={Volatile.Read(ref _jbCount)}");
         }
     }
 
@@ -342,8 +356,9 @@ public sealed class RealtimeAudioBridge : IDisposable
 
         _aiSpeaking = false;
 
-        // Flush jitter buffer
-        while (_jitterBuffer.TryDequeue(out _)) { }
+        while (_jitterBuffer.TryDequeue(out _))
+            Interlocked.Decrement(ref _jbCount);
+        Volatile.Write(ref _jbCount, 0);
         _partialLen = 0;
 
         // Send response.cancel to OpenAI
