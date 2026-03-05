@@ -345,6 +345,12 @@ public static class PromptBuilder
                 "Do NOT confirm destination or passengers yet. Then STOP. " +
                 "House numbers are SACRED STRINGS.",
 
+            CollectionState.VerifyingPickup when verifiedPickup?.MatchedFromHistory == true =>
+                "[INSTRUCTION] This pickup address was found in the caller's booking history. " +
+                $"Say: \"We found {FormatAddressForSpeech(verifiedPickup.Address)} in your booking history. Is that the same address you'd like to be picked up from?\" " +
+                "Then STOP and wait for confirmation. If they say no, they can provide a new address. " +
+                "House numbers are SACRED STRINGS.",
+
             CollectionState.VerifyingPickup when rawData.GetGeminiSlot("pickup") != null =>
                 "[INSTRUCTION] Read back EXACTLY this pickup address: " +
                 $"\"{FormatAddressForSpeech(rawData.GetGeminiSlot("pickup") ?? "")}\". " +
@@ -394,6 +400,12 @@ public static class PromptBuilder
                 "Now verify the DESTINATION. " +
                 $"Say: \"And for the destination, that's {FormatAddressForSpeech(rawData.GetGeminiSlot("destination") ?? rawData.DestinationRaw ?? "")}.\" " +
                 "Then STOP. Do NOT confirm passengers or time yet. " +
+                "House numbers are SACRED STRINGS.",
+
+            CollectionState.VerifyingDestination when verifiedDestination?.MatchedFromHistory == true =>
+                "[INSTRUCTION] This destination was found in the caller's booking history. " +
+                $"Say: \"We found {FormatAddressForSpeech(verifiedDestination.Address)} in your booking history. Is that the same destination you'd like to go to?\" " +
+                "Then STOP and wait for confirmation. If they say no, they can provide a new address. " +
                 "House numbers are SACRED STRINGS.",
 
             CollectionState.VerifyingDestination when rawData.GetGeminiSlot("destination") != null =>
