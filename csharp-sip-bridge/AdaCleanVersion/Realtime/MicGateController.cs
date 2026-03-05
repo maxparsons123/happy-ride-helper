@@ -82,9 +82,17 @@ public sealed class MicGateController
 
         var elapsed = Environment.TickCount64 - Volatile.Read(ref _gatedAtTick);
 
-        // Prevent echo-trigger in first ~180ms — discard these (true echo)
+        // Prevent echo-trigger in first ~180ms — but BUFFER these frames
+        // so first syllables aren't lost if caller starts speaking immediately
         if (elapsed < DoubleTalkGuardMs)
+        {
+            lock (_bufferLock)
+            {
+                if (_buffer.Count < MaxBufferFrames)
+                    _buffer.Add(frame);
+            }
             return false;
+        }
 
         // Past the double-talk guard: buffer the frame (might be real speech)
         lock (_bufferLock)
